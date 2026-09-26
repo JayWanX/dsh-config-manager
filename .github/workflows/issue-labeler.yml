@@ -1,4 +1,4 @@
-# 新 issue 自动打标签：按标题前缀 [Bug] / [Feature] 兜底
+# 新 issue 自动打标签：按标题前缀 [Bug] / [Feature] / [UI] 兜底
 #
 # 为什么需要它：issue 模板里的 `labels: bug` 只在「用户从网页选模板创建」时生效。
 # 走 API / gh CLI / Agent 创建的 issue 会绕过模板，于是出现标题带 [Bug] 却没有任何标签的 issue
@@ -7,10 +7,11 @@
 # 规则（只看标题开头的 [...] 前缀段，大小写不敏感，不解析正文）：
 #   [Bug] / [BUG] / [bug]  -> bug
 #   [Feature] / [FEATURE]  -> enhancement
+#   [UI] / [ui]            -> ui + bug（界面问题本质上就是一个 bug，只是多一条分类标签）
 #   [Feature] [Bug] xxx    -> enhancement + bug（双前缀标题两个都打）
-# 标题中后段出现的 [Bug] 不算（必须是开头）。
+# 标题中后段出现的 [Bug] 不算（必须是开头）；重复标签会自动去重。
 #
-# 前置条件：这里用到的 bug / enhancement 标签必须已存在于仓库，否则 GitHub 静默忽略。
+# 前置条件：这里用到的 bug / enhancement / ui 标签必须已存在于仓库，否则 GitHub 静默忽略。
 name: Auto label issues
 
 on:
@@ -40,16 +41,21 @@ jobs:
           # 只取标题开头连续的 [xxx] 前缀段；标题中后段的 [Bug] 不算
           head_part=$(printf '%s' "$title_lower" | grep -oE '^[[:space:]]*(\[[^]]+\][[:space:]]*)+' || true)
 
-          labels=()
-          if [[ "$head_part" == *"[bug]"* ]]; then labels+=("bug"); fi
-          if [[ "$head_part" == *"[feature]"* ]]; then labels+=("enhancement"); fi
+          # 用空格分隔的字符串累积并去重：标题 [UI][Bug] 不会重复打两次 bug
+          labels=""
+          add_label() {
+            case " $labels " in *" $1 "*) ;; *) labels="$labels $1" ;; esac
+          }
+          if [[ "$head_part" == *"[bug]"* ]]; then add_label bug; fi
+          if [[ "$head_part" == *"[feature]"* ]]; then add_label enhancement; fi
+          if [[ "$head_part" == *"[ui]"* ]]; then add_label ui; add_label bug; fi
 
-          if [ "${#labels[@]}" -eq 0 ]; then
-            echo "标题开头没有 [Bug]/[Feature] 前缀，跳过：$ISSUE_TITLE"
+          if [ -z "${labels// /}" ]; then
+            echo "标题开头没有 [Bug]/[Feature]/[UI] 前缀，跳过：$ISSUE_TITLE"
             exit 0
           fi
 
-          for label in "${labels[@]}"; do
+          for label in $labels; do
             echo "-> #$ISSUE_NUMBER 添加标签：$label"
             gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "$label"
           done

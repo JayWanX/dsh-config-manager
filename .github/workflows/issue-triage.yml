@@ -1,0 +1,55 @@
+# 新 issue 自动回复 + 打 triage 标签
+#
+# 为什么需要它：用户提了 issue 之后「有没有人理」直接决定他会不会再提第二次。
+# 这条工作流保证每条新 issue 立刻得到一条评论（说明还需要什么信息）与一个状态标签。
+#
+# 前置条件：needs-triage 标签必须已存在于仓库，否则 GitHub 静默忽略（不报错）。
+#   gh label create needs-triage --color FBCA04 --description "等待维护者分类"
+name: Issue triage
+
+on:
+  issues:
+    types: [opened]
+
+# 最小权限：只评论 + 打标签，不碰代码
+permissions:
+  issues: write
+
+jobs:
+  welcome:
+    name: Welcome and label
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Comment and add triage label
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = [
+              '感谢反馈！🙏 我通常会在 48 小时内回复；这条已加上 `needs-triage`，进度会体现在标签上。',
+              '',
+              'Thanks for the report! I usually reply within 48h. This issue is labeled `needs-triage`; progress shows up in the labels.',
+              '',
+              '如果还没写，补上这几项能少好几轮来回 / Adding these saves round trips:',
+              '',
+              '- **截图 / 录屏 Screenshot** —— 直接把图片拖进编辑框，或 Ctrl+V 粘贴',
+              '- **控制台报错 Console** —— F12 → Console，复制文本或截图',
+              '- **环境 Environment** —— 插件版本（设置 → 备份与迁移 → 关于，可一键复制）、DSH 版本、系统、浏览器版本、显示缩放与浏览器缩放、深色/浅色',
+              '',
+              '> ⚠️ 请务必抹掉 API Key / Token / 密码等敏感信息（包括截图里的）。',
+              '> Never paste real secrets — including inside screenshots.',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['needs-triage'],
+            });

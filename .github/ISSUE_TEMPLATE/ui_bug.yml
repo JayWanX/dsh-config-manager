@@ -1,0 +1,133 @@
+name: 🎨 UI 问题 / UI issue
+description: 界面错位、样式异常、深色模式或缩放下异常、按钮点了没反应
+title: "[UI] "
+labels: ["bug", "ui"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈界面问题！**一张截图 + 浏览器信息**就能让我直接定位，比文字描述快很多。
+        ⚠️ 请勿粘贴任何真实的 API Key / Token / 密码（截图里也要先确认没有）。
+
+        Thanks for reporting! **A screenshot + browser info** lets me locate the problem directly.
+        ⚠️ Do NOT paste real API keys / tokens / passwords (check your screenshots too).
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 问题类型 / What kind of problem
+      options:
+        - 布局错位、元素重叠或溢出 / Misaligned, overlapping or overflowing layout
+        - 样式异常（颜色、字体、间距） / Styling (colors, fonts, spacing)
+        - 深色模式异常 / Dark mode
+        - 交互无响应（点了没反应） / Control does nothing
+        - 弹窗、层级或遮挡问题 / Dialog, z-index or overlay
+        - 浏览器缩放 / 系统缩放（125%、150%…）下异常 / Under browser or OS scaling
+        - 文案或翻译错误 / Wrong or untranslated text
+        - 其他 / Other
+    validations:
+      required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: 插件版本 / Plugin version
+      description: 设置 → 备份与迁移 → 关于（可直接复制），或点「复制环境信息」按钮
+      placeholder: "0.1.64"
+    validations:
+      required: true
+
+  - type: input
+    id: dsh-version
+    attributes:
+      label: DSH 版本 / DSH version
+      description: 同样在「关于」页可见
+      placeholder: "0.1.x"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统 / OS
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - 其他 / Other
+    validations:
+      required: true
+
+  - type: input
+    id: browser
+    attributes:
+      label: 浏览器及版本 / Browser and version
+      description: 例如 Chrome 141 / Edge 141 / Safari 18
+      placeholder: "Chrome 141"
+    validations:
+      required: true
+
+  - type: input
+    id: zoom
+    attributes:
+      label: 显示缩放 / 浏览器缩放 / Display & browser zoom
+      description: 例如「Windows 125% / 浏览器 100%」——很多界面错位只在非 100% 缩放时出现
+      placeholder: "Windows 125% / browser 100%"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: theme
+    attributes:
+      label: 主题 / Theme
+      options:
+        - 深色 / Dark
+        - 浅色 / Light
+        - 不确定 / Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤 / Steps to reproduce
+      placeholder: |
+        1. 打开… / Open…
+        2. 点击… / Click…
+        3. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际看到 / 期望看到 / Actual vs expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: media
+    attributes:
+      label: 截图 / 录屏 / Screenshot or recording
+      description: 直接把图片拖进这个框，或 Ctrl+V 粘贴 / Drag & drop or paste the image here
+    validations:
+      required: true
+
+  - type: textarea
+    id: console
+    attributes:
+      label: 控制台报错 / Console output (F12 → Console)
+      description: 有就粘贴，没有可留空 / Paste if any, leave empty otherwise
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认 / Before submitting
+      options:
+        - label: 我已搜索过现有 issue，确认不是重复问题 / I searched existing issues and this is not a duplicate
+          required: true
+        - label: 我已确认截图与日志中不含 API Key / Token / 密码 / I confirmed there are no secrets in my screenshots or logs
+          required: true

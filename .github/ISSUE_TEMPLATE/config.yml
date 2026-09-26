@@ -1,8 +1,9 @@
 # 「新建 issue」页面的入口配置（GitHub issue template chooser）
 #
 # 1) blank_issues_enabled: false
-#    隐藏选择页底部的「Open a blank issue」入口，强制用户从 Bug 报告 / 功能建议
-#    两个模板里选一个 —— 模板自带 title 前缀与 labels，不会再出现「无标签、无信息」的 issue。
+#    隐藏选择页底部的「Open a blank issue」入口，强制用户从 Bug 报告 / 功能建议 / UI 问题
+#    三个模板里选一个 —— 模板自带 title 前缀与 labels，不会再出现「无标签、无信息」的 issue。
+#    （若目标是「反馈量最大」而非「信息最全」，把它改成 true 可以再少一步选择。）
 # 2) contact_links
 #    在同一个选择页上给「不是 issue」的事情指路，避免提问/安全漏洞被当成 bug 提上来。
 #

@@ -1,0 +1,129 @@
+name: 🐛 Bug report (English)
+description: Something is broken, erroring, showing wrong data, or not behaving as expected
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report! The more specific it is, the faster it can be located.
+        ⚠️ Never paste real API keys / tokens / passwords — check your screenshots and logs too.
+
+        > 中文用户请改用「**🐛 Bug 报告（中文）**」模板。
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Export / backup / scheduled backup
+        - Import / restore / rollback
+        - Snapshots / disaster recovery (undo, redo)
+        - Remote sync (Git / WebDAV / one-click sync)
+        - Configuration market / GitHub sign-in
+        - Profiles and instance launch
+        - CLI (dsh-config-manager)
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      description: Settings → Backup & Migration → About (shown on that page)
+      placeholder: "0.1.64"
+    validations:
+      required: true
+
+  - type: input
+    id: dsh-version
+    attributes:
+      label: DSH version
+      placeholder: "0.1.x"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How DSH runs
+      options:
+        - dsh web (browser)
+        - Desktop build
+        - headless or another profile
+        - Not sure
+    validations:
+      required: false
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you were doing and what went wrong (one or two sentences)
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open…
+        2. Click…
+        3. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error output / logs
+      description: UI message, browser console (F12 → Console) or terminal log — redact secrets first
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Screenshots or extra context
+      description: Drag an image into this box (Ctrl+V works too)
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and this is not a duplicate
+          required: true
+        - label: I confirmed there are no API keys / tokens / passwords in my report
+          required: true

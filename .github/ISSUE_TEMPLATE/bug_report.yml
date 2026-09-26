@@ -1,4 +1,4 @@
-name: 🐛 Bug 报告 / Bug report
+name: 🐛 Bug 报告（中文）
 description: 功能出错、报错、数据不对、行为不符合预期
 title: "[Bug] "
 labels: ["bug"]
@@ -9,12 +9,12 @@ body:
         感谢报告！填得越具体，定位越快。
         ⚠️ 请勿粘贴任何真实的 API Key / Token / 密码（截图与日志里也要先确认没有）。
 
-        Thanks for reporting! ⚠️ Never paste real API keys / tokens / passwords (check your screenshots too).
+        > English? Please use the **🐛 Bug report (English)** template instead.
 
   - type: dropdown
     id: area
     attributes:
-      label: 受影响的功能 / Affected area
+      label: 受影响的功能
       options:
         - 导出 / 备份 / 定时备份
         - 导入 / 恢复 / 回滚
@@ -23,14 +23,14 @@ body:
         - 配置市场 / GitHub 登录
         - 档案（Profiles）与实例启动
         - CLI（dsh-config-manager）
-        - 其他 / 不确定
+        - 其他或不确定
     validations:
       required: true
 
   - type: input
     id: plugin-version
     attributes:
-      label: 插件版本 / Plugin version
+      label: 插件版本
       description: 设置 → 备份与迁移 → 关于（页面上可直接看到）
       placeholder: "0.1.64"
     validations:
@@ -39,7 +39,7 @@ body:
   - type: input
     id: dsh-version
     attributes:
-      label: DSH 版本 / DSH version
+      label: DSH 版本
       placeholder: "0.1.x"
     validations:
       required: false
@@ -47,42 +47,42 @@ body:
   - type: dropdown
     id: os
     attributes:
-      label: 操作系统 / OS
+      label: 操作系统
       options:
         - Windows
         - macOS
         - Linux
-        - 其他 / Other
+        - 其他
     validations:
       required: true
 
   - type: dropdown
     id: install
     attributes:
-      label: DSH 的启动方式 / How DSH runs
+      label: DSH 的启动方式
       options:
         - dsh web（浏览器）
-        - 桌面应用 / Desktop build
+        - 桌面应用
         - headless 或其它 profile
-        - 不确定 / Not sure
+        - 不确定
     validations:
       required: false
 
   - type: textarea
     id: what-happened
     attributes:
-      label: 问题描述 / What happened
-      description: 你在做什么、出了什么问题（一句话说清）
+      label: 问题描述
+      description: 你在做什么、出了什么问题（一两句话说清）
     validations:
       required: true
 
   - type: textarea
     id: steps
     attributes:
-      label: 复现步骤 / Steps to reproduce
+      label: 复现步骤
       placeholder: |
-        1. 打开… / Open…
-        2. 点击… / Click…
+        1. 打开…
+        2. 点击…
         3. …
     validations:
       required: true
@@ -90,21 +90,21 @@ body:
   - type: textarea
     id: expected
     attributes:
-      label: 期望行为 / Expected behavior
+      label: 期望行为
     validations:
       required: true
 
   - type: textarea
     id: actual
     attributes:
-      label: 实际行为 / Actual behavior
+      label: 实际行为
     validations:
       required: true
 
   - type: textarea
     id: logs
     attributes:
-      label: 报错 / 日志 / Error output
+      label: 报错 / 日志
       description: 界面提示、控制台（F12 → Console）或终端日志；粘贴前记得脱敏
       render: shell
     validations:
@@ -113,7 +113,7 @@ body:
   - type: textarea
     id: extra
     attributes:
-      label: 截图或补充 / Screenshots or extra context
+      label: 截图或补充
       description: 直接把图片拖进这个框即可（Ctrl+V 也能粘）
     validations:
       required: false
@@ -121,9 +121,9 @@ body:
   - type: checkboxes
     id: checks
     attributes:
-      label: 提交前确认 / Before submitting
+      label: 提交前确认
       options:
-        - label: 我已搜索过现有 issue，确认不是重复问题 / I searched existing issues and this is not a duplicate
+        - label: 我已搜索过现有 issue，确认不是重复问题
           required: true
-        - label: 我已确认内容中不含 API Key / Token / 密码 / I confirmed there are no secrets in my report
+        - label: 我已确认内容中不含 API Key / Token / 密码
           required: true

@@ -1,0 +1,132 @@
+name: 🎨 UI issue (English)
+description: Misaligned layout, broken styling, dark mode or scaling problems, a control that does nothing
+title: "[UI] "
+labels: ["bug", "ui"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! **A screenshot plus browser info** lets me locate it directly — far faster than prose.
+        ⚠️ Never paste real API keys / tokens / passwords — check your screenshots too.
+
+        > 中文用户请改用「**🎨 UI 问题（中文）**」模板。
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of problem
+      options:
+        - Misaligned, overlapping or overflowing layout
+        - Styling (colors, fonts, spacing)
+        - Dark mode
+        - Control does nothing
+        - Dialog, z-index or overlay
+        - Under browser or OS scaling (125%, 150%, …)
+        - Wrong or untranslated text
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      description: Settings → Backup & Migration → About (shown there, copyable)
+      placeholder: "0.1.64"
+    validations:
+      required: true
+
+  - type: input
+    id: dsh-version
+    attributes:
+      label: DSH version
+      description: Also shown on the About page
+      placeholder: "0.1.x"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and version
+      description: e.g. Chrome 141 / Edge 141 / Safari 18
+      placeholder: "Chrome 141"
+    validations:
+      required: true
+
+  - type: input
+    id: zoom
+    attributes:
+      label: Display zoom / browser zoom
+      description: e.g. "Windows 125% / browser 100%" — many layout bugs only show up off 100%
+      placeholder: "Windows 125% / browser 100%"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: theme
+    attributes:
+      label: Theme
+      options:
+        - Dark
+        - Light
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open…
+        2. Click…
+        3. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What you see / what you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: media
+    attributes:
+      label: Screenshot or recording
+      description: Drag an image into this box, or paste with Ctrl+V
+    validations:
+      required: true
+
+  - type: textarea
+    id: console
+    attributes:
+      label: Console output (F12 → Console)
+      description: Paste if any, leave empty otherwise
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and this is not a duplicate
+          required: true
+        - label: I confirmed there are no API keys / tokens / passwords in my screenshots or logs
+          required: true

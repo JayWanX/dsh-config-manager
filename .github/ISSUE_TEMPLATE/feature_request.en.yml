@@ -1,0 +1,68 @@
+name: ✨ Feature request (English)
+description: A new feature, an improvement, or a suggestion about the experience
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ideas are welcome! **Describe the problem first** — the situation matters more than the proposed implementation.
+
+        > 中文用户请改用「**✨ 功能建议（中文）**」模板。
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Related area
+      options:
+        - Export / backup / scheduled backup
+        - Import / restore / rollback
+        - Snapshots / disaster recovery
+        - Remote sync (Git / WebDAV)
+        - Configuration market
+        - Profiles
+        - UI / interaction / wording
+        - CLI
+        - A brand-new feature / other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you hitting
+      description: What you are trying to do and where it gets in the way — the more concrete, the better
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: What you would like
+      description: How should it work? The more concrete, the better
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any other approach you thought about (optional)
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Screenshots, examples, prior art
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and discussions and this is not a duplicate
+          required: true

@@ -1,0 +1,67 @@
+name: ✨ 功能建议 / Feature request
+description: 想要的新功能、改进点，或使用体验上的建议
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        欢迎提想法！**先讲场景、再讲方案** —— 场景比实现方式更有价值。
+        Describe the problem first; it matters more than the proposed implementation.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 相关功能 / Related area
+      options:
+        - 导出 / 备份 / 定时备份
+        - 导入 / 恢复 / 回滚
+        - 快照 / 灾备
+        - 远程同步（Git / WebDAV）
+        - 配置市场
+        - 档案（Profiles）
+        - 界面 / 交互 / 文案
+        - CLI
+        - 全新功能 / 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你想解决什么问题 / What problem are you hitting
+      description: 你正在做什么、哪里不顺手 —— 使用场景越具体越好
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: 你期望的方案 / What you would like
+      description: 你希望它怎么工作？越具体越好
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 备选方案 / Alternatives considered
+      description: 有没有别的做法（可留空）
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充 / Additional context
+      description: 截图、示例、参考实现
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认 / Before submitting
+      options:
+        - label: 我已搜索过现有 issue 与 Discussions，确认不是重复建议 / I searched existing issues and discussions
+          required: true

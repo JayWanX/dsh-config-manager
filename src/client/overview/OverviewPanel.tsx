@@ -35,11 +35,12 @@ import {
   buildOverviewMetrics,
   overviewActivity,
   overviewEmptyState,
+  overviewFirstSteps,
   overviewHealth,
   relTime,
   type OverviewMetricKey,
 } from '../../ui/overview-view.ts'
-import { Badge, Button, Card, Spinner, StatusDot } from '../common/ui.tsx'
+import { Badge, Button, Card, Spinner, StatusDot, Stepper } from '../common/ui.tsx'
 import { SectionComposition } from '../common/SectionComposition.tsx'
 import { sectionLabeler } from '../common/section-labels.ts'
 import { BackupIcon, ExportIcon, ImportIcon, SyncIcon, ArrowRightIcon } from '../common/Icon.tsx'
@@ -349,6 +350,16 @@ export function OverviewPanel({ api, syncApi, historyApi, t, openActivity }: Ove
         <Card className={`${css.activityCard} ${css.fillCard}`}>
           <span className={css.groupLabel}>{t('overview.empty.title')}</span>
           <span className={css.hint} style={{ display: 'block', marginBottom: 10 }}>{t('overview.empty.body')}</span>
+          {/* 三步主线（备份 → 导出 → 导入）：顺序来自 overviewFirstSteps()，组件不写死 */}
+          <div className={css.emptySteps}>
+            <Stepper
+              steps={overviewFirstSteps().map((s, i) => ({
+                key: s.key,
+                label: t(`overview.empty.${s.key}`),
+                state: i === 0 ? 'current' : 'todo',
+              }))}
+            />
+          </div>
           <div className={css.toolRow}>
             <Button variant="primary" disabled={backupRunning} onClick={() => { void runBackupNow() }}>
               {t('overview.quick.backup')}

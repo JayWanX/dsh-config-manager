@@ -12,6 +12,7 @@ import {
   latestSnapshot,
   overviewActivity,
   overviewEmptyState,
+  overviewFirstSteps,
   overviewHealth,
   relTime,
   type OverviewInputs,
@@ -179,4 +180,12 @@ test('overviewEmptyState: 备份与快照均加载且为空 → true', () => {
   assert.equal(overviewEmptyState(baseInputs({ backups: [], snapshots: [] })), true)
   assert.equal(overviewEmptyState(baseInputs({ backups: [], snapshots: [{ createdAt: '2026-09-10T00:00:00Z', entryCount: 1 }] })), false)
   assert.equal(overviewEmptyState(baseInputs()), false, '未加载不算空态')
+})
+
+/* ---------------- 首用三步引导 ---------------- */
+
+test('overviewFirstSteps: 固定三步（备份 → 导出 → 导入），键序稳定', () => {
+  const steps = overviewFirstSteps()
+  assert.deepEqual(steps.map((s) => s.key), ['step1', 'step2', 'step3'])
+  assert.notStrictEqual(steps, overviewFirstSteps(), '每次返回新数组，组件 map 不共享可变引用')
 })

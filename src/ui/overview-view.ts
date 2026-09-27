@@ -315,3 +315,19 @@ export function overviewEmptyState(inputs: OverviewInputs): boolean {
   return inputs.backups !== null && inputs.snapshots !== null
     && inputs.backups.length === 0 && inputs.snapshots.length === 0
 }
+
+/* ---------------- 首用三步引导 ---------------- */
+
+/** 首用三步引导的步骤 key（UI 用 `overview.empty.<key>` 渲染标签）。 */
+export type OverviewFirstStepKey = 'step1' | 'step2' | 'step3'
+
+/**
+ * 首用空态的三步主线（固定顺序，非状态推断）：
+ *   ① 创建第一份备份 → ② 导出 ZIP 带走 → ③ 在新机器导入回来。
+ * 这是插件的主线用法（备份 → 迁移），而旧空态只给了「备份 / 同步」两个互不相干的按钮，
+ * 新用户看不出「导出 → 在新机器导入」才是这个插件存在的理由。
+ * 步骤**状态**由 UI 层给出（首用空态恒为「第一步 current、其余 todo」），本模块不推断。
+ */
+export function overviewFirstSteps(): { key: OverviewFirstStepKey }[] {
+  return [{ key: 'step1' }, { key: 'step2' }, { key: 'step3' }]
+}

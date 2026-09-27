@@ -519,6 +519,10 @@ flex-direction:column }` 让内部 input 拉满。市场筛选用 `.marketFilter
 - **Overview 控制中心**：状态条 → 动作工具栏（主操作 + 活动入口右对齐）→
   备份位置卡（路径+copy/体积/配额/间隔/下次）→ 分区构成卡 → 活动视口
   （fit-content 上限 8 行内滚；成功=绿点降噪，失败/跳过=徽章）。
+  - **首用空态**（备份与快照均为空）不走上面这条流，而用 `Stepper`（`.emptySteps` 容器）给出
+    **三步主线**：创建第一份备份 → 导出 ZIP 带走 → 在新机器导入回来。步骤序列来自纯函数
+    `overviewFirstSteps()`（`ui/overview-view.ts`，有单测），组件不写死顺序与文案；
+    首用恒为「第一步 current、其余 todo」——**不做状态推断**，推断属模型层职责。
   - 状态条指标段**精确跳转**：备份文件→备份页「备份文件」、安全快照→「安全快照」、
     定时备份→「定时备份」、远程同步→同步页（`METRIC_TARGET` 同时写 panel 与 snapshots.subTab，
     只写 panel 会全部停在子页默认值）。

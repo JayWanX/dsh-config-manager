@@ -79,7 +79,7 @@ Browse the built-in official market for ready-made configurations (model provide
 | 🔄 | **Remote Sync** | Push/pull portable config via **Git private repo or WebDAV** (secrets do not sync by default; encrypted snapshots can optionally carry encrypted credentials) |
 | ⏰ | **Scheduled backups** | Full backup on a fixed cadence (6h / 12h / 24h / 7d) — set-and-forget, secrets never included |
 | 🛒 | **Config Marketplace** | Browse & one-click install community configs — supply-chain warnings + per-item content selection (change summary + in-place high-risk flags) |
-| 🗂️ | **Profiles (DSH profiles)** | Manage `$DSH_HOME/profiles/<name>` directly: list / create from a shipped template / rename / hard delete / record which profile the next launch should use |
+| 🗂️ | **Profiles (DSH profiles)** | Manage `$DSH_HOME/profiles/<name>` directly: list / create from a shipped template / rename / hard delete / **launch this profile (independent instance)** / **stop the instance** (the row button flips between Launch and Stop with the running state) |
 | 🌐 | **Bilingual UI** | Interface, reports and error details follow the DSH app language (中文 / English) |
 | 🤖 | **Agent tools** | Backup / snapshot / restore / sync right from an agent session |
 
@@ -276,11 +276,18 @@ launched with `dsh --profile <name>`. This page reads and writes that directory 
 | Create | Writes the standard three files under `$DSH_HOME/profiles/<name>` (equivalent to the shipped `initProfile`); starting templates: base / web / headless / sdk / sdk-minimal / acp |
 | Rename | Directory move + fixes the manifest name field; the running profile is refused |
 | Delete | **Hard-deletes the whole directory** (including node_modules); deleting the running profile needs an extra checkbox |
-| Next launch | Only records which profile to use next and shows the `dsh --profile <name>` restart command |
+| Launch this profile | The **switch that actually works**: starts an **independent DSH instance** for that profile (free port picked automatically, browser opened automatically); the running instance and its tasks are untouched. Web-shaped profiles only — non-web ones (e.g. the base template) have no browser UI, so the page shows the terminal command instead of failing silently |
+| Stop instance | While that profile has a running instance, the row button flips from Launch to Stop (the Runtime card also offers one); it asks the process to exit first (grace period) and terminates the process tree only after that, reporting which path was used. **Deleting a profile with a running instance is refused** |
+| No duplicate launches | “Which profiles are running” = the ledger of instances this plugin started ∪ **each instance's own heartbeat** (`<dataDir>/running/<profile>.json`, pid/port only — **never the auth token**). So even a profile you started by hand with `dsh web` will not be launched a second time (you get a clear “already running” message); the instance you are using right now offers no Stop button (that would kill your own session — close that window/terminal, or stop it from the instance that launched it) |
 
-> DSH **cannot switch profiles while running** (the profile comes from the launch flag and bundle layers resolve at boot),
-> so this page never touches processes — it records your choice and asks you to restart.
-> Third-party plugins must be installed into that profile separately (`dsh plugin --profile <name> add <pkg>`).
+> **Why there is no "set as next launch"** (button and marker removed in 2026-09): DSH has **no "default / next launch
+> profile" state** — the profile comes only from the launch arguments (`dsh <name>` / `--profile <name>`; `dsh web` is a
+> hard-coded alias), so any "which profile to use next" marker has **no consumer at all**: the `dsh web` you type
+> yourself still boots web after a restart. Only two mechanisms really switch profiles: ① this page's "launch this
+> profile" (an extra instance, no interruption, stoppable at any time), ② pointing your launch command/shortcut at
+> `dsh --profile <name>` (ecosystem tools such as dshm and DSH Launcher all spawn instances from an external launcher).
+> Instances started by this plugin are recorded in `<dataDir>/launches.json` (pid/port/log), which is why they can be
+> stopped; third-party plugins must be installed into that profile separately (`dsh plugin --profile <name> add <pkg>`).
 > The tab lives at Settings → "Backup & Migration" → **Profiles**.
 
 ### 📸 Snapshot restore (undo an import)
@@ -539,6 +546,24 @@ Yes. The import wizard asks for the export-time encryption password and verifies
 4. **History/session migration is off by default** (v1 copies files only)
 5. **Encrypted backups**: a lost password means the `secrets.enc` can't be decrypted (by design — keep your password safe)
 6. **Snapshot restore is offline and honest**: entries the offline engine can't restore (settings namespaces / patch lines when the snapshot has no whole-file backup, workspace records stored in DSH storages) are reported as skipped with a pointer to online rollback; credential **values** are never auto-written (manual re-entry hint only); old snapshots without a plugin baseline only get a hint to remove added plugins manually
+
+## 💬 Feedback
+
+Found a bug, a misaligned panel, a button that does nothing — or just have an idea? **All of it is welcome.** UI problems especially: they are the easiest thing to overlook and the part that real usage should decide.
+
+| What you want to say | Where |
+|---|---|
+| 🎨 **UI problem**: misaligned layout, broken styling, dark mode, scaling, a control that does nothing | [UI issue form](https://github.com/xiajiajun516/dsh-config-manager/issues/new?template=ui_bug.en.yml) — screenshot + browser version is enough |
+| 🐛 **Something is broken / an error / wrong data** | [Bug report](https://github.com/xiajiajun516/dsh-config-manager/issues/new?template=bug_report.en.yml) |
+| ✨ **New feature idea** | [Feature request](https://github.com/xiajiajun516/dsh-config-manager/issues/new?template=feature_request.en.yml) |
+| 💬 **Not sure whether it is a bug — just asking** | [Discussions](https://github.com/xiajiajun516/dsh-config-manager/discussions) |
+| 🔒 **Security issue / leaked credential** | [Private security advisory](https://github.com/xiajiajun516/dsh-config-manager/security/advisories/new) (please do not open a public issue) |
+
+**Report straight from the plugin**: Settings → Backup & Migration → **About** → "Issues"; or hit **Copy environment info** on that page — plugin version / DSH version / platform are included, so you can paste it into the issue instead of typing version numbers.
+
+**Every report gets followed up**: a new issue receives an immediate reply and the `needs-triage` label, and progress is visible in the labels (`needs-info` → `confirmed` → `fixed`). Fixed problems end up in [CHANGELOG.md](CHANGELOG.md) under the release that fixed them, tagged with the issue number (e.g. #38 / #43 / #45) — that is where a report finally lands.
+
+> ⚠️ Please search for an existing issue first, and **strip every API key / token / password** — including the ones visible in screenshots and logs.
 
 ## 🙏 Contributors
 

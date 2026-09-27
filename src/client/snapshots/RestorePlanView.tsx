@@ -20,6 +20,8 @@ import { toRestorePlanView, withLoadedStatus, type RestorePlanRow } from '../../
 import { countSideRows, maxLineDigits, toSideBySide, type SideBySideRow } from '../../ui/diff-view.ts'
 import { formatBytes } from '../../ui/report.ts'
 import { Badge, Banner, Spinner } from '../common/ui.tsx'
+import { ExpandChevron } from '../common/Icon.tsx'
+import { Collapse } from '../common/Motion.tsx'
 import css from '../config-manager.module.css'
 
 /** 单文件差异加载状态（打开行时懒加载）。 */
@@ -252,7 +254,8 @@ export function RestorePlanView({ api, t, snapshotId, plan, changeSummary }: Res
             <div className={css.restorePlanGroupHead}>
               {collapsible ? (
                 <button type="button" className={css.diffGroupToggle} aria-expanded={skipsOpen} onClick={() => { setSkipsOpen(!skipsOpen) }}>
-                  {collapsed ? '▸' : '▾'} {t(groupLabelKey)}
+                  {/* 折叠开关统一走形变层（DESIGN.md §6）：此前是手写文本符号 ▸/▾（§9 反模式 #9） */}
+                  <ExpandChevron open={!collapsed} size={12} /> {t(groupLabelKey)}
                 </button>
               ) : (
                 <span className={css.groupLabel}>{t(groupLabelKey)}</span>
@@ -266,7 +269,7 @@ export function RestorePlanView({ api, t, snapshotId, plan, changeSummary }: Res
                 </span>
               )}
             </div>
-            {!collapsed && (
+            <Collapse open={!collapsed}>
               <ul className={css.restorePlanList}>
                 {group.rows.map((row) => {
                   const open = openRows.includes(row.index)
@@ -282,7 +285,7 @@ export function RestorePlanView({ api, t, snapshotId, plan, changeSummary }: Res
                         {safeTarget ?? safeDescription}
                       </span>
                       <RowStat t={t} row={row} />
-                      {row.diffable && <span className={css.restorePlanChevron} aria-hidden="true">{open ? '▾' : '▸'}</span>}
+                      {row.diffable && <span className={css.restorePlanChevron} aria-hidden="true"><ExpandChevron open={open} size={12} /></span>}
                     </>
                   )
                   return (
@@ -300,12 +303,12 @@ export function RestorePlanView({ api, t, snapshotId, plan, changeSummary }: Res
                           {row.detail !== undefined && <span className={css.hint}>（{redact(row.detail)}）</span>}
                         </div>
                       )}
-                      {open && state !== undefined && <DiffPane state={state} t={t} />}
+                      <Collapse open={open}>{state !== undefined && <DiffPane state={state} t={t} />}</Collapse>
                     </li>
                   )
                 })}
               </ul>
-            )}
+            </Collapse>
           </div>
         )
       })}

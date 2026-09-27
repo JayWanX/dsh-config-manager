@@ -24,7 +24,7 @@ import {
 import type { ImportSectionStat } from '../../ui/types.ts'
 import { redact } from '../../security/redaction.ts'
 import { zhUiT, type UiT } from '../../ui/i18n.ts'
-import { Badge, Button, Spinner } from './ui.tsx'
+import { Badge, Button } from './ui.tsx'
 import css from '../config-manager.module.css'
 
 export type ReportViewKind = 'export' | 'import'
@@ -253,7 +253,7 @@ export function ReportView({ kind, exportReport, importResult, onDownload, downl
           {onDownload !== undefined && (
             <div className={css.reportFooter}>
               <Button variant="primary" onClick={onDownload} loading={downloadBusy}>
-                {downloadBusy ? <Spinner /> : t('export.download')}
+                {t('export.download')}
               </Button>
             </div>
           )}

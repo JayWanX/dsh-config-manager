@@ -410,6 +410,15 @@ export interface PathIssue {
   kind: 'missing' | 'platformMismatch' | 'homeMismatch';
   value: string;
   mappedTo?: string;
+  /**
+   * 这条路径来自哪个分区（目前只有 workspaces / mcp 会被探测出路径问题）。
+   *
+   * 为什么要有它：导入向导的路径映射页必须**只问这次真的会写盘的路径** ——
+   * 用户没勾「工作区」时不该被要求为工作区路径指定新位置（真机反馈：明明没选工作区，
+   * 却被列了 7 条工作区路径）。core 只负责如实标注来源，是否要问由调用方结合本次选择决定。
+   * 缺省 = 来源未知（旧宿主未回传该字段）→ 调用方按「保守显示」处理。
+   */
+  section?: SectionId;
 }
 
 export interface SnapshotTarget { adapter: SectionId; ref: string; }

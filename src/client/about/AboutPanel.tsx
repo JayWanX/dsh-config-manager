@@ -3,21 +3,26 @@
  *
  * 纯静态展示视图 + 外链，无表单 / 无写操作 / 无新增依赖：
  * - 项目信息卡：插件名 + 官方 Badge；版本 / DSH / 平台 Badge（运行时信息，经 api.status() 获取）；
+ *   卡片末尾是「复制环境信息」—— 版本 / DSH / 平台（+ 诊断位）经纯函数拼成可粘贴的 Markdown，
+ *   提 issue 时不必手抄版本号（prompt：反馈摩擦越小，用户越愿意提）；
  * - 相关链接卡：Star 主按钮（外链）+ 仓库 / 文档 / Issues 链接行 + 作者行；
  * - 公开元数据（名称 / 仓库 / 作者 / 链接）全部来自 ./about-view.ts 的 ABOUT_META / ABOUT_LINKS
  *   （静态常量，单一来源，node 单测覆盖）；
  * - 状态行格式化委托 ./about-view.ts 的 aboutStatusRows 纯函数（组件不实现可测试业务逻辑）；
  * - 版本号不在此重复维护 —— 展示值一律来自 status()（AGENTS.md §版本号三处同步教训）。
  *
- * 安全：无任何输入表单（无 secret 泄漏面）；外链一律 target="_blank" + rel="noreferrer"
+ * 安全：无任何输入表单（无 secret 泄漏面）、无配置写操作（仅把环境信息写入剪贴板）；
+ * 外链一律 target="_blank" + rel="noreferrer"
  * （防 tabnabbing）；错误文本渲染前经 redact() 兜底（安全不变量）。
  * 状态组件内自持（低频静态视图，同 Snapshots/Sync/Market 策略，不进 sessionStorage）。
  */
 import { useCallback, useEffect, useState } from 'react'
 import type { TranslateNS } from '../client-types.ts'
 import type { ConfigManagerApi } from '../api.ts'
-import { Badge, Banner, Button, Card, SectionTitle, Spinner } from '../common/ui.tsx'
-import { ABOUT_CLI, ABOUT_LINKS, ABOUT_META, aboutStatusRows } from './about-view.ts'
+import { Badge, Banner, Button, Card, SectionTitle } from '../common/ui.tsx'
+import { Skeleton } from '../common/Skeleton.tsx'
+import { CopyButton } from '../common/CopyButton.tsx'
+import { ABOUT_CLI, ABOUT_LINKS, ABOUT_META, aboutStatusRows, buildFeedbackSnippet } from './about-view.ts'
 import type { AboutStatusRows } from './about-view.ts'
 import { ReleaseNotesDialog } from './ReleaseNotesDialog.tsx'
 import { redact } from '../../security/redaction.ts'
@@ -70,11 +75,7 @@ export function AboutPanel({ api, t }: AboutPanelProps) {
         <div className={css.statRow}>
           <Badge kind="ok">{t('about.official')}</Badge>
         </div>
-        {state.loading && (
-          <div className={css.statRow}>
-            <Spinner label={t('about.loading')} />
-          </div>
-        )}
+        {state.loading && <Skeleton count={3} label={t('about.loading')} />}
         {state.loadError !== null && (
           <div>
             <Banner kind="error">{redact(state.loadError)}</Banner>
@@ -103,6 +104,19 @@ export function AboutPanel({ api, t }: AboutPanelProps) {
               <Banner kind="warn">{t('about.diag.manifestUnreadable')}</Banner>
             )}
             <span className={css.groupLabel}>{t('about.diag.hint')}</span>
+          </div>
+        )}
+
+        {/* 反馈摩擦最小化：把版本 / DSH / 平台（+ 诊断位）拼成一段可直接粘贴的文本。
+            拼接规则是 ./about-view.ts 的纯函数，组件只装配（AGENTS.md §UI 分层铁律）。 */}
+        {state.rows !== null && (
+          <div className={css.actionRow}>
+            <span className={css.hint}>{t('about.feedbackHint')}</span>
+            <CopyButton
+              text={buildFeedbackSnippet(state.rows)}
+              label={t('about.copyEnv')}
+              t={t}
+            />
           </div>
         )}
       </Card>

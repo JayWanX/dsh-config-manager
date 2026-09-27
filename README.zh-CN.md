@@ -13,7 +13,7 @@ DSH Config Manager 是一个 DeepSeek Harness 配置备份与迁移插件：一�
 - Workspace / AGENTS.md
 
 > DSH 的 profile（`$DSH_HOME/profiles/<name>`）本身**不随备份迁移**（它是「用哪套插件组合启动」的机器本地选择）；
-> 本插件的「档案」页可以列表 / 新建 / 重命名 / 删除它们，并记录「下次启动用哪个」。
+> 本插件的「档案」页可以列表 / 新建 / 重命名 / 删除它们，也可以**用某个档案另起一个独立实例并随时停止它**（真正可用的切换）。
 
 把当前 DeepSeek Harness 环境导出为可移植备份，在另一台电脑上一键恢复；也支持通过 Git / WebDAV 跨机同步（密钥默认不同步，勾选「导出密钥」并加密后可随加密快照迁移）；还能通过内置**配置市场**浏览、一键安装社区分享的现成配置。
 
@@ -81,7 +81,7 @@ DSH 是你的 AI 助手工作台，里面存着你的各种设置：模型配置
 | 🔄 | **远程同步** | 通过 **Git 私有仓库或 WebDAV** 推送 / 拉取可移植配置（密钥默认不参与同步；加密快照可选携带密文凭据） |
 | ⏰ | **定时全量备份** | 按固定周期（6h / 12h / 24h / 7d）自动全量备份，一劳永逸，密钥永不包含 |
 | 🛒 | **配置市场** | 浏览并一键安装社区分享的配置——供应链警示 + 逐项内容选择（可就地看到改动与高风险分区） |
-| 🗂️ | **档案 Profiles（DSH profile）** | 直接管理 `$DSH_HOME/profiles/<name>`：列表 / 新建（官方模板）/ 重命名 / 物理删除 / 记录「下次启动用哪个」 |
+| 🗂️ | **档案 Profiles（DSH profile）** | 直接管理 `$DSH_HOME/profiles/<name>`：列表 / 新建（官方模板）/ 重命名 / 物理删除 / **启动该档案（独立实例）** / **停止实例**（行内按钮按运行状态在「启动 ↔ 停止」间切换） |
 | 🧩 | **本地插件随备份迁移** | `link:` / `file:` 安装的本地开发插件会被打包进备份，换机不再丢失 |
 | 🗄️ | **保留策略可配（GFS 分层）** | 「最近 N 份 + 每月留 1 份 + 每年留 1 份」，默认值等价旧行为 |
 | 🤖 | **Agent 工具** | Agent 会话内直接备份 / 快照 / 恢复 / 同步 |
@@ -272,10 +272,17 @@ dsh plugin --profile web add dsh-config-manager@latest
 | 新建 | 在 `$DSH_HOME/profiles/<name>` 写标准三件套（与官方 `initProfile` 等价）；可选起步模板 base / web / headless / sdk / sdk-minimal / acp |
 | 重命名 | 目录级移动 + 同步修正 `package.json` 的 name；当前运行中的档案拒绝重命名 |
 | 删除 | **物理删除整个目录**（含 node_modules）；当前运行中的档案需额外勾选确认 |
-| 下次启动 | 只写「下次启动用哪个」标记 + 给出 `dsh --profile <name>` 重启命令 |
+| 启动该档案 | **真正可用的切换**：以该档案另起一个**独立 DSH 实例**（自动挑空闲端口 + 自动打开浏览器），当前实例与正在跑的任务不受影响；只支持 **web 形态**档案：非 web 形态（如 base 模板）没有浏览器界面，点击后给出终端命令而不是静默失败 |
+| 停止实例 | 该档案有实例在跑时，行内「启动」自动变成「停止」（运行状态卡里也有一个）；先请它自己退出（优雅期），超时才结束进程树，并如实告诉你是哪种；**实例运行中拒绝物理删除该档案** |
+| 不会重复启动 | 「哪些档案在跑」= 本插件启动的实例台账 ∪ **每个实例自报的心跳**（`<dataDir>/running/<profile>.json`，只含 pid/端口，**不含认证 token**）→ 哪怕某个档案是你手动 `dsh web` 起来的，本页也不会再启动第二个同名实例（明确提示已在运行）；**当前这个实例本身**不给停止按钮（停自己会把你自己杀掉——请关窗口/终端，或到启动它的那个实例里停止） |
 
-> DSH **无法在运行中切换 profile**（profile 由启动参数决定，bundle 层在启动时解析），因此本页不做进程操作，
-> 只记录选择并提示你手动重启。第三方插件需要在该档案里单独安装（`dsh plugin --profile <name> add <pkg>`）。
+> **为什么没有「设为下次启动」**（2026-09 该按钮与标记一并移除）：DSH **没有「默认 / 下次启动 profile」这种状态** ——
+> profile 只由启动参数决定（`dsh <名>` / `--profile <名>`，`dsh web` 是硬编码别名），任何「下次启动用哪个」的标记
+> **都没有消费者**：你自己敲的 `dsh web` 重启后当然还是 web。真正可用的切换只有两种：① 本页的「启动该档案」
+> 另起一个实例（不打断当前会话，随时可停）；② 把启动命令/快捷方式换成 `dsh --profile <名>`
+> （生态里的 dshm、DSH Launcher 也都是「外部启动器 spawn 实例」这一条路）。
+> 本插件启动的实例记在 `<dataDir>/launches.json`（pid/端口/日志），所以**关得掉**；
+> 第三方插件需要在该档案里单独安装（`dsh plugin --profile <name> add <pkg>`）。
 
 ### 📸 快照恢复（撤销一次导入）
 
@@ -457,6 +464,24 @@ dsh-config-manager backup --sections skills,self          # 收窄范围
 5. **加密备份**：密码丢失则无法解密（设计使然——请牢记密码）
 6. **快照恢复是离线的、诚实的**：离线引擎无法恢复的条目（快照无整文件备份时的 settings namespace / patch 行、存在 DSH storages 里的 workspace 记录）会如实列为跳过并指向在线回滚；凭据**值**绝不自动改写（只提示人工补录）；无插件基线的旧快照只提示人工核对新增插件
 7. **本地源插件（`link:` / `file:`）随备份打包**：导出时执行 `npm pack` 把本地开发中的插件打成 tarball 一并备份，导入时解包到 `$DSH_HOME/dsh-config-manager/local-plugins/` 后按 `file:` 安装。因此：① 备份体积会随本地插件的体积增大（单插件超过 100 MB 会被跳过并告警，建议先发布到 registry / git 再备份）；② 插件**源码**会进入备份（与「密钥永不进备份」不冲突——密钥仍被排除，这里进的是代码）；③ 打包需要本机有可用的 `npm`，无 npm 时该插件退化为原行为（保留原 spec，换机后仍需手工安装）
+
+## 💬 反馈与建议
+
+遇到 Bug、界面错位、按钮点了没反应，或者只是有个想法 —— **都欢迎提出来**。界面问题尤其欢迎：这是最容易被自己忽略、也最该由真实使用场景决定的部分。
+
+| 你想说什么 | 去哪儿 |
+|---|---|
+| 🎨 **界面问题**：布局错位、样式异常、深色模式、缩放、按钮无响应 | [UI 问题表单](https://github.com/xiajiajun516/dsh-config-manager/issues/new?template=ui_bug.yml)（只要截图 + 浏览器版本） |
+| 🐛 **功能出错 / 报错 / 数据不对** | [Bug 报告](https://github.com/xiajiajun516/dsh-config-manager/issues/new?template=bug_report.yml) |
+| ✨ **新功能建议** | [功能建议](https://github.com/xiajiajun516/dsh-config-manager/issues/new?template=feature_request.yml) |
+| 💬 **不确定是不是 Bug，想先问问** | [Discussions](https://github.com/xiajiajun516/dsh-config-manager/discussions) |
+| 🔒 **安全问题 / 密钥泄露** | [私密安全公告](https://github.com/xiajiajun516/dsh-config-manager/security/advisories/new)（请不要开公开 issue） |
+
+**在插件里就地反馈**：设置 → 备份与迁移 → **关于** → 「反馈问题」；或点「关于」里的**复制环境信息**按钮，插件版本 / DSH 版本 / 平台会自动带上，粘进 issue 即可 —— 不用手抄版本号。
+
+**每条都会跟进**：新 issue 会立刻收到一条回复并打上 `needs-triage`，处理进度体现在标签上（`needs-info` → `confirmed` → `fixed`）。修好的问题会出现在 [CHANGELOG.md](CHANGELOG.md) 的对应版本条目里，带 issue 编号（例：#38 / #43 / #45）—— 这就是一条反馈最终的落地记录。
+
+> ⚠️ 提交前请先搜一下是否已有同类 issue，并**抹掉任何 API Key / Token / 密码**（截图和日志里也算）。
 
 ## 🙏 贡献者
 

@@ -9,7 +9,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 
-import { Badge, Card, SectionTitle, Spinner } from '../common/ui.tsx'
+import { Badge, Card, SectionTitle } from '../common/ui.tsx'
+import { SkeletonTable } from '../common/Skeleton.tsx'
 import { ErrorBanner } from '../common/ErrorBanner.tsx'
 import type { SyncApi, SyncHistoryEntry, AutosyncHistoryEntry } from './sync-api.ts'
 import {
@@ -76,7 +77,7 @@ export function SyncHistoryView(props: SyncHistoryViewProps): ReactNode {
     [rows],
   );
 
-  if (loading) return <Spinner label={t('common.loading')} />;
+  if (loading) return <SkeletonTable label={t('common.loading')} />;
   if (error) {
     return (
       <ErrorBanner

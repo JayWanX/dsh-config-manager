@@ -20,7 +20,7 @@
  *     <Modal.Footer>…按钮…</Modal.Footer>
  *   </Modal>
  */
-import { useEffect, useState } from 'react'
+import { useLayoutEffect, useState } from 'react'
 import type { CSSProperties, ReactNode, Ref } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import { CloseIcon } from './Icon.tsx'
@@ -40,6 +40,11 @@ import css from '../config-manager.module.css'
  * （与 Radix 迁移前内联渲染 `dialogMask` 的层级语义一致），遮罩与卡片正常可见可点。
  */
 export const MODAL_ROOT_ID = 'dsh-config-manager-root'
+
+/** 插件根节点查询（Portal 容器）：渲染期与 layout effect 共用同一份实现。 */
+function resolveModalRoot(): HTMLElement | null {
+  return typeof document === 'undefined' ? null : document.getElementById(MODAL_ROOT_ID)
+}
 
 export interface ModalProps {
   /** 是否打开（受控） */
@@ -64,12 +69,24 @@ export interface ModalProps {
  * 统一弹窗容器（Radix Dialog）。busy 时禁用 Esc 与遮罩关闭。
  */
 export function Modal({ open, onClose, title, wide, busy, onOpenAutoFocus, cardStyle, children }: ModalProps) {
-  // Portal 容器在挂载后再解析一次：Modal 与根节点可能在同一次 commit 中渲染，
-  // 首次求值时根节点尚未进 DOM（届时回退 Radix 的 document.body）。
-  const [container, setContainer] = useState<HTMLElement | null>(null)
-  useEffect(() => {
-    setContainer(document.getElementById(MODAL_ROOT_ID))
-  }, [])
+  /**
+   * Portal 容器解析 —— 三条纪律（顺序即重要性，别改回 useEffect）：
+   *
+   * ① **渲染期同步取一次**（惰性 useState）：Modal 绝大多数时候与插件根节点**不在**同一次
+   *    commit 里挂载（弹窗随面板重挂、切页签回来才挂），此时根节点已在 DOM 中，一次命中。
+   * ② 用 layout effect 兜底：真正「Modal 与根节点同一次 commit」的极端情况下重解析，
+   *    它发生在**首次绘制之前**，因此看不到任何中间态。
+   * ③ 容器未知时**不渲染 Portal**（见下方 JSX 的 container !== null 判断）：Radix 的 Portal
+   *    在 container 为空时会回退到 document.body，而这个回退判定发生在 layout effect（绘制前）——
+   *    一旦走到那条回退路径，弹窗会**先在 body 里画一帧**（position:fixed 此时相对视口居中，
+   *    而不是相对插件根节点所在的宿主面板），随后才被搬进 #dsh-config-manager-root：
+   *    用户看到的就是「弹窗先闪现在别处、再跳到页面中心」（档案详情弹窗实测反馈）。
+   *    **以前为什么会踩到**：useEffect 在**绘制之后**才跑，而「刷新后详情目标保留」
+   *    （run-store 的持久化白名单）与「切页签回来面板重挂」都会让弹窗**带着 open=true 一起挂载**，
+   *    正好命中这条路径。
+   */
+  const [container, setContainer] = useState<HTMLElement | null>(resolveModalRoot)
+  useLayoutEffect(() => { setContainer(resolveModalRoot()) }, [])
 
   return (
     <Dialog.Root
@@ -80,7 +97,10 @@ export function Modal({ open, onClose, title, wide, busy, onOpenAutoFocus, cardS
         if (!next) onClose()
       }}
     >
-      <Dialog.Portal container={container ?? undefined}>
+      {/* 容器未知（仅限「Modal 与根节点同一次 commit」的瞬间，layout effect 会在绘制前补上）
+          → 什么都不渲染；**绝不**用 Radix 的 document.body 回退（那会先画一帧错位再跳回来）。 */}
+      {container !== null && (
+      <Dialog.Portal container={container}>
         <Dialog.Overlay className={css.dialogMask} />
         <Dialog.Content
           className={`${css.dialogContentCenter} ${css.dialogCard}${wide === true ? ` ${css.dialogWide}` : ''}`}
@@ -95,6 +115,7 @@ export function Modal({ open, onClose, title, wide, busy, onOpenAutoFocus, cardS
           {children}
         </Dialog.Content>
       </Dialog.Portal>
+      )}
     </Dialog.Root>
   )
 }

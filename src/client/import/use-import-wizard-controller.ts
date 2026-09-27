@@ -9,14 +9,14 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { ConflictCollector } from '../../ui/conflict-view.ts'
 import type { FlowPhase } from '../../ui/flow.ts'
-import { importFlowFlags, importPreviewStageAfter, nextImportPhase, type ImportFlowInputs } from '../../ui/import-wizard.ts'
+import { applicablePathIssues, importFlowFlags, importPreviewStageAfter, nextImportPhase, type ImportFlowInputs } from '../../ui/import-wizard.ts'
 import type { ConsultReport } from '../../core/migration-consult.ts'
 import type { ConfigManagerApi, UploadResponse } from '../api.ts'
 import type { TranslateNS } from '../client-types.ts'
 import { runStore } from '../run-store.ts'
 import {
   buildSelectedPlan, effectiveImportPlan, effectiveImportSelection, excludedPlanItems,
-  sectionsFromPlan, selectionHasItems, type Selection,
+  planWriteSections, sectionsFromPlan, selectionHasItems, type Selection,
 } from '../../ui/selection-model.ts'
 import { applyPickedFile, cancelSelection, fileSelectModel } from './import-file-select.ts'
 
@@ -90,15 +90,30 @@ export function useImportWizardController(api: ConfigManagerApi, t: TranslateNS<
 
   /* ---------- 阶段判定（纯逻辑在 src/ui/import-wizard.ts，node 可测） ---------- */
 
-  // 加密备份：解密已覆盖的凭据（decryptRefs）不需用户补录，仅剩余项进入 secrets 阶段
-  const { hasConflicts, hasPathIssues, hasSecrets } = importFlowFlags({
-    plan: imp.plan, analysis: imp.analysis, decryptRefs,
+  /**
+   * 与本次选择相关的路径问题：只保留「这次真的会写盘的分区」的路径。
+   *
+   * 真机反馈：用户没勾工作区，向导仍列出 7 条工作区路径要他逐条指定新位置。
+   * 数据源是整包的探测结果（analysis.pathIssues），必须按 selectedPlan 裁剪 ——
+   * 没有计划时（分析尚未完成）不裁剪。
+   */
+  const applicableIssues = applicablePathIssues(
+    imp.analysis?.pathIssues ?? [],
+    selectedPlan === null ? null : planWriteSections(selectedPlan),
+  )
+
+  // 加密备份：解密已覆盖的凭据（decryptRefs）不需用户补录，仅剩余项进入 secrets 阶段。
+  // 三个标志一律基于**裁剪后的选择**：用户取消的分区不该再把他拖进冲突/路径/补录阶段
+  // （与 enterConflicts 用 selectedPlan、SecretsStage 用 selectedPlan 同一口径）。
+  const { hasConflicts, hasSecrets } = importFlowFlags({
+    plan: selectedPlan, analysis: imp.analysis, decryptRefs, pathIssues: applicableIssues,
   })
+  const hasPathIssues = applicableIssues.length > 0
 
   /**
    * 适用阶段的有序列表（仅含需要用户处理 + 确认页）。
-   * hasConflicts/hasPathIssues/hasSecrets 基于原始 analysis/plan（Dry Run 产物），
-   * 在流程中不会因已解决而重算——所以导航必须只前进（见 nextFlowPhase），
+   * hasConflicts/hasPathIssues/hasSecrets 基于**裁剪后的计划**（Dry Run 产物 ∩ 用户本次选择）：
+   * 计数在流程中不会因「用户已解决某项」而重算——所以导航必须只前进（见 nextFlowPhase），
    * 而不是靠"当前阶段 != X"判定（那会让已完成阶段被重新命中、跳回上一步）。
    * 整体加密容器（containerEncrypted && !archiveUnlocked）恒先插入 decrypt-archive：
    * 不解锁不得分析/继续导入。解密密码只在解锁时输入一次（导出时容器密码与
@@ -455,5 +470,7 @@ export function useImportWizardController(api: ConfigManagerApi, t: TranslateNS<
     hasConflicts,
     hasPathIssues,
     hasSecrets,
+    /** 路径映射阶段的数据源 = 与本次选择相关的路径问题（见上方 applicableIssues 的推导） */
+    applicableIssues,
   }
 }

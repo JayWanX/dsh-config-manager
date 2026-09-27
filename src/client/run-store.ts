@@ -50,7 +50,9 @@ import type { Manifest, SectionId } from '../schema/types.ts'
 import type { ConfigManagerApi } from './api.ts'
 import type { RestorePlan, RestoreReport } from '../core/restore.ts'
 import type { RestoreChangeSummary } from '../core/snapshot-diff.ts'
-import type { DshProfileMeta, DshProfileSelection } from '../profiles/dsh-profile-shared.ts'
+import type {
+  DshProfileCopyResult, DshProfileLaunchResult, DshProfileMeta, DshProfileRunningView, DshProfileTemplate,
+} from '../profiles/dsh-profile-shared.ts'
 import type { MarketListItem, MarketDownloadResult } from '../market/types.ts'
 import type { SyncPushReport, SyncPullReport, SyncPushPreview } from '../sync/sync-engine.ts'
 import type { SyncStartResponse } from './sync/sync-api.ts'
@@ -74,7 +76,7 @@ export type MainView = 'export' | 'import'
  * parsePersistedState 将旧值迁移到 'overview'；旧 `panel:null`（主视图）语义
  * 由 view 字段承担，持久化载荷向后兼容。
  */
-export type PanelId = 'overview' | 'export' | 'import' | 'snapshots' | 'sync' | 'market' | 'profiles' | 'lifecycle'
+export type PanelId = 'overview' | 'export' | 'import' | 'snapshots' | 'sync' | 'market' | 'profiles'
 
 /** 存储抽象（浏览器 sessionStorage / 测试 mock / 无存储）。 */
 export interface StoreStorage {
@@ -227,19 +229,61 @@ export interface MarketStoreSlice {
  */
 export type SnapshotsSubTab = 'restore' | 'files' | 'schedule' | 'recovery'
 
-/** 档案面板的运行时切片（无敏感字段：profile 定义本身不含秘密值）。 */
+/**
+ * 档案面板的运行时切片。**面板组件自持的状态必须是这里的子集**（PanelState = 本切片）——
+ * 每条字段都随模块级单例跨挂载存活，这就是「切页签不丢」的全部机制；组件里另起 useState
+ * 的字段一律会在切页签时归零（真机 bug：启动/停止的 loading 一卸载就没了，用户以为没点上而重复点）。
+ *
+ * 两层语义（与 run-store 其余切片一致）：
+ *  - **可持久化**（非敏感 + 刷新后仍有意义）：列表视图与新建表单草稿；
+ *  - **内存瞬态**（`toPersistedState` 显式剔除）：进行中的操作、弹窗目标、启动回执。
+ *    为什么不落 sessionStorage：发起请求的那个页面已随刷新销毁，重放一个永远等不到回执的
+ *    spinner 只会骗人（列表/运行态刷新后由 `GET /profiles` 重取，宿主才是权威）。
+ */
 export interface ProfilesStoreSlice {
   /** 档案列表（null = 尚未加载） */
   profiles: DshProfileMeta[] | null
-  /** 「下次启动」标记（null = 未设置） */
-  selection: DshProfileSelection | null
+  /** 在跑的实例（台账 ∪ 心跳；UI 据此把「启动」换成「停止」/禁用为「当前运行」） */
+  running: DshProfileRunningView[]
   /** 当前运行中的档案名（null = 尚未加载） */
   current: string | null
-  /** 详情目标档案名（抽屉/弹窗展开项） */
+  /** 新建可用的起步模板（宿主数据，随 `GET /profiles` 重取；不落盘） */
+  templates: DshProfileTemplate[]
+  /** 详情目标档案名（弹窗展开项；原文不在这里 —— 挂载后按名重取） */
   selectedName: string | null
-  /** 已 redact 的错误文本 */
+  /** 已 redact 的错误文本（面板级 actionError） */
   error: string | null
   loadError: string | null
+  /** 新建表单草稿（切页签保留；非敏感可持久化） */
+  createName: string
+  createTemplate: string
+  /** 新建进行中（内存瞬态） */
+  creating: boolean
+  /** 重命名会话：目标档案名 + 输入草稿 + 进行中（内存瞬态） */
+  renameTargetName: string | null
+  renameValue: string
+  renaming: boolean
+  /** 删除会话：目标档案名 + 「当前档案已确认」勾选 + 进行中（内存瞬态） */
+  deleteTargetName: string | null
+  deleteCurrentConfirmed: boolean
+  deleting: boolean
+  /** 「启动该档案」进行中的档案名（null = 空闲；内存瞬态） */
+  launching: string | null
+  /** 「停止该档案」进行中的档案名（null = 空闲；内存瞬态） */
+  stopping: string | null
+  /** 待确认停止的实例档案名（null = 未打开确认框；内存瞬态） */
+  stopTargetName: string | null
+  /** 最近一次启动回执（内存瞬态：`url` 带认证 token，绝不落盘） */
+  launchResult: DshProfileLaunchResult | null
+  /** 非 Web 形态被点「启动」→ 就地给终端命令的档案名（内存瞬态） */
+  launchBlocked: string | null
+  /** 复制会话：源档案名 + 副本名草稿 + 是否连 node_modules 一起拷 + 进行中（内存瞬态） */
+  copyTargetName: string | null
+  copyValue: string
+  copyIncludeModules: boolean
+  copying: boolean
+  /** 最近一次复制回执（内存瞬态：带 warnings，UI 据此给出安装命令；不落盘） */
+  copyResult: DshProfileCopyResult | null
 }
 
 export interface SnapshotsStoreSlice {
@@ -565,11 +609,31 @@ function defaultSnapshotsState(): SnapshotsStoreSlice {
 function defaultProfilesState(): ProfilesStoreSlice {
   return {
     profiles: null,
-    selection: null,
+    running: [],
     current: null,
+    templates: [],
     selectedName: null,
     error: null,
     loadError: null,
+    createName: '',
+    createTemplate: 'base',
+    creating: false,
+    renameTargetName: null,
+    renameValue: '',
+    renaming: false,
+    deleteTargetName: null,
+    deleteCurrentConfirmed: false,
+    deleting: false,
+    launching: null,
+    stopping: null,
+    stopTargetName: null,
+    launchResult: null,
+    launchBlocked: null,
+    copyTargetName: null,
+    copyValue: '',
+    copyIncludeModules: true,
+    copying: false,
+    copyResult: null,
   }
 }
 
@@ -586,20 +650,23 @@ export function normalizeProfilesSlice(raw: unknown): ProfilesStoreSlice {
   if (typeof raw !== 'object' || raw === null) return base
   const r = raw as Record<string, unknown>
   const list = Array.isArray(r['profiles']) ? (r['profiles'] as unknown[]).filter(isDshProfileMetaLite) : null
-  const selectionRaw = r['selection']
-  const selection = (() => {
-    if (typeof selectionRaw !== 'object' || selectionRaw === null) return null
-    const s = selectionRaw as Record<string, unknown>
-    if (typeof s['name'] !== 'string') return null
-    return { name: s['name'], exists: s['exists'] === true, isCurrent: s['isCurrent'] === true }
-  })()
+  // running 是**机器本地瞬态**（pid 只在本次开机有意义）：不从持久化载荷恢复，刷新后由 /profiles 重取。
+  // 进行中的操作 / 弹窗目标 / 启动回执同样是瞬态（发起请求的页面已随刷新销毁）：只恢复
+  // 「磁盘上仍有意义」的列表视图与表单草稿，其余一律回默认（`...base` 已给出默认值）。
   return {
+    ...base,
     profiles: list,
-    selection,
+    running: [],
+    // templates 是宿主侧数据（每次 load 重取），不进持久化载荷
+    templates: [],
     current: typeof r['current'] === 'string' ? r['current'] : null,
     selectedName: typeof r['selectedName'] === 'string' ? r['selectedName'] : null,
     error: typeof r['error'] === 'string' ? r['error'] : null,
     loadError: typeof r['loadError'] === 'string' ? r['loadError'] : null,
+    createName: typeof r['createName'] === 'string' ? r['createName'] : '',
+    createTemplate: typeof r['createTemplate'] === 'string' && r['createTemplate'] !== ''
+      ? r['createTemplate']
+      : base.createTemplate,
   }
 }
 
@@ -712,15 +779,39 @@ export function toSnapshotsStoreSlice(s: SnapshotsStoreSlice): SnapshotsStoreSli
   }
 }
 
-/** 从档案面板状态提取切片（结构兼容：传入 PanelState 亦可）。 */
+/**
+ * 从档案面板状态提取切片（**结构完全一致**：PanelState = ProfilesStoreSlice）。
+ * 逐字段显式列出而不是 `{...s}`：任何新增字段若漏在这里，切页签就会丢它 ——
+ * `run-store.test.ts` 的键集合断言会钉住这一点。
+ */
 export function toProfilesStoreSlice(s: ProfilesStoreSlice): ProfilesStoreSlice {
   return {
     profiles: s.profiles,
-    selection: s.selection,
+    running: s.running,
     current: s.current,
+    templates: s.templates,
     selectedName: s.selectedName,
     error: s.error,
     loadError: s.loadError,
+    createName: s.createName,
+    createTemplate: s.createTemplate,
+    creating: s.creating,
+    renameTargetName: s.renameTargetName,
+    renameValue: s.renameValue,
+    renaming: s.renaming,
+    deleteTargetName: s.deleteTargetName,
+    deleteCurrentConfirmed: s.deleteCurrentConfirmed,
+    deleting: s.deleting,
+    launching: s.launching,
+    stopping: s.stopping,
+    stopTargetName: s.stopTargetName,
+    launchResult: s.launchResult,
+    launchBlocked: s.launchBlocked,
+    copyTargetName: s.copyTargetName,
+    copyValue: s.copyValue,
+    copyIncludeModules: s.copyIncludeModules,
+    copying: s.copying,
+    copyResult: s.copyResult,
   }
 }
 
@@ -981,14 +1072,40 @@ export function toPersistedState(state: StoreState): PersistedState {
       importBackup: null,
       subTab: state.snapshots.subTab,
     },
-    // 档案切片为非敏感（profile 定义本身不含秘密值）：显式放行列表即全部字段
+    // 档案切片：列表视图与表单草稿非敏感（profile 定义本身不含秘密值）→ 显式放行
     profiles: {
       profiles: state.profiles.profiles,
-      selection: state.profiles.selection,
+      // running 不落盘：pid 只在本次开机有意义（重放旧 pid 会把「运行中」判成假的）
+      running: [],
       current: state.profiles.current,
+      // templates 是宿主侧数据（每次 load 重取）：不落盘，刷新后由 GET /profiles 填回
+      templates: [],
       selectedName: state.profiles.selectedName,
       error: state.profiles.error,
       loadError: state.profiles.loadError,
+      createName: state.profiles.createName,
+      createTemplate: state.profiles.createTemplate,
+      // 进行中的操作 / 弹窗目标 / 启动回执一律不落盘：发起请求的那个页面已随刷新销毁，
+      // 重放一个永远等不到回执的 spinner 只会骗人（切页签不丢由模块级单例承担）；
+      // launchResult 还带认证 token —— 落盘等于把该实例的 RPC 交给任意读 sessionStorage 的脚本
+      creating: false,
+      renameTargetName: null,
+      renameValue: '',
+      renaming: false,
+      deleteTargetName: null,
+      deleteCurrentConfirmed: false,
+      deleting: false,
+      launching: null,
+      stopping: null,
+      stopTargetName: null,
+      launchResult: null,
+      launchBlocked: null,
+      // 复制会话也是「弹窗目标 + 进行中 + 回执」三件瞬态：不落盘（copyValue 与 renameValue 同性质）
+      copyTargetName: null,
+      copyValue: '',
+      copyIncludeModules: true,
+      copying: false,
+      copyResult: null,
     },
     // recovery 切片为非敏感（incidents/preview/verifyResult 无秘密值）；running 为内存
     // 切片瞬态：不落盘（宿主 RunRegistry 为权威，刷新后由 resume() 重新发现）
@@ -1038,7 +1155,6 @@ export function parsePersistedState(raw: string): PersistedState | null {
     case 'profiles':
     case 'export':
     case 'import':
-    case 'lifecycle':
       panel = rawPanel
       break
     case 'about':
@@ -1047,7 +1163,13 @@ export function parsePersistedState(raw: string): PersistedState | null {
       break
     case 'recovery':
       // 旧聚合 tab（Phase 5 引导式恢复）→ 备份与快照面板的恢复子 tab。
-      // 注意：'recovery' 是**遗留值**，不是当前面板 id；当前灾备页的 id 是 'lifecycle'。
+      // 注意：'recovery' 是**遗留值**，不是当前面板 id。
+      panel = 'snapshots'
+      snapshotsSubTab = 'recovery'
+      break
+    case 'lifecycle':
+      // 已下线的「灾备」页（自动快照 / 撤销重做 / 快照库）：救援模式 + 崩溃归因
+      // 已并入事故恢复子 tab，旧持久化值一律落到这里。
       panel = 'snapshots'
       snapshotsSubTab = 'recovery'
       break
@@ -1057,10 +1179,6 @@ export function parsePersistedState(raw: string): PersistedState | null {
       break
     case 'more':
       panel = 'overview'
-      break
-    case 'recovery':
-      panel = 'snapshots'
-      snapshotsSubTab = 'recovery'
       break
     default:
       // 旧「主视图」缺省值（null/缺失/非法）→ 由 view 映射（旧用户回到原导出/导入页）
@@ -1075,8 +1193,9 @@ export function parsePersistedState(raw: string): PersistedState | null {
   const snapshots = isRecord(p['snapshots']) ? p['snapshots'] as unknown as SnapshotsStoreSlice : defaultSnapshotsState()
   const profiles = isRecord(p['profiles']) ? p['profiles'] as unknown as ProfilesStoreSlice : defaultProfilesState()
   const recovery = isRecord(p['recovery']) ? p['recovery'] as unknown as RecoveryStoreSlice : defaultRecoveryState()
-  // 从旧顶级 tab 'recovery' 迁移：快照面板 subTab 强制为 recovery（用户当时在恢复 tab）
-  const migratedSnapshots: SnapshotsStoreSlice = rawPanel === 'recovery'
+  // 从旧顶级 tab 'recovery' / 已下线的 'lifecycle' 迁移：快照面板 subTab 强制为 recovery
+  // （用户当时在恢复 tab，或站就在灾备页 —— 两者现在都归事故恢复子 tab）。
+  const migratedSnapshots: SnapshotsStoreSlice = rawPanel === 'recovery' || rawPanel === 'lifecycle'
     ? { ...snapshots, subTab: snapshotsSubTab }
     : snapshots
   // 「更多」切片：旧载荷可能缺失 → 默认（about）；若从旧 about/history 迁移，用迁移值覆盖

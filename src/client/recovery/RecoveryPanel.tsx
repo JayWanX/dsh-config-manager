@@ -22,16 +22,24 @@ import type { RecoveryPort } from '../../ui/types.ts'
 import type { RecoveryPreview, RecoveryStatus, RecoveryVerifyResult } from '../../ui/types.ts'
 import type { TranslateNS } from '../client-types.ts'
 import { Badge, Banner, Button, Card, Empty, SectionTitle, Spinner } from '../common/ui.tsx'
+import { SkeletonList } from '../common/Skeleton.tsx'
 import { ConfirmDialog } from '../common/ConfirmDialog.tsx'
 import { toast } from '../common/toast-store.ts'
 import { runStore, type RecoveryStoreSlice } from '../run-store.ts'
+import type { CrashReport, IncidentApi, RescueStatus } from './incident-api.ts'
 import {
   isSnapshotTrusted, isVerdictAttention, isVerdictSuccess, toRecoveryPreviewView,
   toRecoveryView,
+  crashAdviceKey,
+  crashReasonKey,
+  formatRecoveryTime,
+  rescueHintKey,
 } from './recovery-view.ts'
 import css from '../config-manager.module.css'
 
 export interface RecoveryPanelProps {
+  /** 事故处置（崩溃归因 + 救援模式）API；与 recoveryApi 同属「事故恢复」子 tab */
+  incidentApi: IncidentApi
   recoveryApi: RecoveryPort
   t: TranslateNS<'config-manager-recovery'>
 }
@@ -156,7 +164,7 @@ function incidentStateLabel(t: TranslateNS<'config-manager-recovery'>, state: st
   }
 }
 
-export function RecoveryPanel({ recoveryApi, t }: RecoveryPanelProps) {
+export function RecoveryPanel({ recoveryApi, incidentApi, t }: RecoveryPanelProps) {
   const [state, setState] = useState<PanelState>(initFromStore)
   const stateRef = useRef<PanelState>(state)
   const mountedRef = useRef(true)
@@ -171,6 +179,16 @@ export function RecoveryPanel({ recoveryApi, t }: RecoveryPanelProps) {
   /** issue #31：残留锁回收确认弹窗开关 + 进行中标志（与 incident 流程独立的瞬态） */
   const [lockConfirmOpen, setLockConfirmOpen] = useState(false)
   const [lockBusy, setLockBusy] = useState(false)
+  /**
+   * 事故处置（crash / rescue）：查询结果 + 救援写盘动作的进行中态。
+   *
+   * 为什么不进 runStore：两者都是**查询结果**（宿主持久化），切页签回来重拉即可，
+   * 不必为此扩大 store 契约；救援动作是本地文件改写（毫秒级），没有长驻进行中态。
+   */
+  const [crash, setCrash] = useState<CrashReport | null>(null)
+  const [rescue, setRescue] = useState<RescueStatus | null>(null)
+  const [rescueBusy, setRescueBusy] = useState(false)
+  const [rescueConfirmOpen, setRescueConfirmOpen] = useState(false)
 
   /** 统一提交入口：更新 stateRef → 挂载时 setState → **总是**镜像进 runStore。 */
   const commit = (next: PanelState): void => {
@@ -200,6 +218,49 @@ export function RecoveryPanel({ recoveryApi, t }: RecoveryPanelProps) {
   }
 
   useEffect(load, [recoveryApi])
+
+  /** 事故处置数据加载（崩溃归因 + 救援状态）：失败静默 —— 不干扰恢复主流程。 */
+  const loadIncident = (): void => {
+    incidentApi.crash().then(setCrash, () => { /* 归因不可用不影响恢复 */ })
+    incidentApi.rescueStatus().then(setRescue, () => { /* 同上 */ })
+  }
+
+  useEffect(loadIncident, [incidentApi])
+
+  /** 进入救援模式（高风险写盘：改写两层 cordis.patch.yml + 收窄 dsh.profile.bundles）。 */
+  const enterRescue = (): void => {
+    setRescueConfirmOpen(false)
+    setRescueBusy(true)
+    incidentApi.rescueOn().then(
+      (res) => {
+        setRescueBusy(false)
+        if (!res.ok) { toast.error(res.message ?? t('common.unknownError')); return }
+        toast.ok(t('recovery.rescue.on'))
+        loadIncident()
+      },
+      (err) => {
+        setRescueBusy(false)
+        toast.error(err instanceof Error ? err.message : String(err))
+      },
+    )
+  }
+
+  /** 退出救援模式（从进入时的备份逐字节还原）。 */
+  const exitRescue = (): void => {
+    setRescueBusy(true)
+    incidentApi.rescueOff().then(
+      (res) => {
+        setRescueBusy(false)
+        if (!res.ok) { toast.error(res.message ?? t('common.unknownError')); return }
+        toast.ok(t('recovery.rescue.off'))
+        loadIncident()
+      },
+      (err) => {
+        setRescueBusy(false)
+        toast.error(err instanceof Error ? err.message : String(err))
+      },
+    )
+  }
 
   /** 选择 incident → 加载只读 preview。 */
   const select = (operationId: string): void => {
@@ -326,12 +387,53 @@ export function RecoveryPanel({ recoveryApi, t }: RecoveryPanelProps) {
     <div className={css.viewBody}>
       <SectionTitle title={t('view.recovery')} subtitle={t('recovery.requiredHint')} />
 
+      {/* 事故处置：崩溃归因（上次启动没起来）+ 救援模式（先让 DSH 起得来）。
+          灾备快照线（自动快照 / 撤销重做）已下线，恢复到某个历史点改由「备份文件」承担，
+          本页不自建第二条恢复通道。 */}
+      {crash?.crashed === true && (
+        <Banner kind="error">
+          <div className={css.statRow}>
+            <strong>{t('recovery.crash.title')}</strong>
+            <Badge kind="error">{t(crashReasonKey(crash.crashReason))}</Badge>
+          </div>
+          <div className={css.hint}>{t(crashAdviceKey(crash.advice))}</div>
+          {crash.lastGoodAt !== null && (
+            <div className={css.hint}>{t('recovery.crash.lastGood', { time: formatRecoveryTime(crash.lastGoodAt) })}</div>
+          )}
+          <div className={css.hint}>{t('recovery.crash.guidance')}</div>
+        </Banner>
+      )}
+
+      {rescue !== null && (
+        <Card>
+          <div className={css.statRow}>
+            <strong>{t('recovery.rescue.title')}</strong>
+            <Badge kind={rescue.active ? 'warn' : 'ok'}>
+              {rescue.active ? t('recovery.rescue.activeBadge') : t('recovery.rescue.inactive')}
+            </Badge>
+            {rescue.stale && <Badge kind="warn">{t('recovery.rescue.stale')}</Badge>}
+          </div>
+          <div className={css.hint}>{t('recovery.rescue.desc')}</div>
+          {rescue.active && (
+            <div className={css.hint}>
+              {t(rescue.applied ? 'recovery.rescue.applied' : 'recovery.rescue.active', { time: formatRecoveryTime(rescue.enteredAt) })}
+            </div>
+          )}
+          {rescue.active && <div className={css.hint}>{t(rescueHintKey(rescue))}</div>}
+          <div className={css.actionRow}>
+            {rescue.active
+              ? <Button variant="danger" disabled={rescueBusy} loading={rescueBusy} onClick={exitRescue}>{t('recovery.rescue.exit')}</Button>
+              : <Button variant="danger" disabled={rescueBusy} onClick={() => { setRescueConfirmOpen(true) }}>{t('recovery.rescue.enter')}</Button>}
+          </div>
+        </Card>
+      )}
+
       {/* SAFE MODE / recovery-required 状态提示（正常态不渲染任何横幅——无事项即静默） */}
       {view?.recoveryRequired === true && (
         <Banner kind="error">{t('recovery.currentState.safeMode')}</Banner>
       )}
 
-      {state.status === 'loading' && <Spinner label={t('recovery.loading')} />}
+      {state.status === 'loading' && <SkeletonList label={t('recovery.loading')} />}
 
       {state.status === 'error' && (
         <Banner kind="error">
@@ -353,7 +455,8 @@ export function RecoveryPanel({ recoveryApi, t }: RecoveryPanelProps) {
             {view.lock.state === 'STALE_LOCK_DETECTED' ? t('recovery.lock.detailStale') : t('recovery.lock.detailUnknown')}
           </div>
           <div className={css.actionRow}>
-            <Button variant="danger" disabled={lockBusy} onClick={() => { setLockConfirmOpen(true) }}>
+            {/* 加载图标由 Button 原语按 loading 自动渲染（此前只换文案 = 没有任何进行中反馈） */}
+            <Button variant="danger" disabled={lockBusy} loading={lockBusy} onClick={() => { setLockConfirmOpen(true) }}>
               {lockBusy ? t('recovery.lock.busy') : t('recovery.lock.action')}
             </Button>
           </div>
@@ -490,6 +593,7 @@ export function RecoveryPanel({ recoveryApi, t }: RecoveryPanelProps) {
                     <Button
                       variant="danger"
                       disabled={state.running || !(previewView?.actionable ?? false)}
+                      loading={state.running}
                       onClick={() => { setConfirmOpen(true) }}
                     >
                       {state.running ? t('recovery.executing') : t('recovery.execute')}
@@ -572,6 +676,19 @@ export function RecoveryPanel({ recoveryApi, t }: RecoveryPanelProps) {
       />
 
       {/* issue #31：残留锁回收二次确认（危险：改动控制面锁文件） */}
+
+      {/* 进入救援模式二次确认（危险：改写两层 cordis.patch.yml + 收窄 bundles） */}
+      <ConfirmDialog
+        open={rescueConfirmOpen}
+        title={t('recovery.rescue.confirmTitle')}
+        message={t('recovery.rescue.confirm')}
+        confirmLabel={t('recovery.rescue.enter')}
+        cancelLabel={t('common.cancel')}
+        danger
+        busy={rescueBusy}
+        onConfirm={enterRescue}
+        onCancel={() => { setRescueConfirmOpen(false) }}
+      />
       <ConfirmDialog
         open={lockConfirmOpen}
         title={t('recovery.lock.confirmTitle')}

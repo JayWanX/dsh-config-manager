@@ -9,7 +9,8 @@ import type { ConfigManagerApi } from '../api.ts'
 import type { UiT } from '../../ui/i18n.ts'
 import type { MyInstallState } from './my-configs-view.ts'
 import type { Selection } from '../../ui/selection-model.ts'
-import { Badge, Banner, Spinner } from '../common/ui.tsx'
+import { Badge, Banner } from '../common/ui.tsx'
+import { Skeleton } from '../common/Skeleton.tsx'
 import { marketDetailView } from './market-view.ts'
 import { MarketImportReview } from './MarketImportReview.tsx'
 import css from '../config-manager.module.css'
@@ -45,7 +46,7 @@ export function MyConfigsInstall({
       {/* R-17：下载/导入失败已由全局 Toast 告知（原 install.error Banner 移除）。
           下方 Spinner 以 install.error 为「失败标记」守卫：失败时 detail 恒为 null，
           若不守卫会一直旋转，让用户误以为仍在加载。 */}
-      {detail === null && install.error === null && <div className={css.statRow}><Spinner label={t('list.loading')} /></div>}
+      {detail === null && install.error === null && <Skeleton count={3} label={t('list.loading')} />}
       {detail === null && install.error !== null && (
         <div className={css.statRow}><span className={css.hint}>{t('myconfigs.install.failed')}</span></div>
       )}

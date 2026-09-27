@@ -17,14 +17,16 @@ import type { TranslateNS } from '../client-types.ts'
 import {
   applySessionParentCoupling,
   applySessionWorkspaceCoupling,
-  filterSections, groupPickState, groupUnits, tailWeightedEllipsis, pickerSummary, sectionPickState,
-  selectAll, selectedUnitCount, toggleSection, toggleUnit, toggleUnitGroup, visibleUnits,
+  filterSections, groupPickState, groupSelectedCount, groupUnits, tailWeightedEllipsis, pickerSummary, sectionPickState,
+  selectAll, selectedUnitCount, toggleSection, toggleUnit, toggleUnitGroup, unitChecked, visibleUnits,
   type Selection, type SelectionSection, type SelectionUnit, type SessionParentChange, type SessionWorkspaceCouplingFocus,
 } from '../../ui/selection-model.ts'
 import { formatBytes } from '../../ui/report.ts'
 import { redact } from '../../security/redaction.ts'
 import { Badge, Button, Checkbox, Spinner } from './ui.tsx'
-import { Icon } from './Icon.tsx'
+import { Skeleton } from './Skeleton.tsx'
+import { Collapse } from './Motion.tsx'
+import { ExpandChevron } from './Icon.tsx'
 import css from '../config-manager.module.css'
 
 /** 单元名显示长度上限（配合 .pickerUnitName 的 CSS 省略做兜底；UI-16） */
@@ -146,7 +148,7 @@ export function ContentPicker({
         <Button size="sm" onClick={() => { commit(selectAll(nodes, false)) }}>{t('picker.selectNone')}</Button>
       </div>
 
-      {loading && <Spinner label={t('picker.loading')} />}
+      {loading && <Skeleton count={3} label={t('picker.loading')} />}
       {failedSections.length > 0 && <span className={css.hint}>{t('picker.unitsUnavailable')}</span>}
       {hasLinkedPairs && <span className={css.hint}>{t('picker.sessionWorkspaceLinked')}</span>}
 
@@ -165,19 +167,20 @@ export function ContentPicker({
               <div key={node.section} className={css.pickerGroup}>
                 <div className={css.pickerTreeRow}>
                   {/* 级联树：展开控件在选择框**左边**（点它只展开本节点的子树，不展开别人的）。
-                      用原生 button（共享 Button 原语不透传 aria-* 属性，UI-22），图标走统一 Icon 层。 */}
+                      用原生 button（共享 Button 原语不透传 aria-* 属性，UI-22）；图标走**形变层** ——
+                       展开态切换本身携带信息，让「变了」可见（common/Icon.tsx 的 ExpandChevron）。 */}
                   {node.units.length > 0 ? (
                     <button
                       type="button"
                       className={css.iconBtn}
                       data-size="sm"
                       aria-expanded={open}
-                      aria-controls={open ? unitsId(node.section) : undefined}
+                      aria-controls={unitsId(node.section)}
                       aria-label={open ? t('picker.collapse') : t('picker.expand')}
                       title={open ? t('picker.collapse') : t('picker.expand')}
                       onClick={() => { setExpanded({ ...expanded, [node.section]: !open }) }}
                     >
-                      <Icon name={open ? 'chevronDown' : 'chevronRight'} size={14} />
+                      <ExpandChevron open={open} />
                     </button>
                   ) : (
                     <span className={css.pickerChevronSpacer} aria-hidden="true" />
@@ -221,15 +224,17 @@ export function ContentPicker({
                     }
                   />
                 </div>
-                {open && (
-                  <div id={unitsId(node.section)}>
+                {/* 展开/收起两端都有高度动画（common/Motion.tsx 的 Collapse）；
+                    容器**始终存在**，所以 aria-controls 恒有值。 */}
+                <Collapse open={open} id={unitsId(node.section)}>
                     {/* 二级分组（sessions 按工作区聚合）：没有 group 的单元仍走平铺，
                         与改造前的渲染完全一致（skills / pluginFiles 等分区零变化）。
                         级联树语义：展开分区只列出分组，点某个分组的 chevron 才展开那一棵子树
                         （默认全部折叠，不会一次铺开全部会话）。 */}
                     {groupUnits(units.shown).map((group, gi) => {
-                      const groupState = groupPickState(value, group)
-                      const groupPicked = group.units.reduce((n, u) => (value.excluded.includes(u.id) ? n : n + 1), 0)
+                      // 分组三态与计数都必须带上所属分区 —— 分区整体没勾时，它下面的分组/单元一律显示未勾选
+                      const groupState = groupPickState(value, group, node.section)
+                      const groupPicked = groupSelectedCount(value, group, node.section)
                       const groupKey = node.section + ':' + (group.label ?? '__flat')
                       const groupOpen = group.label === null || expandedGroups[groupKey] === true
                       const groupBodyId = 'picker-units-' + node.section + '-g' + String(gi)
@@ -245,7 +250,7 @@ export function ContentPicker({
                             {/* 占位对齐：让单元行的勾选框与分组行（chevron 之后）的勾选框同一左缘 */}
                             {group.label !== null && <span className={css.pickerChevronSpacer} aria-hidden="true" />}
                             <Checkbox
-                              checked={!value.excluded.includes(u.id)}
+                              checked={unitChecked(value, node.section, u.id)}
                               onChange={(checked) => { commit(toggleUnit(value, nodes, u.id, checked), focusOf(node.section), { unitId: u.id, checked }) }}
                               label={
                                 <span className={css.categoryItem}>
@@ -280,12 +285,12 @@ export function ContentPicker({
                                 className={css.iconBtn}
                                 data-size="sm"
                                 aria-expanded={groupOpen}
-                                aria-controls={groupOpen ? groupBodyId : undefined}
+                                aria-controls={groupBodyId}
                                 aria-label={groupOpen ? t('picker.collapse') : t('picker.expand')}
                                 title={groupOpen ? t('picker.collapse') : t('picker.expand')}
                                 onClick={() => { setExpandedGroups({ ...expandedGroups, [groupKey]: !groupOpen }) }}
                               >
-                                <Icon name={groupOpen ? 'chevronDown' : 'chevronRight'} size={14} />
+                                <ExpandChevron open={groupOpen} />
                               </button>
                               <Checkbox
                                 checked={groupState === 'all'}
@@ -305,7 +310,7 @@ export function ContentPicker({
                           )}
                           {group.label === null
                             ? group.units.map(renderUnit)
-                            : groupOpen && <div id={groupBodyId}>{group.units.map(renderUnit)}</div>}
+                            : <Collapse open={groupOpen} id={groupBodyId}>{group.units.map(renderUnit)}</Collapse>}
                         </div>
                       )
                     })}
@@ -322,8 +327,7 @@ export function ContentPicker({
                         </button>
                       </div>
                     )}
-                  </div>
-                )}
+                </Collapse>
               </div>
             )
           })}

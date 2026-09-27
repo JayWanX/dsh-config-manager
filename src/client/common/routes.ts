@@ -2,7 +2,7 @@
  * 客户端路由常量 —— **唯一来源**（W4「路由常量单点化」）。
  *
  * 为什么单独一个模块：此前 7 个 api 文件各自手写路由字面量（`CONFIG_MANAGER_API` /
- * `SYNC_API` / `MARKET_API` / `MY_CONFIGS_API` / `LIFECYCLE_API` / `RECOVERY_API` /
+ * `SYNC_API` / `MARKET_API` / `MY_CONFIGS_API` / `INCIDENT_API` / `RECOVERY_API` /
  * `HISTORY_API`），src 里还有散落的硬编码路径（如 sync-api 的 consult）——拼错即 404，
  * 而 404 会被 `readJson` 映射成「插件未挂载」，把配置错误伪装成部署问题。
  * 现在：**客户端代码里只允许出现本模块的路由常量**（源码守卫：
@@ -48,9 +48,11 @@ export const CONFIG_MANAGER_API = {
   profiles: `${API_BASE}/profiles`,
   profilesDetail: `${API_BASE}/profiles/detail`,
   profilesCreate: `${API_BASE}/profiles/create`,
+  profilesCopy: `${API_BASE}/profiles/copy`,
   profilesDelete: `${API_BASE}/profiles/delete`,
   profilesRename: `${API_BASE}/profiles/rename`,
-  profilesSelect: `${API_BASE}/profiles/select`,
+  profilesLaunch: `${API_BASE}/profiles/launch`,
+  profilesStop: `${API_BASE}/profiles/stop`,
   starPrompt: `${API_BASE}/star-prompt`,
   releaseNotesPrompt: `${API_BASE}/release-notes-prompt`,
 } as const;
@@ -102,17 +104,13 @@ export const MY_CONFIGS_API = {
 } as const;
 
 /**
- * 灾备路由族。宿主以 **prefix 路由**注册 `API.lifecycle` / `API.crash` / `API.rescue`，
- * 子路径由宿主内部按 path 分发 —— 因此 `lifecycle/status` 一类没有独立宿主字面量，
- * route-parity 测试按前缀覆盖校验（见该测试的 `PREFIX_ROUTED`）。
+ * 事故恢复路由族（crash / rescue 两条 exact 路由）。
+ *
+ * 灾备快照线（自动快照 / 撤销重做 / 快照库）已按产品定位收敛下线，/lifecycle prefix 路由
+ * 随之删除；保留的这两条服务「上次没起来 / 插件把 DSH 搞挂」的处置，浏览器半入口 =
+ * recovery/incident-api.ts 的 IncidentApi。
  */
-export const LIFECYCLE_API = {
-  base: `${API_BASE}/lifecycle`,
-  status: `${API_BASE}/lifecycle/status`,
-  snapshot: `${API_BASE}/lifecycle/snapshot`,
-  undo: `${API_BASE}/lifecycle/undo`,
-  redo: `${API_BASE}/lifecycle/redo`,
-  remove: `${API_BASE}/lifecycle/remove`,
+export const INCIDENT_API = {
   crash: `${API_BASE}/crash`,
   rescue: `${API_BASE}/rescue`,
 } as const;

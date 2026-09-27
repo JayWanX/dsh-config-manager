@@ -31,6 +31,7 @@ import { isCredentialConfigured } from './credential-status.ts';
 import { rollback } from './rollback.ts';
 import { computeCompatibility } from './validator.ts';
 import { msgOf } from './messages.ts';
+import { applyItemResolution } from './conflict-decisions.ts';
 import type { MsgFunc } from './messages.ts';
 import {
   ImportNotConfirmedError, ImportUserSkippedError, type ApplyResult, type ConfigAdapter,
@@ -1231,25 +1232,10 @@ async function verifyAgainstTable(
   return { ok: mismatches.length === 0 && missing.length === 0, mismatches, missing };
 }
 
-/** 应用用户冲突决策 + 全局策略（纯函数，返回新数组） */
-function applyItemResolution(item: PlanItem, decisions: ImportDecisions, msg: MsgFunc): PlanItem {
-  if (item.kind !== 'Conflict') return item;
-  const resolution = decisions.resolutions[item.id];
-  if (resolution === 'keepCurrent') {
-    return { ...item, kind: 'Skip', severity: 'info', detail: `${item.detail ?? ''}${msg('import.conflictKeepCurrent')}` };
-  }
-  if (resolution === 'useImported') {
-    return { ...item, kind: 'Update', severity: 'info', conflict: { itemId: item.id, resolution } };
-  }
-  // review / 未决策：按全局策略兜底
-  if (decisions.strategy === 'skipExisting') {
-    return { ...item, kind: 'Skip', severity: 'info', detail: `${item.detail ?? ''}${msg('import.conflictSkipExisting')}` };
-  }
-  if (decisions.strategy === 'replace') {
-    return { ...item, kind: 'Update', severity: 'info', detail: `${item.detail ?? ''}${msg('import.conflictReplace')}` };
-  }
-  return item; // merge + 未决策 → 保持 Conflict，由报告列明
-}
+/**
+ * 冲突决策（applyItemResolution）已抽到 `./conflict-decisions.ts`：
+ * 与恢复/回放路径共用同一份语义（回放侧随灾备快照线下线，语义仍是同一条）。
+ */
 
 /**
  * 基础路径重定基规则：导出机 DSH home → 本机 DSH home（issue #45 用户补充）。
@@ -1319,12 +1305,13 @@ function detectPathIssues(
   const workspaces = sections.get('workspaces') as { workspaces?: { path?: string }[] } | undefined;
   for (const w of workspaces?.workspaces ?? []) {
     const p = w.path;
-    if (p && isAbsolutePath(p)) issues.push(judgePath(p, sourcePlatform, targetPlatform));
+    // section：如实标注来源分区，供导入向导按「本次会写盘的分区」过滤（见 PathIssue.section）
+    if (p && isAbsolutePath(p)) issues.push({ ...judgePath(p, sourcePlatform, targetPlatform), section: 'workspaces' });
   }
   const mcp = sections.get('mcp') as { servers?: { serverName?: string; command?: string; cwd?: string }[] } | undefined;
   for (const s of mcp?.servers ?? []) {
     for (const p of [s.cwd, s.command]) {
-      if (p && isAbsolutePath(p)) issues.push(judgePath(p, sourcePlatform, targetPlatform));
+      if (p && isAbsolutePath(p)) issues.push({ ...judgePath(p, sourcePlatform, targetPlatform), section: 'mcp' });
     }
   }
   // 去重

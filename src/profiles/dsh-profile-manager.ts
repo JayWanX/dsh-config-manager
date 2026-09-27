@@ -14,28 +14,33 @@
  *  - 脚手架三个文件与 dsh-app-boot 的 initProfile 逐字节等价；
  *  - 保留名（shipped template 名 + Electron 的 desktop）不允许自建；
  *  - 名字校验复用 core/plugin-cli 的 validateProfileName（host 侧兜底）与 shared 的纯函数（双端一致）；
- *  - 「切换」在本引擎里只表示「记录下次启动用哪个」（`<dataDir>/next-profile`）——
- *    DSH 无法在运行中切换 profile，重启由用户/启动脚本负责。
+ *  - 本引擎**不做任何进程操作**：档案的启动/停止在 `dsh-profile-launcher.ts`（独立实例）。
+ *    历史上这里还有一个 `<dataDir>/next-profile`「下次启动」标记——DSH 根本没有消费者，
+ *    只会误导用户（2026-09 按产品决策整体移除，连同前端按钮）。
  *
  * 物理删除：remove() 走 rmSync(recursive)，profile 目录内的 junction（pnpm 链接）
  * 只删链接本身，不会跟随进 pnpm store。
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+// 复制走 async fs（整档案上万个文件，cpSync 会把宿主事件循环卡住二十多秒）
+import { copyFile, cp, mkdir, readdir, readlink, rm, stat, symlink, unlink } from 'node:fs/promises'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { atomicWriteFileSync } from '../utils/atomic-write.ts'
 import { resolveProfileDir, validateProfileName } from '../core/plugin-cli.ts'
 import {
   DSH_PROFILE_TEMPLATES, checkProfileName, classifyShape,
-  type DshProfileDetail, type DshProfileErrorCode, type DshProfileIssue,
-  type DshProfileMeta, type DshProfilePatchReload, type DshProfileSelection,
+  type DshProfileCopyWarning, type DshProfileDetail, type DshProfileErrorCode, type DshProfileIssue,
+  type DshProfileMeta, type DshProfilePatchReload,
 } from './dsh-profile-shared.ts'
 
 /** DSH home 下的 profile 根目录名（与 dsh-app-boot 的 PROFILES_DIR 一致）。 */
 export const PROFILES_DIR = 'profiles'
 /** profile 的用户 patch 层文件名（与 dsh-app-boot 的 PROFILE_PATCH_FILENAME 一致）。 */
 export const PROFILE_PATCH_FILENAME = 'cordis.patch.yml'
-/** 「下次启动用哪个 profile」标记文件名（存放在插件 dataDir 下，机器本地状态，不参与备份）。 */
-export const NEXT_PROFILE_FILENAME = 'next-profile'
+/** pnpm 装出来的依赖目录（复制档案时可选择跳过）。 */
+const NODE_MODULES_DIR = 'node_modules'
+/** DSH 按 node_modules 投影出的派生目录（与 dsh-app-boot 的 PROFILE_MODULE_FALLBACK_DIR 一致）。 */
+const MODULE_FALLBACK_DIR = '.dsh-module-fallback'
 
 export class DshProfileError extends Error {
   readonly code: DshProfileErrorCode
@@ -67,14 +72,23 @@ const PATCH_TEXT_LIMIT = 256 * 1024
 export interface DshProfileManagerOptions {
   /** DSH home（`$DSH_HOME`，宿主 resolveDshHome() 解析） */
   homeDir: string
-  /** 插件 dataDir（「下次启动」标记落在这里） */
-  dataDir: string
+  /** 插件 dataDir（保留给调用方复用；本引擎不再落任何状态） */
   /** 当前运行中的 profile 名（惰性读取，宿主注入） */
   currentProfile?: () => string
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * `candidate` 是否落在 `root` **内部**（root 自身不算）。
+ * 跨盘符时 `relative` 会回一个绝对路径 → 判为「不在内部」（路径来自别的卷，不能重指向）。
+ */
+function isInsideDir(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate)
+  if (rel === '' || isAbsolute(rel)) return false
+  return rel !== '..' && !rel.startsWith(`..${sep}`)
 }
 
 /** 读文本文件；不可读返回 null（调用方决定是 prompt 还是 issue）。 */
@@ -89,23 +103,16 @@ function readTextSafe(path: string): string | null {
 /** 「档案」= DSH profile 的读写引擎（同步 fs；profile 数量级为个位数，无需异步）。 */
 export class DshProfileManager {
   private readonly homeDir: string
-  private readonly dataDir: string
   private readonly currentProfile: () => string
 
   constructor(options: DshProfileManagerOptions) {
     this.homeDir = options.homeDir
-    this.dataDir = options.dataDir
     this.currentProfile = options.currentProfile ?? ((): string => 'web')
   }
 
   /** profiles 根目录（`$DSH_HOME/profiles`） */
   profilesRoot(): string {
     return join(this.homeDir, PROFILES_DIR)
-  }
-
-  /** 「下次启动」标记文件绝对路径 */
-  selectionFile(): string {
-    return join(this.dataDir, NEXT_PROFILE_FILENAME)
   }
 
   /** 列出全部可管理的 profile（有 package.json 的目录），按名字排序。 */
@@ -140,34 +147,6 @@ export class DshProfileManager {
     return { ...meta, manifest, patch }
   }
 
-  /** 读「下次启动」标记；无标记 / 内容为空 = null。 */
-  readSelection(): DshProfileSelection | null {
-    const raw = readTextSafe(this.selectionFile())
-    if (raw === null) return null
-    const name = raw.trim()
-    if (name === '') return null
-    let exists = false
-    try {
-      const dir = resolveProfileDir(this.homeDir, name)
-      exists = existsSync(join(dir, 'package.json'))
-    } catch {
-      exists = false
-    }
-    return { name, exists, isCurrent: name === this.currentProfile() }
-  }
-
-  /** 写「下次启动」标记；目标 profile 必须已存在。 */
-  writeSelection(name: string): DshProfileSelection {
-    this.requireProfile(name)
-    mkdirSync(this.dataDir, { recursive: true })
-    atomicWriteFileSync(this.selectionFile(), `${name}\n`, { mode: 0o644 })
-    return { name, exists: true, isCurrent: name === this.currentProfile() }
-  }
-
-  /** 清除「下次启动」标记（回到默认启动方式）。 */
-  clearSelection(): void {
-    rmSync(this.selectionFile(), { force: true })
-  }
 
   /** 新建 profile（等价 dsh-app-boot 的 initProfile：三个脚手架文件）。 */
   create(name: string, templateId = 'base'): DshProfileMeta {
@@ -193,7 +172,79 @@ export class DshProfileManager {
     return this.readMeta(name, dir)
   }
 
-  /** 重命名（目录级移动；同步修正 package.json 的 name 字段与「下次启动」标记）。 */
+  /**
+   * 复制档案：把 `<home>/profiles/<name>` 整份拷成 `<home>/profiles/<newName>`（清单 + patch 层 + pnpm 锁文件…），
+   * package.json 的 name 字段改写为新档案名。
+   *
+   * 为什么是「目录级复制」而不是「按模板新建」：档案的全部差异（bundles 声明、patch 层、pnpm 锁文件、
+   * 树外插件依赖）只存在于磁盘目录里 —— 按模板建出来的新档案与源档案毫无关系，而用户复制档案的
+   * 真实意图是「拿一份可改的等价副本」。
+   *
+   * includeNodeModules（缺省 true）决定要不要一并拷 node_modules：
+   *  - true  = 副本**立刻可用**（bundles 里的树外插件解析得到），代价是与源档案同体积且耗时
+   *            （实测 285 MB / 1.7 万文件 ≈ 30 s）；
+   *  - false = 秒级完成，但副本启动时会 `cannot resolve profile bundle`（DSH 自己的报错指向
+   *            `dsh plugin --profile <名> install`）→ 返回 warning depsNotInstalled，调用方必须如实转达。
+   *
+   * 实现要点（都是实测踩出来的）：
+   *  - 用 async `fs.promises.cp` 而不是 cpSync：整档案上万个文件，同步拷贝会把宿主事件循环卡住
+   *    二十多秒（DSH 界面整个冻结）；async 版让拷贝期间服务器仍能响应其它请求；
+   *  - `verbatimSymlinks: true`：保持相对符号链接仍是相对（副本内自解），而不是被解析成指向源档案的
+   *    绝对路径；但 **cp 不会展开 junction**（实测：cpSync 会、promises.cp 不会）—— 它留下的是指向
+   *    **源档案**的链接，所以复制后必须跑一遍 `relinkCopiedTree` 把「指向源档案内部」的链接重指向副本自身
+   *    （否则用户删掉源档案，副本就会缺包）；指向源档案**之外**的链接（如 `link:` 依赖指向用户仓库）
+   *    一律原样保留 —— 那本来就是「共享外部目录」的语义；
+   *  - 链接重指向只碰链接本身（unlink + 重建 junction，不需要管理员权限）：实测副本 285 MB / 1.7 万条目里
+   *    只有 48 个链接，且用 `readdir(withFileTypes)` 判链接无需逐条 lstat，代价可忽略；
+   *  - includeNodeModules=false 时**同时跳过 node_modules 与 `.dsh-module-fallback`**：后者是 DSH 按
+   *    node_modules 投影出来的派生目录，只搬它只会留下一堆悬空链接（DSH 启动时会自行重建）；
+   *  - 其余顶层条目一律照搬（cordis.patch.yml / cordis.yml / pnpm-lock.yaml / 各种 .bak 备份都在里面）；
+   *  - 中途失败**回滚目标目录**：留一个「看起来正常、实则缺文件」的半套档案比不复制更危险。
+   */
+  async copy(
+    name: string,
+    newName: string,
+    opts: { includeNodeModules?: boolean } = {},
+  ): Promise<{ meta: DshProfileMeta; warnings: DshProfileCopyWarning[]; durationMs: number }> {
+    const reason = checkProfileName(newName)
+    if (reason !== null) throw new DshProfileError(reason)
+    const srcDir = this.requireProfile(name)
+    const destDir = resolveProfileDir(this.homeDir, validateProfileName(newName))
+    if (existsSync(destDir)) throw new DshProfileError('exists')
+    const includeNodeModules = opts.includeNodeModules !== false
+    const startedAt = Date.now()
+    await mkdir(destDir, { recursive: true })
+    try {
+      const entries = await readdir(srcDir, { withFileTypes: true })
+      for (const entry of entries) {
+        // node_modules 与 DSH 投影出来的 .dsh-module-fallback 同进同出（后者的链接都指向前者）
+        if (!includeNodeModules && (entry.name === NODE_MODULES_DIR || entry.name === MODULE_FALLBACK_DIR)) continue
+        await cp(join(srcDir, entry.name), join(destDir, entry.name), {
+          recursive: true, verbatimSymlinks: true, force: false, errorOnExist: false,
+        })
+      }
+      await this.relinkCopiedTree(srcDir, destDir)
+      const manifest = this.readManifestObject(destDir)
+      if (manifest !== null) {
+        manifest['name'] = `dsh-profile-${newName}`
+        atomicWriteFileSync(join(destDir, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o644 })
+      }
+    } catch (error) {
+      try {
+        await rm(destDir, { recursive: true, force: true })
+      } catch {
+        // 回滚也失败时无能为力：错误照抛，用户可手动删掉这个半套目录
+      }
+      throw new DshProfileError('copyFailed', `copyFailed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    const meta = this.readMeta(newName, destDir)
+    // 没拷 node_modules 却声明了依赖 → 副本启动必然解析不到 bundle：显式告警，绝不静默
+    const warnings: DshProfileCopyWarning[] = []
+    if (!includeNodeModules && Object.keys(meta.dependencies).length > 0) warnings.push('depsNotInstalled')
+    return { meta, warnings, durationMs: Date.now() - startedAt }
+  }
+
+  /** 重命名（目录级移动；同步修正 package.json 的 name 字段）。 */
   rename(name: string, newName: string): DshProfileMeta {
     const reason = checkProfileName(newName)
     if (reason !== null) throw new DshProfileError(reason)
@@ -210,11 +261,59 @@ export class DshProfileManager {
       manifest['name'] = `dsh-profile-${newName}`
       atomicWriteFileSync(join(to, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o644 })
     }
-    const selection = this.readSelection()
-    if (selection !== null && selection.name === name) {
-      atomicWriteFileSync(this.selectionFile(), `${newName}\n`, { mode: 0o644 })
-    }
     return this.readMeta(newName, to)
+  }
+
+  /**
+   * 把副本里「指向源档案内部」的链接重指向副本自身的对应路径。
+   *
+   * 为什么必须做：`fs.promises.cp` 把 junction 当链接照抄（目标仍是源档案的绝对路径）—— 源档案一旦被删，
+   * 副本就会缺包（实测：拷完删掉源档案，副本 node_modules 里被链接的包直接 ENOENT）。指向源档案之外的
+   * 链接（`link:` 依赖指向用户仓库、DSH 从安装目录投影出来的 fallback）保持原样：那是共享语义，不是缺陷。
+   */
+  private async relinkCopiedTree(srcRoot: string, destRoot: string): Promise<void> {
+    const pending: string[] = [destRoot]
+    while (pending.length > 0) {
+      const dir = pending.pop() as string
+      let entries: import('node:fs').Dirent[]
+      try {
+        entries = await readdir(dir, { withFileTypes: true })
+      } catch {
+        continue
+      }
+      for (const entry of entries) {
+        const path = join(dir, entry.name)
+        // juction/符号链接在 readdir 里就是 isSymbolicLink()（Windows 亦然）→ 无需逐条 lstat
+        if (entry.isSymbolicLink()) {
+          await this.relinkCopiedEntry(path, srcRoot, destRoot)
+          continue
+        }
+        if (entry.isDirectory()) pending.push(path)
+      }
+    }
+  }
+
+  /** 单个链接的重指向（失败保持原样：源档案还在时仍旧可用，不让整次复制失败）。 */
+  private async relinkCopiedEntry(linkPath: string, srcRoot: string, destRoot: string): Promise<void> {
+    let rawTarget: string
+    try {
+      rawTarget = await readlink(linkPath)
+    } catch {
+      return
+    }
+    // junction 的 readlink 带 \\?\ 前缀；相对链接按其所在目录解析
+    const target = rawTarget.startsWith('\\\\?\\') ? rawTarget.slice(4) : rawTarget
+    const resolved = isAbsolute(target) ? target : resolve(dirname(linkPath), target)
+    if (!isInsideDir(srcRoot, resolved)) return
+    const mapped = join(destRoot, relative(srcRoot, resolved))
+    try {
+      const isDirectory = (await stat(linkPath)).isDirectory()
+      await unlink(linkPath)
+      if (isDirectory) await symlink(mapped, linkPath, 'junction')
+      else await copyFile(mapped, linkPath)
+    } catch {
+      // 目标读不到 / 重指向失败：保持这个链接原样（绝不因为一个链接让整次复制失败）
+    }
   }
 
   /**
@@ -227,8 +326,6 @@ export class DshProfileManager {
       throw new DshProfileError('currentProfile')
     }
     rmSync(dir, { recursive: true, force: true })
-    const selection = this.readSelection()
-    if (selection !== null && selection.name === name) this.clearSelection()
   }
 
   /** 解析 profile 目录（不存在 → notFound）。 */

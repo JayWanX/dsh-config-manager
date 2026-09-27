@@ -16,6 +16,7 @@ import {
   listInstalledPlugins, readInstalled, readInstalledVersion, reconcileBundles,
   resolveProfileDir,
 } from './plugin-cli.ts';
+import { enterRescueMode } from './boot-rescue.ts';
 import type { PluginInfo } from './types.ts';
 
 /** 建一个带真实文件的临时 profile（web），返回 { homeDir, profileDir, cleanup }。 */
@@ -178,6 +179,57 @@ test('reconcileBundles: 当前依赖但非 bundle 的条目移出；从未是依
     );
 
     assert.equal(reconcileBundles(profileDir), false, '已一致 → 不写回返回 false');
+  } finally {
+    cleanup();
+  }
+});
+
+/**
+ * 救援模式与 reconcile 的冲突（真机实测的失效点，2026-09）。
+ *
+ * 救援把 dsh.profile.bundles 收窄为「DSH 核心 + 本插件」，而 reconcileBundles 的规则是
+ * 「声明 dsh.bundle.patch 的依赖必须出现在 bundles」——二者直接冲突。只要救援期间依赖行
+ * 又出现（导入 / 恢复 / 市场安装都会写 dependencies），reconcile 就会把用户插件加回
+ * bundles；而 reconcile 会随**每次读插件清单**跑（导出预览、自动快照的 plugins 分区、
+ * 插件页），于是救援刚写下的收窄约 1.5 秒就被撤销，用户重启后插件照常挂载 = 名存实亡。
+ */
+test('reconcileBundles：救援模式下必须停手（不得把收窄掉的用户插件加回 bundles）', async () => {
+  const { homeDir, profileDir, cleanup } = makeTempProfile(
+    { 'user-plugin': '1.0.0' },
+    ['@deepseek-ai/dsh-base', 'user-plugin'],
+  );
+  try {
+    writeInstalledPkg(profileDir, 'user-plugin', '1.0.0', './cordis.patch.yml');
+    const pkgPath = join(profileDir, 'package.json');
+    type Manifest = { dependencies: Record<string, string>; dsh: { profile: { bundles: string[] } } };
+    const manifest = (): Manifest => JSON.parse(readFileSync(pkgPath, 'utf8')) as Manifest;
+    const write = (m: Manifest): void => { writeFileSync(pkgPath, JSON.stringify(m, null, 2) + '\n', 'utf8'); };
+
+    // 对照组（没有救援状态）：依赖里有 bundle patch 的包会被加回 bundles —— 证明断言不是空转
+    write({ name: 'dsh-profile-web', dependencies: { 'user-plugin': '1.0.0' }, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } } as unknown as Manifest);
+    assert.equal(reconcileBundles(profileDir), true, '对照组：无救援 → 正常 reconcile 并写回');
+    assert.deepEqual(manifest().dsh.profile.bundles, ['@deepseek-ai/dsh-base', 'user-plugin']);
+
+    // 进入救援（disableUserBundles）：bundles 收窄 + 依赖行被摘掉
+    const entered = await enterRescueMode({
+      homeDir,
+      profile: 'web',
+      rescueMount: { packageName: 'dsh-config-manager', row: { id: 'config-manager', name: 'dsh-config-manager' } },
+      disableUserBundles: true,
+    });
+    assert.equal(entered.ok, true, '进入救援必须成功');
+    assert.deepEqual(manifest().dsh.profile.bundles, ['@deepseek-ai/dsh-base'], 'bundles 收窄为核心');
+    assert.equal('user-plugin' in manifest().dependencies, false, '依赖行同时被摘掉');
+
+    // 模拟「救援期间依赖行又出现」（导入 / 恢复 / 市场安装都会写 dependencies）
+    const cur = manifest();
+    cur.dependencies['user-plugin'] = '1.0.0';
+    write(cur);
+
+    assert.equal(reconcileBundles(profileDir), false, '救援期间必须停手（false = 未写盘）');
+    assert.deepEqual(manifest().dsh.profile.bundles, ['@deepseek-ai/dsh-base'], 'bundles 必须保持收窄后的形态');
+    listInstalledPlugins(homeDir, 'web');
+    assert.deepEqual(manifest().dsh.profile.bundles, ['@deepseek-ai/dsh-base'], 'listInstalledPlugins 同样不得改回 bundles');
   } finally {
     cleanup();
   }

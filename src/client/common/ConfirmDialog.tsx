@@ -17,7 +17,7 @@
  * 安全：message 由调用方传入（渲染前已 redact 兜底）；本组件不触碰任何凭据。
  */
 import { useRef, useState } from 'react'
-import { Button, Spinner } from './ui.tsx'
+import { Button } from './ui.tsx'
 import { Modal } from './Modal.tsx'
 import css from '../config-manager.module.css'
 
@@ -90,7 +90,8 @@ export function ConfirmDialog({
           loading={busy}
           onClick={() => { void handleConfirm() }}
         >
-          {busy ? <Spinner /> : (confirmLabel ?? '')}
+          {/* 加载图标由 Button 原语按 loading 自动渲染（此处只给文案） */}
+          {confirmLabel ?? ''}
         </Button>
         <button
           ref={cancelRef}

@@ -28,7 +28,7 @@ const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const API_FILES = [
   'src/client/api.ts',
   'src/client/history/history-api.ts',
-  'src/client/lifecycle/lifecycle-api.ts',
+  'src/client/recovery/incident-api.ts',
   'src/client/market/market-api.ts',
   'src/client/market/my-configs-api.ts',
   'src/client/recovery/recovery-api.ts',

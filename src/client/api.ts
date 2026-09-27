@@ -30,7 +30,7 @@ import type { ImportAnalysis, ImportDecisions, ImportPlan, ImportResult } from '
 import type { ExportOptions, ExportReport, ExportUnit } from '../core/types.ts';
 import type { RestorePlan, RestoreReport, SnapshotMeta } from '../core/restore.ts';
 import type { RestoreChangeSummary, SnapshotFileDiff } from '../core/snapshot-diff.ts';
-import type { DshProfileDetail, DshProfileMeta, DshProfileSelection, DshProfilesSnapshot } from '../profiles/dsh-profile-shared.ts';
+import type { DshProfileCopyResult, DshProfileDetail, DshProfileLaunchResult, DshProfileMeta, DshProfileRunningView, DshProfilesSnapshot, DshProfileStopOutcome } from '../profiles/dsh-profile-shared.ts';
 
 import type { RunState } from '../core/run-registry.ts';
 import type { ConsultReport } from '../core/migration-consult.ts';
@@ -626,7 +626,7 @@ export class ConfigManagerApi {
   }
 
   // ------------------------------------------------- 档案（DSH 自带 profile）
-  /** 列出 DSH profile：列表 + 当前运行 + 「下次启动」标记 + 起步模板。 */
+  /** 列出 DSH profile：列表 + 当前运行 + 在跑的实例（台账 ∪ 心跳）+ 起步模板。 */
   async profilesList(): Promise<DshProfilesSnapshot> {
     return getJson<DshProfilesSnapshot & { ok: boolean }>(CONFIG_MANAGER_API.profiles, this.t);
   }
@@ -646,6 +646,21 @@ export class ConfigManagerApi {
     return body.profile;
   }
 
+  /**
+   * 复制档案：整份拷贝成新档案（package.json 的 name 跟随改写）。
+   * includeNodeModules 缺省 true —— 副本立刻可用，但 285 MB 级档案实测要三十秒上下（走长操作档位）；
+   * 传 false 只拷清单与 patch（秒级），回执 copy.warnings 会带 depsNotInstalled，调用方必须如实展示。
+   */
+  async profileCopy(name: string, newName: string, opts: { includeNodeModules?: boolean } = {}): Promise<{ profile: DshProfileMeta; copy: DshProfileCopyResult }> {
+    const body = await postJson<{ ok: boolean; profile: DshProfileMeta; copy: DshProfileCopyResult }>(
+      CONFIG_MANAGER_API.profilesCopy,
+      { name, newName, includeNodeModules: opts.includeNodeModules !== false },
+      this.t,
+      LONG_OPTS,
+    );
+    return { profile: body.profile, copy: body.copy };
+  }
+
   /** 重命名档案（目录级移动；当前运行中的档案被 host 拒绝）。 */
   async profileRename(name: string, newName: string): Promise<DshProfileMeta> {
     const body = await postJson<{ ok: boolean; profile: DshProfileMeta }>(CONFIG_MANAGER_API.profilesRename, { name, newName }, this.t);
@@ -661,10 +676,25 @@ export class ConfigManagerApi {
     );
   }
 
-  /** 记录「下次启动」用哪个档案（name=null 清除标记）。DSH 不支持运行中切换，重启由用户完成。 */
-  async profileSelect(name: string | null): Promise<DshProfileSelection | null> {
-    const body = await postJson<{ ok: boolean; selection: DshProfileSelection | null }>(CONFIG_MANAGER_API.profilesSelect, { name }, this.t);
-    return body.selection;
+  /**
+   * 停掉该档案的实例：本插件启动的走台账，**别处/手动启动的**走心跳（同样按 pid 停）。
+   * 返回停止后的运行中实例列表 —— UI 据此把该行按钮换回「启动」。
+   */
+  async profileStop(name: string): Promise<{ result: DshProfileStopOutcome; running: DshProfileRunningView[] }> {
+    const body = await postJson<{ ok: boolean; stopped: { result: DshProfileStopOutcome }; running: DshProfileRunningView[] }>(
+      CONFIG_MANAGER_API.profilesStop, { name }, this.t, LONG_OPTS,
+    );
+    return { result: body.stopped.result, running: body.running ?? [] };
+  }
+
+  /**
+   * 用该档案启动一个**独立 DSH 实例**（"切换档案"真正可用的形态；DSH 没有默认 profile 状态）。
+   * 只支持 web 形态档案；host 要等子进程起来（最长 20s 探活）→ 长操作档位。
+   * 同时返回启动后的 running 列表：UI 立刻把该行按钮换成「停止」，不必再 GET 一次。
+   */
+  async profileLaunch(name: string): Promise<{ launch: DshProfileLaunchResult; running: DshProfileRunningView[] }> {
+    const body = await postJson<{ ok: boolean; launch: DshProfileLaunchResult; running: DshProfileRunningView[] }>(CONFIG_MANAGER_API.profilesLaunch, { name }, this.t, LONG_OPTS);
+    return { launch: body.launch, running: body.running ?? [] };
   }
 
   // ------------------------------------------------- 定时全量备份（快照 tab）

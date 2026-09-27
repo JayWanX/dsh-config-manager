@@ -42,7 +42,8 @@ import {
 import { Badge, Button, Card, Spinner, StatusDot } from '../common/ui.tsx'
 import { SectionComposition } from '../common/SectionComposition.tsx'
 import { sectionLabeler } from '../common/section-labels.ts'
-import { BackupIcon, ExportIcon, ImportIcon, SyncIcon, ArrowRightIcon, CopyIcon } from '../common/Icon.tsx'
+import { BackupIcon, ExportIcon, ImportIcon, SyncIcon, ArrowRightIcon } from '../common/Icon.tsx'
+import { CopyButton } from '../common/CopyButton.tsx'
 import css from '../config-manager.module.css'
 
 /** issue #43：立即备份跳过原因 → 文案键（文案统一走 locale 字典；未知 token 走 other）。 */
@@ -152,26 +153,6 @@ function displaySummary(summary: string, t: TranslateNS<'config-manager'>): stri
 function dirOf(path: string): string {
   const i = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
   return i > 0 ? path.slice(0, i) : path
-}
-
-/**
- * 复制文本到剪贴板，并以 Toast 反馈结果。
- * （原先完全静默：用户无法确认是否复制成功——被复制的内容在界面上往往只显示截断形态。）
- */
-function copyText(text: string, t: TranslateNS<'config-manager'>): void {
-  try {
-    const pending = navigator.clipboard?.writeText(text)
-    if (pending === undefined) {
-      toast.warn(t('toast.copyFailed'))
-      return
-    }
-    void pending.then(
-      () => { toast.ok(t('toast.copied')) },
-      () => { toast.warn(t('toast.copyFailed')) },
-    )
-  } catch {
-    toast.warn(t('toast.copyFailed'))
-  }
 }
 
 /**
@@ -388,15 +369,7 @@ export function OverviewPanel({ api, syncApi, historyApi, t, openActivity }: Ove
                   <span className={css.infoKey}>{t('overview.location.dir')}</span>
                   <span className={css.infoValue}>
                     <span className={css.mono} title={backupDir}>{midEllipsis(backupDir, 52)}</span>
-                    <button
-                      type="button"
-                      className={css.copyBtn}
-                      aria-label={t('overview.activity.copy')}
-                      title={t('overview.activity.copy')}
-                      onClick={() => { copyText(backupDir, t) }}
-                    >
-                      <CopyIcon size={12} />
-                    </button>
+                    <CopyButton text={backupDir} label={t('overview.activity.copy')} t={t} />
                   </span>
                 </div>
               )}
@@ -476,15 +449,7 @@ export function OverviewPanel({ api, syncApi, historyApi, t, openActivity }: Ove
                           <span className={css.activitySummaryText} title={displaySummary(item.summary, t)}>
                             {displaySummary(item.summary, t)}
                           </span>
-                          <button
-                            type="button"
-                            className={css.copyBtn}
-                            aria-label={t('overview.activity.copy')}
-                            title={t('overview.activity.copy')}
-                            onClick={() => { copyText(item.summary, t) }}
-                          >
-                            <CopyIcon size={12} />
-                          </button>
+                          <CopyButton text={item.summary} label={t('overview.activity.copy')} t={t} />
                         </span>
                         <span className={css.activityBadge}>{resultNode(item.badge)}</span>
                       </div>

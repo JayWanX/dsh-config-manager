@@ -88,25 +88,105 @@ Shell（`ConfigManagerSection`）：导航条 + 页面内容 + 状态栏 + 活�
 ## 5. Spacing & Shape
 
 - 间距网格：4 / 8 / 10 / 12 / 16；区块间距统一 10px。
+  **落地方式（2026-09 修正）**：区块间距由**容器**统一提供，不靠各区块自带外边距 ——
+  `.viewBody`（页面主体，纵向 flex）显式 `gap: 10px`，并把**直接子元素**的上/下外边距归零
+  （flex 容器不折叠 margin，不归零就变成 20px）。此前间距靠「上一个元素恰好的下外边距」，
+  于是「小节标题 → 面板」「说明文字 → 横幅」「列表首个子块 → 面板」这些位置恒为 0，
+  表现为面板/按钮紧贴上面的内容。规则块见 CSS §9b（必须留在组件规则之后，源序决定归零胜负）。
+  页面末尾另有 `.viewBody::after`（8px 实盒）作**底部呼吸区**：`.pagePad/.viewBody` 是
+  `flex:1 1 auto + min-height:0`（缩到视口高），它们的 padding/外边距**不进滚动溢出区** ——
+  内容一长，最后一排按钮就被压到底部状态栏上（用户实测）。伪元素是真实盒子，必然计入溢出。
+- 嵌套容器里的小节标题（卡片、抽屉小节）自带 `margin-bottom: 10px`（`.sectionTitleBlock`）；
+  页面主体内该外边距被上面的归零规则接管。
 - 圆角：卡片 8px、控件（按钮/输入/选择）6px、分段容器 7px、徽章 9px、小标签 4px；
   顶部页签条 / 底部状态栏为 8px 圆角分段条（条内 .navTab 6px 药丸），
   激活态 = 主色 16% 淡底 + 45% 主色内描边（`.navStrip` / `.statusBar` 同款语言）。
 - 控件高度：按钮 28px（sm 24）、输入/选择 28px、表格行 ~32px、活动行 28px、
   顶部页签条 32px（条内页签 24px）、状态条 32px、状态栏 28px、图标按钮 26px。
-- 动效：仅颜色过渡 120ms ease、进度条 300ms、抽屉滑入 180ms、状态点脉冲 1.2s。
+- 动效：**令牌统一** —— `.section` 上定义 `--cm-motion-fast/base/slow`（120/180/300ms；
+  slow 就是进度条的 300ms 推进）、
+  `--cm-motion-ease-out`（`cubic-bezier(0.16,1,0.3,1)`，入场用）、`--cm-motion-ease-in-out`
+  （循环动效用）；各处只引用变量，不再各写一遍毫秒值。现有动效清单：
+  颜色过渡 120ms ease（含状态点 / 步骤条的状态色）、进度条 300ms、抽屉滑入与通知入场 180ms、
+  状态点脉冲 1.2s、
+  **页面入场 180ms**（`.pagePad` 的 `pageEnter`：opacity + 4px 上浮；React 侧以 `key={panel}`
+  重建节点，换页时重放一次）、**弹窗入场/退场**（`.dialogMask` 淡入 120ms + `.dialogContentCenter`
+  0.97→1 微缩放 180ms；关闭走 `[data-state='closed']` 的 `maskOut`/`dialogOut` ——
+  Radix 的 Presence 会保持节点挂载并等 `animationend` 再卸载，所以退场只需写 CSS）、
+  **折叠 180ms**（`.collapse`：`grid-template-rows` 0fr ⇄ 1fr，**展开与收起两端都有动画**；
+  用法见 §6 的 `Collapse`）、**视图切换入场**（`.viewEnter`：`ViewSwitch` 的 key 重放）、
+  **列表/条目入场**（`.snapshotList > *`、`.dataTable tbody tr`、`.pickerUnit`、`.restorePlan`、
+  `.banner`、`.empty`，前 4 项各递进 24ms）、**骨架 shimmer 1.3s**（`.skeletonBar`）。
+  图标形变仅限 `ExpandChevron`（折叠展开/收起；临界阻尼、无过冲，见 §6 第三方原语）。
+  **`prefers-reduced-motion: reduce` 下关掉装饰性动效**（页面/弹窗/抽屉/通知入场、状态点脉冲、
+  骨架 shimmer —— 骨架退化为静态占位块，信息不丢）——
+  旋转与不定态进度**刻意保留**：它们承载「正在进行」这个状态本身，关掉会让用户以为界面卡死。
+  形变侧由 morphicons 的 `reducedMotion="user"` 承担（CSS 选择器管不到 SVG 内的属性插值）。
+  两条实现约束：页面/弹窗入场**不写 `forwards`**（动画结束回到基础样式，不留残影）；
+  `.dialogContentCenter` 的 keyframes **必须连 `translate(-50%,-50%)` 一起写**，
+  否则动画期间自居中位移被覆盖、弹窗会跳到左上角（该定位与动画在同一元素上）。
 
 ---
 
 ## 6. Components（config-manager.module.css 类）
 
 ### Primitives（common/ui.tsx）
-- `Button`（primary/ghost/danger × sm/md；`href` 外链同款外观）
+- `Button`（primary/ghost/danger × sm/md；`href` 外链同款外观）。**`loading=true` 时由原语自动前置
+  `Spinner`**（同时自动 `disabled` + `aria-busy`）—— 调用方只给普通文案；既然图标由原语给，
+  同一个按钮上**不要**再手写一个 `<Spinner/>`（会得到两个转圈）。此前「有没有加载图标」取决于
+  每个调用点是否记得写，漏写处只换文案、没有任何进行中反馈（用户实测：任务中心的终止/确认、
+  灾备页的撤销/重做、历史导出）。**新代码一律用 `loading`**；历史遗留的
+  `{busy ? <Spinner label={…}/> : 文案}` 写法仍有图标，可读性略差、不必为它单独改一波。
 - `IconButton`（`.iconBtn`；`active`/`danger` 修饰；必须 `aria-label`）
 - `StatusDot`（idle/ok/info/warn/error + `pulse`）
 - `Badge`（info=中性描边 / ok / warn / error）
 - `Banner`（四态；操作按钮一律**内嵌右侧**）
 - `Segmented`（页内子视图切换；受控）
-- `Card` / `Spinner` / `Field` / `SectionTitle` / `Empty` / `Checkbox` / `Stepper`
+- `Card` / `Field` / `SectionTitle` / `Empty` / `Checkbox` / `Stepper`
+- `Select`（`common/Select.tsx`，2026-09 替换**全部**原生 `<select>`，15 处）：自绘下拉。
+  为什么必须自绘：`appearance: none` 只改触发器，**展开后的弹层仍是系统控件**（深色主题下是亮底
+  系统菜单），且吃不到 `--dsw-*` token（§3 硬约束）。触发器复刻 `.input` 盒模型，弹层走
+  layer-2 + 阴影 + 120ms 入场，chevron 180° 旋转标示展开态。
+  自绘要多扛三件事，缺一不可：① **键盘语义**（↑/↓ 跳过禁用项并环绕、Home/End、Enter/Space 提交、
+  Esc 关闭且必须 `stopPropagation`——它可能位于 Radix 弹窗/活动抽屉内，冒泡会连带关掉外层）、
+  ② **ARIA**（combobox + listbox + option，`aria-expanded`/`aria-activedescendant`/`aria-selected`/`aria-disabled`）、
+  ③ **贴边翻转**（`data-align`：右侧剩余不足 260px 时改右对齐，否则弹层会被 `.section` 的 overflow 裁掉）。
+  可测的索引推导（初始高亮/移动/首尾）在 `src/ui/select-model.ts`（node 单测）；组件只装配。
+  选中项**不用右侧对勾**（用户要求移除），改为「主色加粗 + 10% 主色底 + 左侧 2px 主色条」。
+- `Spinner`（13px 转圈 + 可选文案）。**环是 SVG 几何**（两个 `<circle>`：底环 30% 对比度的完整圆
+  + 25% 实色圆弧 `stroke-dasharray`，共用同一个 `@keyframes spin`）—— **不是**
+  `border + border-radius: 50%`：13px 的盒子上 2px 边框占直径 15%，且只有 `border-top` 实色、
+  其余三边仅 25% 不透明度，栅格化后视觉上只剩一条亮弧、形状读不出来（2026-09 用户实测反馈
+  「加载的 icon 不是圆形」：像素测量显示形状**本来就是**近圆 20×19，问题在观感不在几何）。
+  着色一律 **`currentColor`**（与 lucide 图标同一约定）：写死 `--dsw-alias-state-business-primary`
+  会在**主色按钮**（蓝底）上变成蓝画蓝、图标「隐形」，用户只看到按钮莫名变宽（真机截图）。
+
+- `Skeleton` / `SkeletonList` / `SkeletonTable`（`common/Skeleton.tsx`）：**整块内容首次加载**
+  的骨架占位（列表 / 表格 / 详情）。与 `Spinner` 的分工是**硬的**：**有布局轮廓可给 → 骨架**
+  （首屏列表、数据表、详情正文）；**没有轮廓可给 → Spinner**（按钮内联的 `Button loading`、
+  大分区读取遮罩 `.pickerOverlay`、轮询中的小区域）。骨架先给出「这里将出现什么」，
+  数据到货时页面不跳变；转圈则只表达「正在进行」。无障碍：视觉块统一 `aria-hidden`，
+  加载语义由外框的 `role="status"` + `aria-busy` + **可见 caption 文案**承担 ——
+  文案复用各调用点**已有的** `xxx.loading` 键（Spinner 的 label 同源，不新增字典项），
+  骨架**不得**只留色块不留文案。着色只用「弱化文字色」的低透明 tint + 一条同色高光，
+  不引入第二个色系；`prefers-reduced-motion: reduce` 下退化为静态占位块（§15）。
+  形态：`line` 正文行 / `title` 区块标题 / `block` 区块 / `row` 行条目，
+  多行时按 `nth-child` 做长短交错 + 逐条递进延迟（避免整块齐闪）。
+
+- `Collapse` / `ViewSwitch`（`common/Motion.tsx`）：**内容出现/消失**的两个动效原语。
+  - `Collapse`（折叠容器）：`grid-template-rows` 0fr ⇄ 1fr + 内层 `overflow: hidden`，
+    展开/收起**两端**都有高度动画（`height: auto` 不可插值；`{open && …}` 只能做出现一侧）。
+    硬约定：内容**始终挂载**（收起时有高度可插值才谈得上动画），收起态靠
+    `visibility: hidden`（延迟到高度动画结束）退出 tab 序与绘制；容器 `id` 恒存在，
+    触发器的 `aria-controls` 不再写 `open ? id : undefined`。
+    代价：收起后内部 DOM 仍常驻（ContentPicker 单元行上限 1000 行、`RestorePlanView` 的
+    diff 面板同理）—— 这是本仓库明确接受的取舍，换来两端都有动画。
+    当前调用点：ContentPicker 的分区级与分组级、RestorePlanView 的「无动作」分组与行 diff。
+  - `ViewSwitch`（视图切换入场）：带 `key` 的包装层，key 变化 = 重建节点 = 入场动画重放。
+    **只用于「分支渲染不同组件」的视图级切换**（备份页 4 个子视图、抽屉三段）。
+    包装层透传纵向 flex 填充链（`.viewEnter` 自带 `flex: 1 1 auto` + column），
+    否则子视图的 `flex: 1` 会失效、页面底部重新出现空洞。
+    反例（禁用）：包住带 `useState` 的容器（如导入向导体）—— key 变化会把本地态归零（§9 #15）。
 
 ### 第三方原语（2026-09 Visual Polish 引入，按 `DEVELOPERS.md` 「第三方 UI 库准入」评估落地）
 仅引入**无样式/行为级**原语，视觉仍 100% 走 `--dsw-*` token + 本文件规范，不引入第二套视觉体系：
@@ -117,6 +197,47 @@ Shell（`ConfigManagerSection`）：导航条 + 页面内容 + 状态栏 + 活�
   深路径无类型，由 `src/client/lucide-icons.d.ts` 全局 ambient 声明兜底
   （该文件刻意不含顶层 import，保持全局脚本态，否则 `declare module` 退化为 augmentation 而部分失效）。
   新增图标须同步登记 `Icon.tsx` 映射表 + `lucide-icons.d.ts`。
+- **图标形变 = morphicons**（`common/Icon.tsx` 的 `ExpandChevron` / `CopyStateIcon` + `common/morph-icons.ts`）：
+  MIT、零运行时依赖。它**不提供图标**，而是让状态切换时两个 stroke 图标做物理形变
+  （2D Procrustes + 极坐标插值，旋转自动涌现）。体积：raw ≈ +40KB / gzip ≈ +13KB（**未压缩产物口径**；
+  minified 约 8KB gzip —— 本仓库 bundle 不 minify，故按前者记账）。
+  **收录判据（唯一判据，不得放宽）**：该 DOM 节点的图标会**随用户可见的状态变化而改变**，
+  且形变让「状态变了」这件事被看见。**不满足判据的一律不套形变** —— 静态图标套形变是**纯亏**：
+  要多打一份 vanilla `lucide` 数据，却永远不触发形变（§9 反模式 #13）。
+
+  **当前全部落点（6 处，两对图标）**：
+  ① **折叠展开/收起 chevron**（4 处，同一对 chevron-right ↔ chevron-down）：`ContentPicker` 分区行 + 分组行、
+  `RestorePlanView` 分组头（无动作分组，默认折叠）+ 行内差异展开。实测 θ 恒为 90°、lnSigma = 0。
+  `RestorePlanView` 两处此前是**手写文本符号 ▸/▾**（§9 反模式 #9 的最后残留），已一并收归形变层。
+  ② **复制 → 已复制**（2 处：`OverviewPanel` 的备份目录行与活动行，经 `common/CopyButton.tsx`）：
+  空闲 copy ↔ 已复制 copy-check。
+
+  **⚠ 复制对是特制几何，别「简化」它**：自然的 `copy`(2 条子路径) → `copy-check`(3 条) 是**拓扑不匹配** ——
+  morphicons 只能把一条已有子路径复用给新对勾，实测那条要缩到 **0.20 倍**并转 **−159°**（`lnSigma = −1.62`、
+  `res = 0.66`，对照 chevron 是 0/0），中途是一团乱线；整个 lucide「A + 对勾」家族同理（clipboard-check
+  ×0.50、file-check ×0.72、square-check ×0.20，全部实测否决）。因此 `MORPH_ICONS.copy` 用的是
+  `copy-check` 的结构 + 一个**退化的「隐藏对勾」**（绕 (8,15) 缩到 4%，落进矩形左边框的描边带里，
+  被 round cap 的圆点吞掉 → 空闲态与 lucide `copy` 视觉一致）。拓扑 3↔3 后：矩形与后板 `lnSigma = 0`、
+  `res = 0`（纹丝不动），对勾 `lnSigma = 3.22`、`res = 0`（纯生长、零旋转）。
+  实测依据与三条断言见 `common/morph-icons.ts` 的 `HIDDEN_CHECK_D` 与 `morph-icons.test.ts`。
+
+  **明确不适用（两类，别硬套）**：
+  ① 无状态切换的语义图标（导航、删除、下载、信息…）—— 见上「纯亏」；
+  ② `Spinner ↔ 图标` 的切换（`ExportView` 的「加载中 ↔ 预览」、`OverviewPanel` 的「备份中 ↔ 备份」）——
+  MorphIcon 只做 **IconNode → IconNode** 的形变，跨组件（旋转环 ↔ 图形）不支持，且把环变成眼睛语义上也不对；
+  这类用「条件渲染」+ 各自的静止态即可。
+
+  新增一处形变的配方（两步 + 一步验证）：① 图标对若不在 `MORPH_ICONS` 里，先在 `common/morph-icons.ts` 登记
+  （vanilla `lucide` 深路径 + `lucide-icons.d.ts` 补声明）；② 在 `common/Icon.tsx` 加一个**语义命名**的出口
+  （如 `ExpandChevron`），不要在调用点裸传图标名 —— 语义出口才能让「为什么这里用形变」留在代码里；
+  ③ 用 `morph-icons.test.ts` 的纯核心断言这对图标形变成立（能建出计划、端点落在两个图标上）。
+  两条硬约定：`reducedMotion="user"`（morphicons 缺省 `"never"` = **无视**系统减弱动效设置，
+  必须显式覆盖）、`spring={MORPH_SPRING}`（临界阻尼 ζ=1.0 **无过冲**，刚度 k=420 ≈ **1.6 倍速**；
+  不用 morphicons 的 `smooth`（太慢）也不用 `snappy`（ζ=0.73 有回弹）；参数与理由见
+  `common/morph-icons.ts`，由 `morph-icons.test.ts` 断言 ζ≈1 且 170 < k ≤ 700）。
+  数据走 vanilla `lucide` 深路径（`lucide/dist/esm/icons/<name>.mjs`，导出的是 IconNode **数据**而非组件，
+  因为 `MorphIcon` 只吃数据）；`lucide` 与 `lucide-react` **必须同版本**，否则静态/形变两套图形
+  （`morph-icons.test.ts` 断言相等）；深路径类型同样由 `lucide-icons.d.ts` 兜底。
 - **弹窗 = @radix-ui/react-dialog**（`common/Modal.tsx`）：统一原先两套弹窗
   （ConfirmDialog 手写 focus trap + 各页内联 `dialogMask` 无 trap）为一套，获得成熟
   focus trap / Esc / 初始焦点与关闭后焦点还原 / body 滚动锁 / Portal 渲染。
@@ -154,6 +275,16 @@ Shell（`ConfigManagerSection`）：导航条 + 页面内容 + 状态栏 + 活�
   组件带可选 `sectionLabel`（`SectionId → 文案`）：**用户可见场合一律传
   `sectionLabeler(t)`**（见 §7「分区显示名」），只有给开发者看的场合才允许省略。
   （旧文档里的「导出预览弹窗」已不存在，导出侧改由内容选择器 + 页内合计块承担。）
+- **可点列表行 + 行内按钮**（通则，2026-09）：整张行是「打开详情」的点击目标（hover 描边），
+  **但容器本身不加 `role="button"`/`tabIndex`** —— 里面还有删除等按钮，`role=button` 套 `button`
+  是非法嵌套，且会与全局焦点环规则（`.section :is(button, a, …)`）打架。键盘/读屏走行内那颗
+  `IconButton`（如 `InfoIcon`），同排按钮一律 `stopPropagation`。
+  需要「整行可点 + 行内还有按钮」时照此办理，禁止给容器加 `role=button`。
+  （原用例 = 灾备页快照卡；灾备页已于 2026-09 收敛下线，通则保留。）
+- **只读详情弹窗**：`.kvRow/.kvKey/.kvValue` 是「只读键值行」的固定搭配（档案详情仍在使用），
+  底部只放关闭（`Modal.Footer`），**不在详情里制造第二条执行通道**。
+  （原灾备页「快照详情 · 分区明细」的 `.detailSectionList/.detailSectionRow/.detailSectionName`
+  已随该页面删除。）
 - **导出报告的分区清单**（2026-09 优化）：`.reportBody`（padding 8/12 + 纵向 flex，块间距
   由子块 `.groupLabel` 的 8px 下边距承担）+ 共享的 `.sectionGrid/.sectionRow`。
   **不再把 `renderExportReport` 的整块等宽文本直接铺在面板里** —— 那段文本的分区名是适配器 id、
@@ -200,6 +331,12 @@ Shell（`ConfigManagerSection`）：导航条 + 页面内容 + 状态栏 + 活�
     （可选字段，旧宿主缺失即回退）；客户端由 API 层 `resolveFailedSections(requested, response)`
     （`src/client/api.ts`，node 可测）把「宿主点名」与「请求了但没回来」的推断取并集（推断复用
     `src/ui/export-flow.ts` 的 `failedSectionsFromResponse`），保持 `requested` 顺序并忽略本次请求之外的 id。
+  - **勾选态的唯一口径（2026-09 用户实测：点「全不选」后子项仍然打勾）**：稀疏表示下「不在 `excluded`
+    里」只等于「没有显式排除」，**分区整体没勾时同样成立** —— 所以渲染层一律走
+    `unitChecked(sel, section, unitId)`（先看分区、再看排除集），分组的三态与计数同口径
+    （`groupPickState` / `groupSelectedCount` 必须传所属分区）。直接在组件里写
+    `!sel.excluded.includes(u.id)` 会渲染出「分区 已选 0/13、13 个子项却全部打勾」的自相矛盾
+    （`src/ui/selection-model.test.ts` 有专门回归）。
   - **设备相关 / 敏感徽章（UI-09）**：`SelectionSection.portability === 'deviceSpecific'` 渲染
     `设备相关` 徽章、`sensitive === true` 渲染 `敏感` 徽章（均 `Badge kind="warn"`）。
     勾选含设备相关分区时，调用方在页内与弹窗内就地渲染 `export.selectionWarnings` 提示
@@ -292,6 +429,15 @@ Shell（`ConfigManagerSection`）：导航条 + 页面内容 + 状态栏 + 活�
   叠加 Radix modal 给 body 加的 `pointer-events: none` → 表现为"打开后整页点不动，
   必须先点一下屏幕"（那一下正是关掉隐形弹窗的外部点击）。挂回插件根节点即恢复
   与宿主同一层叠上下文（与迁移前内联 `dialogMask` 的层级语义一致）。
+  **容器必须在渲染期同步解析，且不得回退 `document.body`**（2026-09 档案详情弹窗「先闪现在
+  别处、再跳到页面中心」的真机根因）：Radix `Portal` 的容器为空时会回退到 `document.body`，
+  而该回退判定发生在它的 layout effect（**首次绘制之前**）—— 若用 `useEffect` 去查根节点，
+  查询发生在**绘制之后**，于是「弹窗与 `open=true` 同一次 commit 挂载」的路径（刷新后详情目标
+  由 run-store 保留、切页签回来面板重挂、宿主重挂 section）会**先在 body 里画一帧**：
+  `position:fixed` 此时相对视口居中而不是相对宿主面板，随后才被搬进插件根节点 = 可见的跳闪。
+  三条纪律：① 惰性 `useState(() => 查根节点)`（渲染期同步命中）；② `useLayoutEffect` 兜底
+  （同一 commit 内根节点尚未进 DOM 时，重解析在绘制前完成）；③ 容器未知时**不渲染 Portal**
+  （宁可晚一帧，也绝不走 body 回退）。
 - Drawer：`.drawerMask/.drawerPanel`（右侧 400px；Esc 仅在面板内消费，`stopPropagation`
   避免关闭宿主弹窗）。
 - **运行中心（2026-09，活动抽屉第三段「进行中」）**：`.runsCenter/.runsSummary/.runsCardHead/
@@ -351,6 +497,11 @@ Shell（`ConfigManagerSection`）：导航条 + 页面内容 + 状态栏 + 活�
 - `.sectionOptionRow`：同步分区弹窗里「分区勾选行 + 该分区专属参数」（历史会话的「最新 N 个」）
   的纵向容器。**必须包在 `Checkbox` 之外** —— `Checkbox` 内部是 `<label>` 元素，
   把输入控件放进去会让「点输入框」也切换勾选状态。
+- `.kvRow + .actionRow`：**分隔线之后紧跟操作行**必须补 `margin-top: 8px`
+  （`.kvRow` 只有下边框、没有下外边距，`.actionRow` 没有上外边距 → 按钮紧贴分隔线；
+  用户实测：档案页「运行状态」里的「停止」按钮贴在横线上）。
+- `.historyRow`：`padding: 6px 8px`（左右各 8px）。行位于带边框的滚动容器 `.historyScroll` 内，
+  此前只有纵向 padding → 时间/摘要文字紧贴容器左边框（实测仅 1px = 边框本身）。
 - **教训（本轮踩到）**：`.field` 自带 `margin-bottom:10px`，任何用 `align-items:flex-end`
   把「字段」与「按钮」并排的对齐都会因此差 10px（实测 select 底 1042 / 按钮底 1052）。
   在并排容器里必须把该字段的 margin 归零（见 `.snapshotPickerRow .field`）。
@@ -358,7 +509,8 @@ Shell（`ConfigManagerSection`）：导航条 + 页面内容 + 状态栏 + 活�
 ### 表单宽度纪律（本轮修正的回归）
 `.input/.select` **不得**全局 `width:100%`：它们大量出现在行内 flex 容器里
 （市场筛选、同步快照下拉），全局满宽会让每个控件各占一整行。
-满宽只在**纵向**容器内按需生效：`.field > .input/.select { width:100% }`
+满宽只在**纵向**容器内按需生效：`.field > .input/.selectRoot { width:100% }`
+（`.selectRoot` = 自定义下拉的根节点，见 §6 `Select`）
 （`.field` 是 column flex），路径映射则用 `.pathOld/.pathNew { display:flex;
 flex-direction:column }` 让内部 input 拉满。市场筛选用 `.marketFilterGrid`
 （2 列 grid）+ `.marketFilterSearch`（跨列）+ `.marketFilterMeta`（元信息行）。
@@ -548,15 +700,35 @@ flex-direction:column }` 让内部 input 拉满。市场筛选用 `.marketFilter
   （恢复成功后的确认由操作结果本身承载，常驻绿灯属冗余噪音）。
 - **档案（Profiles，2026-09 语义替换）**：页面 = **DSH 自带 profile** 的管理器
   （`$DSH_HOME/profiles/<name>`），不再是插件自有的「配置快照」。四段垂直结构：
-  ①**当前运行 / 下次启动卡**（`.kvRow` 显示当前 profile；按 `selectionState` 分四种呈现：
-  none→`.hint` 规则说明、current→`Banner kind="ok"`、missing→`Banner kind="warn"` + 清除按钮、
-  pending→`.actionRow` 内给等宽重启命令 `dsh --profile <name>` + 复制 + 清除）；
+  ①**运行状态卡**（`.kvRow` 显示当前 profile；下接**在跑的实例**清单 —— 数据源是「台账 ∪ 心跳」的合并视图，
+  所以手动 `dsh web` 起来的实例也在这里：每条 = 档案名 `.mono` + 「端口 N」（心跳没端口就省略）+ 来源标签
+  （`当前实例` / `本插件启动` / `其他实例`）+ `打开`（`Button href` 新窗口，**只有本插件启动的才有带 token 的 URL**）
++ `停止`（**当前实例禁用**：停自己会死在响应途中，tooltip 指向「关窗口」）；没有实例时一行 `.hint` 说明
+  「点档案行的启动会另起一个独立实例」）；**没有实例 = 空态提示，绝不显示悬空的「下次启动」标记**
+  （2026-09 移除：DSH 根本没有「默认 profile」状态，那个标记只会让用户以为切换成功了）；
+  卡下是**启动/停止的反馈横幅**：非 web 形态被点「启动」→ `Banner kind="warn"` + 等宽终端命令
+  `dsh --profile <name>` + 复制（**不静默失败**：发按钮却不告诉用户为什么不行最糟）；
+  新实例就绪 → `Banner kind="ok"` + 「打开新实例」+ 复制带 token 的 URL；未就绪 → `Banner kind="warn"`
+  + 逐条告警 + 日志路径（`.kvRow` + `.mono`），绝不谎报成功；
   ②**新建卡**（name `.input` + 模板 `.select` + primary 按钮，非空即内联 `.formError` 校验）；
   ③**列表**（`.listHeaderRow` = 标题 + 统计 + 刷新，下接一行 `.hint` 说明「点击行看完整详情」；
   行 = `.profileRow` 内 `.profileRowHeader`：左为**整块可点信息区** `button.profileRowMain`（两行：
-  `.profileRowTitle` = 档案名 `.profileRowName` + `.badgeRow` 徽章组（当前运行 / 下次启动 / 形态 / 损坏），
+  `.profileRowTitle` = 档案名 `.profileRowName` + `.badgeRow` 徽章组（当前运行 / `:端口 运行中` / 形态 / 损坏），
   `.profileRowMeta` = **计数摘要**「N 个层 · patch M 条 · 依赖 K」+ node_modules + patchReload + 更新时间），
-  右为 `.actionRow[data-inline]` 操作组（设为下次启动 / 重命名 / danger 删除）。
+  右为 `.actionRow[data-inline]` 操作组（**启动 / 停止 / 当前运行** 三态之一 / 复制 / 重命名 / danger 删除）；
+  **同一个位置按运行状态换形态**（判据 `profileRowAction`，UI 不得各写一份）：该档案没有实例 → `启动`
+  （primary，唯一真正生效的切换动作，见 README「档案」节的根因说明）；有实例在跑且**不是自己** → `停止`
+  （ghost，先 `ConfirmDialog`：本插件启动的说「会中断那个实例里的会话」，别的实例/手动启动的说「停止会关闭那个实例」）；
+  **就是当前这个实例** → `当前运行`（禁用，tooltip 指向关窗口）——**绝不给第二次「启动」**（同名多开是用户报过的 bug）；
+  **进行中态是页面级状态**（`launching/stopping/creating/renaming/deleting` 住在 run-store 的档案切片里，见 `AGENTS.md` 状态管理）：
+  按钮就地换成 `Spinner`（`启动中…` / `停止中…` / `创建中…`），同一时刻其余启动/停止按钮一律 `disabled`；
+  **切页签（组件卸载重挂）不丢**（模块级单例 + 订阅），**刷新不恢复**（发起请求的页面已随刷新销毁——重放一个等不到回执的转圈只会骗人）；
+  启动回执横幅（带认证 URL）同理只在内存，须由用户点「关闭」收起；
+  **复制档案**（行内 `复制`，源档案在跑也能复制）→ `ConfirmDialog`：副本名 `.input`（预填 `suggestCopyName` =
+  `<name>-copy`，被占用顺延 `-copy-2`…；超长只截前缀，免得一打开就吃 tooLong）+ 源档案有 node_modules 时给
+  `Checkbox`「同时复制 node_modules」（默认勾选；`.hint` 如实写代价：与源档案同体积、实测 285 MB ≈ 30 秒；
+  不勾选则只搬清单与 patch、秒级完成）；回执走 `Banner`：无告警 `ok`，缺依赖 `warn` + 安装命令
+  `dsh plugin --profile <副本> install` + 复制按钮（**副本不能启动必须当场说清**，不静默成功）；
   **行内绝不铺开包名清单**：web 档案 13 个 bundle 名的实测回归会把元信息挤成窄列；
   完整清单只在详情弹窗展开（`profileRowFacts` 只给计数）。
   ④**详情弹窗**（`.detailLines` 逐行列 bundle 层（带序号 = patch 应用顺序）与依赖（按包名排序），
@@ -656,4 +828,24 @@ flex-direction:column }` 让内部 input 拉满。市场筛选用 `.marketFilter
 7. 全同徽章列（同一状态重复 n 次）——降级为状态点。
 8. 同屏术语漂移（同一概念多个名字）。
 9. 手写文本符号图标（▣⇥⇤⟳◷⭳⌕✕⧉→ 等）——统一用 `common/Icon.tsx`（lucide-react）。
+   **已有防线**：`src/client/icon-layer-guard.test.ts` 扫全部 UI 源码的**字符串字面量**（注释与测试夹具除外），
+   发现形状符号即失败 —— 这条规则此前只是散文，`RestorePlanView` 的 `▸/▾` 因此长期没被发现。
 10. 新建弹窗用手写 `dialogMask+dialogCard` 而无 focus trap——统一用 `common/Modal.tsx`（Radix Dialog）。
+11. 加载中的按钮**只把文案换掉（没有加载图标）**——进行中态必须给出可见的加载图标，
+    新调用点直接传 `Button loading`（原语自动渲染图标 + 禁用 + aria-busy）。
+    自造状态会让「有没有图标」「按钮多宽」随调用点漂移（用户实测：同一排按钮有的转圈有的不转）。
+12. 用形变/动画**装饰静态图标**，或把形变铺到导航与语义图标上——形变是「状态确实变化」的可见化
+    手段，仅限 `ExpandChevron`（折叠展开/收起）。新调用点**必须显式传 `reducedMotion="user"`**
+    （morphicons 缺省 `"never"`，会无视系统减弱动效设置）。
+13. **给没有状态切换的静态图标套 Morphicons**（或为「以后可能要形变」预先登记数据）——形变的收益只在
+    「同一个 DOM 节点换了图标」时兑现；静态图标套形变 = 多打一份 vanilla `lucide` 数据却永远不触发，
+    是纯体积亏损。判据见 §6。
+14. 骨架与转圈用反：用骨架替换**按钮内联 / 遮罩**里的进行中反馈（那里没有布局轮廓可给），
+    或给整块首屏加载只留一个居中转圈（用户先看到一个空页面再整页跳变）。另外骨架**不得**
+    只给色块不留文案 —— `role="status"` 之外必须有可见 caption。判据见 §6 的 `Skeleton` 条。
+15. 给「视图级切换」加动画却用 key 重建了**需要保状态**的容器（把带 `useState` 的向导主体、
+    带进行中态的卡片塞进 key 变化的包装层）—— key 变化会卸载重挂整棵子树，本地态归零
+    （与 AGENTS.md「进行中操作也算状态」是同一个坑）。判据：只对**分支渲染不同组件**的视图用
+    `ViewSwitch`；容器内部有要保留的状态时改用 `Collapse`（不重建，只改高度）。
+    `Collapse` 侧的同款红线：**不得**为省 DOM 在收起时卸载内容 —— 那条路只能得到展开侧动画
+    （被卸载的子树没有高度可插值，收起必然瞬塌）。

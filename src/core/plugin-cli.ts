@@ -18,9 +18,10 @@
 import { spawn } from 'node:child_process'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { readFileSync, rmSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 
 import { atomicWriteFileSync } from '../utils/atomic-write.ts'
+import { isRescueActiveSync } from './boot-rescue.ts'
 import type { PluginInfo } from './types.ts'
 
 /* ------------------------------------------------------------ profile 文件 */
@@ -139,6 +140,13 @@ export function hasDshBundlePatch(pkgDir: string): boolean {
  * 仅在确有变化时写回 package.json。返回是否写回。
  */
 export function reconcileBundles(profileDir: string): boolean {
+  // 救援模式停手（硬约束，真机实测的失效点）：救援把 dsh.profile.bundles 收窄为
+  // 「DSH 核心 + 本插件」，而本函数的第一条规则正是「把声明 dsh.bundle.patch 的依赖加回
+  // bundles」—— 二者直接冲突。救援期间只要**读一次**插件清单（导出预览、自动快照的 plugins
+  // 分区、插件页都会经 listInstalledPlugins 走这里），刚收窄的 bundles 就会被原样加回
+  // （实测写入后约 1.5s），用户重启 DSH 后插件全部照常挂载 = 救援名存实亡。
+  // 救援是操作者的显式决定：这段时间 bundle 清单归它所有，reconcile 一律不写盘。
+  if (isRescueActiveForProfileDir(profileDir)) return false
   const manifest = readProfileManifest(profileDir)
   if (manifest === null) return false
   const dependencies = Object.keys(manifest.dependencies ?? {})
@@ -170,6 +178,17 @@ export function reconcileBundles(profileDir: string): boolean {
   }
   writeProfileManifest(profileDir, manifest)
   return true
+}
+
+/**
+ * profileDir（`<home>/profiles/<name>`）形状 → 救援状态探测；形状不符时保守返回 false
+ * （宁可不拦，也不要把别人的目录误判成救援态——非该形状的调用方本来也不是救援场景）。
+ */
+function isRescueActiveForProfileDir(profileDir: string): boolean {
+  const profile = basename(profileDir)
+  const profilesRoot = dirname(profileDir)
+  if (basename(profilesRoot) !== 'profiles') return false
+  return isRescueActiveSync({ homeDir: dirname(profilesRoot), profile })
 }
 
 /**

@@ -8,6 +8,7 @@ import type { MyItemEntry } from './my-configs-api.ts'
 import type { ItemStatusBadge, MyInstallState, MyItemView, MyItemsSummary } from './my-configs-view.ts'
 import { redact } from '../../security/redaction.ts'
 import { Badge, Banner, Button, Card, Empty, Spinner } from '../common/ui.tsx'
+import { SkeletonList } from '../common/Skeleton.tsx'
 import css from '../config-manager.module.css'
 
 /** 列表行（容器用 itemStatusFromHost + toMyItemView 装配） */
@@ -69,7 +70,7 @@ export function MyConfigsList({
         </Button>
       </div>
       {myItemsError !== null && <Banner kind="error">{redact(myItemsError)}</Banner>}
-      {listLoading && myItems === null && <div className={css.statRow}><Spinner label={t('myconfigs.list.loading')} /></div>}
+      {listLoading && myItems === null && <SkeletonList label={t('myconfigs.list.loading')} />}
       {!listLoading && myItems !== null && myItems.length === 0 && <Empty>{t('myconfigs.list.empty')}</Empty>}
       {!listLoading && itemViews.length > 0 && (
         <div className={css.snapshotList}>

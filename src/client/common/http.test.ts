@@ -174,7 +174,7 @@ test('http-12 timeoutMessage：缺省走语境中立的通用超时键（{second
   assert.equal(timeoutMessage(zhUiT, 5 * 60 * 1000, 'error.syncTimeout'), zhUiT('error.syncTimeout', { minutes: '5' }));
   assert.equal(timeoutMessage(zhUiT, 5 * 60 * 1000, 'error.exportTimeout'), zhUiT('error.exportTimeout', { minutes: '5' }));
   assert.equal(timeoutMessage(zhUiT, 5 * 60 * 1000, 'error.recoveryTimeout'), zhUiT('error.recoveryTimeout', { minutes: '5' }));
-  assert.equal(timeoutMessage(zhUiT, 5 * 60 * 1000, 'error.lifecycleTimeout'), zhUiT('error.lifecycleTimeout', { minutes: '5' }));
+
 });
 
 /* ---------------------------------------------------------------- openStream 流式 */

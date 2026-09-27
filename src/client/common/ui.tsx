@@ -23,7 +23,7 @@ export interface ButtonProps {
   /** 尺寸：sm = 表格行内/密集工具栏（24px）；md = 常规（28px，缺省） */
   size?: ButtonSize
   disabled?: boolean
-  /** 进行中态：自动 disabled + aria-busy（children 由调用方渲染 Spinner 保持现状） */
+  /** 进行中态：自动 disabled + aria-busy + **自动前置加载图标**（children 只给普通文案） */
   loading?: boolean
   onClick?: () => void
   children: ReactNode
@@ -46,6 +46,15 @@ export function Button({ variant = 'ghost', size, disabled, loading = false, onC
         : css.ghostButton
   const effectiveDisabled = disabled === true || loading
   const sizeProps = size === 'sm' ? { 'data-size': 'sm' as const } : {}
+  /**
+   * 进行中态一律**自动**带加载图标（调用方只管文案，不必手写 <Spinner/>）。
+   *
+   * 为什么由原语负责：此前「有没有转圈」取决于每个调用点是否记得写 <Spinner/>，
+   * 漏写的地方（任务中心的终止/确认、灾备页的撤销/重做…）只把文案换掉却没有任何进行中
+   * 反馈，用户看到的是「按钮状态怪怪的」。图标走 Spinner 的 currentColor —— 主色按钮上
+   * 的蓝色转圈压在蓝色底上等于看不见（本仓库实测过）。
+   */
+  const content = loading ? (<><Spinner />{children}</>) : children
   if (href !== undefined) {
     return (
       <a
@@ -60,7 +69,7 @@ export function Button({ variant = 'ghost', size, disabled, loading = false, onC
         style={{ textDecoration: 'none' }}
         {...sizeProps}
       >
-        {children}
+        {content}
       </a>
     )
   }
@@ -74,7 +83,7 @@ export function Button({ variant = 'ghost', size, disabled, loading = false, onC
       onClick={onClick}
       {...sizeProps}
     >
-      {children}
+      {content}
     </button>
   )
 }
@@ -185,11 +194,45 @@ export interface SpinnerProps {
   label?: string
 }
 
-/** 加载指示（旋转环 + 可选文案） */
+/**
+ * 加载指示（旋转环 + 可选文案）。
+ *
+ * 为什么用 **SVG 圆**而不是「border + border-radius: 50%」的经典 CSS 转圈
+ * ---------------------------------------------------------------
+ * 2026-09 用户反馈「加载的 icon 不是圆形」。实测（对截图做像素几何测量）：形状**本来就是**
+ * 近圆（外缘 20×19），真正的问题是观感 —— 13px 的盒子上压 2px 边框（占直径 15%），
+ * 且只有 `border-top` 是实色、其余三边仅 25% 不透明度，栅格化后视觉上只剩左上一条亮弧，
+ * 「圆」读不出来，看着像圆角方块的一个角。
+ * 改用两个 `<circle>`：几何由路径保证（与分辨率/DPR 无关），描边细一档（≈1.63px），
+ * 底环有足够对比度 → 形状一眼可辨。
+ *
+ * 颜色仍走 `currentColor`（与 lucide 图标同一约定），在主色/危险/幽灵任意底色上都取该处
+ * 语义前景色；此前写死 business-primary 蓝会在**主色按钮**（蓝底）上变成蓝画蓝、转圈完全看不见。
+ * 动画仍是同一个 `@keyframes spin`，且**刻意不在 prefers-reduced-motion 下停掉**（CSS §15）：
+ * 它承载「正在进行」这个状态本身，停掉会让用户以为界面卡死。
+ */
+/** 圆的半径（24 网格内）；圆心固定 12,12。 */
+const SPINNER_R = 9
+/** 可见扫掠段占整圈的比例（与旧实现的 border-top = 1/4 圈一致）。 */
+const SPINNER_ARC_RATIO = 0.25
+/** 弧长按 2πr 现算 —— 改 `SPINNER_R` 时 `stroke-dasharray` 自动跟随，
+ *  不会像手写常量那样与半径悄悄漂移（此前是 CSS 里手写的 `14.14 42.41`）。 */
+const SPINNER_ARC_LENGTH = 2 * Math.PI * SPINNER_R * SPINNER_ARC_RATIO
+const SPINNER_GAP_LENGTH = 2 * Math.PI * SPINNER_R - SPINNER_ARC_LENGTH
+
 export function Spinner({ label }: SpinnerProps) {
   return (
     <span className={css.spinnerWrap}>
-      <span className={css.spinner} aria-hidden="true" />
+      <svg className={css.spinner} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <circle className={css.spinnerTrack} cx="12" cy="12" r={SPINNER_R} />
+        <circle
+          className={css.spinnerArc}
+          cx="12"
+          cy="12"
+          r={SPINNER_R}
+          strokeDasharray={SPINNER_ARC_LENGTH.toFixed(2) + ' ' + SPINNER_GAP_LENGTH.toFixed(2)}
+        />
+      </svg>
       {label !== undefined && <span className={css.spinnerLabel}>{label}</span>}
     </span>
   )

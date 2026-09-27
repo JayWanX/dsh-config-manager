@@ -10,7 +10,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { ABOUT_LINKS, ABOUT_META, aboutStatusRows, deriveAboutLinks } from './about-view.ts'
+import { ABOUT_LINKS, ABOUT_META, aboutStatusRows, buildFeedbackSnippet, deriveAboutLinks } from './about-view.ts'
 
 /* ---------------------------------------------------------------- 链接派生 */
 
@@ -19,7 +19,7 @@ test('about-view: deriveAboutLinks 派生 star/docs/issues 正确后缀', () => 
   assert.equal(links.starUrl, 'https://github.com/xiajiajun516/dsh-config-manager')
   assert.equal(links.repoUrl, 'https://github.com/xiajiajun516/dsh-config-manager')
   assert.equal(links.docsUrl, 'https://github.com/xiajiajun516/dsh-config-manager#readme')
-  assert.equal(links.issuesUrl, 'https://github.com/xiajiajun516/dsh-config-manager/issues')
+  assert.equal(links.issuesUrl, 'https://github.com/xiajiajun516/dsh-config-manager/issues/new/choose')
 })
 
 test('about-view: deriveAboutLinks 归一化尾斜杠（单个 / 多个）', () => {
@@ -27,19 +27,19 @@ test('about-view: deriveAboutLinks 归一化尾斜杠（单个 / 多个）', () 
   assert.equal(single.repoUrl, 'https://github.com/xiajiajun516/dsh-config-manager')
   assert.equal(single.starUrl, 'https://github.com/xiajiajun516/dsh-config-manager')
   assert.equal(single.docsUrl, 'https://github.com/xiajiajun516/dsh-config-manager#readme')
-  assert.equal(single.issuesUrl, 'https://github.com/xiajiajun516/dsh-config-manager/issues')
+  assert.equal(single.issuesUrl, 'https://github.com/xiajiajun516/dsh-config-manager/issues/new/choose')
 
   const many = deriveAboutLinks('https://github.com/xiajiajun516/dsh-config-manager///')
   assert.equal(many.repoUrl, 'https://github.com/xiajiajun516/dsh-config-manager')
   assert.equal(many.docsUrl, 'https://github.com/xiajiajun516/dsh-config-manager#readme')
-  assert.equal(many.issuesUrl, 'https://github.com/xiajiajun516/dsh-config-manager/issues')
+  assert.equal(many.issuesUrl, 'https://github.com/xiajiajun516/dsh-config-manager/issues/new/choose')
 })
 
 test('about-view: deriveAboutLinks 首尾空白裁剪且不破坏路径型仓库', () => {
   const links = deriveAboutLinks('  https://example.com/org/repo/  ')
   assert.equal(links.repoUrl, 'https://example.com/org/repo')
   assert.equal(links.docsUrl, 'https://example.com/org/repo#readme')
-  assert.equal(links.issuesUrl, 'https://example.com/org/repo/issues')
+  assert.equal(links.issuesUrl, 'https://example.com/org/repo/issues/new/choose')
 })
 
 test('about-view: deriveAboutLinks 与 ABOUT_META.repoUrl 派生常量一致', () => {
@@ -87,6 +87,53 @@ test('about-view: ABOUT_LINKS 各字段与派生规则一致', () => {
   assert.equal(ABOUT_LINKS.starUrl, ABOUT_META.repoUrl)
   assert.equal(ABOUT_LINKS.repoUrl, ABOUT_META.repoUrl)
   assert.equal(ABOUT_LINKS.docsUrl, `${ABOUT_META.repoUrl}#readme`)
-  assert.equal(ABOUT_LINKS.issuesUrl, `${ABOUT_META.repoUrl}/issues`)
+  assert.equal(ABOUT_LINKS.issuesUrl, `${ABOUT_META.repoUrl}/issues/new/choose`)
   assert.equal(ABOUT_LINKS.releasesUrl, `${ABOUT_META.repoUrl}/releases`)
+})
+
+/* ---------------------------------------------------------------- 反馈片段（提 issue 时一键复制） */
+
+test('about-view: buildFeedbackSnippet 无诊断位时只输出环境三行', () => {
+  const text = buildFeedbackSnippet(aboutStatusRows({
+    pluginVersion: '0.1.64',
+    dshVersion: '1.2.3',
+    platform: 'win32',
+    arch: 'x64',
+  }))
+  assert.equal(
+    text,
+    [
+      '### 环境 / Environment',
+      '- 插件版本 / Plugin: 0.1.64',
+      '- DSH 版本 / DSH: 1.2.3',
+      '- 平台 / Platform: win32 · x64',
+    ].join('\n'),
+  )
+})
+
+test('about-view: buildFeedbackSnippet 带诊断位时追加 profile 与插件清单目录', () => {
+  const rows = aboutStatusRows({
+    pluginVersion: '0.1.64',
+    dshVersion: '1.2.3',
+    platform: 'win32',
+    arch: 'x64',
+    homeDir: 'C:/Users/me/.dsh',
+    profile: 'web',
+    installedPluginCount: 7,
+  })
+  const text = buildFeedbackSnippet(rows)
+  assert.ok(text.includes('- profile: web'))
+  assert.ok(text.includes('- 插件清单目录 / Plugin dir: C:/Users/me/.dsh/profiles/web'))
+  assert.equal(text.split('\n').length, 6)
+})
+
+test('about-view: buildFeedbackSnippet 版本号为空时回落 unknown（不产出半截标签）', () => {
+  const text = buildFeedbackSnippet(aboutStatusRows({
+    pluginVersion: '',
+    dshVersion: '',
+    platform: 'win32',
+    arch: 'x64',
+  }))
+  assert.ok(text.includes('- 插件版本 / Plugin: unknown'))
+  assert.ok(text.includes('- DSH 版本 / DSH: unknown'))
 })

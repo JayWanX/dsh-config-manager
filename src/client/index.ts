@@ -32,7 +32,7 @@ import { en as marketEn, zh as marketZh, type MarketKey } from './market/market-
 import { RecoveryApi } from './recovery/recovery-api.ts'
 import { en as recoveryEn, zh as recoveryZh, type RecoveryKey } from './recovery/recovery-locales.ts'
 import { HistoryApi } from './history/history-api.ts'
-import { LifecycleApi } from './lifecycle/lifecycle-api.ts'
+import { IncidentApi } from './recovery/incident-api.ts'
 import { en as historyEn, zh as historyZh, type HistoryKey } from './history/history-locales.ts'
 
 /** 本插件拥有的 locale namespace。 */
@@ -102,8 +102,8 @@ export function apply(ctx: ClientContext): void {
   const recoveryApi = new RecoveryApi(uiT)
   const historyT = ctx.locale.bind(HISTORY_NS)
   const historyApi = new HistoryApi(uiT)
-  // Phase 1 灾备 API 复用主字典（config-manager），不新增 locale namespace。
-  const lifecycleApi = new LifecycleApi(uiT)
+  // 事故恢复（崩溃归因 / 救援模式）：沿用主字典的错误文案，不新增 locale namespace。
+  const incidentApi = new IncidentApi(uiT)
 
   // 单一 settings.section：备份与迁移页（内部 Export/Import/Snapshots/Sync/Market/About 六 tab）。
   // 远程同步、配置市场与关于页不注册独立设置页 —— 并入主 section 的 inject 面
@@ -115,6 +115,6 @@ export function apply(ctx: ClientContext): void {
     order: 60,
     label: () => t('section.label'),
     locale: NS,
-    inject: () => ({ api, syncApi, syncT, marketApi, marketT, myConfigsApi, recoveryApi, recoveryT, historyApi, historyT, lifecycleApi }),
+    inject: () => ({ api, syncApi, syncT, marketApi, marketT, myConfigsApi, recoveryApi, recoveryT, historyApi, historyT, incidentApi }),
   }, ConfigManagerSection))
 }

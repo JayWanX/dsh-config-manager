@@ -14,6 +14,8 @@ import { redact } from '../../security/redaction.ts'
 import { HistoryApi, type HistoryListResult, type HistoryExportFormat } from './history-api.ts'
 import type { TranslateNS } from '../client-types.ts'
 import { Badge, Banner, Button, Card, Empty, SectionTitle } from '../common/ui.tsx'
+import { SkeletonTable } from '../common/Skeleton.tsx'
+import { Select } from '../common/Select.tsx'
 import { ErrorBanner } from '../common/ErrorBanner.tsx'
 import { toast } from '../common/toast-store.ts'
 import {
@@ -90,7 +92,7 @@ export function HistoryPanel({ historyApi, t }: HistoryPanelProps) {
     return (
       <div className={css.viewBody}>
         <SectionTitle title={t('history.title')} subtitle={t('history.subtitle')} />
-        <div className={css.statRow}><span className={css.hint}>{t('history.loading')}</span></div>
+        <SkeletonTable label={t('history.loading')} />
       </div>
     )
   }
@@ -145,36 +147,33 @@ export function HistoryPanel({ historyApi, t }: HistoryPanelProps) {
       <Card>
         <div className={css.groupLabel}>{t('history.filter.title')}</div>
         <div className={css.actionRow}>
-          <select
-            className={css.select}
+          <Select
             value={state.filter.kind ?? ''}
-            onChange={(e) => setFilter({ kind: e.target.value === '' ? undefined : e.target.value as never })}
-          >
-            <option value="">{t('history.filter.kind')}: 全部</option>
-            {kindOptions.map((k) => (
-              <option key={k} value={k}>{t(kindLabelKey(k))}</option>
-            ))}
-          </select>
-          <select
-            className={css.select}
+            onChange={(next) => setFilter({ kind: next === '' ? undefined : next as never })}
+            /* 「全部」复用已有字典键（此前是硬编码中文，英文界面下也显示中文） */
+            options={[
+              { value: '', label: `${t('history.filter.kind')}: ${t('history.filter.recent.all')}` },
+              ...kindOptions.map((k) => ({ value: k, label: t(kindLabelKey(k)) })),
+            ]}
+          />
+          <Select
             value={state.filter.result ?? ''}
-            onChange={(e) => setFilter({ result: e.target.value === '' ? undefined : e.target.value as never })}
-          >
-            <option value="">{t('history.filter.result')}: 全部</option>
-            {resultOptions.map((r) => (
-              <option key={r} value={r}>{t(`history.result.${r}`)}</option>
-            ))}
-          </select>
-          <select
-            className={css.select}
-            value={state.filter.recent ?? 0}
-            onChange={(e) => setFilter({ recent: Number(e.target.value) })}
-          >
-            {/* 与前两个下拉同构（「<维度>: 全部」），否则窄抽屉里三个「全部」含义不明 */}
-            <option value="0">{t('history.filter.recent')}: {t('history.filter.recent.all')}</option>
-            <option value="50">{t('history.filter.recent.50')}</option>
-            <option value="200">{t('history.filter.recent.200')}</option>
-          </select>
+            onChange={(next) => setFilter({ result: next === '' ? undefined : next as never })}
+            options={[
+              { value: '', label: `${t('history.filter.result')}: ${t('history.filter.recent.all')}` },
+              ...resultOptions.map((r) => ({ value: r, label: t(`history.result.${r}`) })),
+            ]}
+          />
+          <Select
+            value={String(state.filter.recent ?? 0)}
+            onChange={(next) => setFilter({ recent: Number(next) })}
+            /* 与前两个下拉同构（「<维度>: 全部」），否则窄抽屉里三个「全部」含义不明 */
+            options={[
+              { value: '0', label: `${t('history.filter.recent')}: ${t('history.filter.recent.all')}` },
+              { value: '50', label: t('history.filter.recent.50') },
+              { value: '200', label: t('history.filter.recent.200') },
+            ]}
+          />
           <input
             className={css.input}
             type="search"
@@ -186,12 +185,14 @@ export function HistoryPanel({ historyApi, t }: HistoryPanelProps) {
           <Button
             onClick={() => void handleExport('json')}
             disabled={state.exporting !== null || summary.total === 0}
+            loading={state.exporting === 'json'}
           >
             {state.exporting === 'json' ? t('history.exporting') : t('history.export.json')}
           </Button>
           <Button
             onClick={() => void handleExport('markdown')}
             disabled={state.exporting !== null || summary.total === 0}
+            loading={state.exporting === 'markdown'}
           >
             {state.exporting === 'markdown' ? t('history.exporting') : t('history.export.markdown')}
           </Button>

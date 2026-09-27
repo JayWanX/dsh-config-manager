@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import {
+  CONFIG_SNAPSHOT_SECTION_IDS,
   DEFAULT_INCLUDED_SECTION_IDS,
   OPT_IN_SYNC_SECTION_IDS,
   PORTABLE_SECTION_IDS,
@@ -252,6 +253,41 @@ test('registry: riskTier 是 SectionMeta 的必填字段（类型层强制，缺
     optInSync: false,
     defaultIncluded: true,
     riskTier: 'low',
+    configSnapshot: true,
   };
   assert.equal(probe.riskTier, 'low');
+});
+
+/**
+ * 分区「配置类 / 内容数据类」口径（`configSnapshot`）。
+ *
+ * 口径当前**无消费者**（灾备快照线已收敛下线），但仍是分区的语义声明，且历史上出过事故：
+ * v0.1.59 把整个灾备子系统下线，根因就是采集走**全部 adapter**，其中 sessions（历史会话，
+ * 真机实测 476 MB）必然超出 64 MiB 快照上限 —— 每一次自动快照都失败，撤销/重做失去可信基线。
+ * 因此这组声明继续逐分区守：内容数据类分区不得被当成配置状态。
+ */
+test('registry: configSnapshot 逐分区表态，且 sessions / secrets 不进配置状态向量', () => {
+  for (const id of SECTION_IDS) {
+    assert.equal(
+      typeof SECTION_REGISTRY[id].configSnapshot, 'boolean',
+      `${id} 的 configSnapshot 必须是显式布尔（类型层必填，值域在运行时守）`,
+    );
+  }
+  // 内容数据类分区：历史会话（真机 476 MB > 64 MiB 上限）永不进状态向量
+  assert.equal(SECTION_REGISTRY.sessions.configSnapshot, false);
+  assert.ok(!CONFIG_SNAPSHOT_SECTION_IDS.includes('sessions'), 'sessions 不得进灾备采集口径');
+  // secrets 无 adapter（凭据值走独立加密容器），声明为 true 会是误导
+  assert.equal(SECTION_REGISTRY.secrets.configSnapshot, false);
+  // 配置类分区必须在口径内，否则撤销覆盖不到它们
+  const mustInclude = [
+    'settings', 'ui', 'providers', 'plugins', 'mcp', 'prompts', 'skills',
+    'agentPresets', 'agentInstructions', 'workspaces', 'pluginFiles', 'credentialsStatus', 'self',
+  ] as const;
+  for (const id of mustInclude) {
+    assert.ok(CONFIG_SNAPSHOT_SECTION_IDS.includes(id), `${id} 应进灾备采集口径`);
+  }
+  assert.equal(
+    CONFIG_SNAPSHOT_SECTION_IDS.length, mustInclude.length,
+    '口径成员 == 逐项列出的配置类分区（多一个都会静默扩大采集面）',
+  );
 });

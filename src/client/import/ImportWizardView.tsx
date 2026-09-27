@@ -380,6 +380,7 @@ function ImportWizardBody({ api, t }: ImportWizardViewProps) {
     selectedPlan,
     selectionNodes,
     selectionValue,
+    applicableIssues,
     excludedCount,
     nothingSelected,
     applyImportSelection,
@@ -457,7 +458,15 @@ function ImportWizardBody({ api, t }: ImportWizardViewProps) {
   }
 
   if (step === 'preview' && phase === 'preview') {
-    const summary: ImportPreviewSummary = wizard.previewSummary()
+    /**
+     * 摘要基于**裁剪后的子计划**（用户本次真的会导入的项）：徽章必须随勾选实时变化，
+     * 否则「将变更 N 项」会与选择器 footer 的合计自相矛盾。路径数改用与 path-mapping
+     * 阶段同一份数据（applicableIssues），不是整包的探测结果。
+     */
+    const summary: ImportPreviewSummary = {
+      ...wizard.previewSummary(selectedPlan),
+      pathMappingsNeeded: applicableIssues.length,
+    }
     /**
      * 第 1 页：迁移前咨询（只读）—— 用户要求咨询**单独成页**，看完结论点「下一步」
      * 才进入「选择要导入的内容」。因此这里把咨询卡从内容选择页挪出来。
@@ -541,7 +550,7 @@ function ImportWizardBody({ api, t }: ImportWizardViewProps) {
   if (phase === 'path-mapping' && step === 'preview') {
     return (
       <PathMappingStage
-        issues={imp.analysis?.pathIssues ?? []}
+        issues={applicableIssues}
         mappings={pathMappings}
         onMappingsChange={(mappings) => { runStore.patch({ import: { pathMappings: mappings } }) }}
         onBack={() => { setPhase('preview') }}
@@ -615,11 +624,13 @@ function ImportWizardBody({ api, t }: ImportWizardViewProps) {
   if (step === 'result') {
     const result = imp.result
     if (result === null) return null
-    // 重试：只重跑「失败 + 用户跳过」的项（ReportView 内联报告已有明细）
+    // 重试：只重跑「失败 + 用户跳过」的项（ReportView 内联报告已有明细）。
+    // plan 传**裁剪后的子计划**：收尾清单（需重启 / 需补录）只列本次真的导入的项 ——
+    // 整份计划会让用户看到自己取消掉的分区。
     return (
       <ResultStep
         result={result}
-        plan={imp.plan}
+        plan={selectedPlan}
         retryable={wizard.retryableCount()}
         running={running}
         excludedCount={excludedCount}

@@ -26,6 +26,8 @@ import type { ConfigManagerApi } from '../api.ts'
 import type { ImportResult, ItemResolution } from '../../core/types.ts'
 import type { SectionId } from '../../schema/types.ts'
 import { Badge, Banner, Button, Card, Empty, SectionTitle, Spinner } from '../common/ui.tsx'
+import { Skeleton, SkeletonList } from '../common/Skeleton.tsx'
+import { Select } from '../common/Select.tsx'
 import { effectiveImportSelection, type Selection } from '../../ui/selection-model.ts'
 import type { ImportSelectionState } from '../../ui/selection-model.ts'
 import { MarketImportReview } from './MarketImportReview.tsx'
@@ -449,7 +451,7 @@ export function MarketPanel({ api, myConfigsApi, importApi, syncApi, t, cmT }: M
               下方 Spinner 以 state.error 为「失败标记」守卫：下载失败时 detail 恒为 null，
               若不守卫会一直旋转，让用户误以为仍在加载（与 MyConfigsView R-17 同款处理）。 */}
           {state.detail === null && state.error === null && (
-            <div className={css.statRow}><Spinner label={t('common.loading')} /></div>
+            <Skeleton count={4} label={t('common.loading')} />
           )}
           {state.detail === null && state.error !== null && (
             <div className={css.statRow}><span className={css.hint}>{t('detail.failed')}</span></div>
@@ -551,46 +553,46 @@ export function MarketPanel({ api, myConfigsApi, importApi, syncApi, t, cmT }: M
                 placeholder={t('list.searchPlaceholder')}
                 onChange={(e: ChangeEvent<HTMLInputElement>) => { patch({ search: e.target.value }) }}
               />
-              <select
-                className={css.select}
+              <Select
                 value={state.category}
-                onChange={(e: ChangeEvent<HTMLSelectElement>) => { patch({ category: e.target.value }) }}
-              >
-                <option value="">{t('list.categoriesAll')}</option>
-                {categories.map((c) => <option key={c} value={c}>{c}</option>)}
-              </select>
+                ariaLabel={t('list.categoriesAll')}
+                onChange={(next) => { patch({ category: next }) }}
+                options={[
+                  { value: '', label: t('list.categoriesAll') },
+                  ...categories.map((c) => ({ value: c, label: c })),
+                ]}
+              />
               {/* P2-⑭：分区筛选（已缓存条目的分区并集；未缓存条目分区未知不参与匹配） */}
-              <select
-                className={css.select}
+              <Select
                 value={state.sectionFilter}
-                onChange={(e: ChangeEvent<HTMLSelectElement>) => { patch({ sectionFilter: e.target.value }) }}
-              >
-                <option value="">{t('list.sectionsAll')}</option>
-                {sectionOptions.map((s) => <option key={s} value={s}>{s}</option>)}
-              </select>
-              <select
-                className={css.select}
+                ariaLabel={t('list.sectionsAll')}
+                onChange={(next) => { patch({ sectionFilter: next }) }}
+                options={[
+                  { value: '', label: t('list.sectionsAll') },
+                  ...sectionOptions.map((s) => ({ value: s, label: s })),
+                ]}
+              />
+              <Select
                 value={state.source}
-                onChange={(e: ChangeEvent<HTMLSelectElement>) => {
-                  patch({ source: e.target.value as 'all' | 'official' | 'personal' })
-                }}
-              >
-                <option value="all">{t('list.sourceAll')}</option>
-                <option value="official">{t('list.sourceOfficial')}</option>
-                <option value="personal">{t('list.sourcePersonal')}</option>
-              </select>
-              <select
-                className={css.select}
+                ariaLabel={t('list.sourceAll')}
+                onChange={(next) => { patch({ source: next as 'all' | 'official' | 'personal' }) }}
+                options={[
+                  { value: 'all', label: t('list.sourceAll') },
+                  { value: 'official', label: t('list.sourceOfficial') },
+                  { value: 'personal', label: t('list.sourcePersonal') },
+                ]}
+              />
+              <Select
                 value={state.sortKey}
-                onChange={(e: ChangeEvent<HTMLSelectElement>) => {
-                  patch({ sortKey: e.target.value as 'default' | 'updatedAt' | 'stars' | 'name' })
-                }}
-              >
-                <option value="default">{t('list.sortDefault')}</option>
-                <option value="updatedAt">{t('list.sortUpdated')}</option>
-                <option value="stars">{t('list.sortStars')}</option>
-                <option value="name">{t('list.sortName')}</option>
-              </select>
+                ariaLabel={t('list.sortDefault')}
+                onChange={(next) => { patch({ sortKey: next as 'default' | 'updatedAt' | 'stars' | 'name' }) }}
+                options={[
+                  { value: 'default', label: t('list.sortDefault') },
+                  { value: 'updatedAt', label: t('list.sortUpdated') },
+                  { value: 'stars', label: t('list.sortStars') },
+                  { value: 'name', label: t('list.sortName') },
+                ]}
+              />
             </div>
             <div className={css.marketFilterMeta}>
               {/* P2-⑭ 提示行（分区筛选生效且存在分区未知条目）：原夹在下拉之间，随网格重构移到计数行 */}
@@ -606,7 +608,7 @@ export function MarketPanel({ api, myConfigsApi, importApi, syncApi, t, cmT }: M
               </Badge>
             </div>
           </>)}
-          {state.browsing && <div className={css.statRow}>{<Spinner label={t('list.loading')} />}</div>}
+          {state.browsing && <SkeletonList label={t('list.loading')} />}
           {!state.browsing && state.loadError === null && state.items.length === 0 && <Empty>{t('list.noItems')}</Empty>}
           {/* 条目卡片列表 */}
           {!state.browsing && state.loadError === null && filtered.length > 0 && (

@@ -25,6 +25,7 @@ import {
   EnvironmentLockIOError,
   EnvironmentLockOwnedByAnotherError,
   EnvironmentLockUnavailableError,
+  createPlatformProcessIdentityProbe,
   runWithMutationLock,
   withMutationLock,
   LOCK_SCHEMA_VERSION,
@@ -1103,5 +1104,107 @@ test('L3-2 release 的 ownership-lost 分支必须 drain 在途 heartbeat 写（
   // 清理占位目录；ownership 刻意保留（ownership-lost 分支不 unlink）
   try { await fs.rmdir(hbPath); } catch { /* 已被写链清理 */ }
   assert.deepEqual(fssync.readdirSync(locksDir), [OWNERSHIP_FILE], '兜底清理后只剩 ownership（ownership-lost 不 unlink）');
+});
+
+/* ------------------------------------------- §11.5 平台进程身份探测（issue #36 的精确判据） */
+
+test('§11.5-p1 win32 identity 探测：解析 Get-Process StartTime ticks（注入 runner，不依赖真实平台）', async () => {
+  const calls: string[] = [];
+  const probe = createPlatformProcessIdentityProbe({
+    platform: 'win32',
+    selfPid: process.pid,
+    runCommand: async (file, args) => { calls.push(`${file} ${args.join(' ')}`); return '133400000000000000\n' },
+  });
+  assert.equal(probe.canGetOsIdentity(), true, 'win32 必须声明 identity 能力（issue #36 的原始缺口）');
+  const a = await probe.probe(process.pid);
+  assert.equal(a.alive, true);
+  assert.equal(a.osProcessStartIdentity, 'win32:133400000000000000');
+  // 自身身份在进程生命周期内不变 → 命中一次即缓存：不得每次 acquire 都 spawn 一次 shell
+  // （known-gaps G-15 记的「代价不可接受」就是指这一点）
+  const b = await probe.probe(process.pid);
+  assert.equal(b.osProcessStartIdentity, 'win32:133400000000000000');
+  assert.equal(calls.length, 1, `自身 pid 的 identity 只查询一次（实际 ${calls.length} 次）`);
+  assert.match(calls[0]!, /Get-Process -Id \d+/);
+});
+
+test('§11.5-p2 identity 查询失败/空输出 → identity=null 且不抛错（退回长过期启发式，绝不推成 UNKNOWN 死路）', async () => {
+  // ① Get-Process 找不到该 pid → 空输出
+  const empty = createPlatformProcessIdentityProbe({
+    platform: 'win32', selfPid: process.pid, runCommand: async () => '  \n',
+  });
+  assert.equal((await empty.probe(process.pid)).osProcessStartIdentity, null, '空输出 → null，绝不冒充身份');
+  // ② 命令被禁用/超时 → 抛错必须被吞成 null：抛错会把分类推成 UNKNOWN_STATE，
+  //    反而让 issue #36 里「长过期可显式回收」这条路径失效（那是比拿不到 identity 更糟的结果）
+  const boom = createPlatformProcessIdentityProbe({
+    platform: 'win32', selfPid: process.pid,
+    runCommand: async () => { throw new Error('powershell 被禁用 / 超时') },
+  });
+  const r = await boom.probe(process.pid);
+  assert.equal(r.alive, true, '存活判定不受 identity 查询失败影响（kill(pid,0) 已确证存在）');
+  assert.equal(r.osProcessStartIdentity, null, '查询失败 → null，且不抛错');
+});
+
+test('§11.5-p3 darwin identity 探测：`ps -o lstart=` 规整；非自身 pid 不做缓存（pid 可能被复用）', async () => {
+  const seen: string[] = [];
+  const probe = createPlatformProcessIdentityProbe({
+    platform: 'darwin',
+    selfPid: process.pid,
+    runCommand: async (file, args) => { seen.push(`${file} ${args.join(' ')}`); return 'Mon Sep 16 12:34:56 2026\n' },
+  });
+  assert.equal(probe.canGetOsIdentity(), true, 'darwin 同样声明能力（ps 是系统自带）');
+  assert.equal((await probe.probe(process.pid)).osProcessStartIdentity, 'posix:Mon Sep 16 12:34:56 2026');
+  assert.match(seen[0]!, /^ps -o lstart= -p \d+$/);
+  // selfPid 换成 1 → 探本进程走「非自身」分支：每次都要重新问（缓存只对自身 pid 成立）
+  const other = createPlatformProcessIdentityProbe({
+    platform: 'darwin', selfPid: 1, runCommand: async () => 'X\n',
+  });
+  assert.equal((await other.probe(process.pid)).osProcessStartIdentity, 'posix:X');
+});
+
+test('§11.5-p4 win32 非 ticks 输出 / 未支持平台：绝不给出「垃圾身份」或凭空身份', async () => {
+  // ① win32 上命令报错文本混进 stdout（诊断信息）→ 必须 null，不能当身份参与比较
+  const garbage = createPlatformProcessIdentityProbe({
+    platform: 'win32', selfPid: process.pid,
+    runCommand: async () => 'Get-Process : Cannot find a process with the process identifier 999999.\n',
+  });
+  assert.equal((await garbage.probe(process.pid)).osProcessStartIdentity, null);
+  // ② 未支持平台（无查询命令）→ canGetOsIdentity()=false 且 identity 恒 null（行为与改造前一致）
+  const unsupported = createPlatformProcessIdentityProbe({
+    platform: 'freebsd' as NodeJS.Platform, selfPid: process.pid, runCommand: async () => 'x',
+  });
+  assert.equal(unsupported.canGetOsIdentity(), false);
+  const u = await unsupported.probe(process.pid);
+  assert.equal(u.alive, true);
+  assert.equal(u.osProcessStartIdentity, null, '无查询命令的平台不得凭空给出身份');
+});
+
+test('§11.5-p5 真实平台集成（真 probe + 真文件）：identity 相符 → LOCKED；PID 复用 → 未达长过期阈值即判 STALE 并可回收', async (t) => {
+  const probe = createPlatformProcessIdentityProbe();
+  const self = await probe.probe(process.pid);
+  if (self.osProcessStartIdentity === null) {
+    t.diagnostic(`本平台（${process.platform}）拿不到自身 OS identity → 跳过精确判定断言（启发式路径由 c11b/c11c 覆盖）`);
+    return;
+  }
+  const locksDir = tmp(t);
+  const clk = makeClock();
+  // ① 记录里的 identity 与本机真实 identity 一致 → 同一个活着的 owner（心跳降级保护）→ LOCKED，不得回收
+  await seedOwnership(locksDir, { instanceId: 'selfalive', pid: process.pid, osIdentity: self.osProcessStartIdentity });
+  await seedHeartbeat(locksDir, 'selfalive', clk.clock() - 2_000);
+  const m1 = lockManager(t, { locksDir, now: clk.clock, probe, staleAfterMs: 1000, longExpiredAfterMs: 60_000 });
+  const s1 = await m1.inspectLockState();
+  assert.equal(s1.state, 'LOCKED', `identity 相符必须判 owner 存活: ${s1.detail}`);
+  assert.equal((await m1.recoverStaleLock()).ok, false, '活着的 owner 不得被回收');
+  await fs.rm(path.join(locksDir, heartbeatFile('selfalive')), { force: true });
+  // ② 记录里的 identity 与真实 identity 不同（同一 pid 已被复用给别的进程）→ **精确**判 STALE，
+  //    且无需等 30 分钟长过期阈值 —— 这正是 issue #36 / G-15 ① 的残余缺口
+  await seedOwnership(locksDir, { instanceId: 'reused', pid: process.pid, osIdentity: `${self.osProcessStartIdentity}-forged` });
+  await seedHeartbeat(locksDir, 'reused', clk.clock() - 2_000);
+  const m2 = lockManager(t, { locksDir, now: clk.clock, probe, staleAfterMs: 1000, longExpiredAfterMs: 60_000 });
+  const s2 = await m2.inspectLockState();
+  assert.equal(s2.state, 'STALE_LOCK_DETECTED', `PID 复用必须被精确识别（不等长过期）: ${s2.detail}`);
+  assert.match(s2.detail ?? '', /identity 与 recorded 不同/);
+  const r = await m2.recoverStaleLock();
+  assert.equal(r.ok, true, `精确判定的残留锁必须可显式回收: ${r.detail}`);
+  assert.deepEqual(fssync.readdirSync(locksDir), [], '回收后目录必须为空（ownership + sidecar 均已清理）');
 });
 

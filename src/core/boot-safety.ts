@@ -7,7 +7,7 @@
  *  - `computeSafeBundles`（./boot-rescue.ts）：救援模式剪 bundle 用的同一函数 ——
  *    profile `dsh.profile.bundles` 里解析不到的包会让 DSH 启动失败，这是「插件装一半」
  *    最典型的坏盘面，也是本审计里**唯一会自动修正**的一项；
- *  - `BOOT_CRITICAL_RELS` / `profileCriticalRels`（./config-lifecycle.ts）：启动关键文件清单。
+ *  - `BOOT_CRITICAL_RELS` / `profileCriticalRels`（./boot-paths.ts）：启动关键文件清单。
  *
  * 纪律（与 boot-rescue 一致）：
  *  - **只做可证明安全的自动修正**（剔除解析不到的 bundle，与救援模式同一判据）；
@@ -20,7 +20,7 @@
  */
 import { RESCUE_KEEP_BUNDLE_PREFIXES, computeSafeBundles } from './boot-rescue.ts';
 import type { BundleResolver } from './boot-rescue.ts';
-import { BOOT_CRITICAL_RELS, profileCriticalRels } from './config-lifecycle.ts';
+import { BOOT_CRITICAL_RELS, profileCriticalRels } from './boot-paths.ts';
 import type { MsgFunc } from './messages.ts';
 import { zhMsg } from './messages.ts';
 

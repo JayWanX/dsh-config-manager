@@ -26,7 +26,10 @@ import type { ConfigManagerApi } from '../api.ts'
 import type { TranslateNS } from '../client-types.ts'
 import type { RecoveryPort } from '../../ui/types.ts'
 import { RecoveryPanel } from '../recovery/RecoveryPanel.tsx'
+import type { IncidentApi } from '../recovery/incident-api.ts'
 import { Badge, Banner, Button, Card, Empty, IconButton, Segmented, Spinner } from '../common/ui.tsx'
+import { SkeletonList } from '../common/Skeleton.tsx'
+import { ViewSwitch } from '../common/Motion.tsx'
 import { toast } from '../common/toast-store.ts'
 import { RefreshIcon, DownloadIcon, ImportIcon, InspectIcon, DeleteIcon, ClockIcon, PencilIcon, MessageIcon } from '../common/Icon.tsx'
 import { ConfirmDialog } from '../common/ConfirmDialog.tsx'
@@ -62,6 +65,8 @@ export interface SnapshotsPanelProps {
   /** 恢复（Phase 5）子视图，透传给 RecoveryPanel */
   recoveryApi: RecoveryPort
   recoveryT: TranslateNS<'config-manager-recovery'>
+  /** 事故恢复（崩溃归因 + 救援模式）API，透传给 RecoveryPanel */
+  incidentApi: IncidentApi
 }
 
 /**
@@ -86,7 +91,7 @@ export const SNAPSHOT_RETENTION_LIMIT = DEFAULT_RETENTION_POLICY.keepLast
 
 
 
-export function SnapshotsPanel({ api, t, recoveryApi, recoveryT }: SnapshotsPanelProps) {
+export function SnapshotsPanel({ api, t, recoveryApi, recoveryT, incidentApi }: SnapshotsPanelProps) {
   const [state, setState] = useState<PanelState>(() => snapshotsPanelStateFromStore(runStore.getSnapshot().snapshots))
   /** 最新 state 镜像（commit/卸载 flush 读取，避免闭包过期值） */
   const stateRef = useRef<PanelState>(state)
@@ -324,9 +329,11 @@ export function SnapshotsPanel({ api, t, recoveryApi, recoveryT }: SnapshotsPane
         />
       </div>
 
+      {/* 四个子视图是不同组件、切换即重挂：包一层让切换有入场过渡（key=subTab） */}
+      <ViewSwitch viewKey={subTab}>
       {subTab === 'recovery' ? (
         /* 事故恢复（Phase 5）：完全复用 RecoveryPanel（自身独立切片 + 确认/执行/验证流程） */
-        <RecoveryPanel recoveryApi={recoveryApi} t={recoveryT} />
+        <RecoveryPanel recoveryApi={recoveryApi} t={recoveryT} incidentApi={incidentApi} />
       ) : subTab === 'files' ? (
         <BackupFilesCard api={api} t={t} refreshTick={backupFilesTick} />
       ) : subTab === 'schedule' ? (
@@ -339,7 +346,7 @@ export function SnapshotsPanel({ api, t, recoveryApi, recoveryT }: SnapshotsPane
         <>
           {/* —— 快照恢复：导入前回滚点列表 → 选择 → dry-run 计划 → 执行 → 报告 —— */}
 
-          {state.status === 'loading' && <Spinner label={t('snapshots.loading')} />}
+          {state.status === 'loading' && <SkeletonList label={t('snapshots.loading')} />}
 
           {state.status === 'error' && (
             <Banner kind="error">
@@ -439,6 +446,7 @@ export function SnapshotsPanel({ api, t, recoveryApi, recoveryT }: SnapshotsPane
               <Button
                 variant="danger"
                 disabled={state.running || !planHasExecutableActions(state.plan)}
+                loading={state.running}
                 onClick={requestExecute}
               >
                 {state.running ? t('snapshots.executing') : t('snapshots.execute')}
@@ -475,6 +483,7 @@ export function SnapshotsPanel({ api, t, recoveryApi, recoveryT }: SnapshotsPane
           />
         </>
       )}
+      </ViewSwitch>
     </div>
   )
 }
@@ -612,7 +621,7 @@ function BackupFilesCard({ api, t, refreshTick }: {
       </div>
       <div className={css.hint} style={{ marginBottom: 8, flex: 'none' }}>{t('backupFiles.hint')}</div>
 
-      {status === 'loading' && <Spinner label={t('backupFiles.loading')} />}
+      {status === 'loading' && <SkeletonList label={t('backupFiles.loading')} />}
 
       {status === 'error' && (
         <Banner kind="error">

@@ -16,7 +16,7 @@
  *        此前写死的注册表锚点已与实测不符、复核后纠正；实测命令见下）：
  *        - `schema/section-registry.ts` 的 `SECTION_REGISTRY: Record<SectionId, SectionMeta>`（报错落在该声明处）——
  *          缺 id → TS2741；该条目需逐项填 displayName / group / payload（zipPath 或 filePrefix）/ dataVersion /
- *          applyOrder / portability / optInSync / defaultIncluded / **riskTier**；
+ *          applyOrder / portability / optInSync / defaultIncluded / **riskTier** / **configSnapshot**；
  *        - `core/backup.ts` 的 `const unhandled: never = target.adapter` 穷尽 switch → TS2322；
  *        - `client/common/section-labels.ts` 的 `SECTION_LABEL_KEY: Record<SectionId, ConfigManagerKey>` i18n 标签 → TS2741；
  *        - `ui/export-flow.ts` 的 `CATEGORY_DESCRIPTIONS: Record<Exclude<SectionId,'secrets'>, string>` → TS2741；
@@ -37,7 +37,7 @@
  *     不 import 任何 node 内置模块 / npm 包 —— 可被 client 侧与 headless 消费（铁律：
  *     client bundle 自包含）。新增 import 前请先确认不破坏该性质；
  *  d. **派生而非复制**：ZIP 内 JSON 路径、文件类分区目录前缀、分区载荷版本、
- *     应用顺序、portability、同步可选分区、默认勾选、**风险分级**全部在本表逐分区声明，
+ *     应用顺序、portability、同步可选分区、默认勾选、**风险分级**、**灾备采集口径**全部在本表逐分区声明，
  *     其余模块取派生视图（`SECTION_IDS` / `SECTION_JSON_PATHS` / `SECTION_FILE_PREFIXES` /
  *     `PORTABLE_SECTION_IDS` / … / sync/risk.ts 的 `SECTION_RISK_TIER`）；
  *     同一事实只允许存在一份字面量（载荷版本收敛为 `SECTION_DATA_VERSION`，
@@ -53,6 +53,7 @@
  *  - 需要文件类目录前缀 → `filePrefixOf(id)`（null = 非文件类）或 `SECTION_FILE_PREFIXES`；
  *  - 需要 portability → `sectionMeta(id).portability`；需要同步可选分区 → `OPT_IN_SYNC_SECTION_IDS`；
  *  - 需要「快速导出默认勾选」→ `DEFAULT_INCLUDED_SECTION_IDS`；
+ *  - 需要灾备（配置状态快照）采集口径 → `CONFIG_SNAPSHOT_SECTION_IDS`；
  *  - 需要风险等级 → `sectionMeta(id).riskTier`（sync 侧经 `riskTierOf(id)`；未注册 → undefined → 待审）；
  *  - 需要校验分区载荷 version → `versions.ts` 的 `isSupportedSectionDataVersion` /
  *    `sectionDataVersionIssue`（唯一校验函数），或直接比对 `sectionMeta(id).dataVersion`；
@@ -138,6 +139,15 @@ export interface SectionMeta {
    * 不存在「默认 low」之类的静默兜底（那会让新分区被自动应用，是安全侧最坏结果）。
    */
   readonly riskTier: SectionRiskTier;
+  /**
+   * 是否进入**配置状态向量**（灾备 / Phase 1 的自动快照与撤销-重做采集口径）。
+   *
+   * false = 该分区的体量由**内容数据**主导（当前仅 sessions，真机实测 476 MB），
+   * 不属于「配置」：采进快照必然撞上 64 MiB 上限，使整条灾备链路持续失败
+   * （v0.1.59 因此把灾备整体下线）。**必填** —— 新增分区必须显式表态，
+   * 与 riskTier 同一纪律（缺项即 tsc 报错，不存在静默默认）。
+   */
+  readonly configSnapshot: boolean;
 }
 
 /** 分区载荷版本：当前 15 个分区统一为 1（唯一字面量；分区可独立升级时只改对应条目的引用） */
@@ -166,6 +176,7 @@ export const SECTION_REGISTRY: Record<SectionId, SectionMeta> = {
     portability: 'portable',
     optInSync: false,
     defaultIncluded: true,
+    configSnapshot: true,
   },
   ui: {
     id: 'ui',
@@ -178,6 +189,7 @@ export const SECTION_REGISTRY: Record<SectionId, SectionMeta> = {
     portability: 'portable',
     optInSync: false,
     defaultIncluded: true,
+    configSnapshot: true,
   },
   providers: {
     id: 'providers',
@@ -190,6 +202,7 @@ export const SECTION_REGISTRY: Record<SectionId, SectionMeta> = {
     portability: 'portable',
     optInSync: false,
     defaultIncluded: true,
+    configSnapshot: true,
   },
   plugins: {
     id: 'plugins',
@@ -205,6 +218,7 @@ export const SECTION_REGISTRY: Record<SectionId, SectionMeta> = {
     portability: 'portable',
     optInSync: false,
     defaultIncluded: true,
+    configSnapshot: true,
   },
   mcp: {
     id: 'mcp',
@@ -217,6 +231,7 @@ export const SECTION_REGISTRY: Record<SectionId, SectionMeta> = {
     portability: 'platformSpecific',
     optInSync: false,
     defaultIncluded: true,
+    configSnapshot: true,
   },
   prompts: {
     id: 'prompts',
@@ -229,6 +244,7 @@ export const SECTION_REGISTRY: Record<SectionId, SectionMeta> = {
     portability: 'portable',
     optInSync: false,
     defaultIncluded: true,
+    configSnapshot: true,
   },
   skills: {
     id: 'skills',
@@ -241,6 +257,7 @@ export const SECTION_REGISTRY: Record<SectionId, SectionMeta> = {
     portability: 'portable',
     optInSync: false,
     defaultIncluded: true,
+    configSnapshot: true,
   },
   agentPresets: {
     id: 'agentPresets',
@@ -253,6 +270,7 @@ export const SECTION_REGISTRY: Record<SectionId, SectionMeta> = {
     portability: 'portable',
     optInSync: false,
     defaultIncluded: true,
+    configSnapshot: true,
   },
   agentInstructions: {
     id: 'agentInstructions',
@@ -265,6 +283,7 @@ export const SECTION_REGISTRY: Record<SectionId, SectionMeta> = {
     portability: 'portable',
     optInSync: false,
     defaultIncluded: true,
+    configSnapshot: true,
   },
   workspaces: {
     id: 'workspaces',
@@ -277,6 +296,7 @@ export const SECTION_REGISTRY: Record<SectionId, SectionMeta> = {
     portability: 'platformSpecific',
     optInSync: false,
     defaultIncluded: true,
+    configSnapshot: true,
   },
   pluginFiles: {
     id: 'pluginFiles',
@@ -289,6 +309,7 @@ export const SECTION_REGISTRY: Record<SectionId, SectionMeta> = {
     portability: 'deviceSpecific',
     optInSync: false,
     defaultIncluded: false,
+    configSnapshot: true,
   },
   credentialsStatus: {
     id: 'credentialsStatus',
@@ -301,6 +322,7 @@ export const SECTION_REGISTRY: Record<SectionId, SectionMeta> = {
     portability: 'deviceSpecific',
     optInSync: false,
     defaultIncluded: true,
+    configSnapshot: true,
   },
   secrets: {
     // 无 adapter、无 ZIP 内分区 JSON：凭据值走独立加密容器（导出侧 .credentials.yaml + secrets.enc）
@@ -314,6 +336,7 @@ export const SECTION_REGISTRY: Record<SectionId, SectionMeta> = {
     portability: 'deviceSpecific',
     optInSync: false,
     defaultIncluded: false,
+    configSnapshot: false,
   },
   sessions: {
     id: 'sessions',
@@ -326,6 +349,7 @@ export const SECTION_REGISTRY: Record<SectionId, SectionMeta> = {
     portability: 'deviceSpecific',
     optInSync: true,
     defaultIncluded: false,
+    configSnapshot: false,
   },
   self: {
     id: 'self',
@@ -338,6 +362,7 @@ export const SECTION_REGISTRY: Record<SectionId, SectionMeta> = {
     portability: 'portable',
     optInSync: false,
     defaultIncluded: true,
+    configSnapshot: true,
   },
 };
 
@@ -420,4 +445,19 @@ export const OPT_IN_SYNC_SECTION_IDS: readonly SectionId[] = SECTION_IDS.filter(
 /** 快速导出默认勾选的分区（deviceSpecific 仍需 UI 就地警示，见 export-flow） */
 export const DEFAULT_INCLUDED_SECTION_IDS: readonly SectionId[] = SECTION_IDS.filter(
   (id) => SECTION_REGISTRY[id].defaultIncluded,
+);
+
+/**
+ * 「配置类分区」的口径（`configSnapshot=true` 的成员）。
+ *
+ * 与导出口径**刻意不同**：导出要的是「这台机器的完整可迁移状态」，而配置状态只是一小块；
+ * 内容数据类分区（sessions，真机 476 MB）属于用户数据，不属于配置状态。
+ *
+ * **当前无消费者**：这组口径原本服务灾备的自动快照 / 撤销-重做，而灾备快照线已按产品定位
+ * 收敛下线（定位 = 迁移 / 同步 / 市场，只保留崩溃归因 + 救援模式）。字段与清单保留为分区的
+ * 语义声明（配置类 vs 内容数据类），未来任何状态类功能可直接复用；新增分区若体量由用户数据
+ * 主导，把它的 `configSnapshot` 置 false。
+ */
+export const CONFIG_SNAPSHOT_SECTION_IDS: readonly SectionId[] = SECTION_IDS.filter(
+  (id) => SECTION_REGISTRY[id].configSnapshot,
 );

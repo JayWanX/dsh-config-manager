@@ -8,6 +8,7 @@ import type { ChangeEvent } from 'react'
 import type { TranslateNS } from '../client-types.ts'
 import type { UiT } from '../../ui/i18n.ts'
 import { Badge, Card } from '../common/ui.tsx'
+import { Select } from '../common/Select.tsx'
 import {
   autosyncIntervalMs, autosyncStatusText, computeAutosyncCountdown, formatIntervalDuration,
 } from './sync-view.ts'
@@ -57,18 +58,13 @@ export function AutosyncCard({ t, uiT, settings, busy, onToggleAutosync, onUpdat
       </label>
       <label className={css.field}>
         <span className={css.fieldLabel}>{t('autosync.interval')}</span>
-        <select
-          className={css.input}
+        <Select
           value={settings.autosyncInterval}
           disabled={busy}
-          onChange={(e: ChangeEvent<HTMLSelectElement>) => {
-            onUpdateInterval(e.target.value as AutosyncInterval)
-          }}
-        >
-          {AUTOSYNC_INTERVAL_OPTIONS.map((iv) => (
-            <option key={iv} value={iv}>{intervalLabel(iv, t)}</option>
-          ))}
-        </select>
+          ariaLabel={t('autosync.interval')}
+          onChange={(next) => { onUpdateInterval(next as AutosyncInterval) }}
+          options={AUTOSYNC_INTERVAL_OPTIONS.map((iv) => ({ value: iv, label: intervalLabel(iv, t) }))}
+        />
         <span className={css.hint}>{t('autosync.intervalHint')}</span>
       </label>
       <div className={css.statRow}>

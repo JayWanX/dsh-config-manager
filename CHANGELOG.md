@@ -9,6 +9,204 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 > **Release workflow**: on tag push, CI extracts the current version's section as the release notes highlights;
 > the build fails fast if the section is missing, so you cannot forget to update it.
 
+## [0.1.65] - 2026-09-27
+
+> 本轮两件大事：**档案终于能真正切换** —— 「启动 / 停止该档案的独立实例」取代了那个写进文件、
+> 却没有任何消费者的「下次启动」标记；以及**产品定位收敛为迁移 / 同步 / 市场** —— 灾备快照线
+> （自动快照 / 撤销-重做 / 快照库）整体下线，只保留**崩溃归因 + 救援模式**并并入
+> 「备份与快照 → 事故恢复」。此外逐条修掉真机实测出来的 UI 缺陷（区块间距、按钮加载反馈、
+> 弹窗跳闪、勾选口径、图标符号残留）。
+>
+> **Theme**: profiles can finally be switched for real — "launch / stop an independent instance"
+> replaces the next-launch marker that nothing ever read; and the scope narrows to migration / sync /
+> market (the disaster-recovery snapshot line is retired; crash attribution and rescue mode stay,
+> merged into "Backups & snapshots → Incident recovery"). A batch of real-machine UI defects is fixed
+> along the way.
+
+### 变更 / Changed
+
+- 🧭 **灾备收敛：删除「自动快照 + 撤销/重做 + 快照库」，只保留事故恢复（崩溃归因 + 救援模式）**：
+  产品定位收敛为迁移 / 同步 / 市场后，`core/{watcher,undo,config-state,config-snapshot,config-lifecycle}.ts`、
+  `client/lifecycle/`、`ui/lifecycle-view.ts` 与 `/lifecycle` 路由整体删除（含 `LIFECYCLE_ENABLED` /
+  `SHOW_LIFECYCLE_NAV` 两个开关）；崩溃归因（`/crash`）与救援模式（`/rescue`）原样保留并并入「备份与快照 →
+  事故恢复」子 tab —— 崩溃横幅去掉已随快照库下线的「一键回退到最后正常快照」，改为引导「进救援模式」与
+  「从最近备份恢复」。`boot-state.json` 搬到独立目录 `<dataDir>/boot-state/`（老位置一次性搬迁）；旧的
+  `panel='lifecycle'` 持久化值自动落到事故恢复子 tab；**已有 `config-snapshots/` 数据不删除**，只停止采集与展示。
+  **Disaster-recovery line retired**: automatic snapshots / undo-redo / the snapshot store and the `/lifecycle`
+  route are removed (scope narrowed to migration / sync / market). Crash attribution and rescue mode stay,
+  merged into the Incident recovery sub-tab; boot-state moves to its own directory (legacy location migrated
+  once); existing snapshot data is left untouched on disk.
+- 🗂️ **档案页去掉「设为下次启动」**：DSH 根本没有「默认 / 下次启动 profile」这种状态 —— profile 只由启动
+  参数决定（`dsh <名>` / `--profile <名>`；`dsh web` 是硬编码别名），启动日志与状态文件里没有任何
+  「上次用的是哪个」，所以那个标记**一个消费者都没有**。真机定位「设 PROVA 为下次启动 → 重启仍进 web」之后，
+  `<dataDir>/next-profile` 标记、「设为下次启动」按钮与 `POST /profiles/select` 路由一并移除
+  （它只会让用户以为切换成功了）。真正的切换只有两条：本页的「启动该档案」，或把你的启动命令 /
+  快捷方式改成 `dsh --profile <name>`。
+  **The "set as next launch" marker is gone**: DSH has no such state (the profile comes only from the launch
+  arguments), so the marker had no consumer at all; the file, the button and the `/profiles/select` route are
+  removed. Real switching is either "launch this profile" on this page, or pointing your own launch command
+  at `dsh --profile <name>`.
+- 🎛️ **视觉打磨**：区块间距改由容器统一提供（`.viewBody` 纵向 `gap: 10px` 并归零直接子元素的外边距 ——
+  此前「小节标题 → 面板」「说明 → 横幅」恒为 0，视觉上紧贴）；动效值统一到 `--cm-motion-*` 令牌
+  （页面 / 弹窗 / 抽屉 / 通知入场、折叠、视图切换、列表入场、骨架 shimmer），
+  `prefers-reduced-motion: reduce` 下关掉装饰性动效 —— 旋转与不定态进度**刻意保留**，它们承载「正在进行」本身。
+  **Visual polish**: section spacing is owned by the container (`gap` instead of per-block margins) and motion
+  values are unified into `--cm-motion-*` tokens; decorative motion is disabled under
+  `prefers-reduced-motion`, while spinners and indeterminate progress stay.
+
+### 新增 / Added
+
+- 🗂️ **档案「启动 / 停止」= 另起一个独立实例（真正可用的档案切换）**：档案行的按钮按运行状态换形态 ——
+  没有实例 → `启动`（`dsh --profile <名> --port <空闲端口>` detached 拉起，从子进程日志抓带 token 的
+  认证 URL 并 HTTP 探活，就绪后给「打开新实例」）；有实例在跑且不是自己 → `停止`（先请求退出、宽限期后
+  才终止进程树，如实回报 graceful / killed / already-stopped）；**就是当前这个实例** → `当前运行`
+  （禁用，tooltip 指向关窗口 —— 停自己会死在响应途中）。实例台账落 `<dataDir>/launches.json`，
+  界面上的「启动 ↔ 停止」就是它的投影，所以插件拉起的进程永远关得掉。**只对 web 形态开放**：
+  headless / generic 档案点「启动」给 `Banner kind="warn"` + 等宽终端命令 + 复制，**绝不静默失败**
+  （spawn 出去是个用户看不见的进程）；失败一律带码：`notLaunchable` / `launcherUnavailable` /
+  `launchFailed`（附子进程日志尾部）/ `alreadyRunning`。launch / stop **刻意不走 mutation gate**
+  （它们不写任何配置文件，而 gate 会把环境锁占到 handler 返回 —— 真机实测那 20 秒里导入 / 恢复全被 423 挡住）。
+  **Launch / stop any profile as an independent instance**: the row button flips 启动 ⇄ 停止 with the running
+  state; web-shaped profiles only (others get the terminal command instead of a silent failure). Instances are
+  recorded in `<dataDir>/launches.json`, so whatever the plugin started can always be stopped; every failure
+  carries a code. Launch/stop deliberately bypass the mutation gate.
+- 💓 **「哪些档案在跑」= 实例台账 ∪ 每个实例自报的心跳**（真机 bug：从 web 启动 cmtest 后，在 cmtest 的
+  界面里还能再启动 web —— web 是手动敲起来的，不在任何台账里）：每个加载本插件的实例启动时往
+  `<dataDir>/running/<profile>.json` 自报 `{pid, port, startedAt, updatedAt}`（20s 刷新 / 60s 判死，
+  pid 死或过期即清理，**绝不写认证 token**）。于是手动 `dsh web` 起来的档案也会被认出来：得到
+  「已经有一个实例在跑」而不是再开一个；别的实例也能从这个界面停掉（同一套优雅 → 强杀实现）；
+  有实例在跑时**拒绝物理删除**该档案。
+  **"Which profiles are running" = the ledger ∪ each instance’s own heartbeat**: a manually started
+  `dsh web` is detected too (no duplicate launch), other instances can be stopped from this page, and
+  deleting a profile with a running instance is refused. The heartbeat carries pid/port only — never the token.
+- 📄 **档案页新增「复制」**：把某个 DSH profile 整份拷成新档案（`POST /profiles/copy`），package.json 的
+  `name` 跟随新档案名。**含不含 node_modules 由用户定**：勾选（默认）时副本立刻可用 —— 实测 285 MB /
+  1.7 万条目 ≈ 30 秒（真机 cmtest 档案），且走 async `fs.promises.cp`（cpSync 会把宿主事件循环卡住二十多秒、
+  整个界面冻结）；不勾选则秒级只搬清单与 patch，副本启动前需要装依赖 —— 回执据此带 `depsNotInstalled`
+  告警与 `dsh plugin --profile <副本> install` 命令，绝不静默成功。拷完还会把副本里**指向源档案内部**的链接
+  重指向副本自身（实测 cmtest 的 48 个 junction 里 37 个在树内，重指向后删掉源档案副本依然自解）；指向源档案
+  之外的链接（`link:` 依赖指向用户仓库）保持原样。中途失败回滚目标目录，不留半套档案。
+  **Duplicate any DSH profile** from the Profiles tab (`POST /profiles/copy`): the manifest `name` follows the new
+  directory; copying node_modules is opt-in-but-default (285 MB ≈ 30 s on a real profile, async `fs.promises.cp` so
+  the host event loop keeps serving), and a dependency-less copy reports `depsNotInstalled` with the exact install
+  command instead of pretending to succeed. In-tree junctions are re-pointed at the copy so it survives deleting
+  the source, and a failed copy rolls back its target directory.
+- 🔁 **救援横幅重启后换文案（真机反馈：重启之后还在要求重启）**：宿主 `/rescue` 新增 `applied` —— 判据是
+  「本进程启动时刻晚于进入救援的时刻」（`rescueAppliedInThisProcess`，纯函数、可单测）。未重启 → 仍是
+  「请重启 DSH 使其生效」；**已重启 → 改为「救援模式已开启（{time}）—— 本次启动只挂载了 DSH 核心与本插件」**，
+  第二行提示同步改为「其它用户插件本次未加载；退出救援模式后同样需要重启 DSH 才会恢复」。旧宿主缺 `applied`
+  → 保守回落成「请重启」（不会把未生效说成生效）。
+  **Rescue banner now changes after the restart**: the host reports `applied` (this process started after rescue
+  was entered) and the banner stops asking for a restart that already happened; a missing field degrades to the
+  old wording.
+- 🧩 **新共享原语**：`Select`（自绘下拉，替换**全部 15 处**原生 `<select>` —— `appearance: none` 只改触发器，
+  展开后的弹层仍是系统控件：深色主题下是亮底系统菜单，且吃不到 `--dsw-*` token；自带完整键盘语义 / ARIA /
+  贴边翻转，索引推导放在 `src/ui/select-model.ts` 可单测）、`Skeleton`（整块首屏加载的骨架，与 `Spinner` 的
+  分工是硬的：**有布局轮廓 → 骨架，没有 → 转圈**，首屏不再先空一片再整页跳变）、`Collapse` / `ViewSwitch`
+  （折叠容器展开与收起**两端**都有高度动画；视图切换入场）、`CopyButton`（复制 → 已复制）。
+  **New shared primitives**: a self-drawn `Select` (replaces all 15 native selects, with real keyboard/ARIA
+  semantics), `Skeleton` (first-paint placeholders; the split with `Spinner` is: outline available → skeleton),
+  `Collapse`/`ViewSwitch` and `CopyButton`.
+- 🎞️ **图标形变（morphicons）试点**：折叠展开的 chevron 与「复制 → 已复制」在状态切换时做物理形变
+  （`common/Icon.tsx` 的 `ExpandChevron` / `CopyStateIcon`）。**收录判据唯一**：该节点上的图标必须随用户可见的
+  状态变化而改变 —— 静态图标套形变是纯体积亏损，因此**不铺到导航与语义图标**。两条硬约定：
+  `reducedMotion="user"`（morphicons 缺省会无视系统减弱动效设置）、临界阻尼弹簧（ζ=1.0 无过冲、≈1.6 倍速）。
+  体积约 +40KB raw / +13KB gzip（未压缩产物口径）；vanilla `lucide` 与 `lucide-react` **必须同版本**，
+  否则静态/形变会呈现两套图形。
+  **Icon morphing (morphicons) pilot**: only where the icon genuinely changes with user-visible state (the
+  collapse chevron and copy → copied) — never on static or semantic icons. `reducedMotion="user"` plus a
+  critically damped spring are hard requirements, and the `lucide`/`lucide-react` versions must match.
+- 📣 **反馈入口**：README 新增「反馈」一节（UI 问题 / Bug / 功能建议分别对应 Issue Form，安全问题走私密报告），
+  「关于」页的「复制环境信息」把插件版本 / DSH 版本 / 平台一并给到，方便直接粘贴进 Issue；Issue 模板拆成中英两套
+  （6 份）并加中英一致性护栏测试。
+  **Feedback entry points**: a Feedback section in the README (UI issue / bug / feature forms plus a private
+  security advisory), an About-page "copy environment info" button, and bilingual issue forms guarded by a
+  consistency test.
+
+### 修复 / Fixed
+
+- 🆘 **救援模式真的会禁用其它插件了（真机复现的致命缺陷）**：救援把 `dsh.profile.bundles` 收窄为
+  「DSH 核心 + 本插件」后，**约 1.5 秒就被改回原样** —— 用户重启 DSH，插件一个不少地回来，救援名存实亡。
+  根因是插件自己的 `reconcileBundles`（`listInstalledPlugins` 读插件清单时必跑，导出预览 / 自动快照的
+  `plugins` 分区 / 插件页都会触发）按「声明 `dsh.bundle.patch` 的依赖必须出现在 `bundles`」把用户插件
+  原样加回。修法两条并用：① 进入救援时把这些包**同时从 profile 的 `dependencies` 摘掉**（包本身不卸载，
+  退出时整份 `package.json` 从备份逐字节还原），manifest 自洽后任何 reconcile 都无从加回；
+  ② `reconcileBundles` 在救援激活期间**一律停手**（新增同步探测 `isRescueActiveSync`），因为救援是操作者
+  的显式决定，这段时间 bundle 清单归它所有。四阶段真机验证：救援前两个用户插件都挂载 → 进救援后清单收窄
+  且持续 6 秒不再被改写 → 重启后两个插件**都不挂载**（DSH 正常起来，组合树里只剩 `config-manager`）→
+  退出救援三处文件逐字节还原 → 重启后两个插件都回来。
+  **Rescue mode now actually disables other plugins (fatal real-machine defect)**: narrowing
+  `dsh.profile.bundles` to "DSH core + this plugin" was silently undone about 1.5s later by the plugin's
+  own `reconcileBundles` (run on every plugin-list read: export preview, the auto-snapshot `plugins`
+  section, the plugin page), which re-adds any dependency declaring `dsh.bundle.patch`. Fixed twice over:
+  entering rescue also strips those packages from the profile's `dependencies` (nothing is uninstalled;
+  `package.json` is restored byte-for-byte on exit), and `reconcileBundles` now stands down entirely while
+  rescue is active (new sync probe `isRescueActiveSync`). Verified in four phases on a real isolated instance.
+- 🔐 **环境锁的 PID 复用判据（issue #36）**：被强杀 / PID 被复用留下的 `environment.lock` 此前只能靠
+  「心跳长过期」启发式判定，于是 `recover-stale-lock` 在真实场景里可能拒不动手。现在优先用**操作系统的进程
+  创建时间**做身份比较（linux 读 `/proc/<pid>/stat` 的 starttime，不 spawn 任何进程；win32 取 `Get-Process`
+  的 `StartTime.ToFileTimeUtc()`；macOS 用 `ps -o lstart=`），**拿不到才退回**长过期启发式；查询失败 / 超时
+  一律按「拿不到身份」处理（绝不抛错把分类推成 UNKNOWN_STATE，那会让「长过期可回收」这条路径失效）；
+  自身身份在进程内缓存（成功与失败都缓存），于是每次 acquire 不再 spawn shell。
+  **PID-reuse detection for the environment lock (issue #36)**: stale-lock recovery now compares the OS process
+  creation time first (linux `/proc`, win32 `Get-Process`, darwin `ps`), falling back to the long-expired
+  heartbeat heuristic only when the identity cannot be read; a failed or timed-out query never throws.
+- 🪟 **弹窗不再「先闪现在别处、再跳到页面中心」**（真机实测）：Radix `Portal` 在容器为空时会回退
+  `document.body`，而该判定发生在它的 layout effect（**首次绘制之前**）—— 用 `useEffect` 查根节点时，
+  查询已在绘制之后，于是「弹窗与 `open=true` 同一次 commit 挂载」的路径（档案详情目标跨刷新保留、
+  切页签回来面板重挂、宿主重挂 section）会先在 body 里画一帧（此时 `position:fixed` 相对视口居中，
+  而不是相对宿主面板），随后才被搬进插件根节点 = 可见的跳闪。修法三条：渲染期同步解析容器
+  （惰性 `useState`）→ `useLayoutEffect` 兜底 → **容器未知时不渲染 Portal**（宁可晚一帧，也绝不走 body 回退）。
+  **No more dialog flicker before it lands in the panel**: the portal container is resolved synchronously during
+  render, with a `useLayoutEffect` fallback, and no portal is rendered at all while the container is unknown —
+  never falling back to `document.body`.
+- 🗂️ **档案面板的进行中态不再丢**（真机两轮定位）：`launching / stopping / creating / renaming / deleting`
+  搬进 run-store 的档案切片（`PanelState = ProfilesStoreSlice`），面板用 `useSyncExternalStore` 订阅读取，
+  **不另存 `useState` 副本**。此前留在组件 state 里，切页签（卸载）就归零 → 回来按钮变回「启动」，
+  用户以为没点上而重复点；只写 store 不订阅时，上一次挂载遗留的请求（启动最长 20s，必然踩到）回来界面不刷新
+  → 「启动中」一直转。进行中态 / 弹窗目标 / 带 token 的启动回执**刻意不落 sessionStorage** ——
+  发起请求的页面已随刷新销毁，重放一个等不到回执的转圈只会骗人。
+  **In-flight profile states survive a tab switch**: they now live in the run-store profiles slice, and the panel
+  subscribes to it with `useSyncExternalStore` instead of keeping a `useState` copy that resets on unmount.
+- ☑️ **勾选态只有一个口径**（真机实测：点「全不选」后子项仍然打勾）：渲染层一律走
+  `unitChecked(sel, section, unitId)`（先看分区、再看排除集），分组的计数与三态同口径 —— 稀疏表示下
+  「不在排除集里」**不等于**已勾选（分区整体没勾时同样成立），直接判 `!excluded.includes(id)` 会渲染出
+  「分区已选 0/13、13 个子项却全部打勾」的自相矛盾。
+  **A single source of truth for checked state**: rendering goes through the section-aware helper (section first,
+  then the exclude set), so "not excluded" no longer renders as checked when the whole section is off.
+- 📏 **间距紧贴的三处修复**（用户实测）：区块间距改由 `.viewBody` 的 `gap` 统一提供（见「变更」）；
+  `.kvRow + .actionRow` 补 `margin-top: 8px`（档案页「运行状态」里的停止按钮此前贴在横线上）；
+  `.historyRow` 补左右 `8px`（时间 / 摘要紧贴滚动容器边框，实测只剩 1px = 边框本身）。
+  **Three spacing fixes**: block spacing comes from the container `gap`; the action row after a key/value row
+  gets its missing top margin; history rows get horizontal padding.
+- ⏳ **加载反馈统一**：`Button loading` 由原语自动前置 `Spinner`（同时 `disabled` + `aria-busy`）——
+  此前有没有加载图标取决于每个调用点是否记得写，漏写处只换文案、毫无进行中反馈（用户实测：同一排按钮
+  有的转圈有的不转）；`Spinner` 的环改成 **SVG 几何**（两个 `<circle>`：底环 + 实色圆弧）而不是
+  `border + border-radius` —— 13px 的盒子上 2px 边框占直径 15%，且只有一条边实色，栅格化后视觉上只剩
+  一条亮弧、形状读不出来（用户反馈「加载图标不是圆形」）；着色一律 `currentColor`，否则在主色按钮上
+  蓝画蓝、图标「隐形」（只看到按钮莫名变宽）。
+- 🚫 **图标层护栏 + 文本符号清理**：`RestorePlanView` 里手写的 `▸/▾` 文本符号换成形变 chevron，
+  并新增 `icon-layer-guard.test.ts` 扫全部 UI 源码的**字符串字面量**（注释与测试夹具除外），
+  发现形状符号即失败 —— 这条规则此前只是文档里的散文，所以那个残留长期没被发现。
+
+### 测试 / Tests
+
+- 档案线：`dsh-profile-launcher.test.ts`（挑端口 / 抓认证 URL / 探活 / 失败码 / 只对 web 形态开放）、
+  `dsh-profile-runtime.test.ts`（心跳写入与过期 / 死 pid 清理 / **绝不写 token**）、
+  `run-store.test.ts` 新增「档案切片键集合 + 镜像不漏字段 + 带 token 的回执不落盘」。
+  New profile-side regressions: the launcher (port picking, auth URL, readiness, failure codes, web-only),
+  the runtime heartbeat (refresh/expiry, dead-pid cleanup, never the token) and the run-store slice shape.
+- UI 线：`select-model.test.ts`（键盘索引推导）、`morph-icons.test.ts`（形变必须是纯 90° 旋转、无缩放，
+  端点恰好落在两个图标上，且 `lucide` 与 `lucide-react` 版本相等）、`icon-layer-guard.test.ts`、
+  `selection-model.test.ts` 的勾选口径回归。
+- 锁线：`env-lock.test.ts` 注入平台与命令执行器覆盖 linux / win32 / darwin 三个分支（拿不到身份即退回启发式）、
+  `tests/cli/lock-recover-dir.test.ts`（被强杀留下的锁必须真能被 `recover-stale-lock` 回收）。
+  New lock regressions: the OS-identity probe across linux/win32/darwin (falling back to the heuristic) and a
+  CLI-level test that a kill-left-behind lock is really recovered.
+- 接线守卫：`incident-wiring.test.ts`（崩溃归因 / 救援模式 / `boot-paths` 的源码级接线）；
+  路由快照更新为 68 条（`+ /profiles/launch`、`+ /profiles/copy`、`− /lifecycle`、`− /profiles/select`）。
+- Source-level wiring guards plus the updated 68-route parity snapshot.
+
 ## [0.1.64] - 2026-09-24
 
 > 本版主题是**会话跨机可信迁移 + 长任务可观测可终止 + 同步通道的会话管理**：一台机器的备份导到另一台，

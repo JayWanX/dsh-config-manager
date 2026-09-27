@@ -10,7 +10,8 @@ import { MARKET_UPSTREAM_OWNER, MARKET_UPSTREAM_REPO } from '../../market/upstre
 import { computeGithubLoginView } from '../sync/sync-view.ts'
 import type { UiT } from '../../ui/i18n.ts'
 import type { MyGithubFlowState } from '../../ui/my-configs-view.ts'
-import { Badge, Banner, Button, Card, Spinner } from '../common/ui.tsx'
+import { Badge, Banner, Button, Card } from '../common/ui.tsx'
+import { Skeleton } from '../common/Skeleton.tsx'
 import type { LoginView } from './my-configs-view.ts'
 import css from '../config-manager.module.css'
 
@@ -50,7 +51,7 @@ export function MyConfigsLoginCard({ loginView, github, t, uiT, onStart, onCance
       <Card>
         <div className={css.statRow}>
           <span className={css.groupLabel}>{t('myconfigs.login.title')}</span>
-          <Spinner label={t('myconfigs.login.checking')} />
+          <Skeleton count={2} label={t('myconfigs.login.checking')} />
         </div>
       </Card>
     )

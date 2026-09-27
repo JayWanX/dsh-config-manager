@@ -12,6 +12,8 @@ import { useEffect, useRef, useState } from 'react'
 import type { ConfigManagerApi } from '../api.ts'
 import type { TranslateNS } from '../client-types.ts'
 import { Badge, Banner, Button, Card, Checkbox, Spinner, StatusDot } from '../common/ui.tsx'
+import { Skeleton } from '../common/Skeleton.tsx'
+import { Select } from '../common/Select.tsx'
 import { toast } from '../common/toast-store.ts'
 import { runStore } from '../run-store.ts'
 // issue #31：宿主回传的 skipReason 是机器 token（如 'mutation-locked'），必须经统一映射
@@ -223,7 +225,7 @@ export function BackupScheduleCard({ api, t, onBackupDone }: {
         </Button>
       </div>
 
-      {status === 'loading' && <Spinner label={t('backupSchedule.loading')} />}
+      {status === 'loading' && <Skeleton count={2} label={t('backupSchedule.loading')} />}
 
       {status === 'error' && (
         <Banner kind="error">
@@ -285,79 +287,74 @@ export function BackupScheduleCard({ api, t, onBackupDone }: {
               disabled={busy}
             />
             {draft.enabled && (
-              <select
-                className={css.select}
+              <Select
                 value={draft.interval}
                 disabled={busy}
                 style={{ width: 'auto' }}
-                onChange={(event) => { updateDraft({ ...draft, interval: event.target.value as BackupInterval }) }}
-              >
-                {BACKUP_INTERVAL_OPTIONS.map((interval) => (
-                  <option key={interval} value={interval}>{t(backupIntervalLabelKey(interval))}</option>
-                ))}
-              </select>
+                ariaLabel={t('backupSchedule.interval')}
+                onChange={(next) => { updateDraft({ ...draft, interval: next as BackupInterval }) }}
+                options={BACKUP_INTERVAL_OPTIONS.map((interval) => ({
+                  value: interval,
+                  label: t(backupIntervalLabelKey(interval)),
+                }))}
+              />
             )}
             {draft.enabled && draft.interval === 'custom' && (
-              <select
-                className={css.select}
-                value={draft.customSchedule?.dayOfWeek ?? 1}
+              <Select
+                value={String(draft.customSchedule?.dayOfWeek ?? 1)}
                 disabled={busy}
                 style={{ width: 'auto' }}
-                onChange={(event) => {
+                ariaLabel={t('backupSchedule.weekday')}
+                onChange={(next) => {
                   updateDraft({
                     ...draft,
                     customSchedule: {
-                      dayOfWeek: Number(event.target.value),
+                      dayOfWeek: Number(next),
                       hour: draft.customSchedule?.hour ?? 3,
                       minute: draft.customSchedule?.minute ?? 0,
                     },
                   })
                 }}
-              >
-                {WEEKDAY_OPTIONS.map((w) => (
-                  <option key={w.value} value={w.value}>{weekdayText(w.value)}</option>
-                ))}
-              </select>
+                options={WEEKDAY_OPTIONS.map((w) => ({ value: String(w.value), label: weekdayText(w.value) }))}
+              />
             )}
             {draft.enabled && draft.interval === 'custom' && (
-              <select
-                className={css.select}
-                value={draft.customSchedule?.hour ?? 3}
+              <Select
+                value={String(draft.customSchedule?.hour ?? 3)}
                 disabled={busy}
                 style={{ width: 'auto' }}
-                onChange={(event) => {
+                ariaLabel={t('backupSchedule.hour')}
+                onChange={(next) => {
                   updateDraft({
                     ...draft,
                     customSchedule: {
                       dayOfWeek: draft.customSchedule?.dayOfWeek ?? 1,
-                      hour: Number(event.target.value),
+                      hour: Number(next),
                       minute: draft.customSchedule?.minute ?? 0,
                     },
                   })
                 }}
-              >
-                {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>)}
-              </select>
+                options={Array.from({ length: 24 }, (_, h) => ({ value: String(h), label: `${String(h).padStart(2, '0')}:00` }))}
+              />
             )}
             {draft.enabled && draft.interval === 'custom' && (
-              <select
-                className={css.select}
-                value={draft.customSchedule?.minute ?? 0}
+              <Select
+                value={String(draft.customSchedule?.minute ?? 0)}
                 disabled={busy}
                 style={{ width: 'auto' }}
-                onChange={(event) => {
+                ariaLabel={t('backupSchedule.minute')}
+                onChange={(next) => {
                   updateDraft({
                     ...draft,
                     customSchedule: {
                       dayOfWeek: draft.customSchedule?.dayOfWeek ?? 1,
                       hour: draft.customSchedule?.hour ?? 3,
-                      minute: Number(event.target.value),
+                      minute: Number(next),
                     },
                   })
                 }}
-              >
-                {[0, 15, 30, 45].map((m) => <option key={m} value={m}>{String(m).padStart(2, '0')}</option>)}
-              </select>
+                options={[0, 15, 30, 45].map((m) => ({ value: String(m), label: String(m).padStart(2, '0') }))}
+              />
             )}
           </div>
           {/* 设置行说明：勾选启用后启动即执行一次（行为说明；卡片级 hint 只讲「备什么」，

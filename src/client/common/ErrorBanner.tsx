@@ -9,7 +9,7 @@ import { useMemo } from 'react'
 import { formatActionableError, toActionableError } from '../../ui/errors.ts'
 import { redact } from '../../security/redaction.ts'
 import { zhUiT, type UiT } from '../../ui/i18n.ts'
-import { Button, Spinner } from './ui.tsx'
+import { Button } from './ui.tsx'
 import { ArrowRightIcon } from './Icon.tsx'
 import css from '../config-manager.module.css'
 
@@ -53,8 +53,9 @@ export function ErrorBanner({ error, onRetry, retrying, t = zhUiT }: ErrorBanner
       {item !== undefined && <div className={css.errorItem}>{item}</div>}
       {actionable.retryable && onRetry !== undefined && (
         <div className={css.errorFooter}>
+          {/* 加载图标由 Button 原语按 loading 自动渲染（此处只给文案） */}
           <Button variant="primary" onClick={onRetry} disabled={retrying === true} loading={retrying === true}>
-            {retrying === true ? <Spinner /> : t('commonRetry')}
+            {t('commonRetry')}
           </Button>
         </div>
       )}

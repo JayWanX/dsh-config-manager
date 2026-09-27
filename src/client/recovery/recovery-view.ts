@@ -165,3 +165,74 @@ export function isSnapshotTrusted(verdict: string | null): boolean {
 export function sortIncidentsByNewest(incidents: RecoveryIncident[]): RecoveryIncident[] {
   return [...incidents].sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0));
 }
+
+/* ------------------------------------------------ 事故处置（崩溃 + 救援） */
+
+export type CrashReasonKey =
+  | 'recovery.crash.reason.session-corrupt'
+  | 'recovery.crash.reason.bundle-check'
+  | 'recovery.crash.reason.patch-tree'
+  | 'recovery.crash.reason.unknown'
+
+/** 崩溃归因 → 文案键（未知一律回落 unknown，界面永不出现空徽章）。 */
+export function crashReasonKey(reason: string | null): CrashReasonKey {
+  switch (reason) {
+    case 'session-corrupt': return 'recovery.crash.reason.session-corrupt'
+    case 'bundle-check': return 'recovery.crash.reason.bundle-check'
+    case 'patch-tree': return 'recovery.crash.reason.patch-tree'
+    default: return 'recovery.crash.reason.unknown'
+  }
+}
+
+export type CrashAdviceKey =
+  | 'recovery.crash.advice.none'
+  | 'recovery.crash.advice.restore-last-good'
+  | 'recovery.crash.advice.repair-session'
+  | 'recovery.crash.advice.check-bundles'
+  | 'recovery.crash.advice.check-patch-tree'
+
+/** 建议动作 → 文案键（未知 / none 回落 none）。 */
+export function crashAdviceKey(advice: string): CrashAdviceKey {
+  switch (advice) {
+    case 'restore-last-good': return 'recovery.crash.advice.restore-last-good'
+    case 'repair-session': return 'recovery.crash.advice.repair-session'
+    case 'check-bundles': return 'recovery.crash.advice.check-bundles'
+    case 'check-patch-tree': return 'recovery.crash.advice.check-patch-tree'
+    default: return 'recovery.crash.advice.none'
+  }
+}
+
+export interface RescueBannerInput {
+  /** 救援状态激活（状态文件存在且家目录指纹匹配） */
+  active: boolean
+  /** 已在当前进程生效：进程启动时刻晚于进入救援的时刻（用户已经重启过） */
+  applied: boolean
+}
+
+export type RescueBannerKey = 'recovery.rescue.active' | 'recovery.rescue.applied'
+
+/** 主文案：未激活 → null（不渲染）；激活但本进程还没重启 → 重启提示；已生效 → 只陈述状态。 */
+export function rescueBannerKey(input: RescueBannerInput): RescueBannerKey | null {
+  if (!input.active) return null
+  return input.applied ? 'recovery.rescue.applied' : 'recovery.rescue.active'
+}
+
+export type RescueHintKey = 'recovery.rescue.appliedHint' | 'recovery.rescue.restartHint'
+
+/** 第二行提示：已生效时改说「退出同样要重启」，否则说「需要重启才生效」。 */
+export function rescueHintKey(input: RescueBannerInput): RescueHintKey {
+  return input.active && input.applied ? 'recovery.rescue.appliedHint' : 'recovery.rescue.restartHint'
+}
+
+/**
+ * ISO 时间 → 本地短格式（null / 空 / 非法 → em dash）。
+ * 刻意手写而非 Intl：与列表其它时间显示同口径，避免 locale 差异让同一时刻看起来变了。
+ */
+export function formatRecoveryTime(value: string | null): string {
+  if (value === null || value === '') return '—'
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return '—'
+  const p = (n: number): string => String(n).padStart(2, '0')
+  return d.getFullYear() + '/' + (d.getMonth() + 1) + '/' + d.getDate() + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds())
+}
+

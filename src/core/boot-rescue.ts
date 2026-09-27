@@ -29,6 +29,7 @@
  * 文案：本模块不产出用户可见文案——失败只给 `code`（+ 英文诊断 message，供日志/测试排查），
  * i18n 由调用方按 code 负责。
  */
+import { readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -281,6 +282,25 @@ function writeBundlesField(pkg: Record<string, unknown>, bundles: string[]): boo
   return true;
 }
 
+/**
+ * 从 pkg.dependencies 里就地摘掉这些包名（不存在/非普通对象 → 零改动）。
+ *
+ * 为什么救援模式必须做这一步：**「声明 dsh.bundle.patch 的依赖必须出现在 dsh.profile.bundles」**
+ * 是本插件 reconcileBundles 与 DSH 官方 `dsh plugin` reconcilePlugins 的共同规则。只把包从
+ * bundles 里移出、却把依赖行留在 package.json，下一次 reconcile 就会用依赖行把它们**原样加回**
+ * bundles —— 而 reconcile 会在每次「读插件清单」时跑（导出预览、自动快照的 plugins 分区、
+ * 插件页都会触发）。真机实测：救援写入后约 1.5 秒 bundles 就被改回 5 条，重启后用户插件照常
+ * 挂载，救援名存实亡。摘掉依赖行让 manifest 自洽（插件确实只剩核心 + 自身），任何 reconcile
+ * 都无从加回；包本身不卸载（node_modules 原样），退出时整份 package.json 从备份逐字节还原。
+ */
+function stripDependencies(pkg: Record<string, unknown>, names: readonly string[]): void {
+  const deps = pkg['dependencies'];
+  if (!isPlainObject(deps)) return;
+  for (const name of names) {
+    if (Object.prototype.hasOwnProperty.call(deps, name)) delete deps[name];
+  }
+}
+
 /* ---------------------------------------------------------------- 状态 */
 
 export interface RescueState {
@@ -400,7 +420,7 @@ const RESCUE_PATCH_HEADER_LINES = [
 /** 救援模式 profile patch 的头注释（按 bundle 处理方式给出准确说明，不得夸大能力）。 */
 function rescuePatchHeader(bundlesDisabled: boolean): string {
   const note = bundlesDisabled
-    ? '# dsh.profile.bundles 已被收窄为 DSH 核心与救援插件自身：其余用户插件本次启动不挂载。'
+    ? '# dsh.profile.bundles 已被收窄为 DSH 核心与救援插件自身，被禁用的包同时已从 dependencies 临时摘除：其余用户插件本次启动不挂载。'
     : '# 注意：dsh.profile.bundles 里的插件仍由 bundle 层挂载（本次只裁剪了不可解析的 bundle）。';
   return [...RESCUE_PATCH_HEADER_LINES, note, ''].join('\n');
 }
@@ -571,6 +591,10 @@ export async function enterRescueMode(opts: RescueEnterOptions): Promise<RescueE
     // 无裁剪 → 不重写（保持原字节/原格式）；有裁剪 → 扁平写回 kept（绝无 [kept] 二次包裹）
     if (finalPruned.length > 0 && writeBundlesField(parsed, narrowed.kept)) {
       prunedBundles = finalPruned;
+      // 同一份写入里把被禁用的包从 dependencies 摘掉（见 stripDependencies：否则任何
+      // reconcile 都会按依赖行把它们加回 bundles，救援当场失效）。仅摘 narrowed（收窄禁用）
+      // 的那批；safe.pruned（解析不到）本来就不会被 reconcile 加回。
+      stripDependencies(parsed, narrowed.pruned.map((entry) => entry.name));
       nextPackageJsonText = `${JSON.stringify(parsed, null, 2)}\n`;
     }
   }
@@ -724,6 +748,38 @@ export async function exitRescueMode(opts: { homeDir: string; backupDir?: string
 }
 
 /* ---------------------------------------------------------------- 状态查询 */
+
+/**
+ * 同步版救援状态探测：状态文件存在且 homeDir+profile 指纹匹配 → true。
+ *
+ * 为什么需要同步版：本插件的 `reconcileBundles`（plugin-cli，同步路径）必须能在**写盘之前**
+ * 判断「现在处于救援模式吗」—— 救援期间它一旦把声明 `dsh.bundle.patch` 的依赖加回
+ * `dsh.profile.bundles`，救援就被静默撤销（详见 boot-rescue 顶部与 stripDependencies 注释）。
+ * 语义与 {@link rescueModeStatus} 的 `active` 一致：stale（换机/重建 home）不算激活。
+ */
+export function isRescueActiveSync(opts: { homeDir: string; profile: string; backupDir?: string }): boolean {
+  const backupDir = opts.backupDir ?? defaultBackupDir(opts.homeDir);
+  let text: string;
+  try {
+    text = readFileSync(path.join(backupDir, STATE_FILE), 'utf8');
+  } catch {
+    return false;
+  }
+  const state = parseRescueState(text);
+  return state !== null && fingerprintMatches(opts.homeDir, opts.profile, state.homeFingerprint);
+}
+
+/**
+ * 救援是否已在**当前进程**生效：进程启动时刻晚于（或等于）进入救援的时刻 → 本次启动就是救援启动。
+ *
+ * 为什么需要它：横幅文案不能永远写「请重启 DSH 使其生效」—— 用户重启之后那句话还在（真机反馈），
+ * 而实际上救援已经生效。宿主传入进程启动时刻（`Date.now() - process.uptime()*1000`），core 只做判据
+ * （保持纯函数、可单测，不依赖 process）。enteredAt 不可解析（损坏状态）→ false（保守：仍提示重启）。
+ */
+export function rescueAppliedInThisProcess(enteredAt: string, processStartedAtMs: number): boolean {
+  const entered = Date.parse(enteredAt);
+  return Number.isFinite(entered) && entered <= processStartedAtMs;
+}
 
 /** 读状态；指纹不匹配时返回 { active:false, stale:true, state }。损坏/缺失 → { active:false, stale:false, state:null }。 */
 export async function rescueModeStatus(opts: { homeDir: string; profile: string; backupDir?: string }): Promise<RescueStatus> {

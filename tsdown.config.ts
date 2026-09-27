@@ -106,7 +106,9 @@ export default defineConfig({
     // The regex covers lucide-react's per-icon deep imports (`lucide-react/dist/esm/icons/*.mjs`)
     // which Icon.tsx uses for precise tree-shaking — without it they'd stay external and
     // the DSH loader (single client.js, no such module) would fail at runtime.
-    alwaysBundle: [/^lucide-react(\/.*)?$/, /^@radix-ui\//],
+    // morphicons（形变运行时）+ vanilla `lucide`（形变图标的 IconNode 数据）同理。
+    // 注意 `/^lucide(\/.*)?$/` 不会误伤 `lucide-react`（后者是 `-react`，非 `/` 分隔）。
+    alwaysBundle: [/^lucide-react(\/.*)?$/, /^@radix-ui\//, /^morphicons(\/.*)?$/, /^lucide(\/.*)?$/],
   },
   plugins: [cssModulesPlugin()],
   sourcemap: true,

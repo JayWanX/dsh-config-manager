@@ -2,31 +2,40 @@
  * 「档案」面板（第 7 个 tab；DSH 自带 profile 管理）。
  *
  * 「档案」= DSH 的 profile（`$DSH_HOME/profiles/<name>`），由 src/profiles/dsh-profile-manager.ts
- * 读写（列表 / 详情 / 新建 / 重命名 / 物理删除 / 记录「下次启动」）。本视图：
+ * 读目录定义、由 src/profiles/dsh-profile-launcher.ts 管实例。本视图：
  * - **列表**：形态（web/headless/自定义）、bundle 层、依赖数、patch 条目、node_modules、更新时间；
- * - **下次启动**：DSH 无法在运行中切换 profile —— 这里只写 `<dataDir>/next-profile` 标记并给出
- *   手动重启命令（`dsh --profile <name>`），由用户自己重启；
+ * - **运行状态卡**：当前运行的 profile + 本插件启动的实例（端口 / 打开 / 停止）；
+ * - **启动 / 停止该档案**：让 host 用 `dsh --profile <名> --port <空闲端口>` 拉起**独立实例**
+ *   （自动挑端口 + 自动开浏览器），当前实例不受影响；只对 Web 形态开放（其余形态没有浏览器界面，
+ *   spawn 出来是隐形进程），非 Web 形态点击后给出终端命令而不是静默失败；
+ *   **已经在跑的档案，行内按钮变成「停止」**——停止走 ConfirmDialog（会中断那个实例里的会话）；
  * - **新建 / 重命名 / 删除**：删除是**物理删除**（含 node_modules），走 ConfirmDialog；
  *   删除当前运行中的档案需额外勾选确认；
  * - **详情**：package.json 与 cordis.patch.yml 原文（只读）。
  *
- * 状态组件自持（useState），同时镜像 runStore.profiles 切片（切 tab/刷新不丢列表与选择）。
+ * 状态**全部住在 runStore.profiles 切片**（本组件订阅读取，不另存一份）：切页签不丢进行中态，
+ * 迟到的回执也能把界面拉回同步；组件私有 state 只剩一次性正文（detail/detailLoading/detailError）。
  * 安全：profile 定义不含秘密值（dependencies 只有包名与 spec）；错误文本渲染前过 redact()。
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { ChangeEvent } from 'react'
 import { redact } from '../../security/redaction.ts'
-import type { DshProfileDetail, DshProfileMeta, DshProfileSelection, DshProfileTemplate } from '../../profiles/dsh-profile-shared.ts'
+import { DSH_PROFILE_LAUNCH_TIMEOUT_MS } from '../../profiles/dsh-profile-shared.ts'
+import type { DshProfileDetail, DshProfileMeta, DshProfileRunningView } from '../../profiles/dsh-profile-shared.ts'
 import type { ConfigManagerApi } from '../api.ts'
 import type { TranslateNS } from '../client-types.ts'
 import { runStore, toProfilesStoreSlice, type ProfilesStoreSlice } from '../run-store.ts'
 import { Badge, Banner, Button, Card, Checkbox, Empty, SectionTitle, Spinner } from '../common/ui.tsx'
+import { Skeleton, SkeletonList } from '../common/Skeleton.tsx'
+import { Select } from '../common/Select.tsx'
 import { ConfirmDialog } from '../common/ConfirmDialog.tsx'
 import { Modal } from '../common/Modal.tsx'
 import { toast } from '../common/toast-store.ts'
 import {
-  bundleLines, dependencyLines, formatBytes, formatProfileTime, issueLabelKey, profileRowFacts, restartCommand,
-  selectionState, shapeLabelKey, sortProfilesForDisplay, summarizeProfiles, validateProfileNameInput,
+  bundleLines, canLaunchProfile, copyWarningKey, dependencyLines, formatBytes, formatProfileTime, issueLabelKey,
+  launchState, launchWarningKey, profileInstallCommand, profileRowAction, profileRowFacts, profilesPanelPhase,
+  restartCommand, runningRecordFor, shapeLabelKey, sortProfilesForDisplay, stopResultKey, summarizeProfiles,
+  suggestCopyName, validateProfileNameInput,
 } from '../../ui/dsh-profiles-view.ts'
 import css from '../config-manager.module.css'
 
@@ -35,80 +44,42 @@ export interface ProfilesPanelProps {
   t: TranslateNS<'config-manager'>
 }
 
-interface PanelState {
-  status: 'loading' | 'ready' | 'error'
-  loadError: string | null
-  profiles: DshProfileMeta[]
-  current: string
-  selection: DshProfileSelection | null
-  templates: DshProfileTemplate[]
-  /** 新建表单 */
-  createName: string
-  createTemplate: string
-  creating: boolean
-  /** 重命名会话 */
-  renameTarget: DshProfileMeta | null
-  renameValue: string
-  renaming: boolean
-  /** 删除会话（物理删除，不可恢复） */
-  deleteTarget: DshProfileMeta | null
-  deleteCurrentConfirmed: boolean
-  deleting: boolean
-  /** 「下次启动」写入中 */
-  selecting: boolean
-  /** 详情目标（null = 未打开） */
-  detailName: string | null
-  actionError: string | null
-}
+/**
+ * 面板状态 = **run-store 的档案切片**（一一对应，组件不得再持有切片外的字段）：
+ * 切片住在模块级单例里，所以切页签（组件卸载）**不丢任何字段** —— 这正是「启动中 /
+ * 停止中 / 提交中」按钮态不再一卸载就归零的机制（真机 bug：切走再回来按钮变回「启动」，
+ * 用户以为没点上而重复点击）。
+ *
+ * 需要组件私有的只剩**一次性正文**（detail / detailLoading / detailError）：切片只存
+ * `selectedName`，弹窗正文挂载后按名重取，所以刷新/切页签回来都不是空弹窗。
+ */
+type PanelState = ProfilesStoreSlice
 
-const initial: PanelState = {
-  status: 'loading',
-  loadError: null,
-  profiles: [],
-  current: '',
-  selection: null,
-  templates: [],
-  createName: '',
-  createTemplate: 'base',
-  creating: false,
-  renameTarget: null,
-  renameValue: '',
-  renaming: false,
-  deleteTarget: null,
-  deleteCurrentConfirmed: false,
-  deleting: false,
-  selecting: false,
-  detailName: null,
-  actionError: null,
-}
-
-function initFromStore(): PanelState {
-  const s: ProfilesStoreSlice = runStore.getSnapshot().profiles
-  return {
-    ...initial,
-    profiles: s.profiles ?? [],
-    current: s.current ?? '',
-    selection: s.selection,
-    // detailName 不恢复：详情原文是一次性拉取的（恢复弹窗目标只会得到一个空弹窗）
-    detailName: null,
-    actionError: s.error,
-    loadError: s.loadError,
-  }
+/** useSyncExternalStore 的选择器（模块级常量：引用稳定，不随渲染重建）。 */
+function selectProfilesSlice(): PanelState {
+  return runStore.getSnapshot().profiles
 }
 
 /** host 侧 engine 错误码 → 文案（未知错误回退到通用模板，不显示裸英文码）。 */
-const ERROR_CODES = ['exists', 'notFound', 'currentProfile', 'invalidName', 'reservedName', 'unknownTemplate'] as const
+const ERROR_CODES = ['notLaunchable', 'launcherUnavailable', 'launchFailed', 'alreadyRunning', 'notRunning', 'stopFailed', 'instanceRunning', 'exists', 'notFound', 'currentProfile', 'invalidName', 'reservedName', 'unknownTemplate'] as const
 
 function profileErrorText(t: TranslateNS<'config-manager'>, error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
   for (const code of ERROR_CODES) {
-    if (message === code || message.includes(code)) return t(`profiles.error.${code}`)
+    if (message === code || message.includes(code)) {
+      // launchFailed / stopFailed 的 message 形如 `<code>: <细节>`：细节是排障的唯一线索，不能吞掉
+      if ((code === 'launchFailed' || code === 'stopFailed') && message.includes(': ')) {
+        const tail = message.slice(message.indexOf(': ') + 2).trim()
+        return tail === '' ? t(`profiles.error.${code}`) : `${t(`profiles.error.${code}`)} — ${redact(tail)}`
+      }
+      return t(`profiles.error.${code}`)
+    }
   }
   return t('profiles.error.generic', { message: redact(message) })
 }
 
 /** 复制文本到剪贴板（与 OverviewPanel 同一交互约定：结果以 Toast 反馈）。 */
-function copyText(text: string, t: TranslateNS<'config-manager'>): void {
+function copyText(text: string, t: TranslateNS<'config-manager'>, okKey: 'profiles.copied' | 'profiles.launch.copiedUrl' | 'profiles.duplicate.copiedInstall' = 'profiles.copied'): void {
   try {
     const pending = navigator.clipboard?.writeText(text)
     if (pending === undefined) {
@@ -116,7 +87,7 @@ function copyText(text: string, t: TranslateNS<'config-manager'>): void {
       return
     }
     void pending.then(
-      () => { toast.ok(t('profiles.copied')) },
+      () => { toast.ok(t(okKey)) },
       () => { toast.warn(t('toast.copyFailed')) },
     )
   } catch {
@@ -125,80 +96,71 @@ function copyText(text: string, t: TranslateNS<'config-manager'>): void {
 }
 
 export function ProfilesPanel({ api, t }: ProfilesPanelProps) {
-  const [state, setState] = useState<PanelState>(initFromStore)
-  const stateRef = useRef<PanelState>(state)
+  /**
+   * 面板状态 = 单例里的档案切片（直接订阅，不再另存 React state）：
+   *  - 切页签（组件卸载）不丢进行中态与草稿；
+   *  - 上一次挂载遗留的请求回执落地时（此刻组件可能已重挂），单例一通知界面就同步 ——
+   *    只写 store 不通知的话，用户回来看到的是永远转不完的「启动中」（真机实测）；
+   *  - 挂载即读当前值，无需 initFromStore 那套拷贝。
+   */
+  const state = useSyncExternalStore(runStore.subscribe, selectProfilesSlice)
   const mountedRef = useRef(true)
-  /** 详情原文（一次性读取；非持久化） */
+  /** 详情原文（一次性读取；切片只存档案名 selectedName，挂载后按名重取） */
   const [detail, setDetail] = useState<DshProfileDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
 
-  const commit = (next: PanelState): void => {
-    stateRef.current = next
-    if (mountedRef.current) setState(next)
-    runStore.patch({
-      profiles: toProfilesStoreSlice({
-        profiles: next.profiles,
-        selection: next.selection,
-        current: next.current === '' ? null : next.current,
-        selectedName: next.detailName,
-        error: next.actionError,
-        loadError: next.loadError,
-      }),
-    })
+  /**
+   * 唯一的写入口：合并进单例（本组件即便已卸载，迟到的回执也照写）。
+   * 基线取 **store 当前值**而不是闭包里的旧快照：请求可能在面板卸载后才回执，
+   * 这期间用户已回到页面并刷新过列表 —— 用卸载前的旧快照做基会把刚取回的新数据写回旧值。
+   */
+  const patch = (p: Partial<PanelState>): void => {
+    runStore.patch({ profiles: toProfilesStoreSlice({ ...runStore.getSnapshot().profiles, ...p }) })
   }
-  const patch = (p: Partial<PanelState>): void => commit({ ...stateRef.current, ...p })
 
-  useEffect(() => () => {
-    mountedRef.current = false
-    const cur = stateRef.current
-    runStore.patch({
-      profiles: toProfilesStoreSlice({
-        profiles: cur.profiles,
-        selection: cur.selection,
-        current: cur.current === '' ? null : cur.current,
-        selectedName: cur.detailName,
-        error: cur.actionError,
-        loadError: cur.loadError,
-      }),
-    })
-  }, [])
+  useEffect(() => () => { mountedRef.current = false }, [])
 
   const load = (): void => {
-    patch({ status: 'loading', loadError: null })
+    patch({ loadError: null })
     api.profilesList().then(
       (snapshot) => {
         const profiles = snapshot.profiles ?? []
-        const cur = stateRef.current
-        // 目标已消失 → 关闭详情/重命名/删除会话，避免对着幽灵档案操作
+        const running = snapshot.running ?? []
+        const templates = snapshot.templates ?? []
+        // 基线取 store 当前值（不是本闭包的旧快照）：迟到的回执/并发的目标都不该被旧值覆盖
+        const cur = runStore.getSnapshot().profiles
+        // 目标已消失 → 关闭详情/重命名/删除/停止会话，避免对着幽灵档案操作
         const stillExists = (name: string | null): boolean => name !== null && profiles.some((p) => p.name === name)
+        const stillRunning = (name: string | null): boolean => name !== null && running.some((rr) => rr.name === name)
         patch({
-          status: 'ready',
           profiles,
-          current: snapshot.current ?? '',
-          selection: snapshot.selection ?? null,
-          templates: snapshot.templates ?? [],
-          createTemplate: (snapshot.templates ?? []).some((tp) => tp.id === cur.createTemplate) ? cur.createTemplate : 'base',
-          detailName: stillExists(cur.detailName) ? cur.detailName : null,
-          renameTarget: stillExists(cur.renameTarget?.name ?? null) ? cur.renameTarget : null,
-          deleteTarget: stillExists(cur.deleteTarget?.name ?? null) ? cur.deleteTarget : null,
+          current: snapshot.current ?? null,
+          running,
+          templates,
+          createTemplate: templates.some((tp) => tp.id === cur.createTemplate) ? cur.createTemplate : 'base',
+          selectedName: stillExists(cur.selectedName) ? cur.selectedName : null,
+          renameTargetName: stillExists(cur.renameTargetName) ? cur.renameTargetName : null,
+          copyTargetName: stillExists(cur.copyTargetName) ? cur.copyTargetName : null,
+          deleteTargetName: stillExists(cur.deleteTargetName) ? cur.deleteTargetName : null,
+          // 待确认的停止目标若已经不在运行了 → 关掉确认框（避免「停一个幽灵实例」）
+          stopTargetName: stillRunning(cur.stopTargetName) ? cur.stopTargetName : null,
         })
       },
       (err) => {
-        patch({ status: 'error', loadError: err instanceof Error ? err.message : String(err) })
+        patch({ loadError: err instanceof Error ? err.message : String(err) })
       },
     )
   }
 
   useEffect(load, [api])
 
-  /** 打开详情（只读；原文一次性拉取） */
-  const openDetail = (profile: DshProfileMeta): void => {
-    patch({ detailName: profile.name, actionError: null })
+  /** 拉取详情正文（一次性；按名重取，所以刷新/切页签回来都不是空弹窗）。 */
+  const fetchDetail = (name: string): void => {
     setDetail(null)
     setDetailError(null)
     setDetailLoading(true)
-    api.profileDetail(profile.name).then(
+    api.profileDetail(name).then(
       (value) => {
         if (!mountedRef.current) return
         setDetail(value)
@@ -212,138 +174,296 @@ export function ProfilesPanel({ api, t }: ProfilesPanelProps) {
     )
   }
 
+  /** 打开详情（只读；切片只记名字，正文现场重取）。 */
+  const openDetail = (profile: DshProfileMeta): void => {
+    patch({ selectedName: profile.name, error: null })
+    fetchDetail(profile.name)
+  }
+
   const closeDetail = (): void => {
-    patch({ detailName: null })
+    patch({ selectedName: null })
     setDetail(null)
     setDetailError(null)
     setDetailLoading(false)
   }
 
+  // 上次挂载时详情是开着的（切页签回来 / 刷新恢复）→ 按名字重建弹窗：正文重取，不给空弹窗
+  useEffect(() => {
+    const restored = state.selectedName
+    if (restored !== null) fetchDetail(restored)
+  }, [])
+
   const doCreate = (): void => {
     const name = state.createName.trim()
     const issue = validateProfileNameInput(name)
     if (issue !== null) {
-      patch({ actionError: nameIssueText(t, name, issue) })
+      patch({ error: nameIssueText(t, name, issue) })
       return
     }
     if (state.creating) return
-    patch({ creating: true, actionError: null })
+    patch({ creating: true, error: null })
+    // 回执不再用 mountedRef 拦：patch 直达单例，面板卸载期间出的结果也照写（否则按钮永久停在「创建中」）
     api.profileCreate(name, state.createTemplate).then(
       (meta) => {
-        patch({ creating: false, createName: '', actionError: null })
+        patch({ creating: false, createName: '', error: null })
         toast.ok(t('profiles.create.done', { name: meta.name }))
         load()
       },
       (err) => {
-        patch({ creating: false, actionError: profileErrorText(t, err) })
-        toast.error(profileErrorText(t, err))
+        const text = profileErrorText(t, err)
+        patch({ creating: false, error: text })
+        toast.error(text)
       },
     )
   }
 
-  const doRename = (): void => {
-    const target = state.renameTarget
-    if (target === null || state.renaming) return
+  /** 重命名：目标由渲染期解析出的档案对象传入（列表一刷新就自动跟随，不留幽灵目标）。 */
+  const doRename = (target: DshProfileMeta): void => {
+    if (state.renaming) return
     const newName = state.renameValue.trim()
     const issue = validateProfileNameInput(newName)
     if (issue !== null) {
-      patch({ actionError: nameIssueText(t, newName, issue) })
+      patch({ error: nameIssueText(t, newName, issue) })
       return
     }
-    patch({ renaming: true, actionError: null })
+    patch({ renaming: true, error: null })
     api.profileRename(target.name, newName).then(
       (meta) => {
-        patch({ renaming: false, renameTarget: null, renameValue: '', actionError: null })
+        patch({ renaming: false, renameTargetName: null, renameValue: '', error: null })
         toast.ok(t('profiles.rename.done', { name: meta.name }))
         load()
       },
       (err) => {
-        patch({ renaming: false, actionError: profileErrorText(t, err) })
+        patch({ renaming: false, error: profileErrorText(t, err) })
       },
     )
   }
 
-  const doDelete = (): void => {
-    const target = state.deleteTarget
-    if (target === null || state.deleting) return
+  /** 删除（物理删除目录，不可恢复）：目标由渲染期解析出的档案对象传入。 */
+  const doDelete = (target: DshProfileMeta): void => {
+    if (state.deleting) return
     if (target.isCurrent && !state.deleteCurrentConfirmed) {
-      patch({ actionError: t('profiles.deleteCurrentWarning') })
+      patch({ error: t('profiles.deleteCurrentWarning') })
       return
     }
-    patch({ deleting: true, actionError: null })
+    patch({ deleting: true, error: null })
     api.profileDelete(target.name, { allowCurrent: target.isCurrent }).then(
       () => {
-        patch({ deleting: false, deleteTarget: null, deleteCurrentConfirmed: false, actionError: null })
+        patch({ deleting: false, deleteTargetName: null, deleteCurrentConfirmed: false, error: null })
         toast.ok(t('profiles.delete.done', { name: target.name }))
         load()
       },
       (err) => {
-        patch({ deleting: false, actionError: profileErrorText(t, err) })
+        patch({ deleting: false, error: profileErrorText(t, err) })
       },
     )
   }
 
-  const doSelect = (name: string | null): void => {
-    if (state.selecting) return
-    patch({ selecting: true, actionError: null })
-    api.profileSelect(name).then(
-      (selection) => {
-        patch({ selecting: false, selection, actionError: null })
-        toast.ok(name === null ? t('profiles.selectCleared') : t('profiles.selectDone', { name }))
+  /**
+   * 「停止该档案」：host 先请子进程自己退出，优雅期（6s）超时才强杀进程树。
+   * 回执带停止后的 running 列表 —— 按钮立刻变回「启动」，并如实说明是优雅退出还是被强杀。
+   */
+  const doStop = (record: DshProfileRunningView): void => {
+    if (state.stopping !== null) return
+    patch({ stopping: record.name, error: null })
+    api.profileStop(record.name).then(
+      ({ result, running }) => {
+        patch({ stopping: null, stopTargetName: null, running, error: null })
+        // 三种终态分开说：强制杀掉 / 早已不在都不许伪装成「优雅退出」
+        toast.ok(t(stopResultKey(result), { name: record.name }))
       },
       (err) => {
-        patch({ selecting: false, actionError: profileErrorText(t, err) })
+        const text = profileErrorText(t, err)
+        patch({ stopping: null, stopTargetName: null, error: text })
+        toast.error(text)
       },
     )
   }
 
-  const rows = sortProfilesForDisplay(state.profiles, {
-    currentName: state.current === '' ? null : state.current,
-    selectionName: state.selection?.name ?? null,
+  /**
+   * 「启动该档案」：host 用 `dsh --profile <名> --port <空闲端口>` 拉起独立实例并等就绪（最长 20s）。
+   * 非 Web 形态没有浏览器界面 → 不发起请求，就地给终端命令；host 侧的 launchFailed 会带上日志尾部。
+   * 回执（含带 token 的 URL）写进切片：切页签回来横幅还在，不会「点完就没了」。
+   */
+  const doLaunch = (profile: DshProfileMeta): void => {
+    if (state.launching !== null) return
+    if (!canLaunchProfile(profile.shape)) {
+      patch({ launchResult: null, launchBlocked: profile.name, error: null })
+      return
+    }
+    patch({ launchBlocked: null, launching: profile.name, error: null })
+    api.profileLaunch(profile.name).then(
+      ({ launch: result, running }) => {
+        patch({ launching: null, error: null, running, launchResult: result })
+        if (launchState(result) === 'ready') {
+          toast.ok(t('profiles.launch.started', { name: result.name, port: result.port }))
+        } else {
+          toast.warn(t('profiles.launch.pending', { name: result.name, port: result.port, seconds: Math.round(DSH_PROFILE_LAUNCH_TIMEOUT_MS / 1000) }))
+        }
+      },
+      (err) => {
+        const text = profileErrorText(t, err)
+        patch({ launching: null, error: text })
+        toast.error(text)
+      },
+    )
+  }
+
+  /**
+   * 「复制该档案」：host 整份拷贝 `<home>/profiles/<源名>` → 新档案名（可选是否带 node_modules）。
+   * 回执落进切片（含 warnings）：带 node_modules 的档案实测要二十多秒（285 MB），切页签回来横幅还在；
+   * 没带 node_modules 的副本**启动会失败**，所以横幅必须给出安装命令 —— 绝不静默。
+   */
+  const doDuplicate = (target: DshProfileMeta): void => {
+    if (state.copying) return
+    const name = state.copyValue.trim()
+    const issue = validateProfileNameInput(name)
+    if (issue !== null) {
+      patch({ error: nameIssueText(t, name, issue) })
+      return
+    }
+    patch({ copying: true, error: null })
+    api.profileCopy(target.name, name, { includeNodeModules: state.copyIncludeModules }).then(
+      ({ copy }) => {
+        patch({ copying: false, copyTargetName: null, copyValue: '', copyResult: copy, error: null })
+        toast.ok(t('profiles.duplicate.done', { name: copy.name }))
+        load()
+      },
+      (err) => {
+        const text = profileErrorText(t, err)
+        patch({ copying: false, error: text })
+        toast.error(text)
+      },
+    )
+  }
+
+  /**
+   * 阶段由切片派生（`profilesPanelPhase`）：列表已恢复时一次后台刷新不该把视图打回「加载中」。
+   * 旧实现每次挂载都先置 loading —— 切回页签必然闪一下空态。
+   */
+  const phase = profilesPanelPhase(state.profiles, state.loadError)
+  const profileList = state.profiles ?? []
+  const rows = sortProfilesForDisplay(profileList, {
+    currentName: state.current,
+    runningNames: state.running.map((r) => r.name),
   })
-  const summary = summarizeProfiles(state.profiles)
-  const selection = state.selection
-  const selState = selectionState(selection)
+  const summary = summarizeProfiles(profileList)
   const createIssue = state.createName.trim() === '' ? null : validateProfileNameInput(state.createName)
+  // 弹窗目标按档案名即时解析：列表一刷新就自动跟随（目标消失 → 弹窗自己关掉）
+  const renameTarget = state.renameTargetName === null
+    ? null
+    : profileList.find((p) => p.name === state.renameTargetName) ?? null
+  const deleteTarget = state.deleteTargetName === null
+    ? null
+    : profileList.find((p) => p.name === state.deleteTargetName) ?? null
+  const stopTarget = state.stopTargetName === null
+    ? null
+    : state.running.find((r) => r.name === state.stopTargetName) ?? null
+  const copyTarget = state.copyTargetName === null
+    ? null
+    : profileList.find((p) => p.name === state.copyTargetName) ?? null
+  /** 启动回执 / 非 Web 提示（切片字段的本地别名，渲染段与改造前同形） */
+  const launch = state.launchResult
+  const launchBlocked = state.launchBlocked
+  /** 最近一次复制回执（切片字段的本地别名） */
+  const copyResult = state.copyResult
 
   return (
     <div className={css.viewBody}>
       <SectionTitle title={t('profiles.title')} subtitle={t('profiles.subtitle')} />
 
-      {/* —— 当前运行 / 下次启动 —— */}
+      {/* —— 运行状态：当前运行中的 profile + 本插件启动的实例（可打开 / 可停止） —— */}
       <Card className={css.card}>
-        <div className={css.groupLabel}>{t('profiles.nextLaunch')}</div>
+        <div className={css.groupLabel}>{t('profiles.running.title')}</div>
         <div className={css.kvRow}>
           <span className={css.kvKey}>{t('profiles.current')}</span>
           <span className={css.kvValue}>
-            {state.current === '' ? '—' : <span className={css.mono}>{state.current}</span>}
+            {state.current === null ? '—' : <span className={css.mono}>{state.current}</span>}
           </span>
         </div>
-        {selState === 'none' && <div className={css.hint}>{t('profiles.selectHint')}</div>}
-        {selState === 'current' && selection !== null && (
-          <Banner kind="ok">{t('profiles.selectCurrent', { name: selection.name })}</Banner>
-        )}
-        {selState === 'missing' && selection !== null && (
-          <Banner kind="warn">
-            {t('profiles.selectMissing', { name: selection.name })}
-            <Button size="sm" disabled={state.selecting} onClick={() => { doSelect(null) }}>
-              {t('profiles.selectClear')}
-            </Button>
-          </Banner>
-        )}
-        {selState === 'pending' && selection !== null && (
-          <div className={css.actionRow}>
-            <span className={css.hint}>{t('profiles.selectPending', { name: selection.name })}</span>
-            <code className={css.mono}>{restartCommand(selection.name)}</code>
-            <Button size="sm" onClick={() => { copyText(restartCommand(selection.name), t) }}>
-              {t('profiles.copy')}
-            </Button>
-            <Button size="sm" variant="ghost" disabled={state.selecting} onClick={() => { doSelect(null) }}>
-              {t('profiles.selectClear')}
+        {state.running.length === 0 && <div className={css.hint}>{t('profiles.running.none')}</div>}
+        {state.running.map((record) => (
+          <div key={record.name} className={css.actionRow}>
+            <span className={css.kvValue}>
+              <span className={css.mono}>{record.name}</span>
+              {record.port !== null && <>{' · '}{t('profiles.running.port', { port: record.port })}</>}
+              {' · '}{t(record.current ? 'profiles.running.originCurrent' : record.owned ? 'profiles.running.originOwned' : 'profiles.running.originExternal')}
+            </span>
+            {record.url !== null && <Button size="sm" href={record.url}>{t('profiles.running.open')}</Button>}
+            {/* 当前实例不能停自己（进程会死在响应途中）：给禁用按钮 + 说明，而不是藏起来 */}
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={state.stopping !== null || record.current}
+              title={record.current ? t('profiles.stop.currentHint') : record.owned ? t('profiles.stop.hint') : t('profiles.stop.hintExternal')}
+              onClick={() => { patch({ stopTargetName: record.name, error: null }) }}
+            >
+              {state.stopping === record.name ? <Spinner label={t('profiles.stopping')} /> : t('profiles.stop')}
             </Button>
           </div>
-        )}
+        ))}
       </Card>
+
+      {/* —— 「启动该档案」的反馈：就绪给带 token 的认证 URL；没就绪给告警 + 日志路径 —— */}
+      {launchBlocked !== null && (
+        <Banner kind="warn">
+          <div>{t('profiles.launch.notWeb', { name: launchBlocked })}</div>
+          <div className={css.actionRow}>
+            <code className={css.mono}>{restartCommand(launchBlocked)}</code>
+            <Button size="sm" onClick={() => { copyText(restartCommand(launchBlocked), t) }}>
+              {t('profiles.copy')}
+            </Button>
+          </div>
+        </Banner>
+      )}
+      {launch !== null && (
+        <Banner kind={launchState(launch) === 'ready' ? 'ok' : 'warn'}>
+          <div>
+            {launchState(launch) === 'ready'
+              ? t('profiles.launch.started', { name: launch.name, port: launch.port })
+              : t('profiles.launch.pending', { name: launch.name, port: launch.port, seconds: Math.round(DSH_PROFILE_LAUNCH_TIMEOUT_MS / 1000) })}
+          </div>
+          <div className={css.kvRow}>
+            <span className={css.kvKey}>{t('profiles.launch.log')}</span>
+            <span className={css.kvValue}><span className={css.mono}>{launch.logFile}</span></span>
+          </div>
+          {launch.warnings.map((warning) => (
+            <div key={warning} className={css.hint}>{t(launchWarningKey(warning))}</div>
+          ))}
+          <div className={css.actionRow}>
+            {launch.url !== null && (
+              <>
+                <Button size="sm" variant="primary" href={launch.url}>{t('profiles.launch.open')}</Button>
+                <Button size="sm" onClick={() => { copyText(launch.url ?? '', t, 'profiles.launch.copiedUrl') }}>
+                  {t('profiles.launch.copyUrl')}
+                </Button>
+              </>
+            )}
+            <Button size="sm" variant="ghost" onClick={() => { patch({ launchResult: null }) }}>{t('common.close')}</Button>
+          </div>
+        </Banner>
+      )}
+
+      {/* —— 「复制该档案」的回执：没带 node_modules 的副本不能直接启动，必须给出安装命令 —— */}
+      {copyResult !== null && (
+        <Banner kind={copyResult.warnings.length > 0 ? 'warn' : 'ok'}>
+          <div>{t('profiles.duplicate.done', { name: copyResult.name })}</div>
+          {copyResult.warnings.map((warning) => (
+            <div key={warning}>
+              <div>{t(copyWarningKey(warning))}</div>
+              <div className={css.actionRow}>
+                <code className={css.mono}>{profileInstallCommand(copyResult.name)}</code>
+                <Button size="sm" onClick={() => { copyText(profileInstallCommand(copyResult.name), t, 'profiles.duplicate.copiedInstall') }}>
+                  {t('profiles.copy')}
+                </Button>
+              </div>
+            </div>
+          ))}
+          <div className={css.actionRow}>
+            <Button size="sm" variant="ghost" onClick={() => { patch({ copyResult: null }) }}>{t('common.close')}</Button>
+          </div>
+        </Banner>
+      )}
 
       {/* —— 新建档案 —— */}
       <Card className={css.card}>
@@ -358,18 +478,15 @@ export function ProfilesPanel({ api, t }: ProfilesPanelProps) {
             value={state.createName}
             onChange={(e: ChangeEvent<HTMLInputElement>) => { patch({ createName: e.target.value }) }}
           />
-          <select
-            className={css.select}
-            aria-label={t('profiles.create.templateLabel')}
+          <Select
+            ariaLabel={t('profiles.create.templateLabel')}
             value={state.createTemplate}
-            onChange={(e: ChangeEvent<HTMLSelectElement>) => { patch({ createTemplate: e.target.value }) }}
-          >
-            {state.templates.map((template) => (
-              <option key={template.id} value={template.id}>
-                {template.id} — {template.bundles.join(' + ')}
-              </option>
-            ))}
-          </select>
+            onChange={(next) => { patch({ createTemplate: next }) }}
+            options={state.templates.map((template) => ({
+              value: template.id,
+              label: `${template.id} — ${template.bundles.join(' + ')}`,
+            }))}
+          />
           <Button variant="primary" disabled={state.creating || state.createName.trim() === '' || createIssue !== null} onClick={doCreate}>
             {state.creating ? <Spinner label={t('profiles.create.creating')} /> : t('profiles.create.action')}
           </Button>
@@ -378,15 +495,15 @@ export function ProfilesPanel({ api, t }: ProfilesPanelProps) {
       </Card>
 
       {/* —— 列表 —— */}
-      {state.status === 'loading' && <Spinner label={t('profiles.loading')} />}
-      {state.status === 'error' && (
+      {phase === 'loading' && <SkeletonList label={t('profiles.loading')} />}
+      {phase === 'error' && (
         <Banner kind="error">
           {redact(state.loadError ?? t('common.unknownError'))}
           <Button size="sm" onClick={load}>{t('common.retry')}</Button>
         </Banner>
       )}
-      {state.status === 'ready' && state.profiles.length === 0 && <Empty>{t('profiles.empty')}</Empty>}
-      {state.status === 'ready' && state.profiles.length > 0 && (
+      {phase === 'ready' && profileList.length === 0 && <Empty>{t('profiles.empty')}</Empty>}
+      {phase === 'ready' && profileList.length > 0 && (
         <>
           <div className={css.listHeaderRow}>
             <span className={css.groupLabel}>{t('profiles.list.title')}</span>
@@ -400,8 +517,10 @@ export function ProfilesPanel({ api, t }: ProfilesPanelProps) {
           <div className={css.snapshotList} role="list" aria-label={t('profiles.list.title')}>
             {rows.map((profile) => {
               const facts = profileRowFacts(profile)
+              const runningRecord = runningRecordFor(state.running, profile.name)
+              const rowAction = profileRowAction(profile.name, state.running)
               return (
-                <div key={profile.name} className={css.profileRow} role="listitem" data-selected={profile.name === state.detailName ? '' : undefined}>
+                <div key={profile.name} className={css.profileRow} role="listitem" data-selected={profile.name === state.selectedName ? '' : undefined}>
                   <div className={css.profileRowHeader}>
                     {/* 整行「信息区」可点：行内只给计数，完整清单（bundle 层 / 逐条依赖 / patch 原文）在详情弹窗里 */}
                     <button type="button" className={css.profileRowMain} title={t('profiles.list.hint')} onClick={() => { openDetail(profile) }}>
@@ -409,8 +528,10 @@ export function ProfilesPanel({ api, t }: ProfilesPanelProps) {
                         <span className={`${css.mono} ${css.profileRowName}`}>{profile.name}</span>
                         <span className={css.badgeRow}>
                           {profile.isCurrent && <Badge kind="ok">{t('profiles.current')}</Badge>}
-                          {selection !== null && selection.name === profile.name && !profile.isCurrent && (
-                            <Badge kind="info">{t('profiles.nextLaunch')}</Badge>
+                          {runningRecord !== undefined && (
+                            <Badge kind="info">
+                              {runningRecord.port !== null ? t('profiles.running.badge', { port: runningRecord.port }) : t('profiles.running.badgePlain')}
+                            </Badge>
                           )}
                           <Badge kind="info">{t(shapeLabelKey(profile.shape))}</Badge>
                           {profile.issues.map((issue) => (
@@ -426,13 +547,49 @@ export function ProfilesPanel({ api, t }: ProfilesPanelProps) {
                       </span>
                     </button>
                     <span className={css.actionRow} data-inline>
-                      <Button size="sm" disabled={state.selecting} onClick={() => { doSelect(profile.name) }}>
-                        {t('profiles.select')}
+                      {rowAction === 'current' && (
+                        <Button size="sm" disabled title={t('profiles.stop.currentHint')}>{t('profiles.current')}</Button>
+                      )}
+                      {rowAction === 'stop' && runningRecord !== undefined && (
+                        <Button
+                          size="sm"
+                          title={runningRecord.owned ? t('profiles.stop.hint') : t('profiles.stop.hintExternal')}
+                          disabled={state.stopping !== null}
+                          onClick={() => { patch({ stopTargetName: runningRecord.name, error: null }) }}
+                        >
+                          {state.stopping === profile.name ? <Spinner label={t('profiles.stopping')} /> : t('profiles.stop')}
+                        </Button>
+                      )}
+                      {rowAction === 'launch' && (
+                        <Button
+                          size="sm"
+                          variant="primary"
+                          title={canLaunchProfile(profile.shape) ? t('profiles.launch.hint') : t('profiles.launch.notWeb', { name: profile.name })}
+                          disabled={state.launching !== null || state.stopping !== null}
+                          onClick={() => { doLaunch(profile) }}
+                        >
+                          {state.launching === profile.name ? <Spinner label={t('profiles.launching')} /> : t('profiles.launch')}
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        title={t('profiles.duplicateHint')}
+                        disabled={state.copying}
+                        onClick={() => {
+                          patch({
+                            copyTargetName: profile.name,
+                            copyValue: suggestCopyName(profile.name, profileList.map((p) => p.name)),
+                            copyIncludeModules: profile.hasNodeModules,
+                            error: null,
+                          })
+                        }}
+                      >
+                        {t('profiles.duplicate')}
                       </Button>
-                      <Button size="sm" onClick={() => { patch({ renameTarget: profile, renameValue: profile.name, actionError: null }) }}>
+                      <Button size="sm" onClick={() => { patch({ renameTargetName: profile.name, renameValue: profile.name, error: null }) }}>
                         {t('profiles.rename')}
                       </Button>
-                      <Button size="sm" variant="danger" onClick={() => { patch({ deleteTarget: profile, deleteCurrentConfirmed: false, actionError: null }) }}>
+                      <Button size="sm" variant="danger" onClick={() => { patch({ deleteTargetName: profile.name, deleteCurrentConfirmed: false, error: null }) }}>
                         {t('profiles.delete')}
                       </Button>
                     </span>
@@ -445,15 +602,15 @@ export function ProfilesPanel({ api, t }: ProfilesPanelProps) {
       )}
 
       {/* —— 详情弹窗（只读原文） —— */}
-      <Modal open={state.detailName !== null} onClose={closeDetail} title={t('profiles.detail')} wide busy={detailLoading}>
+      <Modal open={state.selectedName !== null} onClose={closeDetail} title={t('profiles.detail')} wide busy={detailLoading}>
         <Modal.Header
-          title={state.detailName !== null ? t('profiles.detailTitle', { name: state.detailName }) : t('profiles.detail')}
+          title={state.selectedName !== null ? t('profiles.detailTitle', { name: state.selectedName }) : t('profiles.detail')}
           closeLabel={t('common.close')}
           onClose={closeDetail}
           closeDisabled={false}
         />
         <Modal.Body scroll>
-          {detailLoading && <Spinner label={t('profiles.loading')} />}
+          {detailLoading && <Skeleton count={3} label={t('profiles.loading')} />}
           {detailError !== null && <Banner kind="error">{detailError}</Banner>}
           {detail !== null && (
             <>
@@ -522,17 +679,53 @@ export function ProfilesPanel({ api, t }: ProfilesPanelProps) {
         </Modal.Footer>
       </Modal>
 
+      {/* —— 复制档案：整份拷贝（大档案是否连 node_modules 一起拷由用户定） —— */}
+      <ConfirmDialog
+        open={copyTarget !== null}
+        title={t('profiles.duplicateTitle')}
+        message={copyTarget !== null ? t('profiles.duplicateMessage', { name: copyTarget.name }) : undefined}
+        confirmLabel={t('profiles.duplicate')}
+        cancelLabel={t('common.cancel')}
+        busy={state.copying}
+        onConfirm={() => { if (copyTarget !== null) doDuplicate(copyTarget) }}
+        onCancel={() => { patch({ copyTargetName: null, copyValue: '', error: null }) }}
+      >
+        <input
+          type="text"
+          className={css.input}
+          value={state.copyValue}
+          aria-label={t('profiles.duplicate.nameLabel')}
+          disabled={state.copying}
+          onChange={(e: ChangeEvent<HTMLInputElement>) => { patch({ copyValue: e.target.value }) }}
+        />
+        {copyTarget !== null && copyTarget.hasNodeModules && (
+          <>
+            <Checkbox
+              checked={state.copyIncludeModules}
+              disabled={state.copying}
+              onChange={(checked: boolean) => { patch({ copyIncludeModules: checked, error: null }) }}
+              label={t('profiles.duplicate.includeModules')}
+            />
+            <div className={css.hint}>{t('profiles.duplicate.includeModulesHint')}</div>
+          </>
+        )}
+        {copyTarget !== null && !copyTarget.hasNodeModules && (
+          <div className={css.hint}>{t('profiles.duplicate.onlyManifest')}</div>
+        )}
+        {state.error !== null && <span className={css.formError}>{state.error}</span>}
+      </ConfirmDialog>
+
       {/* —— 重命名 —— */}
-      {state.renameTarget !== null && (
+      {renameTarget !== null && (
         <ConfirmDialog
           open
           title={t('profiles.renameTitle')}
-          message={t('profiles.renameMessage', { name: state.renameTarget.name })}
+          message={t('profiles.renameMessage', { name: renameTarget.name })}
           confirmLabel={t('profiles.rename')}
           cancelLabel={t('common.cancel')}
           busy={state.renaming}
-          onConfirm={doRename}
-          onCancel={() => { patch({ renameTarget: null, renameValue: '', actionError: null }) }}
+          onConfirm={() => { if (renameTarget !== null) doRename(renameTarget) }}
+          onCancel={() => { patch({ renameTargetName: null, renameValue: '', error: null }) }}
         >
           <input
             type="text"
@@ -541,37 +734,51 @@ export function ProfilesPanel({ api, t }: ProfilesPanelProps) {
             aria-label={t('profiles.renameTitle')}
             onChange={(e: ChangeEvent<HTMLInputElement>) => { patch({ renameValue: e.target.value }) }}
           />
-          {state.actionError !== null && <span className={css.formError}>{state.actionError}</span>}
+          {state.error !== null && <span className={css.formError}>{state.error}</span>}
         </ConfirmDialog>
       )}
 
+      {/* —— 停止实例：会中断那个实例里正在跑的会话 → 走确认，不静默杀 —— */}
+      <ConfirmDialog
+        open={stopTarget !== null}
+        title={t('profiles.stopTitle')}
+        message={stopTarget !== null
+          ? t(stopTarget.owned ? 'profiles.stopMessage' : 'profiles.stopMessageExternal', { name: stopTarget.name, port: stopTarget.port ?? '—' })
+          : undefined}
+        confirmLabel={t('profiles.stop')}
+        cancelLabel={t('common.cancel')}
+        busy={state.stopping !== null}
+        onConfirm={() => { if (stopTarget !== null) doStop(stopTarget) }}
+        onCancel={() => { patch({ stopTargetName: null, error: null }) }}
+      />
+
       {/* —— 删除（物理删除，不可恢复） —— */}
       <ConfirmDialog
-        open={state.deleteTarget !== null}
+        open={deleteTarget !== null}
         title={t('profiles.deleteTitle')}
-        message={state.deleteTarget !== null
-          ? `${t('profiles.deleteMessage', { name: state.deleteTarget.name })}${state.deleteTarget.isCurrent ? `\n\n${t('profiles.deleteCurrentWarning')}` : ''}`
+        message={deleteTarget !== null
+          ? `${t('profiles.deleteMessage', { name: deleteTarget.name })}${deleteTarget.isCurrent ? `\n\n${t('profiles.deleteCurrentWarning')}` : ''}`
           : undefined}
         confirmLabel={t('profiles.delete')}
         cancelLabel={t('common.cancel')}
         danger
         busy={state.deleting}
-        onConfirm={doDelete}
-        onCancel={() => { patch({ deleteTarget: null, deleteCurrentConfirmed: false, actionError: null }) }}
+        onConfirm={() => { if (deleteTarget !== null) doDelete(deleteTarget) }}
+        onCancel={() => { patch({ deleteTargetName: null, deleteCurrentConfirmed: false, error: null }) }}
       >
-        {state.deleteTarget?.isCurrent === true && (
+        {deleteTarget?.isCurrent === true && (
           <Checkbox
             checked={state.deleteCurrentConfirmed}
-            onChange={(checked: boolean) => { patch({ deleteCurrentConfirmed: checked, actionError: null }) }}
+            onChange={(checked: boolean) => { patch({ deleteCurrentConfirmed: checked, error: null }) }}
             label={t('profiles.deleteCurrentConfirm')}
           />
         )}
-        {state.actionError !== null && <span className={css.formError}>{state.actionError}</span>}
+        {state.error !== null && <span className={css.formError}>{state.error}</span>}
       </ConfirmDialog>
 
       {/* —— 表单级错误（无弹窗时也要可见） —— */}
-      {state.actionError !== null && state.renameTarget === null && state.deleteTarget === null && (
-        <Banner kind="error">{state.actionError}</Banner>
+      {state.error !== null && renameTarget === null && deleteTarget === null && copyTarget === null && (
+        <Banner kind="error">{state.error}</Banner>
       )}
     </div>
   )

@@ -22,7 +22,8 @@ import type { RecoveryLockStatus } from '../../ui/types.ts'
 import { cancelDialogModel, runCards, runSummary } from '../../ui/runs-view.ts'
 import type { CancelDecision, CancelDialogModel, RunCardModel } from '../../ui/runs-view.ts'
 import { runStateProgress } from '../run-store.ts'
-import { Badge, Banner, Button, Card, Empty, Spinner } from './ui.tsx'
+import { Badge, Banner, Button, Card, Empty } from './ui.tsx'
+import { SkeletonList } from './Skeleton.tsx'
 import { Modal } from './Modal.tsx'
 import { ProgressBar } from './ProgressBar.tsx'
 import { toast } from './toast-store.ts'
@@ -179,7 +180,7 @@ export function RunsCenter({ api, recoveryApi, t, defaultRollbackOnError }: Runs
         <LockCard state={lock.state} busy={lockBusy} onRecover={() => { void recoverLock() }} t={t} />
       )}
       {error !== null && <Banner kind="error">{t('runs.loadFailed', { message: redact(error) })}</Banner>}
-      {runs === null && error === null && <Spinner label={t('runs.loading')} />}
+      {runs === null && error === null && <SkeletonList label={t('runs.loading')} />}
       {runs !== null && cards.length === 0 && <Empty>{t('runs.empty')}</Empty>}
       {cards.map((card) => {
         const run = (runs ?? []).find((r) => r.runId === card.runId)

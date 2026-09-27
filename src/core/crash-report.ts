@@ -1,5 +1,5 @@
 /**
- * 崩溃检测 / 归因 / 「最后正常快照」选择（Phase 1 P0-5）。
+ * 崩溃检测 / 归因（灾备线按产品定位收敛后只保留检测与归因）。
  *
  * 背景：宿主启动时先读 `<dir>/boot-state.json`（本模块的 BootState），据此判断
  * 「上次启动是否走到过确认成功」：
@@ -7,9 +7,8 @@
  *   - `prev.ok !== true` → 上次没走到确认成功（进程被杀 / 启动即崩 / dispose 前未标记）→
  *     判崩溃，并按日志尾部签名归因（session 日志损坏 / bundle 声明缺失 / 插件树注册冲突）；
  *   - `prev.ok === true` → 上次正常。
- * 崩溃时给出「建议动作」枚举（advice）与「最近确认正常时刻」（lastGoodAt），宿主据此选择
- * 恢复目标：`selectLastGoodSnapshot()` 在快照列表中挑出 `createdAt <= lastGoodAt` 的最新一个
- * （跳过 `pre-restore` 双保险快照），再由既有恢复通道执行。
+ *  崩溃时给出「建议动作」枚举（advice）与「最近确认正常时刻」（lastGoodAt）；具体怎么恢复
+ *  由用户在事故恢复页选择（进入救援模式 / 从备份恢复），本模块不自建恢复通道。
  *
  * 生命周期（宿主接线，本模块只提供纯函数与 IO 原语）：
  *   读 prev = readBootState(dir) → alert = computeBootAlert(prev, readCrashLogTail(...))
@@ -45,6 +44,12 @@ import { parseJsonSafe } from '../utils/json.ts';
 /** boot-state 文件名（位于 <dir> 之下）。 */
 const BOOT_STATE_FILE = 'boot-state.json';
 
+/** boot-state 所在目录名（相对插件数据目录 dataDir）。与任何快照库无关。 */
+export const BOOT_STATE_DIR_NAME = 'boot-state';
+
+/** 历史位置：boot-state 曾寄存在灾备快照库目录里（老用户升级时的搬迁来源）。 */
+export const LEGACY_BOOT_STATE_DIR_NAME = 'config-snapshots';
+
 /** 日志尾部默认读取字节数（256 KiB）。 */
 const DEFAULT_LOG_TAIL_BYTES = 262144;
 
@@ -57,8 +62,7 @@ const MAIN_LOG_FILE = 'dsh.log';
 /** 日志文件后缀（大小写不敏感）。 */
 const LOG_SUFFIX = '.log';
 
-/** 快照 kind：恢复前的双保险快照，不作为「最后正常」候选。 */
-const PRE_RESTORE_KIND = 'pre-restore';
+
 
 /** 合法崩溃原因（读盘校验用；与 CrashKind 联合类型保持一一对应）。 */
 const CRASH_KINDS: readonly CrashKind[] = ['session-corrupt', 'bundle-check', 'patch-tree', 'unknown'];
@@ -210,6 +214,30 @@ export async function writeBootState(dir: string, state: BootState): Promise<voi
   }
 }
 
+/**
+ * 把旧位置的 boot-state 搬到新目录（一次性、幂等、best-effort）。
+ *
+ * 背景：boot-state 曾寄生在 <dataDir>/config-snapshots/（灾备快照库目录）。灾备线收敛
+ * 下线后 boot-state 搬到独立目录，老用户那份可用状态若直接不读，会表现为「丢失上次是否
+ * 正常」的记录（首次判定退化为无记录）。因此启动时补一次搬迁：
+ *  新目录已有 → 不动；旧目录有可用状态且新目录没有 → 原样搬过去。
+ *
+ * 纪律：只读旧、只写新；任何失败都不抛（返回 false），绝不影响启动。
+ */
+export async function adoptLegacyBootState(legacyDir: string, dir: string): Promise<boolean> {
+  if (legacyDir === dir) return false;
+  try {
+    if ((await readBootState(dir)) !== null) return false;
+    const legacy = await readBootState(legacyDir);
+    if (legacy === null) return false;
+    await writeBootState(dir, legacy);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+
 // ---------- boot alert ----------
 
 /**
@@ -308,41 +336,6 @@ export async function listCandidateLogs(homeDir: string): Promise<string[]> {
   return out;
 }
 
-// ---------- 最后正常快照 ----------
-
-/** 时间戳解析（非字符串/空串/不可解析 → null）。 */
-function parseTime(value: string | null | undefined): number | null {
-  if (typeof value !== 'string' || value === '') return null;
-  const ms = Date.parse(value);
-  return Number.isNaN(ms) ? null : ms;
-}
-
-/**
- * 选「最后正常快照」：在 snapshots 中找 createdAt <= lastGoodAt 的**最新**一个，
- * 跳过 kind==='pre-restore'（恢复前双保险快照，不代表「正常状态」）。
- * lastGoodAt 为 null / 非法 → null；无符合项（含 createdAt 不可解析者）→ null。
- * createdAt 相同时保留数组中靠前者。入参为最小结构类型，刻意不 import restore.ts
- * （快照元信息 → 恢复执行 的依赖方向必须单向，避免循环依赖）。
- */
-export function selectLastGoodSnapshot<T extends { id: string; createdAt: string; kind?: string }>(
-  snapshots: readonly T[],
-  lastGoodAt: string | null,
-): T | null {
-  const boundary = parseTime(lastGoodAt);
-  if (boundary === null) return null;
-  let best: T | null = null;
-  let bestTime = Number.NEGATIVE_INFINITY;
-  for (const snapshot of snapshots) {
-    if (snapshot.kind === PRE_RESTORE_KIND) continue;
-    const at = parseTime(snapshot.createdAt);
-    if (at === null || at > boundary) continue;
-    if (best === null || at > bestTime) {
-      best = snapshot;
-      bestTime = at;
-    }
-  }
-  return best;
-}
 
 // ---------- 启动生命周期辅助 ----------
 

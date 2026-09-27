@@ -47,7 +47,7 @@
 | **L3** | `env-lock` heartbeat 在途写残留 `.tmp` → `rmSync` ENOTEMPTY | ✅ 已修复（写串行化 + release 前 drain） |
 | **L4** | `run-store` 测试固定 `sleep` 竞态（全量并发时偶发） | ✅ 已修复（改 `waitFor` 条件等待） |
 | G-14 | 同步只搬 `pnpmWorkspace` 声明、不搬 `patches/**` → 目标机 pnpm 拒绝一切安装（issue #35） | ✅ 已修复（`patchFiles` 同进同出 + 导入端剔除不可满足声明 + 市场双端拒收 + journal 状态可辨 + 计划项可回滚 + 工具链变更可见可取消） |
-| G-15 | Windows 无 OS process identity → 阈值内的 PID 复用残留锁仍判 UNKNOWN_STATE（issue #36） | ⚠️ **部分修复**（长过期可显式回收；精确区分 PID 复用仍未实现，见 §3） |
+| G-15 | Windows 无 OS process identity → 阈值内的 PID 复用残留锁仍判 UNKNOWN_STATE（issue #36） | ✅ **已修复**（win32 `Get-Process` / macOS `ps` 精确 PID 复用判定 + `recover-stale-lock` 锁目录候选；拿不到 identity 时仍退回长过期启发式，见 §3） |
 | G-16 | 文件类分区静默跳过 junction/符号链接（issue #37） | ✅ 已修复（GUI 与 CLI 同一跟随内核 + 跳过/不可读均留痕；home 外目标仍拒绝且留痕） |
 | G-17 | 同步页「导出密钥」无数据源：勾选后不导出任何凭据，只跳过载荷的二次脱敏（issue #38） | ✅ 已修复（凭据作为独立密文载荷随加密快照迁移；拉取侧解密 → 逐条确认 → `credentials.set` 写回） |
 | G-18 | `.credentials.yaml` 的 `refs:` 块未被识别：包里带着凭据原文，导入后仍要求人工重填（issue #39） | ✅ 已修复（两处解析共用同一口径，v1 `refs:` 块与预发布扁平布局都认；误导性的「需人工重填」只在确实还缺 ref 时出现） |
@@ -169,15 +169,17 @@
 | 验证方式 | `src/adapters/pnpm-workspace.test.ts`（8 例：逐字节不变 / 只删缺失条目 / 全删连键删 / 越界路径 / flow 形态不改写 / CRLF / 无声明零改动）；`src/adapters/plugins.test.ts` → 「issue #35：patch 文件随分区迁移；目标缺失的 patchedDependencies 声明导入时剔除」；`tests/core/import-journal-status.test.ts`（四种结局的 journal 状态）；`src/market/{prepare,market}.test.ts`（双端拒收 + 路径穿越拒绝）。 |
 | 规格同步 | `docs/spec/bundle-format-v1.md` §3.2 / §3.4 / §3.5 / §10（`patchFiles` 字段与「声明与文件必须同进同出」的实现者注意）。 |
 
-### G-15 Windows 仍无 OS process identity（#36 的残余边界，**部分修复**）
+### G-15 Windows/macOS 缺少 OS process identity → PID 复用残留锁判 UNKNOWN_STATE（issue #36，**已修复**）
 
 | 项 | 内容 |
 |---|---|
-| 现状 | `canGetOsIdentity()` 仍只在 Linux 为 true（`src/utils/env-lock.ts` 的 `defaultProbe`）。Windows 上 Node 无原生 API 读**其它进程**的创建时间；实现需 spawn `Get-Process`/WMI，而锁探测在每次 acquire 上都会跑，代价不可接受。 |
-| 已缓解 | 心跳**长过期**（阈值 `max(30 × staleAfterMs, 30 分钟)`，可注入 `longExpiredAfterMs`）时，把「心跳过期 + pid 存活 + 身份不可验证」判为 `STALE_LOCK_DETECTED`，使 `recover-stale-lock` 与 GUI「回收残留锁」可成功回收（issue #36 的期望行为）。 |
-| 未解决 | ① 阈值内（< 30 分钟无心跳）的 PID 复用残留锁仍判 `UNKNOWN_STATE`，只能等待阈值过去；② 无法把「PID 复用」与「owner 真存活但心跳降级」精确区分——两者都靠「心跳长过期」这一代理判据，属**启发式**而非确证。 |
-| 为什么不更激进 | 缩短阈值会提高「误回收活锁」的风险（活着的 owner 在 ACL/磁盘异常下可能长时间写不进心跳）。当前取值是「用户实测等 9 天」与「误删活锁」之间的折中；要真正解决需注入平台级 identity 探测（`ProcessIdentityProbe` 已是可注入接口，宿主可自行实现）。 |
-| 验证方式 | `src/utils/env-lock.test.ts` 的 `§11.1-c11b`（9 天长过期 → 可识别 + 可显式回收 + acquire 仍不自动摘锁）与 `§11.1-c11c`（未达阈值仍保守 `UNKNOWN_STATE`；heartbeat 缺失不放宽；阈值可注入）。 |
+| 基线问题（0.1.59 实测） | `canGetOsIdentity()` 只在 Linux 为 true，win32/macOS 的 `probe()` 恒返回 `osProcessStartIdentity: null`；Windows 又会复用 PID，于是「心跳过期 + pid 存活」永远停在 `UNKNOWN_STATE` —— `recover-stale-lock` 与 GUI「回收残留锁」**都拒绝**，用户只能手工删锁文件（报告者的心跳停更 9 天仍无法回收）。 |
+| 修复位置 | `src/utils/env-lock.ts` 的 `createPlatformProcessIdentityProbe`（`defaultProbe` 即其默认实例）：win32 用 `Get-Process -Id <pid>` 的 `StartTime.ToFileTimeUtc()`（100ns FileTime），darwin 用 `ps -o lstart=`，linux 仍读 `/proc/<pid>/stat`（不 spawn）。identity 与记录**一致** → `LOCKED`（活着的 owner，心跳降级保护）；**不一致** → `STALE_LOCK_DETECTED`（PID 复用，**精确**判定，不再依赖心跳长过期阈值）。 |
+| 代价控制（原「每次 acquire 都要 spawn，代价不可接受」的症结） | ① **自身 pid 的 identity 在进程内缓存**（进程创建时间不变）→ 每次 acquire 不再 spawn shell，只有本进程第一次 acquire 付一次查询；② 对**其它** pid 的查询只发生在「锁文件已存在且心跳已过期」的少数路径（心跳新鲜时先返回 `LOCKED`，根本不探测）；③ 查询超时 3s + `windowsHide: true`；④ 查询失败/超时/命令缺失 → `identity = null` 且**不抛错**（抛错会把分类推成 `UNKNOWN_STATE`，反而让长过期回收失效）。 |
+| 保留的启发式（兜底，未删除） | 「心跳长过期」（阈值 `max(30 × staleAfterMs, 30 分钟)`，可注入 `longExpiredAfterMs`）仍用于**拿不到 identity** 的所有情形：平台不支持、查询失败、以及**旧版本写出的记录**（`osProcessStartIdentity: null`）。`acquire` 侧始终**绝不自动摘锁**（只分类）。 |
+| 关联修复（同轮，同一用户故事「残留锁只能手工删」） | ① `recover-stale-lock` 的锁目录不再写死 `$DSH_HOME/dsh-config-manager/locks`：改为在 `resolveControlRoots` 候选根（`--data-dir` 派生 + 缺省根）里挑第一个**真的存在 `environment.lock`** 的 `<root>/locks`（`resolveRecoverLocksDir`，`src/cli/index.ts`）——宿主配置了自定义 `dataDir` 时此前根本定位不到锁；② `recover-stale-lock --data-dir <dir>` 的**空格写法此前必然失败**（前置校验把「值」也当成非法 token，只有 `--data-dir=<dir>` 能过），该冗余校验已删除。 |
+| 剩余边界（诚实登记） | ① 平台查询失败（企业策略禁用 powershell 等）或不支持的平台 → 退回长过期启发式，阈值内（< 30 分钟无心跳）的 PID 复用锁仍需等阈值过去；② 「别的 pid」的 identity 查询各付一次 shell 启动（本机实测约 0.25 s），只发生在上锁冲突的罕见路径；③ 时钟被极端调整时 `StartTime` 比对可能失配，方向是判成「PID 复用」→（若原 owner 其实还活着）会允许一次显式回收，这仍是**人工触发**的显式动作，不放松自动侧。 |
+| 验证方式 | 单测：`src/utils/env-lock.test.ts` 的 `§11.1-c11b`（9 天长过期 → 可识别 + 可显式回收 + acquire 仍不自动摘锁）、`§11.1-c11c`（未达阈值仍保守 `UNKNOWN_STATE`；heartbeat 缺失不放宽；阈值可注入）、`§11.5-p1…p5`（win32/darwin 解析与缓存、失败降级不抛错、**真实平台**上「identity 相符 → LOCKED / 不符 → 未达长过期阈值也判 STALE 并可回收」）；CLI 锁目录：`tests/cli/lock-recover-dir.test.ts`（R-01…R-06）。真机 E2E：`outputs/issue36-verify/verify.mjs`（8/8：强杀持锁进程 → 长过期后 CLI 回收成功；PID 复用锁「修复前 UNKNOWN_STATE 拒绝 / 修复后 CLI 立即回收」；identity 相符的活锁仍拒绝回收；自定义 `--data-dir` 根可定位）。 |
 
 ### G-17 同步通道的「导出密钥」没有数据源（issue #38）
 

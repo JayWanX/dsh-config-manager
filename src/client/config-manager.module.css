@@ -20,6 +20,7 @@
  *   §12 Page: Profiles        —— 配置档案
  *   §13 Page: History / About —— 活动抽屉 / 关于
  *   §14 Responsive            —— 窄弹窗降级
+ *   §15 Motion                —— 减弱动效（prefers-reduced-motion）
  */
 
 /* ================================================================ §1 Tokens & Base */
@@ -39,12 +40,19 @@
      通知层必须留在插件自己的层叠上下文内（宿主 overlay z-index 1000），
      故用绝对定位贴合本根节点，而非 Portal 到 body。 */
   position: relative;
+  /* 动效令牌（§15 Motion）：时长/缓动只在这里定义一次，各处引用变量 ——
+     此前 120/160/180ms 在文件里各写一遍，改一处就会漂移。 */
+  --cm-motion-fast: 120ms;
+  --cm-motion-base: 180ms;
+  --cm-motion-slow: 300ms;
+  --cm-motion-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --cm-motion-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* 交互过渡统一参数（hover/focus 颜色过渡；仅颜色属性，克制） */
 .section :is(button, a, input, select, textarea, [role='tab']) {
   transition-property: background-color, border-color, color;
-  transition-duration: 120ms;
+  transition-duration: var(--cm-motion-fast);
   transition-timing-function: ease;
 }
 
@@ -277,6 +285,80 @@
   flex-direction: column;
   min-height: 0;
   padding: 12px 16px 16px;
+  /* 页面入场（首次打开设置 / 切页签）：opacity + 4px 上浮。
+     React 侧以 key={panel} 重建本节点，因此每次换页重放一次；
+     只动 opacity/transform 且**不写 forwards**，动画结束即回到基础样式（无残留 transform）。 */
+  animation: pageEnter var(--cm-motion-base) var(--cm-motion-ease-out);
+}
+
+@keyframes pageEnter {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 列表数据到货入场（卡片列表 / 数据表）：前 4 项逐项递进 24ms，第 5 项起统一 96ms ——
+   逐项递增会让长列表的尾巴拖很久，统一延迟既能读出「一条条出现」的节奏又不会拖尾。
+   只在元素**创建**时播放：轮询刷新复用同一 DOM 节点，不会反复闪。 */
+.snapshotList > *,
+.dataTable tbody tr {
+  animation: itemEnter var(--cm-motion-base) var(--cm-motion-ease-out) both;
+}
+
+.snapshotList > *:nth-child(2),
+.dataTable tbody tr:nth-child(2) { animation-delay: 24ms; }
+
+.snapshotList > *:nth-child(3),
+.dataTable tbody tr:nth-child(3) { animation-delay: 48ms; }
+
+.snapshotList > *:nth-child(4),
+.dataTable tbody tr:nth-child(4) { animation-delay: 72ms; }
+
+.snapshotList > *:nth-child(n + 5),
+.dataTable tbody tr:nth-child(n + 5) { animation-delay: 96ms; }
+
+@keyframes itemEnter {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 视图切换入场（页内子视图 / 向导步骤）：调用方给**已有容器**加 key（key 变化 = React
+   重建节点 = 动画重放），刻意不新增包装层 —— 包装 div 会切断
+   .shellMain/.pagePad/.viewBody 的纵向 flex 填充链（页面会不再撑满视口）。 */
+.viewEnter {
+  animation: itemEnter var(--cm-motion-base) var(--cm-motion-ease-out);
+  /* 透传纵向 flex 填充链：包装层不自带 flex 的话，会把子视图的 `flex: 1 1 auto`
+     （DESIGN.md「消灭底部空洞」的约定）挡在外面。抽屉里父容器不是 flex，故无副作用。 */
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* —— 折叠容器（common/Motion.tsx 的 Collapse）——
+   展开/收起两端都要有高度动画：`height: auto` 不可插值，所以走 grid-template-rows
+   0fr ⇄ 1fr，内层 overflow: hidden 裁剪。内容因此**始终挂载**（组件注释里有代价说明）。
+   visibility 也参与过渡：展开时立即可见，收起时**延迟到高度动画结束**才隐藏 ——
+   否则收起过程会看到内容先消失、空白再塌陷。 */
+.collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  visibility: hidden;
+  transition:
+    grid-template-rows var(--cm-motion-base) var(--cm-motion-ease-out),
+    visibility 0s linear var(--cm-motion-base);
+}
+
+.collapse[data-open] {
+  grid-template-rows: 1fr;
+  visibility: visible;
+  transition:
+    grid-template-rows var(--cm-motion-base) var(--cm-motion-ease-out),
+    visibility 0s;
+}
+
+.collapseInner {
+  overflow: hidden;
+  min-height: 0;
 }
 
 /* —— 底部状态栏：与顶部页签条同款（圆角分段条 + 四周留白，不再通栏贴边） —— */
@@ -304,6 +386,8 @@
   border-radius: 50%;
   background: var(--dsw-alias-label-tertiary);
   flex: none;
+  /* 状态色随任务起停切换（idle → info → ok）：瞬变像「闪了一下」。 */
+  transition: background-color var(--cm-motion-fast) ease;
 }
 
 .statusDot[data-kind='ok'] {
@@ -423,8 +507,7 @@
 }
 
 /* —— 输入 / 选择 —— */
-.input,
-.select {
+.input {
   height: 28px;
   padding: 0 8px;
   border: 1px solid var(--dsw-alias-border-l2);
@@ -440,7 +523,7 @@
    不可全局设 width:100% —— 那会让行内 flex 容器里的每个 select 各占一整行
    （市场页筛选、同步页快照下拉都曾被撑成整行）。 */
 .field > .input,
-.field > .select {
+.field > .selectRoot {
   width: 100%;
 }
 
@@ -448,39 +531,165 @@
   color: var(--dsw-alias-label-tertiary);
 }
 
-.input:hover,
-.select:hover {
+.input:hover {
   border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 40%, var(--dsw-alias-border-l2));
 }
 
-.input:focus,
-.select:focus {
+.input:focus {
   outline: none;
   border-color: var(--dsw-alias-state-business-primary);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent);
 }
 
-.input:disabled,
-.select:disabled {
+.input:disabled {
   opacity: 0.5;
   cursor: default;
-}
-
-.select {
-  appearance: none;
-  padding-right: 22px;
-  background-image: linear-gradient(45deg, transparent 50%, var(--dsw-alias-label-secondary) 50%),
-    linear-gradient(135deg, var(--dsw-alias-label-secondary) 50%, transparent 50%);
-  background-position: calc(100% - 12px) 12px, calc(100% - 8px) 12px;
-  background-size: 4px 4px;
-  background-repeat: no-repeat;
-  cursor: pointer;
 }
 
 /* 密码/路径输入（等宽利于核对） */
 .input[type='password'] {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
+}
+
+/* —— 自定义下拉（common/Select.tsx） ——
+   为什么不是原生 <select>：`appearance: none` 只改触发器，**展开后的弹层仍是系统控件**
+   （深色主题下是亮底系统菜单），且它吃不到 --dsw-* token（§3 硬约束）。
+   这里全部自绘：触发器复刻 .input 的盒模型（28px / 6px 圆角 / input-major 底 / border-l2 描边），
+   弹层用 layer-2 底 + 阴影，选中项对勾 + 主色、高亮项走 hover 底。 */
+.selectRoot {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  min-width: 0;
+  vertical-align: middle;
+  font-size: 12.5px;
+}
+
+.selectTrigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: var(--dsw-specific-input-major);
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--dsw-alias-label-primary);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--cm-motion-fast) ease,
+    box-shadow var(--cm-motion-fast) ease;
+}
+
+.selectTrigger:hover {
+  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 40%, var(--dsw-alias-border-l2));
+}
+
+/* 展开态与键盘焦点同一视觉（都是「这个控件当前活着」） */
+.selectTrigger:focus-visible,
+.selectRoot[data-open] .selectTrigger {
+  outline: none;
+  border-color: var(--dsw-alias-state-business-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent);
+}
+
+.selectTrigger:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.selectLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* chevron 旋转是**状态提示**（展开 ↔ 收起），不是形变层：静态图标 + CSS 过渡即可
+   （morphicons 只用于「图标本身随状态换形的 6 处」，§6，不得扩大范围）。 */
+.selectChevron {
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+  transition: transform var(--cm-motion-fast) var(--cm-motion-ease-out);
+}
+
+.selectRoot[data-open] .selectChevron {
+  transform: rotate(180deg);
+}
+
+/* 弹层：留白 4px 的紧凑面板（与触发器同宽起步，标签长时最宽 260px）。
+   定位方向由组件在展开瞬间量测后写入 data-align（贴右边界时左对齐会溢出画布被裁）。 */
+.selectMenu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 100%;
+  max-width: 260px;
+  max-height: 220px;
+  box-sizing: border-box;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+  box-shadow: 0 10px 26px color-mix(in srgb, var(--dsw-alias-bg-base) 45%, transparent);
+  transform-origin: top center;
+  animation: selectMenuIn var(--cm-motion-fast) var(--cm-motion-ease-out);
+}
+
+.selectRoot[data-align='end'] .selectMenu {
+  left: auto;
+  right: 0;
+}
+
+@keyframes selectMenuIn {
+  from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+
+.selectOption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+
+.selectOption[data-active] {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* 选中项：主色文字 + 左侧主色竖条（此前用右侧对勾，用户要求移除该图标） */
+.selectOption[aria-selected='true'] {
+  color: var(--dsw-alias-state-business-primary);
+  font-weight: 600;
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent);
+  box-shadow: inset 2px 0 0 var(--dsw-alias-state-business-primary);
+}
+
+.selectOption[data-disabled] {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.selectOptionLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* —— 复选 / 单选行 —— */
@@ -552,6 +761,7 @@
 
 /* —— 横幅（四态；紧凑） —— */
 .banner {
+  animation: itemEnter var(--cm-motion-base) var(--cm-motion-ease-out);
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -595,15 +805,40 @@
   vertical-align: middle;
 }
 
+/*
+ * 加载环走 **SVG 几何**（见 ui.tsx 的 Spinner 注释）：旧实现是 13px 盒 + 2px 边框 +
+ * border-radius: 50%，边框占直径 15% 且只有 border-top 实色 —— 栅格化后形状读不出来
+ * （用户：「加载的 icon 不是圆形」）。改为两个 <circle>，几何与分辨率/DPR 无关。
+ *
+ * 颜色一律 **currentColor**（与 lucide 图标同一约定）：
+ * 此前写死 business-primary 蓝 —— 在**主色按钮**（蓝底）上等于用蓝色画蓝色，转圈完全看不见，
+ * 用户看到的只是「按钮变宽了却没有加载图标」（真机截图）。currentColor 让它在任意底色的
+ * 上下文（主色/危险/幽灵按钮、卡片）里都取该处的语义前景色。
+ */
 .spinner {
   display: inline-block;
   width: 13px;
   height: 13px;
-  border: 2px solid color-mix(in srgb, var(--dsw-alias-state-business-primary) 25%, transparent);
-  border-top-color: var(--dsw-alias-state-business-primary);
-  border-radius: 50%;
-  animation: spin 0.7s linear infinite;
   flex: none;
+  vertical-align: middle;
+  transform-origin: 50% 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+/* 底环：完整圆、低对比 —— 让「这是个圆」一眼可辨（旧实现底色仅 25% 不透明度，形状读不出来） */
+.spinnerTrack {
+  fill: none;
+  stroke: color-mix(in srgb, currentColor 30%, transparent);
+  stroke-width: 3;
+}
+
+/* 25% 圆弧：实色扫掠段；旋转由 .spinner 的 spin 承担（不做二次自转）。
+   stroke-dasharray 不在这里手写 —— 由 ui.tsx 按 r 现算（改半径时弧长自动跟随，不会漂移）。 */
+.spinnerArc {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 3;
+  stroke-linecap: round;
 }
 
 @keyframes spin {
@@ -612,7 +847,115 @@
 
 .spinnerLabel {
   font-size: 12px;
-  color: var(--dsw-alias-label-secondary);
+  /* 跟随所在上下文的前景色（主色按钮上是前景白），略带降权但不至于读不出来 */
+  color: inherit;
+  opacity: 0.85;
+}
+
+/* —— Skeleton（加载骨架；common/Skeleton.tsx）——
+   场景：**整块内容的首次加载**（列表 / 表格 / 详情）。骨架先给出布局轮廓，数据到货时
+   不会整页跳动；按钮内联的进行中态仍用 Spinner —— 那里没有轮廓可给，转圈才是对的反馈。
+   着色只用「弱化文字色」的低透明 tint + 一条同色更亮的高光，不引入第二个色系。 */
+.skeletonRoot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  margin-top: 8px;
+}
+
+.skeletonBars,
+.skeletonCards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.skeletonBar {
+  display: block;
+  border-radius: 4px;
+  background-color: color-mix(in srgb, var(--dsw-alias-label-tertiary) 14%, transparent);
+  background-image: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--dsw-alias-label-tertiary) 26%, transparent),
+    transparent
+  );
+  background-repeat: no-repeat;
+  background-size: 160px 100%;
+  background-position: -160px 0;
+  animation: skeletonShimmer 1.3s var(--cm-motion-ease-in-out) infinite;
+}
+
+@keyframes skeletonShimmer {
+  to { background-position: calc(100% + 160px) 0; }
+}
+
+/* 形态：标题 / 正文行 / 区块 / 行条目 */
+.skeletonTitle { height: 13px; width: 42%; border-radius: 5px; }
+.skeletonLine { height: 11px; }
+.skeletonBlock { height: 46px; border-radius: 8px; }
+.skeletonRow { height: 30px; border-radius: 6px; }
+
+/* 多行骨架的长短交错（全等宽看起来像表格）+ 逐条递进延迟（像正在逐块填充，而不是整块齐闪） */
+.skeletonBars > .skeletonBar:nth-child(4n + 2) { width: 92%; }
+.skeletonBars > .skeletonBar:nth-child(4n + 3) { width: 78%; }
+.skeletonBars > .skeletonBar:nth-child(4n) { width: 64%; }
+.skeletonBars > .skeletonBar:nth-child(2) { animation-delay: 60ms; }
+.skeletonBars > .skeletonBar:nth-child(3) { animation-delay: 120ms; }
+.skeletonBars > .skeletonBar:nth-child(4) { animation-delay: 180ms; }
+.skeletonBars > .skeletonBar:nth-child(n + 5) { animation-delay: 240ms; }
+
+/* 条目卡骨架：与 .card 同款表面（bg-layer-2 + 细边框），骨架 → 真实卡片不跳变 */
+.skeletonCard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+}
+
+.skeletonCard > .skeletonBar:nth-child(2) { width: 84%; }
+.skeletonCard > .skeletonBar:nth-child(3) { width: 56%; }
+
+/* 表格骨架：行高/内边距对齐 .dataTable，三列按「名称 / 说明 / 时间」分配宽度 */
+.skeletonTable {
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.skeletonTableRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+
+.skeletonTableRow:last-child {
+  border-bottom: none;
+}
+
+.skeletonTableCell {
+  flex: 1 1 0;
+  height: 11px;
+}
+
+.skeletonTableCell:first-child {
+  flex: 0 0 40%;
+}
+
+.skeletonTableCell:last-child {
+  flex: 0 0 20%;
+}
+
+/* 骨架下方的可见文案（与 Spinner 的 label 同义）：加载反馈必须能被读到，不只靠色块 */
+.skeletonCaption {
+  font-size: 11.5px;
+  color: var(--dsw-alias-label-tertiary);
 }
 
 /* ================================================================ §4 Surfaces */
@@ -694,9 +1037,13 @@
   color: var(--dsw-alias-state-error-primary);
 }
 
-/* 区块标题（页面内二级标题） */
+/* 区块标题（页面内二级标题）。
+   下外边距 = DESIGN §5「区块间距统一 10px」：标题块与紧随其后的面板/横幅在**嵌套容器**
+   （卡片、抽屉小节）里此前是 0 间距（面板贴着标题吃进去）；页面主体内该外边距由
+   .viewBody 的 gap 统一接管（见文末「页面主体区块间距」块，那里会把直接子元素的下外边距归零）。 */
 .sectionTitleBlock {
   min-width: 0;
+  margin: 0 0 10px;
 }
 
 .sectionTitle {
@@ -715,6 +1062,7 @@
 
 /* 空态 */
 .empty {
+  animation: itemEnter var(--cm-motion-base) var(--cm-motion-ease-out);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1035,6 +1383,13 @@ button.statCard:focus-visible {
   border-bottom: none;
 }
 
+/* 分隔线（.kvRow 的下边框）之后紧跟的操作行：补 8px 上间距。
+   此前 .actionRow 只有下外边距、.kvRow 没有下外边距 → 两者相邻时按钮紧贴分隔线
+   （用户实测：档案页「运行状态」里那个「停止」按钮贴着上面的横线）。 */
+.kvRow + .actionRow {
+  margin-top: 8px;
+}
+
 .kvKey {
   flex: none;
   width: 88px;
@@ -1110,6 +1465,16 @@ button.statCard:focus-visible {
 }
 
 /* —— 步骤条（紧凑横向） —— */
+/* 步骤推进（select → … → done）时圆点与标签的状态色是瞬变的：加颜色过渡，
+   让「走到下一步」在视觉上可跟随，而不是硬切。 */
+.stepperDot,
+.stepperLabel {
+  transition:
+    background-color var(--cm-motion-fast) ease,
+    border-color var(--cm-motion-fast) ease,
+    color var(--cm-motion-fast) ease;
+}
+
 .stepper {
   display: flex;
   align-items: center;
@@ -1201,7 +1566,7 @@ button.statCard:focus-visible {
   inset: 0 auto 0 0;
   border-radius: 3px;
   background: var(--dsw-alias-state-business-primary);
-  transition: width 300ms ease-out;
+  transition: width var(--cm-motion-slow) var(--cm-motion-ease-out);
 }
 
 .progressBarDone {
@@ -1220,7 +1585,7 @@ button.statCard:focus-visible {
   width: 34%;
   border-radius: 3px;
   background: var(--dsw-alias-state-business-primary);
-  animation: indet 1.15s ease-in-out infinite;
+  animation: indet 1.15s var(--cm-motion-ease-in-out) infinite;
 }
 
 @keyframes indet {
@@ -1315,6 +1680,13 @@ button.statCard:focus-visible {
   align-items: center;
   justify-content: center;
   background: color-mix(in srgb, var(--dsw-alias-bg-base) 55%, transparent);
+  /* 遮罩淡入：Radix Dialog 只在 open 时挂载 Overlay/Content，元素创建即播放一次。 */
+  animation: maskIn var(--cm-motion-fast) var(--cm-motion-ease-out);
+}
+
+@keyframes maskIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 /* Radix Dialog.Content 自居中定位（Portal 下与 Overlay 平级，需自身 fixed 居中；
@@ -1325,6 +1697,35 @@ button.statCard:focus-visible {
   left: 50%;
   transform: translate(-50%, -50%);
   z-index: 101;
+  /* 弹窗卡片入场（淡入 + 0.97→1 微缩放）。
+     关键：本类的基础样式靠 translate(-50%,-50%) 自居中，动画里**必须把该位移一起写进
+     keyframes** —— 只写 scale 会在动画期间覆盖 transform，弹窗会瞬间跳到左上角。 */
+  animation: dialogIn var(--cm-motion-base) var(--cm-motion-ease-out);
+}
+
+@keyframes dialogIn {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(0.97); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+
+/* 关闭退场：Radix Dialog 的 Presence 在 present=false 时**保持节点挂载**并等动画结束
+   （它读 computed animation-name 后监听 animationend），所以只要给 data-state='closed'
+   一条动画，关闭就有淡出；不支持时退化为原来的瞬时关闭，功能不受影响。
+   注意这些规则的特异性高于基础类，prefers-reduced-motion 块里必须**再点名一次**。 */
+.dialogMask[data-state='closed'] {
+  animation: maskOut var(--cm-motion-fast) var(--cm-motion-ease-out);
+}
+
+.dialogContentCenter[data-state='closed'] {
+  animation: dialogOut var(--cm-motion-fast) var(--cm-motion-ease-out);
+}
+
+@keyframes maskOut {
+  to { opacity: 0; }
+}
+
+@keyframes dialogOut {
+  to { opacity: 0; transform: translate(-50%, -50%) scale(0.98); }
 }
 
 .dialogCard {
@@ -1434,7 +1835,7 @@ button.statCard:focus-visible {
   font-size: 12px;
   line-height: 1.45;
   color: var(--dsw-alias-label-primary);
-  animation: toastIn 160ms ease-out;
+  animation: toastIn var(--cm-motion-base) var(--cm-motion-ease-out);
 }
 
 @keyframes toastIn {
@@ -1512,7 +1913,7 @@ button.statCard:focus-visible {
   border-left: 1px solid var(--dsw-alias-border-l1);
   background: var(--dsw-alias-bg-layer-2);
   box-shadow: -12px 0 32px color-mix(in srgb, var(--dsw-alias-bg-base) 35%, transparent);
-  animation: drawerIn 180ms ease-out;
+  animation: drawerIn var(--cm-motion-base) var(--cm-motion-ease-out);
 }
 
 @keyframes drawerIn {
@@ -2545,6 +2946,8 @@ button.statCard:focus-visible {
   position: absolute;
   inset: 0;
   z-index: 2;
+  /* 出现/消失原本是瞬时的：读取大分区时遮罩突然盖上来会像「闪一下」。 */
+  animation: maskIn var(--cm-motion-fast) var(--cm-motion-ease-out);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2622,6 +3025,7 @@ button.statCard:focus-visible {
 
 /* 单元行缩进，视觉从属其分区 */
 .pickerUnit {
+  animation: itemEnter var(--cm-motion-base) var(--cm-motion-ease-out);
   display: flex;
   align-items: center;
   padding: 3px 0 3px 18px;
@@ -3398,7 +3802,9 @@ button.statCard:focus-visible {
 
 /* —— git 风格恢复预览：分组行 + 左右双栏逐行对照（2026-09） ——
    颜色一律走 --dsw-* token + color-mix（绿=success / 红=error 的 12% 淡底），零硬编码。 */
+/* 计划是「点开快照后才出现」的整块内容：淡入让插入可读（内部折叠见 .collapse）。 */
 .restorePlan {
+  animation: itemEnter var(--cm-motion-base) var(--cm-motion-ease-out);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -3460,9 +3866,9 @@ button.statCard:focus-visible {
   white-space: nowrap;
 }
 
+/* 行内展开 chevron 的着色位（尺寸由 Icon 层的 size 决定，不再需要为字形准备的 font-size） */
 .restorePlanChevron {
   flex: none;
-  font-size: 10px;
   color: var(--dsw-alias-label-tertiary);
 }
 
@@ -3679,7 +4085,9 @@ button.statCard:focus-visible {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding: 6px 0;
+  /* 左右内边距：行位于 .historyScroll（带边框的滚动容器）内，此前 padding 只有纵向
+     → 时间/摘要文字紧贴容器左边框（实测仅 1px，即边框本身）。 */
+  padding: 6px 8px;
   border-bottom: 1px solid color-mix(in srgb, var(--dsw-alias-border-l1) 55%, transparent);
   font-size: 12px;
 }
@@ -3824,7 +4232,7 @@ button.profileRowMain:hover {
   min-width: 0;
 }
 
-/* 档案行内的徽章组（当前运行 / 下次启动 / 形态 / 损坏）：不收缩、不与档案名抢宽 */
+/* 档案行内的徽章组（当前运行 / 运行中实例 / 形态 / 损坏）：不收缩、不与档案名抢宽 */
 .badgeRow {
   display: inline-flex;
   align-items: center;
@@ -3878,6 +4286,46 @@ button.profileRowMain:hover {
 .severityError {
   color: var(--dsw-alias-state-error-primary);
   font-weight: 600;
+}
+
+/* ================================================================ §9b 页面主体区块间距 */
+
+/* 页面主体（.viewBody = 纵向 flex）统一区块间距 10px（DESIGN §5「区块间距统一 10px」）。
+ *
+ * 为什么必须由容器接管：flex 容器**不折叠**外边距，而各区块自带的下外边距（.card/.banner/
+ * .actionRow/.statRow = 10px）只在上一个元素恰好有下外边距时才产生间距 —— 于是
+ * 「小节标题 → 面板」「说明文字 → 横幅」「列表首个子块 → 面板」这些位置恒为 0，
+ * 表现为面板/按钮紧贴上面的内容（用户实测：导入页路径映射的蓝色提示条贴着副标题、
+ * 多个页面的卡片直接顶在小节标题下）。
+ *
+ * 三条规则的分工：
+ *   ① gap 提供**唯一**的 10px 间距；
+ *   ② 直接子元素的上/下外边距归零（否则 gap + margin 双倍成 20px）；
+ *      .statRow 的 `:not(:last-child)` 特异性更高，必须单独点名；
+ *   ③ ::after 是一个**真实的盒子**：页面底部此前只剩「末元素的下外边距」，而
+ *      .pagePad/.viewBody 是 `flex:1 1 auto + min-height:0`（缩到视口高），
+ *      它们的 padding/外边距不进入滚动溢出区 —— 内容一长，最后一排按钮就被压到底部状态栏上
+ *      （用户实测：导入页「重新选择 / 下一步」与底部栏没有间距）。末尾放一个 8px 实盒，
+ *      它必然计入滚动溢出，滚动到底时恒留 10(gap) + 8 = 18px 呼吸区。
+ *
+ * 本块必须留在组件规则之后（同特异性的 margin 归零靠源序胜出）。 */
+.viewBody {
+  gap: 10px;
+}
+
+.viewBody > * {
+  margin-bottom: 0;
+}
+
+.viewBody > .statRow {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+.viewBody::after {
+  content: '';
+  flex: none;
+  height: 8px;
 }
 
 /* ================================================================ §14 Responsive */
@@ -3952,4 +4400,67 @@ button.profileRowMain:hover {
   border-radius: 8px;
   background: var(--dsw-alias-bg-base);
   padding: 6px 10px;
+}
+/* ================================================================ §15 Motion */
+
+/* 减弱动效：prefers-reduced-motion: reduce
+ *
+ * 只关掉**装饰性**动效（入场 + 状态点脉冲）——它们是纯粹的观感修饰，关掉信息不丢。
+ *
+ * **刻意保留** `.spinner`（spin）与 `.progressIndeterminate`（indet）：它们承载
+ * 「正在进行」这个状态本身，关掉会让用户以为界面卡死（无障碍实践里的常见反例）。
+ *
+ * 形变层（common/Icon.tsx 的 ExpandChevron）不在此处兜底：SVG 内部的属性插值由
+ * morphicons 的 reducedMotion="user" 处理（在组件上显式指定），CSS 选择器管不到。
+ */
+@media (prefers-reduced-motion: reduce) {
+  .drawerPanel,
+  .toast,
+  .statusDot[data-pulse] {
+    animation: none;
+  }
+  /* 页面入场 / 弹窗入场 / 骨架 shimmer 同样是纯装饰性动效 —— 一并关掉。
+     骨架在无动画时仍是**可见的静态占位块**（高光段去掉、只留底色），
+     「这里正在加载、将出现 N 行内容」这个信息不丢。 */
+  .pagePad,
+  .dialogMask,
+  .dialogContentCenter,
+  .snapshotList > *,
+  .dataTable tbody tr,
+  .viewEnter,
+  .pickerOverlay,
+  .pickerUnit,
+  .banner,
+  .empty {
+    animation: none;
+  }
+  .statusDot,
+  .stepperDot,
+  .stepperLabel {
+    transition: none;
+  }
+  /* 自定义下拉：弹层入场与 chevron 旋转都是装饰性动效 —— 关掉后仍是瞬时展开/收起，
+     状态（展开与否、选中项）完全不变。 */
+  .selectMenu,
+  .selectChevron {
+    animation: none;
+    transition: none;
+  }
+  /* 这两条的基础类规则关不掉它们（[data-state='closed'] 特异性更高），必须点名 */
+  .dialogMask[data-state='closed'],
+  .dialogContentCenter[data-state='closed'] {
+    animation: none;
+  }
+  .restorePlan {
+    animation: none;
+  }
+  /* 折叠容器：关掉高度过渡（瞬时展开/收起，功能不变）与 visibility 的延迟
+     （延迟与过渡绑定，过渡关掉后必须一起归零，否则收起会短暂留一层不可见高度）。 */
+  .collapse {
+    transition: none;
+  }
+  .skeletonBar {
+    animation: none;
+    background-image: none;
+  }
 }

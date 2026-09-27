@@ -17,7 +17,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { RunStore, STATE_KEY, redactPersistedValue, toPersistedState, type PersistedState, type StoreStorage } from './run-store.ts'
+import {
+  RunStore, STATE_KEY, normalizeProfilesSlice, redactPersistedValue, toPersistedState, toProfilesStoreSlice,
+  type PersistedState, type ProfilesStoreSlice, type StoreStorage,
+} from './run-store.ts'
+import type { DshProfileCopyResult, DshProfileLaunchResult, DshProfileTemplate } from '../profiles/dsh-profile-shared.ts'
 import type { RunProgress } from './common/progress-view.ts'
 import { MAX_RUN_LOG_LINES, type RunState } from '../core/run-registry.ts'
 import type { RestoreReport } from '../core/restore.ts'
@@ -1483,13 +1487,181 @@ test('P0-9: 持久化字段清单显式化（键集合断言 —— 新增字段
     'actionError', 'backupDraft', 'changeSummary', 'error', 'importBackup', 'plan', 'report',
     'running', 'selectedId', 'subTab',
   ])
-  assert.deepEqual(keys(p.profiles), ['current', 'error', 'loadError', 'profiles', 'selectedName', 'selection'])
+  assert.deepEqual(keys(p.profiles), [
+    'copyIncludeModules', 'copyResult', 'copyTargetName', 'copyValue', 'copying',
+    'createName', 'createTemplate', 'creating', 'current', 'deleteCurrentConfirmed', 'deleteTargetName',
+    'deleting', 'error', 'launchBlocked', 'launchResult', 'launching', 'loadError', 'profiles',
+    'renameTargetName', 'renameValue', 'renaming', 'running', 'selectedName', 'stopTargetName', 'stopping',
+    'templates',
+  ])
   assert.deepEqual(keys(p.recovery), ['actionError', 'error', 'preview', 'running', 'selectedOperationId', 'status', 'verifyResult'])
   assert.deepEqual(keys(p.more), ['moreSub'])
   // 瞬态与凭据不得出现在任何切片（回归护栏）
   assert.equal(p.snapshots.running, false)
   assert.equal(p.snapshots.importBackup, null)
   assert.equal(p.recovery.running, false)
+})
+
+/* ----------------- 档案面板：进行中态随模块级单例跨挂载存活（真机 bug 回归） */
+
+/** 启动回执样本：url 带认证 token —— 它在内存切片里合法，落盘就是缺陷。 */
+const PROFILE_LAUNCH_TOKEN = 'PROFILE-TOKEN-DEADBEEF'
+const PROFILE_LAUNCH_RESULT: DshProfileLaunchResult = {
+  name: 'cmtest',
+  mode: 'web',
+  port: 3102,
+  url: 'http://127.0.0.1:3102/?token=' + PROFILE_LAUNCH_TOKEN,
+  pid: 4242,
+  logFile: 'C:\\dsh\\logs\\launch-cmtest-3102.log',
+  ready: true,
+  warnings: [],
+}
+const PROFILE_TEMPLATE_FIXTURE: DshProfileTemplate = {
+  id: 'web',
+  bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'],
+  patchReload: 'live',
+}
+/** 复制回执样本：带 warnings（没带 node_modules 的副本不能直接启动）—— 同样是内存瞬态。 */
+const PROFILE_COPY_RESULT: DshProfileCopyResult = {
+  name: 'cmtest-copy',
+  sourceName: 'cmtest',
+  includeNodeModules: false,
+  durationMs: 12,
+  warnings: ['depsNotInstalled'],
+}
+
+test('档案面板：状态镜像不漏字段（漏字段 = 切页签丢「启动中 / 停止中」）', () => {
+  const store = new RunStore({ storage: null })
+  const base = store.getSnapshot().profiles
+  const full: ProfilesStoreSlice = {
+    ...base,
+    launching: 'cmtest',
+    stopping: 'web',
+    creating: true,
+    renaming: true,
+    deleting: true,
+    renameTargetName: 'a',
+    renameValue: 'b',
+    deleteTargetName: 'c',
+    deleteCurrentConfirmed: true,
+    stopTargetName: 'web',
+    launchBlocked: 'base',
+    launchResult: PROFILE_LAUNCH_RESULT,
+  }
+  const mirrored = toProfilesStoreSlice(full)
+  assert.deepEqual(Object.keys(mirrored).sort(), Object.keys(base).sort(), '切片键集合必须与面板状态一一对应')
+  assert.deepEqual(mirrored, full, '逐字段照搬：漏一个字段就会在切页签（组件卸载重挂）后归零')
+})
+
+test('档案面板：进行中操作/弹窗目标/启动回执为内存态（切页签保留、刷新清空、token 不落盘）', () => {
+  const { storage, raw } = makeStorage()
+  const store = new RunStore({ storage })
+  store.patch({
+    profiles: {
+      launching: 'cmtest',
+      stopping: 'web',
+      creating: true,
+      renaming: true,
+      deleting: true,
+      renameTargetName: 'a',
+      renameValue: 'b',
+      deleteTargetName: 'c',
+      deleteCurrentConfirmed: true,
+      stopTargetName: 'web',
+      launchBlocked: 'base',
+      launchResult: PROFILE_LAUNCH_RESULT,
+      copying: true,
+      copyTargetName: 'cmtest',
+      copyValue: 'cmtest-copy',
+      copyIncludeModules: false,
+      copyResult: PROFILE_COPY_RESULT,
+      createName: 'my-profile',
+      createTemplate: 'web',
+      selectedName: 'cmtest',
+      templates: [PROFILE_TEMPLATE_FIXTURE],
+    },
+  })
+  // 模块级单例：同一 JS 上下文（= 切页签，组件卸载重挂）里这些字段原样保留
+  assert.equal(store.getSnapshot().profiles.launching, 'cmtest')
+  const text = raw()
+  assert.ok(text !== null)
+  assert.ok(!text.includes(PROFILE_LAUNCH_TOKEN), '认证 token 绝不进 sessionStorage')
+
+  // 刷新恢复路径：同一份存储新建 store（等于刷新页面）
+  const after = new RunStore({ storage }).getSnapshot().profiles
+  assert.equal(after.launching, null, '进行中操作不跨刷新（发起请求的页面已销毁）')
+  assert.equal(after.stopping, null)
+  assert.equal(after.creating, false)
+  assert.equal(after.renaming, false)
+  assert.equal(after.deleting, false)
+  assert.equal(after.renameTargetName, null)
+  assert.equal(after.deleteTargetName, null)
+  assert.equal(after.stopTargetName, null)
+  assert.equal(after.launchResult, null, '回执带 token → 刷新后清空')
+  assert.equal(after.launchBlocked, null)
+  assert.equal(after.copying, false, '复制进行中同样是瞬态（发起请求的页面已销毁）')
+  assert.equal(after.copyTargetName, null)
+  assert.equal(after.copyValue, '')
+  assert.equal(after.copyIncludeModules, true, '开关回到默认（下次打开弹窗按源档案现算）')
+  assert.equal(after.copyResult, null)
+  assert.equal(after.createName, 'my-profile', '表单草稿跨刷新保留')
+  assert.equal(after.createTemplate, 'web')
+  assert.equal(after.selectedName, 'cmtest', '详情目标跨刷新保留（正文挂载后按名重取）')
+  assert.deepEqual(after.templates, [], 'templates 是宿主数据（每次 load 重取），不进持久化载荷')
+})
+
+test('normalizeProfilesSlice：只恢复磁盘上有意义的字段，瞬态一律回默认', () => {
+  const restored = normalizeProfilesSlice({
+    profiles: [{ name: 'web', dir: '/x/profiles/web', bundles: [] }],
+    running: [{ name: 'web', pid: 1, port: 3000 }],
+    current: 'web',
+    selectedName: 'web',
+    error: null,
+    loadError: null,
+    createName: 'draft',
+    createTemplate: 'base',
+    creating: true,
+    launching: 'web',
+    renameTargetName: 'web',
+    renameValue: 'x',
+    renaming: true,
+    deleteTargetName: 'web',
+    deleteCurrentConfirmed: true,
+    deleting: true,
+    stopping: 'web',
+    stopTargetName: 'web',
+    launchResult: PROFILE_LAUNCH_RESULT,
+    launchBlocked: 'base',
+    copying: true,
+    copyTargetName: 'web',
+    copyValue: 'web-copy',
+    copyIncludeModules: false,
+    copyResult: PROFILE_COPY_RESULT,
+    templates: [PROFILE_TEMPLATE_FIXTURE],
+  })
+  assert.equal(restored.profiles?.length, 1, '列表恢复')
+  assert.equal(restored.current, 'web')
+  assert.equal(restored.selectedName, 'web')
+  assert.equal(restored.createName, 'draft')
+  assert.equal(restored.createTemplate, 'base')
+  assert.deepEqual(restored.running, [], 'running 是机器本地瞬态（pid 只在本次开机有意义）')
+  assert.deepEqual(restored.templates, [], 'templates 是宿主数据，不从载荷恢复')
+  assert.equal(restored.creating, false)
+  assert.equal(restored.renaming, false)
+  assert.equal(restored.deleting, false)
+  assert.equal(restored.launching, null)
+  assert.equal(restored.stopping, null)
+  assert.equal(restored.renameTargetName, null)
+  assert.equal(restored.deleteTargetName, null)
+  assert.equal(restored.stopTargetName, null)
+  assert.equal(restored.launchResult, null)
+  assert.equal(restored.launchBlocked, null)
+  assert.equal(restored.renameValue, '')
+  assert.equal(restored.copying, false)
+  assert.equal(restored.copyTargetName, null)
+  assert.equal(restored.copyValue, '')
+  assert.equal(restored.copyIncludeModules, true)
+  assert.equal(restored.copyResult, null)
 })
 
 /* ------------------- t27：脱敏结果按引用缓存（回收 P0-9 的性能代价） */

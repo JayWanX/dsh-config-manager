@@ -12,6 +12,8 @@
  *  - heartbeat 走 **独立 sidecar** `environment.heartbeat.<instanceId>`，可安全用 Phase 1 `atomicWriteFile` 更新。
  *  - **operation-scoped** `MutationLockToken`：禁止 process-level reentrant（instanceId/handle/reenterCount 判嵌套）。
  *  - stale 检测只分类（LOCKED / STALE_LOCK_DETECTED / UNKNOWN_STATE），**绝不自动 unlink/takeover**。
+ *  - PID 复用判据**优先**用 OS process creation identity（linux `/proc`、win32 `Get-Process` StartTime、
+ *    macOS `ps`）；拿不到才退回「心跳长过期」启发式（issue #36）。
  *  - recover 是独立显式动作（CLI `--recover-stale-lock`），用原子 rename 捕获 + 二次验证，二次验证失败不覆盖 successor。
  *  - destructive mutation 无 `--force`：必须成功 acquire，否则不得执行。
  *  - release 前校验 owner.instanceId === token.instanceId，不匹配不 unlink（ownership-lost）。
@@ -19,6 +21,7 @@
  * 零 DSH 依赖（仅 node:fs / node:path / node:os / node:crypto + 复用 atomic-write.ts 的 atomicWriteFile）。
  * CLI 离线引擎可复用。io / 时钟 / 进程身份探测可注入（对齐 Phase 1 AtomicIo 模式）。
  */
+import { execFile } from 'node:child_process'
 import fs from 'node:fs/promises'
 import fssync from 'node:fs'
 import path from 'node:path'
@@ -340,12 +343,104 @@ const defaultTimers: LockTimerApi = {
   clearInterval: (handle) => { clearInterval(handle as ReturnType<typeof setInterval>) },
 }
 
-/** 默认进程探测（跨平台 best-effort；OS identity 能力由平台决定） */
-function defaultProbe(): ProcessIdentityProbe {
-  const canGetOsIdentity = (): boolean => {
-    // Linux /proc 可靠；Windows/macOS 由 probe 运行时二次探测决定，这里保守：仅声明 Linux 能力
-    return process.platform === 'linux'
+/** 外部命令执行器（测试注入用）：只取 stdout；失败/超时抛错。 */
+export type IdentityCommandRunner = (file: string, args: string[], timeoutMs: number) => Promise<string>
+
+/** 平台进程身份探测的可注入依赖（缺省 = 真实平台实现）。 */
+export interface ProcessIdentityProbeOptions {
+  /** 平台（缺省 process.platform；测试注入以覆盖 win32/darwin 分支） */
+  platform?: NodeJS.Platform
+  /** 外部命令执行器（缺省 child_process.execFile；仅 win32/darwin 有查询命令） */
+  runCommand?: IdentityCommandRunner
+  /** 自身进程 pid（缺省 process.pid；测试注入） */
+  selfPid?: number
+}
+
+/**
+ * identity 查询超时（ms）。宁可在超时后**拿不到** identity（自动退回「心跳长过期」启发式判据），
+ * 也不能让一次探测拖住 mutation —— 查询只发生在「锁文件已存在且心跳已过期」的少数路径上。
+ */
+const IDENTITY_QUERY_TIMEOUT_MS = 3_000
+
+/** 缺省命令执行器：execFile + 超时 + windowsHide（避免 Windows 上短暂弹出控制台窗口）。 */
+function defaultRunCommand(file: string, args: string[], timeoutMs: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      file,
+      args,
+      { timeout: timeoutMs, windowsHide: true, maxBuffer: 64 * 1024, encoding: 'utf8' },
+      (err, stdout) => { if (err) reject(err); else resolve(stdout) },
+    )
+  })
+}
+
+/**
+ * win32 进程创建时间查询：`Get-Process` 的 `StartTime.ToFileTimeUtc()`（100ns 精度 FileTime）。
+ * 说明：Node 无原生 API 读**其它进程**的创建时间，只能经系统命令；这是本文件唯一的外部命令依赖，
+ * 且自身身份被**进程内缓存**（见 createPlatformProcessIdentityProbe）后不再每次 acquire 重复 spawn。
+ */
+function win32IdentityQuery(pid: number): { file: string; args: string[] } {
+  return {
+    file: 'powershell.exe',
+    args: [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
+      `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($p) { [string]$p.StartTime.ToFileTimeUtc() }`,
+    ],
   }
+}
+
+/** darwin 进程创建时间查询：`ps -o lstart=` 给出进程启动的墙钟串。 */
+function darwinIdentityQuery(pid: number): { file: string; args: string[] } {
+  return { file: 'ps', args: ['-o', 'lstart=', '-p', String(pid)] }
+}
+
+/** 把命令输出规整成 identity 串；空/非法 → null（绝不把垃圾当身份参与比较）。 */
+function normaliseIdentityOut(platform: NodeJS.Platform, stdout: string): string | null {
+  const t = stdout.trim()
+  if (t === '') return null
+  if (platform === 'win32') return /^\d+$/.test(t) ? `win32:${t}` : null
+  return `posix:${t}`
+}
+
+/**
+ * 平台进程身份探测（默认实现；issue #36 的精确判据）：
+ *  - linux：读 `/proc/<pid>/stat` 的 starttime（第 22 字段）——不 spawn 任何进程；
+ *  - win32：`Get-Process` 的 `StartTime.ToFileTimeUtc()`；
+ *  - darwin：`ps -o lstart=`；
+ *  - 其它平台：`canGetOsIdentity()` = false（退回「心跳长过期」启发式判据）。
+ *
+ * 代价（known-gaps G-15 的「代价不可接受」正是要解决的点）：自身进程的创建时间在进程生命周期内
+ * **不变** → 命中一次即缓存（成功与失败都缓存：探测能力是环境属性），于是每次 acquire 不再 spawn shell；
+ * 对**别的** pid 的探测只发生在「锁文件存在且心跳已过期」的少数路径上（心跳新鲜时先返回 LOCKED，不探测）。
+ *
+ * 失败语义：查询失败/超时/命令缺失 → **identity = null**，绝不抛错 —— 抛错会把分类推成 UNKNOWN_STATE，
+ * 反而让 issue #36 里「长过期可显式回收」这条路径失效。identity = null 时上层自动退回长过期启发式。
+ */
+export function createPlatformProcessIdentityProbe(opts: ProcessIdentityProbeOptions = {}): ProcessIdentityProbe {
+  const platform = opts.platform ?? process.platform
+  const selfPid = opts.selfPid ?? process.pid
+  const runCommand = opts.runCommand ?? defaultRunCommand
+  /** 自身进程身份缓存（见上：成功/失败都缓存，避免每次 acquire spawn 一次 shell） */
+  let selfResolved = false
+  let selfIdentity: string | null = null
+
+  const queryIdentity = async (pid: number): Promise<string | null> => {
+    if (!Number.isSafeInteger(pid) || pid <= 0) return null
+    const cmd = platform === 'win32'
+      ? win32IdentityQuery(pid)
+      : platform === 'darwin'
+        ? darwinIdentityQuery(pid)
+        : null
+    if (cmd === null) return null
+    try {
+      return normaliseIdentityOut(platform, await runCommand(cmd.file, cmd.args, IDENTITY_QUERY_TIMEOUT_MS))
+    } catch {
+      return null
+    }
+  }
+
+  const canGetOsIdentity = (): boolean =>
+    platform === 'linux' || platform === 'win32' || platform === 'darwin'
 
   const probe = async (pid: number): Promise<ProcessIdentity> => {
     let alive = false
@@ -372,27 +467,32 @@ function defaultProbe(): ProcessIdentityProbe {
       // 防御：理论上到不了这里
       throw new Error(`进程探测未确定 pid=${pid}`)
     }
-    let osIdentity: string | null = null
-    if (alive) {
-      if (process.platform === 'linux') {
-        try {
-          const l = fssync.readFileSync(`/proc/${pid}/stat`, 'utf8').toString()
-          const afterComm = l.slice(l.lastIndexOf(')') + 1).trim().split(/\s+/)
-          osIdentity = `linux:${afterComm[21] ?? 'unknown'}`
-        } catch { osIdentity = null }
-      } else if (process.platform === 'win32') {
-        // best-effort：Node 无法直接读其它进程 creation time；留给注入实现。这里返回 null = 无法验证。
-        osIdentity = null
-      } else if (process.platform === 'darwin') {
-        osIdentity = null // 依赖 ps 的实现应由宿主注入；默认保守
-      } else {
-        osIdentity = null
+    if (!alive) return { alive, osProcessStartIdentity: null }
+    if (platform === 'linux') {
+      try {
+        const l = fssync.readFileSync(`/proc/${pid}/stat`, 'utf8').toString()
+        const afterComm = l.slice(l.lastIndexOf(')') + 1).trim().split(/\s+/)
+        return { alive, osProcessStartIdentity: `linux:${afterComm[21] ?? 'unknown'}` }
+      } catch {
+        return { alive, osProcessStartIdentity: null }
       }
     }
-    return { alive, osProcessStartIdentity: osIdentity }
+    if (pid === selfPid) {
+      if (!selfResolved) {
+        selfIdentity = await queryIdentity(pid)
+        selfResolved = true
+      }
+      return { alive, osProcessStartIdentity: selfIdentity }
+    }
+    return { alive, osProcessStartIdentity: await queryIdentity(pid) }
   }
 
   return { probe, canGetOsIdentity }
+}
+
+/** 默认进程探测（跨平台 best-effort；OS identity 能力由平台决定） */
+function defaultProbe(): ProcessIdentityProbe {
+  return createPlatformProcessIdentityProbe()
 }
 
 function isENOENT(e: unknown): boolean {

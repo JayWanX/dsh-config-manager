@@ -39,7 +39,7 @@ import {
   writeReinstallRecoveryPoint,
   type ReinstallPlan, type ReinstallItemId,
 } from '../core/reinstall.ts';
-import { EnvironmentLockManager, runWithMutationLock, EnvironmentLockUnavailableError } from '../utils/env-lock.ts';
+import { EnvironmentLockManager, runWithMutationLock, EnvironmentLockUnavailableError, OWNERSHIP_FILE } from '../utils/env-lock.ts';
 import { runSessionsRepair } from './sessions-repair.ts';
 import { Phase3Recovery, readSafeModeMarkerSync, safeModeMarkerPath } from '../core/phase3-host.ts';
 import {
@@ -211,12 +211,10 @@ export function parseCli(argv: readonly string[]): ParseResult {  const command 
   }
   if (command === 'sessions') return parseCliSessions(argv);
   if (command === 'recover-stale-lock') {
-    // recover-stale-lock：独立显式 recovery，不接受 destructive 执行参数（只能 --data-dir 定位锁目录）
-    for (const flag of argv.slice(1)) {
-      if (flag !== '--data-dir' && !flag.startsWith('--data-dir=') && !flag.startsWith('-')) {
-        return { ok: false, error: `recover-stale-lock 只接受 --data-dir / accepts only --data-dir` };
-      }
-    }
+    // recover-stale-lock：独立显式 recovery，不接受 destructive 执行参数（只能 --data-dir 定位锁目录）。
+    // 只需 parseCliDataDir —— 它自己就会拒绝任何未知 flag。此前这里还有一道「逐 token 只许 --data-dir」的
+    // 前置校验，会把 `--data-dir <dir>` 的**值**也当成非法 token 拒掉（只有 `--data-dir=<dir>` 能过），
+    // 于是 help 里写的空格写法在这个「只剩 CLI 可用」的紧急路径上失效。
     return parseCliDataDir(argv);
   }
 
@@ -363,6 +361,25 @@ export function resolveControlRoots(
   }
   add(path.join(resolveDshHome(env), 'dsh-config-manager'));
   return out;
+}
+
+/**
+ * `recover-stale-lock` 的锁目录解析：在「候选控制面根」（与 SAFE MODE 同源）里挑第一个**真的躺着**
+ * ownership 文件的 `<root>/locks`；全都没命中 → 缺省根 `$DSH_HOME/dsh-config-manager/locks`。
+ *
+ * 为什么不能写死缺省根（issue #36 的兜底路径）：宿主 `dataDir` 可被配置成非缺省值，写死会让残留锁
+ * 「明明在磁盘上，CLI 却报没有」→ 用户只能手工删锁文件（正是本命令要消灭的处境）。
+ */
+export function resolveRecoverLocksDir(
+  opts: { dataRoot?: string; dataDir?: string } = {},
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const fallback = path.join(resolveDshHome(env), 'dsh-config-manager', 'locks');
+  for (const root of resolveControlRoots(opts, env)) {
+    const candidate = path.join(root, 'locks');
+    if (fssync.existsSync(path.join(candidate, OWNERSHIP_FILE))) return candidate;
+  }
+  return fallback;
 }
 
 /**
@@ -839,12 +856,12 @@ export async function runCli(
   }
 
   const lockDataDir = resolveDataDir(options.dataDir, env);
-  const lockHome = resolveDshHome(env);
 
   // recover-stale-lock：独立显式 recovery（只 inspect + prove stale + 原子回收；不自动、无 --force）。
   if (options.command === 'recover-stale-lock') {
+    // 锁目录按候选根定位（宿主 dataDir 可被配置成非缺省值，写死缺省根会「找不到锁」→ 用户只能手工删文件）。
     const lock = new EnvironmentLockManager({
-      locksDir: path.join(lockHome, 'dsh-config-manager', 'locks'),
+      locksDir: resolveRecoverLocksDir({ dataRoot: options.dataRoot, dataDir: options.dataDir }, env),
       op: 'recover-stale-lock',
       target: lockDataDir,
       lockVersion: '0.1.0',

@@ -53,8 +53,8 @@ export type TimeoutMessageKey =
   | 'error.fallback'
   | 'error.exportTimeout'
   | 'error.syncTimeout'
-  | 'error.recoveryTimeout'
-  | 'error.lifecycleTimeout';
+  | 'error.recoveryTimeout';
+
 
 /** 默认超时文案键：**语境中立**的通用超时（可用于任何请求，不暗示导出/同步/恢复语境）。 */
 export const DEFAULT_TIMEOUT_KEY = 'error.requestTimeout' satisfies TimeoutMessageKey;

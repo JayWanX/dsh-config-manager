@@ -97,7 +97,8 @@ install → typecheck → npm test（全量套件，不按目录裁剪）→ bui
 8. Schema 迁移 v1→v2 为占位（CURRENT=1）
 9. 历史会话默认不迁移（v1 仅文件级复制）
 10. 加密备份密码丢失无法解密（设计使然）
-11. **DSH 无法在运行中切换 profile**：profile 由启动参数 `--profile <name>` 决定，bundle 层在启动时解析，运行中的进程无法更换自身 profile。故「档案」页的切换 = 写 `<dataDir>/next-profile` 标记 + 提示手动重启（`dsh --profile <name>`）；DSH 也没有 profile 管理 HTTP 路由（已核对 0.1.5-rc.1 / 0.1.5-rc.2 / 0.1.6-alpha.2 全无 profile-admin/ui-profile-admin/profileManagement）
+11. **DSH 无法在运行中切换 profile**（且**没有「默认 / 下次启动 profile」状态**）：profile 由启动参数 `--profile <name>` 决定（`dsh <名>` 是简写，`dsh web` 是硬编码别名；缺 `--profile` 直接报错退出），bundle 层在启动时解析，运行中的进程无法更换自身 profile。DSH 也没有 profile 管理 HTTP 路由（已核对 0.1.5-rc.1 / 0.1.5-rc.2 / 0.1.6-alpha.2 全无 profile-admin/ui-profile-admin/profileManagement），**更没有任何「上次用的是哪个 profile」的持久状态** —— 所以任何「下次启动用哪个」的标记**都没有消费者**（本插件曾据此写过 `<dataDir>/next-profile` + 「设为下次启动」按钮，真机定位「设 PROVA 为下次启动 → 重启仍进 web」后，**2026-09 标记与按钮一并移除**：它只会让用户以为切换成功了；`$DSH_HOME/cordis.patch.yml` 只是叠加在**当前** profile 上的 home 层补丁，换不了 profile）。**插件把「切换」做成进程级的启动/停止**（`src/profiles/dsh-profile-launcher.ts`）：`dsh --profile <名> --port <空闲端口>` 拉起 detached 独立实例，从子进程日志抓带 token 的认证 URL 并 HTTP 探活；实例台账落 `<dataDir>/launches.json`（pid/port/url/log），`listRunning` 按 pid 存活过滤并清死记录，`stop` 先优雅后强杀并如实回报三种终态；**只对 web 形态开放**（headless/generic spawn 出去是隐形进程），失败一律带码（`notLaunchable` / `launcherUnavailable` / `launchFailed` + 日志尾部 / `alreadyRunning`）。**launch / stop 刻意不走 mutation gate**：它们不写配置文件，而 gate 会把环境锁占到 handler 返回（launch 最长 20s 就绪）——真机实测那 20s 内导入/恢复全被 423 挡住，且启动完成后 1s 内点停止也会被挡。生态里 dsh-profile-manager（dshm）与 DSH Launcher 走的也是「外部启动器 spawn 实例」这条路。
+**「哪些 profile 在跑」必须靠心跳而不是启动方台账**（真机 bug：从 web 启动 cmtest 后，在 cmtest 的界面里还能再启动 web —— web 是手动敲起来的，不在任何台账里）：每个加载本插件的实例在 apply 时往 `<dataDir>/running/<profile>.json` 自报 `{pid, port, startedAt, updatedAt}`（`src/profiles/dsh-profile-runtime.ts`；20s 刷新、60s 判死、pid 死或过期即清理；**绝不写认证 token**），`GET /profiles` 的 `running` 是「台账 ∪ 心跳」的合并视图（`owned` = 本插件启动的、`current` = 就是自己），因此：已在跑（含手动启动的）→ `alreadyRunning` 拒绝启动、启动当前档案 → `currentProfile`、实例在跑 → 拒绝物理删除、**别的实例也能从本界面用 `stopExternal` 停掉**（同一套优雅→强杀，`src/profiles/process-control.ts` 是唯一实现），而**当前实例自己不给停止**（停自己会死在响应途中）。
 12. DSH 不提供 `DSH_PROFILE` 环境变量：当前 profile 只能从 argv（`--profile`）或插件 config 推断（`resolveProfileNameFromArgv`）
 
 ## 📌 常见坑
@@ -123,7 +124,7 @@ install → typecheck → npm test（全量套件，不按目录裁剪）→ bui
 - 总览 `overview/OverviewPanel.tsx`（纯函数模型 `src/ui/overview-view.ts`：指标/健康判定/建议/最近活动/相对时间）
 - 导出 `export/ExportView.tsx`；导入九步 `import/ImportWizardView.tsx`（外层包装 Stepper 步骤条 + `ImportWizardBody` 本体；纯函数 `src/ui/import-stepper.ts`；+`ConflictList/PathMappingForm/import-file-select`）；快照 `snapshots/SnapshotsPanel.tsx`
 - 历史 `history/HistoryPanel.tsx`；同步 `sync/SyncSettingsView.tsx`(+`SyncConfirmView/SyncHistoryView/sync-view`)；市场 `market/MarketPanel.tsx`(+`MyConfigsView/my-configs-view/my-configs-api`)；咨询 `consult/ConsultCard.tsx`
-- 共享原语 **`common/ui.tsx`**（Button/Badge/Banner/Card/Spinner/Field/SectionTitle/Empty/Checkbox/Stepper）+`common/ErrorBanner.tsx`/`ProgressBar.tsx`/`ReportView.tsx`/`ConfirmDialog.tsx`（含 focus trap）
+- 共享原语 **`common/ui.tsx`**（Button/Badge/Banner/Card/Spinner/Field/SectionTitle/Empty/Checkbox/Stepper）+`common/ErrorBanner.tsx`/`ProgressBar.tsx`/`ReportView.tsx`/`ConfirmDialog.tsx`（含 focus trap）/`Skeleton.tsx`（加载骨架 `Skeleton`/`SkeletonList`/`SkeletonTable`；与 Spinner 的分工见 `DESIGN.md §6`）/`Motion.tsx`（`Collapse` 折叠容器 + `ViewSwitch` 视图切换入场）
 - 状态中枢 `run-store.ts`（模块级单例+sessionStorage 白名单）；数据访问 `api.ts`/`sync/sync-api.ts`/`market/market-api.ts`；文案字典 `locales.ts`/`sync-locales.ts`/`market-locales.ts`（zh 源/en 镜像）
 - 样式全在 `src/client/config-manager.module.css`
 
@@ -140,6 +141,10 @@ CI 门禁：`.github/workflows/ci.yml` 对 `pull_request`→main 与 `push`→ma
 #### 状态管理
 - 高频可恢复流程(Export/Import)状态在 `run-store.ts`；新视图需「切 tab 不丢/刷新恢复」就入 runStore。
 - 低频面板(Snapshots/Sync/Market)组件自持(state+ref) + 非敏感切片镜像 runStore（`toSyncStoreSlice/toMarketStoreSlice/toSnapshotsStoreSlice`）；状态变更统一走 `commit(next)`（更新 stateRef→setState→**总是** `runStore.patch`），不依赖 effect flush；凭据仅内存、瞬态为内存切片，均被 `toPersistedState` 白名单剔除。
+- **档案面板（ProfilesPanel）是「状态即切片」的形态，改它前必读**：`PanelState = ProfilesStoreSlice`（`src/client/run-store.ts`），组件用 `useSyncExternalStore(runStore.subscribe, selectProfilesSlice)` 直接订阅读取，**不另存 useState 副本**；写只经 `patch()`（基线取 store 当前值，非同闭包旧快照）。
+  两个真机 bug 决定了这两条：① 进行中态（`launching/stopping/creating/renaming/deleting`）若留在组件 state，切页签（卸载）就归零 → 回来按钮变回「启动」，用户以为没点上而重复点；② 只写 store 不订阅，过去那次挂载遗留的请求回来时界面不会刷新 → 「启动中」一直转（启动最长 20s，必然踩到）。
+  新增面板字段必须同时进 `toProfilesStoreSlice`（`run-store.test.ts` 的键集合断言 + 镜像不漏字段用例会红）：可持久化（列表视图 / 新建草稿）进 `toPersistedState` 显式放行；进行中态、弹窗目标、`launchResult`（带 token 的认证 URL）一律 `null/false` 剔除 —— 发起请求的页面已随刷新销毁，重放一个等不到回执的 spinner 只会骗人。
+  弹窗目标存**档案名**（`renameTargetName/deleteTargetName/stopTargetName`），渲染期从列表/运行态即时解析 → 列表一刷新目标就自动消失，不需要额外清理逻辑。
 - 面板开关存 runStore `panel` 字段。
 - 控制器(`ExportFlow/ImportWizard`)由 runStore 缓存复用，**禁止每次渲染 new**；刷新恢复经 `writeWizardSnapshot()` 受控 rehydrate。
 
@@ -189,4 +194,16 @@ CI 门禁：`.github/workflows/ci.yml` 对 `pull_request`→main 与 `push`→ma
 
 **已落地（2026-09 Visual Polish，按上述 7 步评估通过）**：
 - `lucide-react`（图标）+ `@radix-ui/react-dialog`（弹窗 a11y）——均为**无样式/行为级**原语，视觉仍走 `--dsw-*` token，不引入第二套视觉体系。**devDependencies**（经 `tsdown.config.ts` 的 `deps.alwaysBundle` 打进单文件 cjs，已被内联故非运行时依赖；放 dependencies 会迫使 headless 消费者安装整套 React UI 栈）。bundle +136KB raw / +30KB gzip。封装层 `common/Icon.tsx`、`common/Modal.tsx`；细节与未迁移弹窗清单见 `DESIGN.md §6`。护栏：`src/client/bundle-selfcontained.test.ts`（build 后跑）；消费方式见 `docs/spec/headless-consumption.md`。
+
+**追加（2026-09 图标形变试点，同样按 7 步评估通过）**：
+- `morphicons`（图标形变运行时）+ vanilla `lucide`（形变图标的 **IconNode 数据**）——MIT / ISC，
+  **零运行时依赖**，同样进 **devDependencies** + `deps.alwaysBundle`
+  （`/^morphicons(\/.*)?$/`、`/^lucide(\/.*)?$/`；后者按 `/` 分隔，**不误伤** `lucide-react`）。
+  实测边际成本 **+40.5KB raw / +13.6KB gzip**（**未压缩产物口径**；minified 约 8KB gzip —— 本仓库 bundle 不 minify，
+  故按前者记账；量法：隔离探针只打新增模块，与 `npm run build` 前后对比 `lib/client.js` 互相印证）。
+  **为什么还要 vanilla `lucide`**：`MorphIcon` 消费 IconNode **数据**，而 `lucide-react` 只导出**组件**；
+  两包并存是 morphicons 的既定设计，但**版本必须与 `lucide-react` 相同**，否则静态/形变两套图形。
+  封装层：`common/Icon.tsx` 的 `ExpandChevron` + `common/morph-icons.ts`（数据表）。
+  护栏：`src/client/common/morph-icons.test.ts`（形变必须是纯 90° 旋转、无缩放 + 端点恰好落在两个图标上 + 两包版本相等）。
+  使用边界与两条硬约定（`reducedMotion="user"` / `spring="smooth"`）见 `DESIGN.md §6`。
 

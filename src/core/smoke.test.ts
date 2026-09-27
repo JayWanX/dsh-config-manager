@@ -517,7 +517,10 @@ test('导出→导入完整往返（win32 → linux + 路径映射 + Secret 不�
     assert.equal(analysis.secretCount, 1, '应报告 1 个已配置凭据（DEEPSEEK_API_KEY）');
     assert.equal(analysis.valid, true);
     assert.equal(analysis.compatibility, 'partial'); // 跨平台
-    assert.ok(analysis.pathIssues.some((p) => p.kind === 'platformMismatch' && p.value.includes('C:\\Users\\alice')), '应检测到跨平台路径问题');
+    const crossPlatform = analysis.pathIssues.find((p) => p.kind === 'platformMismatch' && p.value.includes('C:\\Users\\alice'));
+  assert.ok(crossPlatform, '应检测到跨平台路径问题');
+  // 来源分区必须如实标注：导入向导据此只问「本次真的会写盘的路径」（用户报告：没选工作区也被要求设路径）
+  assert.equal(crossPlatform.section, 'workspaces', '工作区路径问题的来源分区必须是 workspaces');
 
     // Dry Run：analyze + plan 后目标零变化
     const plan = await importer.createImportPlan(zipPath, {

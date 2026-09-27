@@ -8,11 +8,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  ImportWizard, compatibilityBadgeKind, compatibilityLevel, importApplicablePhases, importBasePathNotices, importFlowFlags,
+  ImportWizard, applicablePathIssues, compatibilityBadgeKind, compatibilityLevel, importApplicablePhases,
+  importBasePathNotices, importFlowFlags,
   importPreviewStageAfter, isSkippablePluginInstall, mergeSecretInput, nextImportPhase, pendingSecretRequests,
 } from './import-wizard.ts';
 import { MockImportPort, makeAnalysis, makeImportResult, makePlan, makePlanItem } from './test-helpers.ts';
-import type { ImportPlan } from '../core/types.ts';
+import type { ImportPlan, PathIssue } from '../core/types.ts';
+import type { SectionId } from '../schema/types.ts';
 
 /**
  * UI-06 回归：补录页「看到的值 = 提交的值」。
@@ -338,6 +340,42 @@ test('importFlowFlags：从 Dry Run 产物派生「是否有该阶段」三标�
   assert.equal(importFlowFlags({ plan: makePlan(), analysis: null, decryptRefs: ['OTHER'] }).hasSecrets, true);
 });
 
+test('applicablePathIssues：只保留本次真的会写盘的分区（用户没勾工作区就不该被要求设路径）', () => {
+  const issues: PathIssue[] = [
+    { kind: 'missing', value: 'D:\\Tools', section: 'workspaces' },
+    { kind: 'missing', value: 'D:\\Projects\\x', section: 'workspaces' },
+    { kind: 'missing', value: '/opt/mcp/bin', section: 'mcp' },
+    { kind: 'missing', value: 'C:\\legacy', }, // 旧宿主未回传来源
+  ];
+  // ① 完全没有计划（分析尚未完成）→ 不裁剪
+  assert.equal(applicablePathIssues(issues, null).length, 4);
+  // ② 只导入 mcp → 工作区路径整批消失（真机反馈：没选工作区仍列 7 条路径）
+  assert.deepEqual(applicablePathIssues(issues, new Set<SectionId>(['mcp'])).map((i) => i.value), ['/opt/mcp/bin', 'C:\\legacy']);
+  // ③ 一条都不写 → 空（向导随之跳过 path-mapping 阶段）
+  assert.deepEqual(applicablePathIssues(issues, new Set<SectionId>()), [{ kind: 'missing', value: 'C:\\legacy' }]);
+  // ④ 来源未知的条目一律保留：宁可多问一句，也不能漏掉一条会写盘的映射
+  assert.equal(importFlowFlags({ plan: makePlan(), analysis: makeAnalysis({ pathIssues: issues }), decryptRefs: [], pathIssues: [] }).hasPathIssues, false);
+  assert.equal(importFlowFlags({ plan: makePlan(), analysis: makeAnalysis({ pathIssues: issues }), decryptRefs: [], pathIssues: issues }).hasPathIssues, true);
+})
+
+test('previewSummary(plan)：按裁剪后的子计划计数（取消的条目不再出现在徽章里）', async () => {
+  const port = new MockImportPort();
+  const wiz = new ImportWizard({ port });
+  await wiz.selectZip('x.zip');
+  const plan = await wiz.confirmCompatibility();
+  const full = wiz.previewSummary();
+  const onlySettings = wiz.previewSummary({
+    ...plan,
+    items: plan.items.filter((i) => i.adapter === 'settings'),
+    missingSecrets: [],
+    needsRestart: false,
+  });
+  assert.ok(full.willChange > onlySettings.willChange, '裁剪后「将变更」必须变少');
+  assert.equal(onlySettings.pluginsToInstall, 0, '取消安装插件后不再声称要装插件');
+  assert.equal(onlySettings.mcpAdds, 0);
+  assert.equal(onlySettings.secretsNeeded, 0, '取消插件后不再索要它的密钥');
+  assert.equal(onlySettings.needsRestart, false, '不再提示重启');
+})
 test('pendingSecretRequests：剔除解密已覆盖的 ref，无 plan → 空数组', () => {
   assert.deepEqual(pendingSecretRequests(null, []), []);
   assert.deepEqual(pendingSecretRequests(makePlan(), []), [{ ref: 'K1', required: true }]);

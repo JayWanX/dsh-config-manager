@@ -37,7 +37,6 @@ const FAMILY_KEYS = [
   'error.exportTimeout',
   'error.syncTimeout',
   'error.recoveryTimeout',
-  'error.lifecycleTimeout',
 ] as const;
 
 /** 每个请求族键仍必须携带的语境专属措辞（被改写即红灯）。 */
@@ -45,7 +44,6 @@ const FAMILY_ZH_MARKERS: Record<(typeof FAMILY_KEYS)[number], string> = {
   'error.exportTimeout': '导出',
   'error.syncTimeout': '同步',
   'error.recoveryTimeout': '恢复',
-  'error.lifecycleTimeout': '灾备',
 };
 
 /** 语境专属标记：通用键里出现任何一个，就说明它不够中立（会误报诊断）。 */

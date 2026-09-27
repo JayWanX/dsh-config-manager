@@ -90,7 +90,8 @@ export interface AboutDiagnosticsRow {
  *
  * - starUrl = repoUrl（去尾斜杠归一化后原样）；
  * - docsUrl = repoUrl + '#readme'；
- * - issuesUrl = repoUrl + '/issues'；
+ * - issuesUrl = repoUrl + '/issues/new/choose'（直达 GitHub 的「选模板」页：
+ *   直接落到 issue 列表要多点一次、还要自己判断该用哪个模板，反馈摩擦就是这么来的）；
  * - releasesUrl = repoUrl + '/releases'；
  * - 输入尾斜杠（含多个）会被归一化去除，如 'https://…/repo/' → 'https://…/repo'。
  */
@@ -100,7 +101,7 @@ export function deriveAboutLinks(repoUrl: string): AboutLinks {
     starUrl: base,
     repoUrl: base,
     docsUrl: `${base}#readme`,
-    issuesUrl: `${base}/issues`,
+    issuesUrl: `${base}/issues/new/choose`,
     releasesUrl: `${base}/releases`,
   };
 }
@@ -135,6 +136,29 @@ function diagnosticsRow(status: AboutStatusInput): AboutDiagnosticsRow | null {
     pluginCount: status.installedPluginCount ?? 0,
     manifestUnreadable: status.profileManifestReadable === false,
   };
+}
+
+/**
+ * 运行时信息 → 可直接粘贴到 issue 的 Markdown 片段。
+ *
+ * 为什么放在这里：用户提界面问题时最不愿意做的就是手抄版本号，而「关于」页已经握着全部
+ * 需要的信息。拼接规则是纯函数（node 可测），组件只负责把它交给 CopyButton。
+ *
+ * 不含任何敏感信息：只有版本号、平台标识、profile 名与插件清单目录（目录用于排查
+ * profile / DSH_HOME 不匹配，不是凭据）。诊断位缺失（老宿主）时只输出前三行。
+ */
+export function buildFeedbackSnippet(rows: AboutStatusRows): string {
+  const lines = [
+    '### 环境 / Environment',
+    `- 插件版本 / Plugin: ${rows.version || 'unknown'}`,
+    `- DSH 版本 / DSH: ${rows.dsh || 'unknown'}`,
+    `- 平台 / Platform: ${rows.platform || 'unknown'}`,
+  ];
+  if (rows.diagnostics !== null) {
+    lines.push(`- profile: ${rows.diagnostics.profile}`);
+    lines.push(`- 插件清单目录 / Plugin dir: ${rows.diagnostics.profileDir}`);
+  }
+  return lines.join('\n');
 }
 
 /** 插件公开元数据常量（见设计文档 §3；repoUrl 与 package.json repository 一致） */

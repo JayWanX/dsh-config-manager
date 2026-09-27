@@ -9,7 +9,7 @@
 ## 📦 概览
 - 用途：DSH 配置的备份/导出/导入/迁移/远程同步/配置市场，双面 Cordis 插件。
 - 技术栈：TS 5.9（strict + `verbatimModuleSyntax` + `noUncheckedIndexedAccess`）、Node≥22（host）、React 18 + CSS Modules（web）、`node:test` 零依赖、tsdown + lightningcss 打包 client。
-- 样式：**CSS Modules 唯一样式表 `src/client/config-manager.module.css`**；颜色/字体/阴影全走 DSH `--dsw-*` 变量；**默认不引入 Tailwind/CSS-in-JS/Sass/UI 库/图标库/动画库**——确需追加时按 `DEVELOPERS.md` 的「第三方 UI 库准入」7 步流程评估后落地。
+- 样式：**CSS Modules 唯一样式表 `src/client/config-manager.module.css`**；颜色/字体/阴影全走 DSH `--dsw-*` 变量；**默认不引入 Tailwind/CSS-in-JS/Sass/UI 库/图标库/动画库**——确需追加时按 `DEVELOPERS.md` 的「第三方 UI 库准入」7 步流程评估后落地。**已准入（2026-09，均经该流程）**：`lucide-react`（图标）、`morphicons` + vanilla `lucide`（图标**形变**，仅折叠展开 chevron）、`@radix-ui/react-dialog`（弹窗 a11y）；三者均为 devDependencies + `deps.alwaysBundle`。**不得重复引入同类替代库**，清单与体积见 `DEVELOPERS.md` / `DESIGN.md §6`。
 
 ## 🗂️ 结构与分层
 ```
@@ -24,11 +24,12 @@ src/adapters/  13适配器(settings/ui/providers/plugins/mcp/prompts/skills/agen
 src/sync/      SyncEngine+Git/WebDav+AutoSyncScheduler+config/state/history/sync-selection
 src/market/    GitMarketReader+index-parser+security校验+builtin；github-repos.ts+my-repo.ts+git-file-writer.ts
 src/migrations/ schema迁移链(registry+v1→v2占位)
-src/profiles/  档案=DSH自带profile：dsh-profile-shared(零依赖类型/常量/纯函数)+dsh-profile-manager(列表/详情/新建/重命名/物理删/记录下次启动)
+src/profiles/  档案=DSH自带profile：dsh-profile-shared(零依赖类型/常量/纯函数)+dsh-profile-manager(列表/详情/新建/重命名/复制/物理删)+process-control(存活/优雅→强杀)+dsh-profile-launcher(独立实例：spawn/挑端口/抓认证URL/探活/停止/台账)+dsh-profile-runtime(心跳：谁在跑/停别的实例)
 src/ui/        框架无关UI逻辑(纯函数/控制器，无React，node可测)  ← 业务逻辑必须在此
 src/utils/     paths/zip/hashing/json/logger/atomic-write/env-lock/recursive-walk（跟随 junction 的递归遍历内核，issue #37）
 src/client/    React壳(浏览器半)  ← 只做装配
-tests/ 集成测试(node --test)；docs/README.md 文档索引；docs/design/ 设计文档；docs/spec/ 对外契约(格式规格/schema/兼容矩阵/已知缺口)；\n               docs/seo/ 曝光审计记录；docs/handoff/ 阶段交接文档(历史归档，非当前状态)；其余文档一律进 docs/，根目录只放对外文档
+tests/ 集成测试(node --test)；docs/README.md 文档索引；docs/design/ 设计文档；docs/spec/ 对外契约(格式规格/schema/兼容矩阵/已知缺口)；
+               docs/seo/ 曝光审计记录；docs/handoff/ 阶段交接文档(历史归档，非当前状态)；其余文档一律进 docs/，根目录只放对外文档
 ```
 
 ### UI 分层铁律
@@ -72,9 +73,9 @@ tests/ 集成测试(node --test)；docs/README.md 文档索引；docs/design/ �
 
 ## 🏗️ 架构心智
 - 双面插件：host `src/index.ts`（Cordis `name='config-manager'`，`/api/dsh-config-manager/*`）+ web `src/client/`（React，settings.section，经 api 调 host）。
-- **宿主路由只经 `src/routes/kit.ts` 的 `endpoint()` 声明**（W1，host-entry#F-02/F-03/F-05）：围栏（loopback + 同源）与方法白名单由 kit 在**注册点**统一包装（`registerRoutes()` 兜底断言「未经 kit 的路由直接抛错」），**禁止**再写逐路由的 `guard`/裸 `isLoopbackRequest` 样板；新增一条 API 只改一处（组文件里那一条 `endpoint({ path, methods }, handler)`）。路由源 = `src/index.ts`（被源码级窗口守卫钉住的 8 条）+ `src/routes/*.ts`（59 条）——**源码级守卫必须扫全部路由源**（见 `tests/route/route-fence.test.ts`、`route-parity.test.ts`、`route-channel-guard.test.ts`），只扫 index.ts 会静默失去覆盖。
+- **宿主路由只经 `src/routes/kit.ts` 的 `endpoint()` 声明**（W1，host-entry#F-02/F-03/F-05）：围栏（loopback + 同源）与方法白名单由 kit 在**注册点**统一包装（`registerRoutes()` 兜底断言「未经 kit 的路由直接抛错」），**禁止**再写逐路由的 `guard`/裸 `isLoopbackRequest` 样板；新增一条 API 只改一处（组文件里那一条 `endpoint({ path, methods }, handler)`）。路由源 = `src/index.ts`（被源码级窗口守卫钉住的 8 条）+ `src/routes/*.ts`（61 条）——**源码级守卫必须扫全部路由源**（见 `tests/route/route-fence.test.ts`、`route-parity.test.ts`、`route-channel-guard.test.ts`），只扫 index.ts 会静默失去覆盖。
 - **宿主路由只能经 `src/routes/kit.ts` 的 `registerRoutes()` 注册**（W1，约定级防线）：全仓唯一调用点是 `src/index.ts`（也是唯一 webServer 消费点），它逐条断言路由出自 `endpoint()`；**绕过它直接 `webServer.register(...)` 的旁路当前不存在，但未来新增第二个注册点会静默失去围栏覆盖**（route-fence 只覆盖现有注册路径）。新增注册路径时必须同时接上 `registerRoutes`，或补一条同等的结构守卫。
-- **插件 HTTP API 的真实认证边界 = kit 的围栏，不是 DSH 的 cookie**（W2 真机 E2E 实测 + DSH 源码读码确证；线上证据 `outputs/e2e-w2/`）：DSH 的 browser-session cookie 拒绝只挂在 **`kind:'prefix'`、`path:'/api'` 的 RPC 承载路由**上（`@deepseek-ai/dsh-client-connection/lib/index.js` 的 `requestRejection()` L553-556 = Host/Origin 403 + browserAuth 401，只被 `register()` L605-618 的 prefix 路由调用），而 host-webserver 的派发顺序是 **exact 表先命中**（`@deepseek-ai/dsh-host-webserver/lib/index.js` 的 `match()` L321-331：先查 exact 表，未命中才按 prefix 最长匹配）。本插件 67 条路由（`src/routes/*.ts` 59 + `src/index.ts` 保留 8 = 65 条 exact + `recovery`/`lifecycle` 2 条**插件私有前缀**）都命中 exact 或更长的私有 prefix，**永不进入** DSH 的 `/api` 认证路由——实测**无 cookie** 的 `GET /api/dsh-config-manager/status` 返回 **200 + 完整 JSON**，而 DSH 自己的 `GET /api/<未认领路径>` 与 `GET /` 无 cookie 均 **401**（认证确实存在，只是不覆盖插件 exact 路由）。**影响面**：本机任意非浏览器进程（含本机其它本地用户）**无 token/cookie 即可调用全部 67 条路由**，含破坏性路由（`/profiles/delete`、`/execute`、`/sync/rollback`、`/snapshots/delete`、`/recovery/**` 等）；**远程/LAN 来源**被 kit 的 `remoteAddress ∈ {127.0.0.1, ::1, ::ffff:127.0.0.1}` 判定挡掉，**浏览器跨站 CSRF** 被同源/Host 围栏挡掉（实测跨站 Origin 403、同源对照 200）——**围栏确实在生效，不得把这条写成「插件 API 无认证」**。两个不得误解的推论：① **不得把 DSH 会话认证当作插件 API 的兜底**——认证挂在通用 prefix 路由 `/api` 上 + exact 优先的派发顺序是**平台级性质**，任何在 `/api` 下注册 exact 路由的 DSH 插件同理；插件 API 的边界只能是 kit 的 `endpoint()` 围栏。② 若将来要在**共享机器**或**经本机代理/隧道转发**（非回环来源、`trustedHosts`/LAN 绑定）的场景暴露插件 API，**必须**在 kit 里自行对接认证（方向：在 `endpoint()` 注册点统一加一道校验，勿逐路由散写），届时应重新评级本条的残余风险。**复核路径**：读上述两处 DSH 源码（安装位置 `.../node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/{dsh-host-webserver,dsh-client-connection}/lib/index.js`）；线上复核 `powershell -NoProfile -File outputs/e2e-w2/run-e2e.ps1 -Strict`（本机无 pwsh 7，脚本支持 5.1；探针 `outputs/e2e-w2/probe.mjs`，原始打点与结论见 `outputs/e2e-w2/FINDINGS.md` §4 / §6 D1）。
+- **插件 HTTP API 的真实认证边界 = kit 的围栏，不是 DSH 的 cookie**（W2 真机 E2E 实测 + DSH 源码读码确证；线上证据 `outputs/e2e-w2/`）：DSH 的 browser-session cookie 拒绝只挂在 **`kind:'prefix'`、`path:'/api'` 的 RPC 承载路由**上（`@deepseek-ai/dsh-client-connection/lib/index.js` 的 `requestRejection()` L553-556 = Host/Origin 403 + browserAuth 401，只被 `register()` L605-618 的 prefix 路由调用），而 host-webserver 的派发顺序是 **exact 表先命中**（`@deepseek-ai/dsh-host-webserver/lib/index.js` 的 `match()` L321-331：先查 exact 表，未命中才按 prefix 最长匹配）。本插件 68 条路由（口径 = `tests/route/route-parity.test.ts` 的快照清单；其中 `recovery` 为插件私有前缀）都命中 exact 或更长的私有 prefix，**永不进入** DSH 的 `/api` 认证路由——实测**无 cookie** 的 `GET /api/dsh-config-manager/status` 返回 **200 + 完整 JSON**，而 DSH 自己的 `GET /api/<未认领路径>` 与 `GET /` 无 cookie 均 **401**（认证确实存在，只是不覆盖插件 exact 路由）。**影响面**：本机任意非浏览器进程（含本机其它本地用户）**无 token/cookie 即可调用全部 68 条路由**，含破坏性路由（`/profiles/delete`、`/execute`、`/sync/rollback`、`/snapshots/delete`、`/recovery/**` 等）；**远程/LAN 来源**被 kit 的 `remoteAddress ∈ {127.0.0.1, ::1, ::ffff:127.0.0.1}` 判定挡掉，**浏览器跨站 CSRF** 被同源/Host 围栏挡掉（实测跨站 Origin 403、同源对照 200）——**围栏确实在生效，不得把这条写成「插件 API 无认证」**。两个不得误解的推论：① **不得把 DSH 会话认证当作插件 API 的兜底**——认证挂在通用 prefix 路由 `/api` 上 + exact 优先的派发顺序是**平台级性质**，任何在 `/api` 下注册 exact 路由的 DSH 插件同理；插件 API 的边界只能是 kit 的 `endpoint()` 围栏。② 若将来要在**共享机器**或**经本机代理/隧道转发**（非回环来源、`trustedHosts`/LAN 绑定）的场景暴露插件 API，**必须**在 kit 里自行对接认证（方向：在 `endpoint()` 注册点统一加一道校验，勿逐路由散写），届时应重新评级本条的残余风险。**复核路径**：读上述两处 DSH 源码（安装位置 `.../node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/{dsh-host-webserver,dsh-client-connection}/lib/index.js`）；线上复核 `powershell -NoProfile -File outputs/e2e-w2/run-e2e.ps1 -Strict`（本机无 pwsh 7，脚本支持 5.1；探针 `outputs/e2e-w2/probe.mjs`，原始打点与结论见 `outputs/e2e-w2/FINDINGS.md` §4 / §6 D1）。
 - `src/core/` 与 DSH 解耦：`ConfigAdapter`/`HostContext`+内存 mock；**新功能优先加 core，适配器/UI 薄壳**。
 - 13 adapter 见结构；`self`=插件自身配置（`$DSH_HOME/dsh-config-manager/` 下 `sync-*.json`/`market-config.json`/`ui-prefs.json` 白名单收，portable 默认包含；`dataDir` 在 `~/.dsh` 外不挂载）。
 - 同步：`SyncEngine`+`Git/WebDavTransport`+`AutoSyncScheduler`(事件驱动,远端新快照才拉/本地改动才推)+`sync-selection`；**autosync 与 sync-selection 按通道(git/webdav)独立**(schema v2，v1→git)，调度器双通道各自排期。
@@ -93,7 +94,7 @@ tests/ 集成测试(node --test)；docs/README.md 文档索引；docs/design/ �
 - 分号暂未统一——跟随所在文件风格，勿同一次 diff 混改。
 
 ### 状态管理
-- 状态归属：高频可恢复流程（Export/Import）进 `run-store.ts`（切 tab 不丢/刷新恢复）；低频面板组件自持 + 非敏感切片镜像；凭据只存内存并被 `toPersistedState` 白名单剔除。细则见 `DEVELOPERS.md`。
+- 状态归属：高频可恢复流程（Export/Import）进 `run-store.ts`（切 tab 不丢/刷新恢复）；低频面板进切片（**进行中操作也算状态** —— 组件 `useState` 里的 loading 一卸载就归零，切页签回来按钮变回「启动」是用户报过的 bug；档案面板即 `PanelState = ProfilesStoreSlice` + `useSyncExternalStore` 订阅读取，见 `DEVELOPERS.md`）；凭据只存内存并被 `toPersistedState` 白名单剔除。细则见 `DEVELOPERS.md`。
 
 ### 数据访问/错误
 - 一律走类型化 api 类(`ConfigManagerApi/SyncApi/MarketApi`)，实现 `src/ui/types.ts` port 契约；**组件禁止直接 fetch**。
@@ -127,7 +128,7 @@ npm run bundle                   # 仅重建 client bundle
 1. 颜色/字体/阴影必走 `--dsw-*` token；**禁止 hardcode**(`#fff`等)，tint 用 `color-mix(in srgb, <token> <pct>%, transparent)`。
 2. 样式只能进 `src/client/config-manager.module.css`；禁止新增 css/内联 `<style>`/第三方 css；类名用 CSS Modules 引用(`css.xxx`)，**勿写字符串 class**(`sync-history-table` 属遗留)。
 3. 复用 `src/client/common/ui.tsx` 原语 + Common 的 `ErrorBanner/ErrorList/ProgressBar/ReportView`；已有公共组件能解决禁止重建，新页面先搜库。
-4. **默认不引入第二套视觉体系**(Tailwind/CSS-in-JS/Sass/UI库/图标库/动画库)；图标默认用文本符号/emoji。确需追加第三方 UI 库时，按 `DEVELOPERS.md` 的「第三方 UI 库准入」7 步流程评估后落地。
+4. **默认不引入第二套视觉体系**(Tailwind/CSS-in-JS/Sass/UI库/图标库/动画库)。**图标 = `lucide-react`**（`common/Icon.tsx`，深路径导入 + `lucide-icons.d.ts` 兜底）；**形变仅 `ExpandChevron` / `CopyStateIcon`**（`morphicons`，只在「状态确实变化」处用；硬约定 `reducedMotion="user"` / `spring={MORPH_SPRING}`（临界阻尼 k=420，≈1.6 倍速），见 `DESIGN.md §6`，**不得扩大范围**）。确需追加第三方 UI 库时，按 `DEVELOPERS.md` 的「第三方 UI 库准入」7 步流程评估后落地。
 5. 按钮语义：`variant="primary"`(主操作)/默认 ghost(次)/`variant="danger"`(危险如恢复/回滚)；勿用 primary 做危险操作。
 6. 徽章：`Badge kind="ok|info|warn|error"` 与 `Banner` 四态一一对应；先想语义再选 kind。
 7. 文案走 i18n 字典；展示文本渲染前进 `redact()`。
@@ -151,7 +152,7 @@ npm run bundle                   # 仅重建 client bundle
 
 ## 📦 Dependency Rules
 - 已有库能满足优先用现有（运行时依赖仅 `js-yaml`；peer 是 DSH 官方包）。
-- 不为小功能随意加 UI/CSS/Icon/Animation/Utility 库。
+- 不为小功能随意加 UI/CSS/Icon/Animation/Utility 库；**也不要引入已准入库的同类替代品**（图标 = lucide-react；图标形变 = morphicons + vanilla lucide；弹窗 = Radix Dialog）。
 - 加依赖前确认现有方案无合适选择，评估发布限制；新增后同步更新 `package.json`+`package-lock.json`（两处+根对象）。
 
 ## ✅ Verification
@@ -171,6 +172,45 @@ UI 自查：DESIGN.md 一致(token/组件/spacing/radius/状态语义)、响应�
 代码与文档同步；冲突时以代码为准修正文档。
 
 ## 📌 常见坑
+- **DSH 没有「默认 / 下次启动 profile」这种状态（档案切换的真实根因，2026-09 真机定位并据此重做）**：profile 只由启动参数决定 ——
+  `dsh <名>` / `--profile <名>`，`dsh web` 是硬编码别名（`apps/cli/src/args.ts` 里缺 `--profile` 直接报错退出），
+  启动日志/状态文件里**没有任何「上次用的是哪个 profile」**；`$DSH_HOME/cordis.patch.yml` 只是叠加在**当前** profile 上的 home 层补丁，
+  换不了 profile。**曾经写过 `<dataDir>/next-profile` 标记 + 「设为下次启动」按钮 —— 那是写了个没人读的文件**（用户自己敲的
+  `dsh web` 重启后当然还是 web；真机：设 PROVA 为下次启动 → 重启仍进 web）——2026-09 该标记与按钮**整体移除**：它只会让用户以为
+  切换成功了。真正可用的切换只有两种：① **另起独立实例**（本插件「启动/停止该档案」= `dsh --profile <名> --port <空闲端口>` detached +
+  从子进程日志抓带 token 的认证 URL + HTTP 探活 + 按 `process.kill(pid,0)` 判活；生态里的 dshm / DSH Launcher 走的都是这条）；
+  ② 把用户的启动命令/快捷方式换成 `dsh --profile <名>`（插件无法远程改别人的启动入口，所以只能给命令）。五条硬约束：
+  ⓐ **只对 web 形态可启动**（headless/generic 如 base 模板 spawn 出去是用户看不见的进程 → `notLaunchable` + 终端命令，绝不假装成功）；
+  ⓑ **实例台账是唯一事实**（`<dataDir>/launches.json`：pid/port/url/log；`listRunning` 按 pid 存活过滤并清死记录，UI 的「启动 ↔ 停止」就是它的投影——
+  DSH 不认识插件启动的进程，不记账就永远关不掉）；
+  ⓒ **同一 profile 不许重复启动，判据是「心跳」而不是「台账」**（真机 bug：从 web 启动 cmtest 后，在 cmtest 的界面里还能再启动 web —— web 是手动敲起来的，不在任何台账里）：
+  每个加载本插件的实例在 apply 时往 `<dataDir>/running/<profile>.json` 自报 `{pid, port, startedAt, updatedAt}`（`dsh-profile-runtime.ts`；20s 刷、60s 判死、pid 死或过期即清理；**绝不写认证 token**——那等于把该实例的 DSH RPC 交给本机任意进程）。
+  `GET /profiles` 的 `running` = 台账 ∪ 心跳的合并视图（`owned` 标谁启动的、`current` 标是不是自己），`launch` 前同时过台账与心跳 → 已在跑就 `alreadyRunning`，**启动当前档案直接 `currentProfile`**；
+  心跳里的**别的实例也能被停**（`stopExternal` 按它的心跳 pid 走同一套优雅→强杀），但**不能停自己**（`currentProfile`：进程会死在响应途中，UI 给禁用按钮 + 「关窗口」提示）；
+  「实例运行中」的判据同样用合并视图（删除档案前挡住）；存活判定/优雅期/终止只有一份实现（`process-control.ts`，Windows 无优雅通道 → 1.5s 后必然强杀）。
+  ⓓ **launch / stop 不过 mutation gate**：它们不写任何配置文件，而 gate 会把环境锁占到 handler 返回（launch 最长等 20s 就绪）——
+  真机实测：gated 版本会在「启动完成后 1s 内点删除/停止」时回 423 mutation-locked，且那 20s 里导入/恢复全被挡（无 gate 后改用
+  「就绪后再查一次台账，撞名就杀掉自己那个并报 alreadyRunning」兜住双开窗口）；
+  ⓔ **绝不静默**：每个失败码都带原因，`launchFailed` / `stopFailed` 附子进程日志尾部或 pid；停止如实区分 graceful / killed / already-stopped。
+  ⓕ **进行中态必须住进 runStore 切片**（真机两轮定位）：`launching/stopping/creating/renaming/deleting` 放进 `runStore.profiles`，
+  面板用 `useSyncExternalStore(runStore.subscribe, selectProfilesSlice)` **订阅读取**（`PanelState = ProfilesStoreSlice`，不另存 useState 副本）——
+  ① 留在组件 state 里，切页签（卸载）就归零：正在启动的按钮切走再回来变回「启动」，用户以为没点上而重复点；
+  ② 只写 store 不订阅，上一次挂载遗留的那次请求（launch 最长 20s，必然踩到）回来时界面不刷新 → 「启动中」一直转。
+  进行中态/弹窗目标/启动回执**不落 sessionStorage**（发起请求的页面已随刷新销毁，重放 spinner 只会骗人；`launchResult.url` 还带 token）。
+  新增字段必须同时进 `toProfilesStoreSlice`（`run-store.test.ts` 的键集合 + 镜像不漏字段用例会红）。详见 `DEVELOPERS.md` 状态管理细则。
+  改这块前先读 `src/profiles/dsh-profile-launcher.ts` 的文件头与 `src/profiles/dsh-profile-launcher.test.ts`
+  （真机验证脚本：`outputs/launch-verify/`）。
+- **复制档案（`POST /profiles/copy`）的三条硬约束**（2026-09 实测落地）：① **必须跑链接重指向** —— async
+  `fs.promises.cp` 与 `cpSync` 行为不同：cpSync 会把 junction 展开成真实目录，而 `promises.cp` 只把链接照抄，
+  留下的是**指向源档案**的绝对路径（实测真机 cmtest：48 个 junction 里 37 个在源档案树内），源档案一删副本就缺包；
+  所以拷完走 `relinkCopiedTree`：**只重指向树内链接**（unlink + 重建 junction，Windows 上 junction 不需要管理员权限），
+  指向树外的（`link:` 依赖指向用户仓库、DSH 从安装目录投影出的 fallback）一律原样保留。判链接用
+  `readdir(withFileTypes).isSymbolicLink()`（Windows 对 junction 也返回 true）→ 无需逐条 lstat。
+  ② **整档案拷贝必须走 async fs**：285 MB / 1.7 万条目实测 cpSync 25 s、`promises.cp` + 重指向 ≈ 30 s，但前者把宿主
+  事件循环卡住整整 25 s（DSH 界面全冻）；③ `includeNodeModules=false` 时**同时跳过 `node_modules` 与 DSH 投影出来的
+  `.dsh-module-fallback`**（后者是派生目录，单独搬运只会留下一堆悬空链接，DSH 启动时会重建），并让缺依赖回到
+  回执里（`warnings: ['depsNotInstalled']` + `dsh plugin --profile <副本> install`），绝不静默成功；中途失败回滚目标目录。
+  真机复核脚本：`outputs/profile-copy-verify/verify.mjs`（拷 cmtest → 数链接重指向 → 删探针副本）。
 - **pnpm 发布年龄**：`@latest` 装旧版是 pnpm 11 `minimumReleaseAge`（<30天被排除）；解决：精确版本装一次白名单，或 `pnpm-workspace.yaml` 设 `minimumReleaseAge: 0`。
 - **MemFs 测试**：内存 fs key 与宿主 path 解耦（win32 home 注入 cwd）。
 - **Windows LF→CRLF 警告**：无害噪音。
@@ -193,6 +233,33 @@ UI 自查：DESIGN.md 一致(token/组件/spacing/radius/状态语义)、响应�
 - **子代理会话（origin='subagent'）不是工作区里的对话：导出时必须连带父对话**（真机事故：导入全部「成功」，工作区里一条都看不见）：DSH 客户端 `dsh-client-ui-workspace` 的 `sessionVisible()` 是 `session.origin !== "subagent" && ...` —— 工作区列表**只显示**顶层会话，子代理会话只作为**父对话的下一级**出现；只把子会话导出/同步过去，目标机导入侧一切成功（文件落盘、`workspace.json` 也登记了），用户在 DSH 工作区里却一条都看不到（真机：用户勾了 4 条子代理会话导出再导入，全无踪影 —— 它们的父对话都不在包里）。修复（**双向**）：`SessionsAdapter.export()` 收尾调用 `coupleSessionParents`（`src/adapters/sessions.ts`）——① **向上**：选中子代理会话就补父对话（父对话本身也可能是子代理会话 → 继续往上追），报告 `export.sessionParentsCoupled`；② **向下（2026-09 改为界面联动，引擎不再自己做）**：勾父时由**界面**自动勾上它的子代理会话（`src/ui/selection-model.ts` 的 `applySessionParentCoupling`，ContentPicker 的 `commit` 在每次单元点击后调用）——为什么要挪走：条目级白名单是用户意图的唯一事实，而引擎看不到「界面为什么没勾这条子会话」，自己向下补会把「用户单独取消的子会话」无声加回包里（真机：只勾 2 条 → 导出 41 个目录）；子会话清单由宿主 `SessionStoreFacade.parentRelations()`（`src/index.ts` 用 DSH `sessionPersistence.list()` 的 header `parentSession`+`origin` 实现，**不读日志字节**）提供，只收 `origin='subagent'` 的子会话（非 subagent 的会话即使带 parentSession 也是顶层行），经 `/export-preview` 的 `ExportUnit.parentSessionId`（裸键）下发给浏览器；**注意 `export.sessionChildrenCoupled` 已不再产生**（字典键保留备用）；追不到（本机没有 / 超出分区上限）报 `export.sessionParentsUncoupled`，绝不静默；**BFS 的「已排队」与「已展开」必须分成两个集合**（某个会话可能既是被选中的父对话、又是别人的子会话；混用一个集合会把它当「已见过」而不再展开 → 它的子代理会话静默丢失，真机实测踩过）；导入侧 `finalizeApply` 对「父对话不在包内」的子代理会话报 `import.subagentSessionsWithoutParents`（旧包兜底，把「导入成功却看不见」变成可读告警）。**父对话 id 在磁盘 header 里叫 `parentSession`，DSH 的 RPC 投影才改名 `parentSessionId`**（只认后者一个都认不出来，静默失效 —— 已由 `src/utils/session-log.test.ts` 钉住两种写法）。复核：`outputs/subagent-fix/export-check.ps1`（只勾 4 条子会话 → 包内 8 个会话文件 + 「已连带导出 4 个父对话」）与 `import-check.ps1`（干净目标导入 → DSH `session/list` 8 条，其中 4 条顶层会话 `cwd == workspace.path` 且在 `sessionIds` 里 = 工作区可见，4 条子会话按其父之下显示）。**②.1 父子联动的方向语义（白名单即权威）**（真机第二轮：用户只勾 2 条子代理会话，导出却打了 41 个会话目录 = 2 个父对话 + 37 条**从未勾选**的兄弟子会话，导入页显示「43 个历史会话」）：界面侧 = 勾父带子（传递）、勾子带父（父链向上）、取消父连带取消子、**取消子只取消这一条**；批量动作（分区/分组/全选、清单到货后补跑）走**正向闭包**（只补齐、绝不取消任何勾选项）。方向必须显式传入（`SessionParentChange`）——这两条规则会互相抵消（取消父后若还跑「已勾选的子 ⇒ 勾上父」，父立刻被勾回来，与工作区联动同一个坑）。引擎侧**只保留向上补父对话**（父缺席 = 导入后完全看不见）、**绝不再向下展开**：白名单即权威。复核测试：`src/ui/selection-model.test.ts` 的 5 条「父对话 ↔ 子代理会话联动」与 `src/adapters/sessions.test.ts` 的「只勾子会话 …不把用户没勾的兄弟会话一起打包」。
 - **导出选择器里「历史对话」的排序时间有两个来源**（用户报告「没有按最新到最旧排」）：第一口径 = `storages/session_projcache.json` 的 `lastPromptAt`（缺则 `identity.createdAt`），第二口径 = `SessionsAdapter.unitActivityTimes()` 现算的**会话日志 mtime**（`/export-preview` 注入 `applySessionMeta`）。为什么必须有第二口径：那份缓存只覆盖一部分会话（真机实测同一项目 **731 个目录里 347 个不在缓存内**），缺时间的会话会退化成组尾的 uuid 字典序。**索引键必须用 `sessionIdKey()` 归一化后再查**（缓存键是裸 `<uuid>`，单元 id 末段是目录名，`session-<uuid>` / 裸 `<uuid>` 两种形态并存 —— 不归一化会同时丢掉标题与时间）。
 - **journal step 的 `skipped` 只能表示「用户主动跳过」**：`warning`（非致命失败，§34.17）与 `failed` 都必须记 `attention`，否则事后审计会把「安装失败」读成「用户跳过了」（issue #35 实测）。
+
+- **灾备快照线已按产品定位收敛下线（2026-09），只保留崩溃归因 + 救援模式**：定位 = 迁移 / 同步 / 市场 ——
+  自动快照（watcher）、撤销/重做、手动快照、快照库与 `/lifecycle` 路由整体删除（`core/{watcher,undo,config-state,config-snapshot,config-lifecycle}.ts`、
+  `client/lifecycle/`、`ui/lifecycle-view.ts`、`LIFECYCLE_ENABLED` / `SHOW_LIFECYCLE_NAV` 双开关）。**保留**：`core/crash-report.ts`
+  （崩溃检测 / 归因 / boot-state）与 `core/boot-rescue.ts`（救援模式），两者并入「事故恢复」子 tab（`client/recovery/RecoveryPanel.tsx`）——
+  崩溃后的处置只剩「先让 DSH 起得来」（救援模式）与「从最近备份恢复」（备份文件），**不再自建第二条恢复通道**（`/crash` 已无 `lastGoodSnapshotId`）。
+  三条不许回退的接线：① `boot-state.json` 独立在 `<dataDir>/boot-state/`，老位置 `<dataDir>/config-snapshots/` 由 `adoptLegacyBootState` 一次性搬迁（幂等、best-effort）；
+  ② `BOOT_CRITICAL_RELS` / `profileCriticalRels` 搬进 `core/boot-paths.ts` —— **导入安全闸门 `boot-safety.ts` 仍在用，删灾备不许连带删**；
+  ③ `PanelId` 不再含 `'lifecycle'`，旧持久化值在 `run-store` 迁移到 `snapshots` + `subTab='recovery'`。守卫：`src/core/incident-wiring.test.ts`（源码级接线）
+  + `tests/route/route-parity.test.ts`（68 条路由快照）+ `src/core/crash-report.test.ts`（归因与老位置搬迁）。
+  分区注册表的 `configSnapshot` 字段保留为**语义声明**（配置类 vs 内容数据类），当前无消费者；旧实现与踩坑史见 `docs/handoff/PHASE1_HANDOFF.md`。
+
+- **救援模式与 `reconcileBundles` 的硬冲突（2026-09 真机复现「救援完全没用」的根因，两条修法不许拆开）**：
+  进入救援会把 `dsh.profile.bundles` 收窄为「DSH 核心 + 本插件」，但插件自己的 `reconcileBundles`
+  （`src/core/plugin-cli.ts`，规则 = 「声明 `dsh.bundle.patch` 的依赖必须出现在 `bundles`」，由
+  `listInstalledPlugins` 在**每次读插件清单**时调用：导出预览 / 自动快照的 `plugins` 分区 / 插件页都会触发）
+  会在**约 1.5 秒**内用 `dependencies` 里的依赖行把用户插件全部加回 —— 用户重启 DSH 后插件一个不少，
+  救援名存实亡（实测轨迹：`t+0ms` 收窄到 3 条 → `t+1500ms` 变回 5 条）。因此：① `enterRescueMode`
+  （`disableUserBundles`）**必须同时把被禁用的包从 profile 的 `dependencies` 摘掉**（`stripDependencies`；
+  包不卸载，退出时整份 `package.json` 从备份逐字节还原）——manifest 自洽后**任何** reconcile（含 DSH 官方
+  `dsh plugin`）都无从加回；② `reconcileBundles` 在救援激活期间**一律停手**（`isRescueActiveSync`，
+  同步探测，与 `rescueModeStatus().active` 同口径、stale 不算激活），因为救援是操作者的显式决定。
+  **验证口径**：只在文件层断言「bundles 被收窄」不够 —— 必须真机四阶段（救援前挂载 → 进救援且清单持续
+  数秒不被改写 → 重启后用户插件不挂载 → 退出后逐字节还原 → 重启后插件回来）。夹具有一个坑：假插件若
+  同时进 `dependencies` 又由 home patch 插入，会被 reconcile 加进 bundles 并与 patch 行重复挂载
+  （`duplicate loader entry id`）—— 走 patch 层的插件**不要**写进 `dependencies`。
+  复核脚本：`outputs/rescue-e2e/`（隔离 `DSH_HOME` + 两个假插件，浏览器实操）。
 
 ## ⛔ 技术限制（勿突破）
 凭据值无法回滚(DSH 不回读)、插件安装需重启、MCP 无管理 API(组合 patch 行导入)、localStorage UI 状态不迁移、Schema v1→v2 为占位(CURRENT=1)、历史会话默认不迁移、加密备份密码丢失无法解密。完整清单见 DEVELOPERS.md §「完整技术限制」。

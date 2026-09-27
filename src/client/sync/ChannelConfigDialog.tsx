@@ -9,6 +9,7 @@ import type { TranslateNS } from '../client-types.ts'
 import type { UiT } from '../../ui/i18n.ts'
 import { Badge, Banner, Button, Spinner } from '../common/ui.tsx'
 import { Modal } from '../common/Modal.tsx'
+import { Select } from '../common/Select.tsx'
 import { SYNC_CREDENTIAL_REF, SYNC_WEBDAV_CREDENTIAL_REF } from './sync-api.ts'
 import type { SyncStatusResponse } from './sync-api.ts'
 import { channelTabModels, presetById, presetIdForUrl, privateRepoHint, WEBDAV_PRESETS } from './sync-view.ts'
@@ -183,19 +184,16 @@ export function ChannelConfigDialog({ open, onClose, t, uiT, channel, busy, savi
           <span className={css.groupLabel}>{t('webdav.title')}</span>
           {/* 常见 WebDAV 服务器预设：选择后填充 url 模板（含占位符待替换） */}
           <span className={css.hint}>{t('webdav.presetHint')}</span>
-          <select
-            className={css.select}
+          <Select
             value={presetIdForUrl(webdavUrl)}
             disabled={busy}
-            onChange={(e: ChangeEvent<HTMLSelectElement>) => {
-              const p = presetById(e.target.value)
-              onFormChange({ webdavUrl: p.url })
+            ariaLabel={t('webdav.presetHint')}
+            onChange={(next) => {
+              const preset = presetById(next)
+              onFormChange({ webdavUrl: preset.url })
             }}
-          >
-            {WEBDAV_PRESETS.map((p) => (
-              <option key={p.id} value={p.id}>{p.label}</option>
-            ))}
-          </select>
+            options={WEBDAV_PRESETS.map((preset) => ({ value: preset.id, label: preset.label }))}
+          />
           <label className={css.field}>
             <span className={css.fieldLabel}>{t('webdav.url')}</span>
             <input

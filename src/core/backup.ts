@@ -24,8 +24,8 @@ import type {
  * （即可能产生目标写入）。
  *
  * 为什么必须单点：硬不变量「导入前强制快照（可回滚）」只为会写目标的项登记原值
- * （本文件 collectTargets → createSnapshot），而执行分派在 analyzer.applyOne、
- * 快照回放在 config-snapshot.restoreConfigSnapshot。三处各写一份 kind 清单必然漂移
+ * （本文件 collectTargets → createSnapshot），而执行分派在 analyzer.applyOne，
+ * 历史上还有一条恢复回放侧（core/config-snapshot.ts，已随灾备快照线下线）。两处各写一份 kind
  * —— 实测漂移过一次，两个方向的错都在：
  *  - PathMapping 与 Conflict(resolution='useImported') 会写目标却不在快照范围
  *    （写了撤不掉，报告却声称「已快照、可回滚」）；

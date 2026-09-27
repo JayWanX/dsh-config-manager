@@ -29,13 +29,13 @@
  * 清空、需要时重新输入。
  */
 import { useEffect, useRef, useState } from 'react'
-import type { ChangeEvent } from 'react'
 import type { TranslateNS } from '../client-types.ts'
 import type { SyncPullReport, SyncPushPreview, SyncPushReport } from '../../sync/sync-engine.ts'
 import type { UiT } from '../../ui/i18n.ts'
 import type { SectionId } from '../../schema/types.ts'
 import { Badge, Banner, Button, Card, SectionTitle, Spinner } from '../common/ui.tsx'
 import { ErrorBanner } from '../common/ErrorBanner.tsx'
+import { Select } from '../common/Select.tsx'
 import { toast } from '../common/toast-store.ts'
 import { redact } from '../../security/redaction.ts'
 import { Modal } from '../common/Modal.tsx'
@@ -1115,26 +1115,25 @@ export function SyncSettingsView({ api, t, cmT }: SyncSettingsViewProps) {
                 本行底部 10px 间距由 `.snapshotPickerHint` 或下方容器的条件 marginBottom 提供。 */}
             <label className={css.field} style={{ flex: '1 1 auto', minWidth: 0 }}>
               <span className={css.fieldLabel}>{t('syncflow.selectSnapshot')}</span>
-              <select
-                className={css.select}
+              {/* 惰性加载：原生 select 靠 onFocus/onMouseDown/onClick 三写触发，
+                  自定义下拉统一在**展开时**触发一次（onOpen），语义更准且不必再写三处。 */}
+              <Select
                 value={chState.selectedSnapshotId}
                 disabled={state.busy !== null}
-                onFocus={() => { void loadSnapshots() }}
-                onMouseDown={() => { void loadSnapshots() }}
-                onClick={() => { void loadSnapshots() }}
-                onChange={(e: ChangeEvent<HTMLSelectElement>) => {
-                  const id = e.target.value
-                  patchChannel({ selectedSnapshotId: id })
-                  void runSync(id === '' ? undefined : id)
+                ariaLabel={t('syncflow.selectSnapshot')}
+                onOpen={() => { void loadSnapshots() }}
+                onChange={(next) => {
+                  patchChannel({ selectedSnapshotId: next })
+                  void runSync(next === '' ? undefined : next)
                 }}
-              >
-                <option value="">{t('syncflow.latestSnapshot')}</option>
-                {chState.snapshots.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.id}{t('syncflow.snapshotOption', { date: s.createdAt.slice(0, 10), count: String(s.sectionCount) })}
-                  </option>
-                ))}
-              </select>
+                options={[
+                  { value: '', label: t('syncflow.latestSnapshot') },
+                  ...chState.snapshots.map((s) => ({
+                    value: s.id,
+                    label: `${s.id}${t('syncflow.snapshotOption', { date: s.createdAt.slice(0, 10), count: String(s.sectionCount) })}`,
+                  })),
+                ]}
+              />
             </label>
             <span className={css.pickerAction}>
               <Button

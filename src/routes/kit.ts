@@ -10,6 +10,7 @@
  *
  * 计数口径（三路一致 = 65，勿再照抄审计初稿的 66 —— 那是计数口径 overcount）：
  *   HEAD 的 routesList 65 条 ＝ 现行 `endpoint()` 声明 65 条 ＝ 运行期 `buildRoutes()` 57 条 + `src/index.ts` 保留的 8 条。
+ * （此后按同一口径顺延：加入 `/profiles/launch` 后为 68 = `buildRoutes()` 60 条 + 保留的 8 条。）
  *
  * 现在：`endpoint()` 是唯一入口，注册点（`registerRoutes`）兜底断言每条路由都出自本 kit。
  * 新增一条路由 = 在所属组文件里加一条 `endpoint({ path, methods, kind? }, handler)` 声明，

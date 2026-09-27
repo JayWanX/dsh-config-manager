@@ -13,8 +13,9 @@
  */
 import type {
   GlobalConflictStrategy, ImportAnalysis, ImportDecisions, ImportPlan, ImportResult,
-  PathMapping, PlanItem,
+  PathIssue, PathMapping, PlanItem,
 } from '../core/types.ts';
+import type { SectionId } from '../schema/types.ts';
 import type { ImportPort, ImportPreviewSummary, ImportStep, ProgressListener, WizardSnapshot } from './types.ts';
 import { EXECUTING_STAGE, IMPORT_STAGES, ProgressTracker } from './progress.ts';
 import { formatActionableError, toActionableError } from './errors.ts';
@@ -76,12 +77,39 @@ export function importFlowFlags(args: {
   plan: Pick<ImportPlan, 'items' | 'missingSecrets'> | null
   analysis: Pick<ImportAnalysis, 'pathIssues'> | null
   decryptRefs: readonly string[]
+  /**
+   * 已按**本次选择**裁剪过的路径问题（`applicablePathIssues` 的产物）。
+   * 缺省 = `analysis.pathIssues` 全量（保持既有语义：不做选择裁剪的调用方零改动）。
+   * 传了它，用户取消工作区 / 只勾 Skip 项时 path-mapping 阶段就不会出现。
+   */
+  pathIssues?: readonly PathIssue[]
 }): { hasConflicts: boolean; hasPathIssues: boolean; hasSecrets: boolean } {
   return {
     hasConflicts: (args.plan?.items ?? []).some((i) => i.kind === 'Conflict'),
-    hasPathIssues: (args.analysis?.pathIssues.length ?? 0) > 0,
+    hasPathIssues: (args.pathIssues ?? args.analysis?.pathIssues ?? []).length > 0,
     hasSecrets: pendingSecretRequests(args.plan, args.decryptRefs).length > 0,
   }
+}
+
+/**
+ * 按「本次真的会写盘的分区」过滤路径问题 —— 导入向导 path-mapping 阶段的**唯一**输入来源。
+ *
+ * 为什么不能直接渲染 `analysis.pathIssues`（真机反馈）：那是一份对**整包**的探测结果，
+ * 用户没勾工作区时仍会列出 7 条工作区路径并要求逐条指定新位置 —— 对不会写入任何东西的分区
+ * 索要设置，既费事又让人怀疑自己刚才的勾选没生效。
+ *
+ * 语义细节：
+ *  - `sections === null`（还没有计划）→ 原样返回，不做裁剪；
+ *  - `issue.section` 缺省（旧宿主未回传来源）→ **保留**：宁可按老行为多问一句，也不静默丢掉一条
+ *    会写盘的路径映射（漏映射 = 目标机路径错位，比多一次输入严重）；
+ *  - `section` 有值 → 只有该分区这次会写盘时才保留。
+ */
+export function applicablePathIssues(
+  issues: readonly PathIssue[],
+  sections: ReadonlySet<SectionId> | null,
+): PathIssue[] {
+  if (sections === null) return [...issues]
+  return issues.filter((issue) => issue.section === undefined || sections.has(issue.section))
 }
 
 /**
@@ -298,9 +326,15 @@ export class ImportWizard {
     this.decryptPassword = password;
   }
 
-  /** Preview 摘要（规范 §10 数值化；基于当前 plan 与 analysis） */
-  previewSummary(): ImportPreviewSummary {
-    const items = this.plan?.items ?? [];
+  /**
+   * Preview 摘要（规范 §10 数值化；基于当前 plan 与 analysis）。
+   *
+   * `plan` 参数（2026-09 用户反馈）：传**裁剪后的子计划**时，所有计数只算这次真的会导入的项 ——
+   * 否则用户在预览页取消一批条目后，徽章仍在报整包的数字（「将变更 N 项」与选择器 footer
+   * 的合计自相矛盾，也会把未导入分区的问题摆到台面上）。缺省 = 未裁剪的整份计划。
+   */
+  previewSummary(plan: ImportPlan | null = this.plan): ImportPreviewSummary {
+    const items = plan?.items ?? [];
     const analysis = this.analysis;
     const count = (kinds: PlanItem['kind'][]): number =>
       items.filter((i) => kinds.includes(i.kind)).length;
@@ -313,9 +347,9 @@ export class ImportWizard {
       mcpAdds: items.filter((i) => i.adapter === 'mcp' && i.kind === 'Create').length,
       prompts: items.filter((i) => i.adapter === 'prompts' && i.kind !== 'Skip').length,
       pathMappingsNeeded: analysis?.pathIssues.length ?? 0,
-      secretsNeeded: this.plan?.missingSecrets.length ?? analysis?.secretCount ?? 0,
+      secretsNeeded: plan?.missingSecrets.length ?? analysis?.secretCount ?? 0,
       conflicts: count(['Conflict']),
-      needsRestart: this.plan?.needsRestart ?? false,
+      needsRestart: plan?.needsRestart ?? false,
     };
   }
 

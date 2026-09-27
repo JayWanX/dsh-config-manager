@@ -16,7 +16,7 @@
  *    **宁严不松**：漏采=红（安全），多采=绿（危险）；
  *  - 负向自检见 parity-00：合成样本里注释中的假路径必须不被采信。
  *
- * 例外：宿主 **prefix 路由**（recovery / lifecycle：只注册前缀，子路径由宿主内部按 path 分发，
+ * 例外：宿主 **prefix 路由**（recovery：只注册前缀，子路径由宿主内部按 path 分发，
  * 没有逐条字面量）在 `PREFIX_ROUTED` 里显式登记，按前缀覆盖校验。新客户端路径若在宿主找不到
  * （或宿主 prefix 集合变了）→ 本测试点名，必须显式登记。
  */
@@ -30,7 +30,7 @@ import {
   API_BASE,
   CONFIG_MANAGER_API,
   HISTORY_API,
-  LIFECYCLE_API,
+  INCIDENT_API,
   MARKET_API,
   MY_CONFIGS_API,
   RECOVERY_API,
@@ -42,19 +42,19 @@ const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 
 /** 全部路由族（新增路由族必须登记在这里，否则本测试看不到它）。 */
 const ROUTE_FAMILIES: readonly Record<string, string>[] = [
-  CONFIG_MANAGER_API, SYNC_API, MARKET_API, MY_CONFIGS_API, LIFECYCLE_API, RECOVERY_API, HISTORY_API,
+  CONFIG_MANAGER_API, SYNC_API, MARKET_API, MY_CONFIGS_API, INCIDENT_API, RECOVERY_API, HISTORY_API,
 ];
 
 /**
- * 宿主 prefix 路由覆盖的客户端路径：宿主只注册前缀（`API.recovery` / `API.lifecycle`），
+ * 宿主 prefix 路由覆盖的客户端路径：宿主只注册前缀（`API.recovery`），
  * 子路径由宿主内部按 path 分发，因此没有逐条宿主字面量。
  */
 const PREFIX_ROUTED = new Set<string>([
-  LIFECYCLE_API.status,
-  LIFECYCLE_API.snapshot,
-  LIFECYCLE_API.undo,
-  LIFECYCLE_API.redo,
-  LIFECYCLE_API.remove,
+
+
+
+
+
   RECOVERY_API.status,
   RECOVERY_API.lockRecover,
 ]);
@@ -157,7 +157,7 @@ test('parity-02 客户端每个路由都能在宿主路由源码里找到（精�
   );
 });
 
-test('parity-03 prefix 路由（recovery / lifecycle）确有宿主前缀字面量覆盖', () => {
+test('parity-03 prefix 路由（recovery）确有宿主前缀字面量覆盖', () => {
   const literals = hostRouteLiterals();
   for (const p of PREFIX_ROUTED) {
     assert.ok(prefixCovered(p, literals), `prefix 路由 ${p} 没有对应的宿主前缀字面量（宿主路由可能改名/迁移）`);

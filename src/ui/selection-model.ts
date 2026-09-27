@@ -209,10 +209,22 @@ export function groupUnits(units: readonly SelectionUnit[]): UnitGroup[] {
   return out
 }
 
-/** 二级分组三态（与分区三态同一套口径；分组只是分区内的视图）。 */
-export function groupPickState(sel: Selection, group: UnitGroup): SectionPickState {
+/**
+ * 分组内已勾选单元数。
+ *
+ * **必须先看所属分区**（与 sectionPickState / selectedUnitCount 同一口径）：稀疏表示下
+ * 「不在 excluded 里」只说明「没有显式排除」，分区整体没勾时同样成立 —— 只看 excluded 会渲染出
+ * 「分区 已选 0/13、13 个子项却全部打勾」的自相矛盾（用户实测：点「全不选」后子项仍然勾着）。
+ */
+export function groupSelectedCount(sel: Selection, group: UnitGroup, section: SectionId): number {
+  if (!sel.sections.includes(section)) return 0
   const excluded = new Set(sel.excluded)
-  const selected = group.units.reduce((n, u) => (excluded.has(u.id) ? n : n + 1), 0)
+  return group.units.reduce((n, u) => (excluded.has(u.id) ? n : n + 1), 0)
+}
+
+/** 二级分组三态（与分区三态同一套口径；分组只是分区内的视图）。 */
+export function groupPickState(sel: Selection, group: UnitGroup, section: SectionId): SectionPickState {
+  const selected = groupSelectedCount(sel, group, section)
   if (selected === 0) return 'none'
   return selected === group.units.length ? 'all' : 'partial'
 }
@@ -243,6 +255,17 @@ export function toggleUnitGroup(sel: Selection, node: SelectionSection, group: U
 
 export function isUnitSelected(sel: Selection, unitId: string): boolean {
   return !sel.excluded.includes(unitId)
+}
+
+/**
+ * 单元勾选态（**渲染层唯一口径**）。
+ *
+ * 与 `isUnitSelected` 的差别：后者是稀疏表示下的「未显式排除」，分区整体没勾时它依然为 true，
+ * 直接拿它渲染勾选框会出现「分区计数 0/13 + 13 个子项全打勾」的自相矛盾（用户实测：
+ * 点「全不选」后分区标题变成未勾选，子项却还是勾的）。渲染必须先看分区，再看排除集。
+ */
+export function unitChecked(sel: Selection, section: SectionId, unitId: string): boolean {
+  return sel.sections.includes(section) && !sel.excluded.includes(unitId)
 }
 
 /** 分区三态：不可细分分区退回整体开关。 */
@@ -781,6 +804,30 @@ export function isPlanItemExcluded(item: PlanItem, selection: Selection): boolea
 /** 被用户排除的计划项（供报告如实展示「N 项未导入」）。 */
 export function excludedPlanItems(plan: ImportPlan, selection: Selection): PlanItem[] {
   return plan.items.filter((item) => isSelectableItem(item) && isPlanItemExcluded(item, selection))
+}
+
+/**
+ * 计划项里「本次会写盘」的种类（其余全是诊断/跳过：Skip=本机已一致、Warning/Error/MissingDependency
+ * 只报告、MissingSecret 走凭据补录、PathMapping 是映射说明）。
+ */
+const WRITE_ITEM_KINDS: ReadonlySet<PlanItemKind> = new Set<PlanItemKind>(['Create', 'Update', 'Conflict', 'Install'])
+
+/**
+ * 本次导入**确实会写盘**的分区集合。
+ *
+ * 用途：路径映射阶段的过滤依据 —— PathIssue 只说明「这条路径来自哪个分区」，
+ * 还需要「这个分区这次会不会写」才能判断该不该问用户（工作区全为 Skip 或整个分区被取消时，
+ * 为它填映射是纯粹的无效劳动）。
+ *
+ * 入参必须是**已裁剪**的子计划（buildSelectedPlan 的产物）：本函数只按 kind 判定，
+ * 不再重复做选择语义，避免出现第二套「哪些项会被导入」的判定。
+ */
+export function planWriteSections(plan: ImportPlan): Set<SectionId> {
+  const out = new Set<SectionId>()
+  for (const item of plan.items) {
+    if (WRITE_ITEM_KINDS.has(item.kind)) out.add(item.adapter)
+  }
+  return out
 }
 
 /**

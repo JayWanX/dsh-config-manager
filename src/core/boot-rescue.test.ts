@@ -35,7 +35,9 @@ import {
   enterRescueMode,
   exitRescueMode,
   homeFingerprint,
+  isRescueActiveSync,
   normalizeHomeDir,
+  rescueAppliedInThisProcess,
   rescueModeStatus,
   rescuePaths,
   restrictToRescueBundles,
@@ -714,6 +716,69 @@ test('B-26 disableUserBundles 缺省关闭：只剪不可解析的（保守路�
   assert.ok((await readText(p.packageJson)).includes('good-bundle'), 'package.json 不得被重写');
 });
 
+/**
+ * B-27 收窄 bundles 必须**同时**摘掉 dependencies（真机实测的失效点）。
+ *
+ * 本插件 reconcileBundles 与 DSH 官方 `dsh plugin` reconcilePlugins 的共同规则是
+ * 「声明 dsh.bundle.patch 的依赖必须出现在 dsh.profile.bundles」。只把包移出 bundles、
+ * 把依赖行留着，下一次 reconcile 就用依赖行把它们**原样加回** bundles —— 真机实测：
+ * 救援写入后约 1.5 秒 bundles 就被改回 5 条，重启后用户插件照常挂载，救援名存实亡。
+ * 摘掉依赖行让 manifest 自洽，任何 reconcile 都无从加回。
+ */
+test('B-27 disableUserBundles：被禁用的包必须同时从 dependencies 摘除（否则被 reconcile 加回）', async (t) => {
+  const homeDir = await makeHome(t);
+  const backupDir = path.join(homeDir, 'rescue-backups');
+  const p = targets(homeDir);
+  const ORIGINAL = JSON.stringify({
+    name: 'dsh-profile-web',
+    dependencies: { '@deepseek-ai/dsh-base': '0.1.0-rc.1', dshmarket: '^1.49.0', 'keep-me': '^2.0.0' },
+    dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dshmarket', 'dsh-config-manager'] } },
+  }) + '\n';
+  await writeFileDeep(p.profilePatch, ORIGINAL_PROFILE_PATCH);
+  await writeFileDeep(p.packageJson, ORIGINAL);
+
+  await enterOk(enterOpts(homeDir, backupDir, {
+    resolveBundle: () => true,
+    disableUserBundles: true,
+  }));
+
+  const written = JSON.parse(await readText(p.packageJson)) as {
+    dependencies: Record<string, string>;
+    dsh: { profile: { bundles: string[] } };
+  };
+  assert.deepEqual(written.dsh.profile.bundles, ['@deepseek-ai/dsh-base', 'dsh-config-manager']);
+  assert.equal('dshmarket' in written.dependencies, false, '被禁用的包的依赖行必须摘掉');
+  assert.equal(written.dependencies['@deepseek-ai/dsh-base'], '0.1.0-rc.1', '核心依赖行不得被动');
+  assert.equal(written.dependencies['keep-me'], '^2.0.0', '无关依赖行不得被动');
+
+  // 退出：整份 package.json 从备份逐字节还原（依赖行原样回来）
+  await exitOk({ homeDir, backupDir });
+  assert.equal(await readText(p.packageJson), ORIGINAL, '退出后 package.json 必须与原始字节完全相等');
+});
+
+/**
+ * B-28 isRescueActiveSync：reconcileBundles 的同步判据，语义必须与 rescueModeStatus().active 一致
+ * ——状态缺失/已退出 → false；激活 → true；指纹不匹配（换机/换 profile）→ false（stale 不算激活）。
+ */
+test('B-28 isRescueActiveSync：缺失/激活/stale 三态与 rescueModeStatus 同口径', async (t) => {
+  const homeDir = await makeHome(t);
+  const backupDir = path.join(homeDir, 'rescue-backups');
+  await seedOriginals(homeDir);
+
+  assert.equal(isRescueActiveSync({ homeDir, profile: PROFILE, backupDir }), false, '未进入 → false');
+  await enterOk(enterOpts(homeDir, backupDir, { resolveBundle: () => true }));
+  assert.equal(isRescueActiveSync({ homeDir, profile: PROFILE, backupDir }), true, '进入后 → true');
+  assert.equal(
+    isRescueActiveSync({ homeDir, profile: PROFILE, backupDir }) === (await rescueModeStatus({ homeDir, profile: PROFILE, backupDir })).active,
+    true,
+    '必须与 rescueModeStatus().active 同口径',
+  );
+  assert.equal(isRescueActiveSync({ homeDir, profile: 'other', backupDir }), false, '别的 profile → false');
+  assert.equal(isRescueActiveSync({ homeDir: `${homeDir}-moved`, profile: PROFILE, backupDir }), false, '别的 home → false');
+  await exitOk({ homeDir, backupDir });
+  assert.equal(isRescueActiveSync({ homeDir, profile: PROFILE, backupDir }), false, '退出后 → false');
+});
+
 /* ---------------------------------------------------------------- exitRescueMode */
 
 test('B-16 exitRescueMode happy path：三处逐字节还原 + 状态文件删除', async (t) => {
@@ -784,6 +849,23 @@ test('B-19 exitRescueMode：stale 状态（指纹不匹配）拒绝还原，零�
 });
 
 /* ---------------------------------------------------------------- rescueModeStatus */
+
+/**
+ * B-29 rescueAppliedInThisProcess：横幅换文案的判据（真机反馈 —— 重启后不该再要求重启）。
+ * 判据 = 「进入救援的时刻」是否早于「本进程启动的时刻」：早于 → 本进程就是救援启动，已生效。
+ */
+test('B-29 rescueAppliedInThisProcess：重启后判为已生效；同进程进入救援不算', () => {
+  const entered = '2026-09-26T12:00:00.000Z';
+  const enteredMs = Date.parse(entered);
+  // 重启过：本进程启动于进入救援之后（晚 1 秒也算）
+  assert.equal(rescueAppliedInThisProcess(entered, enteredMs + 1000), true);
+  // 边界：启动时刻与进入时刻相同（秒级时间戳同值）→ 视为已生效
+  assert.equal(rescueAppliedInThisProcess(entered, enteredMs), true);
+  // 同一个进程里刚点的「进入救援」（进程启动早于进入时刻）→ 未生效，仍要求重启
+  assert.equal(rescueAppliedInThisProcess(entered, enteredMs - 1000), false);
+  // 损坏/不可解析的 enteredAt → 保守：仍提示重启
+  assert.equal(rescueAppliedInThisProcess('not-a-date', enteredMs + 1000), false);
+});
 
 test('B-20 rescueModeStatus：active / stale / 缺失 / 损坏', async (t) => {
   const homeDir = await makeHome(t);

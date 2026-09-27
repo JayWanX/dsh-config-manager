@@ -1,13 +1,13 @@
 /**
- * Phase 1 P0-5 崩溃检测 / 归因 / 最后正常快照选择 单测（src/core/crash-report.ts）。
+ * Phase 1 P0-5 崩溃检测 / 归因 单测（src/core/crash-report.ts）。
  *
  * 覆盖（每条一个具名 test）：
  *  1. classifyCrashLog：四类日志签名分支 + unknown 回退（含大小写不敏感）；
- *  2. adviceFor：每种 crashReason 的建议动作 + crashed=false 恒 'none'；
+ *  2. adviceFor：每种 crashReason 的建议动作 + crashed=false 恒为 none；
  *  3. computeBootAlert：首次启动 / prev.ok 决定崩溃 / crashReason 沿用或由 logTail 归因；
  *  4. readBootState：缺失 / 非法 JSON / 合法 JSON 但结构非法（缺字段、类型错）→ 一律 null；
  *  5. writeBootState + readBootState 往返（真实临时目录；原子写不留 tmp 残留文件）；
- *  6. selectLastGoodSnapshot：取 <= 时间戳的最新一个 / 跳过 pre-restore / 非法时间戳与无符合 → null；
+ *  6. adoptLegacyBootState：老位置（灾备快照库目录）状态的一次性搬迁（幂等 + best-effort）；
  *  7. readCrashLogTail：大文件取尾部（不是头部）/ 跳过空文件 / 无可读 → null；
  *  8. listCandidateLogs：<home>/logs/*.log + <home>/dsh.log；目录缺失 → []；
  *  9. beginBoot / markBootOk：ok:false→true、lastGoodAt 推进、beginBoot 保留 prev.lastGoodAt。
@@ -23,6 +23,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
+  adoptLegacyBootState,
   adviceFor,
   beginBoot,
   classifyCrashLog,
@@ -31,7 +32,6 @@ import {
   markBootOk,
   readBootState,
   readCrashLogTail,
-  selectLastGoodSnapshot,
   writeBootState,
   type BootState,
 } from './crash-report.ts';
@@ -224,44 +224,28 @@ test('writeBootState + readBootState：往返一致（真实临时目录，原�
   assert.deepEqual(await fs.readdir(dir), ['boot-state.json']);
 });
 
-/* ---------------------------------------------------------------- 6. 最后正常快照 */
+/* ---------------------------------------------------------------- 6. 旧位置搬迁 */
 
-test('selectLastGoodSnapshot：取 createdAt <= lastGoodAt 的最新一个，跳过 pre-restore', () => {
-  const snapshots = [
-    { id: 'old', createdAt: '2026-09-10T00:00:00.000Z' },
-    { id: 'newest-ok', createdAt: '2026-09-12T00:00:00.000Z' },
-    { id: 'middle', createdAt: '2026-09-11T00:00:00.000Z' },
-    { id: 'pre-restore', createdAt: '2026-09-12T00:00:00.000Z', kind: 'pre-restore' },
-    { id: 'future', createdAt: '2026-09-13T00:00:00.000Z' },
-  ];
+test('adoptLegacyBootState：新目录为空时从旧目录搬一次，之后幂等', async (t) => {
+  const legacy = await makeDir(t);
+  const dir = await makeDir(t);
+  const state = makeState({ ok: true, okAt: '2026-09-13T10:00:00.000Z', lastGoodAt: '2026-09-13T10:00:00.000Z' });
+  await writeBootState(legacy, state);
 
-  // <= 边界的最新一个（middle；newest-ok 与 pre-restore 同刻但越界）
-  assert.equal(selectLastGoodSnapshot(snapshots, '2026-09-11T12:00:00.000Z')?.id, 'middle');
-  // 边界含等于：newest-ok 命中；同刻的 pre-restore 被跳过（不得成为「正常」快照）
-  assert.equal(selectLastGoodSnapshot(snapshots, '2026-09-12T00:00:00.000Z')?.id, 'newest-ok');
-  // 全部早于边界 → 取最新（future 是列表中最新的快照）
-  assert.equal(selectLastGoodSnapshot(snapshots, '2026-09-20T00:00:00.000Z')?.id, 'future');
+  assert.equal(await adoptLegacyBootState(legacy, dir), true);
+  assert.deepEqual(await readBootState(dir), state);
+  // 幂等：新目录已有状态 → 不动（旧目录后来变脏也不覆盖）
+  await writeBootState(legacy, makeState({ ok: false }));
+  assert.equal(await adoptLegacyBootState(legacy, dir), false);
+  assert.deepEqual(await readBootState(dir), state);
+});
 
-  // lastGoodAt 为 null / 非法 / 空串 → null
-  assert.equal(selectLastGoodSnapshot(snapshots, null), null);
-  assert.equal(selectLastGoodSnapshot(snapshots, 'not-a-date'), null);
-  assert.equal(selectLastGoodSnapshot(snapshots, ''), null);
-
-  // 无符合项（都晚于边界）→ null
-  assert.equal(selectLastGoodSnapshot(snapshots, '2026-09-09T00:00:00.000Z'), null);
-
-  // 只有 pre-restore 可用 → null（宁可没有候选，也不把双保险快照当「最后正常」）
-  assert.equal(
-    selectLastGoodSnapshot([{ id: 'p', createdAt: '2026-09-11T00:00:00.000Z', kind: 'pre-restore' }], '2026-09-12T00:00:00.000Z'),
-    null,
-  );
-
-  // createdAt 不可解析的候选被忽略；空列表 → null
-  assert.equal(
-    selectLastGoodSnapshot([{ id: 'bad', createdAt: 'oops' }], '2026-09-12T00:00:00.000Z'),
-    null,
-  );
-  assert.equal(selectLastGoodSnapshot([], '2026-09-12T00:00:00.000Z'), null);
+test('adoptLegacyBootState：旧目录无状态 / 同目录 / 旧目录缺失 → false 且不抛', async (t) => {
+  const legacy = await makeDir(t);
+  const dir = await makeDir(t);
+  assert.equal(await adoptLegacyBootState(legacy, dir), false);
+  assert.equal(await adoptLegacyBootState(dir, dir), false);
+  assert.equal(await adoptLegacyBootState(path.join(legacy, 'missing'), dir), false);
 });
 
 /* ---------------------------------------------------------------- 7. 日志尾部 */

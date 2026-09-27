@@ -12,13 +12,15 @@ import assert from 'node:assert/strict'
 import {
   buildExportRequest, buildSelectedPlan, defaultSelection,
   defaultSelectionFromPlan, effectiveImportPlan, effectiveImportSelection, filterSections,
-  groupPickState, groupUnits, HIGH_RISK_ADAPTERS, isHighRiskAdapter, isPlanItemExcluded, isUnitSelected,
+  groupPickState, groupSelectedCount, groupUnits, HIGH_RISK_ADAPTERS, isHighRiskAdapter, isPlanItemExcluded, isUnitSelected,
+  planWriteSections,
   tailWeightedEllipsis, pickerSummary,
   sectionPickState, sectionsFromPlan, sectionsFromPreview, selectedUnitCount, selectAll,
-  selectionHasItems, toggleSection, toggleUnit, toggleUnitGroup, unitLabel,
+  selectionHasItems, toggleSection, toggleUnit, toggleUnitGroup, unitChecked, unitLabel,
   visibleUnits, UNIT_RENDER_LIMIT,
   type ImportSelectionState, type Selection, type SelectionSection,
 } from './selection-model.ts'
+import { makePlan, makePlanItem } from './test-helpers.ts'
 import type { SectionId } from '../schema/types.ts'
 import type { ImportPlan, PlanItem } from '../core/types.ts'
 
@@ -141,6 +143,46 @@ test('回归：分区被整体取消后，其**已加载清单**的子单元不�
   const partial = toggleUnit({ sections: ['skills'], excluded: [] }, [withUnits], 'skills:a', false)
   assert.equal(sectionPickState(partial, withUnits), 'partial')
   assert.equal(selectedUnitCount(partial, withUnits), 1)
+})
+
+test('回归：单元级勾选态必须看所属分区 —— 全不选后子项一律未勾选（unitChecked）', () => {
+  const withUnits = node('settings', [{ id: 'settings:a' }, { id: 'settings:b' }])
+  // 稀疏表示 {sections:[], excluded:[]}：只看 excluded 会误判成「全勾」——
+  // 用户实测到的「点全不选后分区已是 0/13、13 个子项却还勾着」正是这个
+  assert.equal(unitChecked({ sections: [], excluded: [] }, 'settings', 'settings:a'), false)
+  assert.equal(unitChecked(selectAll([withUnits], false), 'settings', 'settings:a'), false)
+  // 分区勾上才是「未显式排除 = 勾选」
+  const on = defaultSelection(['settings'])
+  assert.equal(unitChecked(on, 'settings', 'settings:a'), true)
+  const oneOff = toggleUnit(on, [withUnits], 'settings:a', false)
+  assert.equal(unitChecked(oneOff, 'settings', 'settings:a'), false)
+  assert.equal(unitChecked(oneOff, 'settings', 'settings:b'), true)
+  // 二级分组同口径：分区没勾时分组既不是 all 也不报已选数
+  const units = [
+    { id: 'sessions:p/1', label: 't1', sizeBytes: 1, group: 'ws-a' },
+    { id: 'sessions:p/2', label: 't2', sizeBytes: 1, group: 'ws-a' },
+  ]
+  const group = groupUnits(units)[0]!
+  assert.equal(groupPickState({ sections: [], excluded: [] }, group, 'sessions'), 'none')
+  assert.equal(groupSelectedCount({ sections: [], excluded: [] }, group, 'sessions'), 0)
+  assert.equal(groupSelectedCount({ sections: ['sessions'], excluded: [] }, group, 'sessions'), 2)
+})
+
+test('planWriteSections：只有本次真的会写盘的分区才需要路径映射', () => {
+  const plan: ImportPlan = makePlan({
+    items: [
+      makePlanItem({ id: 'workspace:w1', adapter: 'workspaces', kind: 'Create' }),
+      makePlanItem({ id: 'plugin:x', adapter: 'plugins', kind: 'Skip' }),
+      makePlanItem({ id: 'mcp:s1', adapter: 'mcp', kind: 'Update' }),
+      makePlanItem({ id: 'settings:note', adapter: 'settings', kind: 'Warning' }),
+    ],
+    missingSecrets: [],
+    needsRestart: false,
+  })
+  assert.deepEqual([...planWriteSections(plan)].sort(), ['mcp', 'workspaces'], 'Skip / Warning 不算写盘')
+  // 取消勾选后传**裁剪后的计划**：该分区不再要求映射
+  const cropped = buildSelectedPlan(plan, { sections: ['mcp'], excluded: [] })
+  assert.deepEqual([...planWriteSections(cropped)], ['mcp'])
 })
 
 test('pickerSummary：计数与体积随勾选变化，且不会超出实际导出范围', () => {
@@ -366,8 +408,8 @@ test('分组级勾选：点一个分组 = 只勾这一组（不得静默变成�
   // ① 分区未勾选时点 A 组：只勾 A（稀疏表示要求把 B 显式排除），分区随之勾上
   let sel: Selection = toggleUnitGroup({ sections: [], excluded: [] }, section, groupA!, true)
   assert.deepEqual(sel.sections, ['sessions'])
-  assert.equal(groupPickState(sel, groupA!), 'all')
-  assert.equal(groupPickState(sel, groupB!), 'none')
+  assert.equal(groupPickState(sel, groupA!, section.section), 'all')
+  assert.equal(groupPickState(sel, groupB!, section.section), 'none')
   assert.equal(sectionPickState(sel, section), 'partial', '只选了 A 组 → 分区三态为部分选')
   assert.deepEqual(
     buildExportRequest(sel, [section]).includeItems?.sessions,
@@ -382,7 +424,7 @@ test('分组级勾选：点一个分组 = 只勾这一组（不得静默变成�
 
   // ③ 取消 A 组：只剩 B（稀疏表示只记被排除的两条）
   sel = toggleUnitGroup(sel, section, groupA!, false)
-  assert.equal(groupPickState(sel, groupA!), 'none')
+  assert.equal(groupPickState(sel, groupA!, section.section), 'none')
   assert.deepEqual(sel.excluded, ['sessions:p/1', 'sessions:p/2'])
   assert.deepEqual(buildExportRequest(sel, [section]).includeItems?.sessions, ['sessions:p/3'])
 

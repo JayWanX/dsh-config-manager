@@ -66,6 +66,21 @@ DSH 是你的 AI 助手工作台，里面存着你的各种设置：模型配置
 
 ---
 
+## 🆚 与其它备份 / 同步插件的区别
+
+DSH 生态里这个方向有几个插件，它们解决的问题并不相同——按自己的场景选一个即可，也可以共存。
+
+| 插件 | 最擅长 | 本插件更进一步的地方 |
+|---|---|---|
+| [xiaoyuyu6420/dsh-backup](https://github.com/xiaoyuyu6420/dsh-backup) | 一条命令从 CLI 给整个 `~/.dsh` 打快照，另有会话体检 / 升级快照 / 救援控制台 | 写盘前可审阅的 GUI 流程（dry-run 预览、冲突逐项决策、失败自动回滚）、跨机路径重映射、加密凭据载荷、配置市场 |
+| [muyifc/dsh-config-sync](https://github.com/muyifc/dsh-config-sync) | 把 DSH 配置导出/导入成可移植的密码加密文件，可被工具调用 | 13–14 个分区（含插件 / MCP / 技能 / 档案 / 工作区）、定时备份、Git + WebDAV 双通道同步、会话跨机迁移与路径重定基 |
+| [dickpy/dsh-cloud-sync](https://github.com/dickpy/dsh-cloud-sync) · [weibaohui/dsh-sync](https://github.com/weibaohui/dsh-sync) | 通过 WebDAV / S3 或私有 Git 镜像让多台机器保持一致 | 同步只是本插件五项能力之一——另有导出/导入、定时备份、配置市场与档案实例启停 |
+| `cp -r ~/.dsh`（或给 home 目录挂 Git） | 免费、零配置，纯文本配置够用 | 不处理密钥、不做路径重映射、抓不到 `link:` / `file:` 安装的本地插件、不动会话日志、没有冲突处理与回滚 |
+
+**一句话**：想要「一条命令把一切打快照」，`dsh-backup` 很好用；想要「把一整套能用的环境搬到另一台电脑、并持续同步，而且写盘前一定先给你看」，那就是本插件。
+
+---
+
 ## ✨ 核心亮点
 
 | 图标 | 功能 | 一句话说明 |
@@ -143,11 +158,20 @@ dsh plugin --profile web add dsh-config-manager@latest
 
 > 💡 照着复制就行：`@latest` 确保装到最新版。
 >
-> 🐛 **`@latest` 装到了旧版？** 这是 **pnpm 11 的 `minimumReleaseAge` 供应链发布年龄策略**（不是缓存）：发布不足约 30 天的新版本会被排除出版本解析，直到进入白名单。两种解决办法：
-> - 装一次精确版本即可自动白名单，之后 `@latest` 正常：
->   ```bash
->   dsh plugin --profile web add dsh-config-manager@0.1.8
->   ```
+> 🐛 **`@latest` 装到了旧版？** 这是 **pnpm 11 的 `minimumReleaseAge` 供应链发布年龄策略**（不是缓存）：发布不足约 30 天的新版本会被排除出版本解析，直到进入白名单，所以 `@latest` 可能悄悄解析成旧构建。下面这行不会过期——它先问 npm「当前真正的最新版本是多少」，再按精确版本安装：
+>
+> ```powershell
+> # Windows（PowerShell）
+> $v = (npm view dsh-config-manager version).Trim(); dsh plugin --profile web add "dsh-config-manager@$v"
+> ```
+>
+> ```bash
+> # macOS / Linux
+> dsh plugin --profile web add "dsh-config-manager@$(npm view dsh-config-manager version)"
+> ```
+>
+> 只需做一次——装过一次精确版本即自动进入白名单，之后 `@latest` 一直正常。重启 DSH 后，可在 **设置 → 备份与迁移 → 关于** 看到实际运行的版本（版本变化时也会自动弹出更新内容）。
+>
 > - 或一行命令彻底关闭年龄门槛（在 profile 的 `pnpm-workspace.yaml` 顶部加 `minimumReleaseAge: 0`）：
 >   ```powershell
 >   $f = "$env:USERPROFILE\.dsh\profiles\web\pnpm-workspace.yaml"

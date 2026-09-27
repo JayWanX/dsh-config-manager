@@ -64,6 +64,21 @@ Browse the built-in official market for ready-made configurations (model provide
 
 ---
 
+## 🆚 How it differs from the other DSH backup / sync plugins
+
+Several DSH plugins live in this space and they solve different problems — pick the one that matches your situation; they can also coexist.
+
+| Plugin | Strongest at | Where DSH Config Manager goes further |
+|---|---|---|
+| [xiaoyuyu6420/dsh-backup](https://github.com/xiaoyuyu6420/dsh-backup) | One-command `~/.dsh` snapshots from the CLI, plus session doctor / upgrade snapshots / rescue console | Review-before-write GUI flow (dry-run preview, per-item conflict decisions, automatic rollback), cross-machine path remapping, encrypted credential payload, configuration marketplace |
+| [muyifc/dsh-config-sync](https://github.com/muyifc/dsh-config-sync) | Export / import DSH configuration to a portable, password-encrypted file, callable from tool calls | 13–14 sections incl. plugins / MCP / skills / profiles / workspaces, scheduled backups, Git + WebDAV sync per channel, session migration with path rebase |
+| [dickpy/dsh-cloud-sync](https://github.com/dickpy/dsh-cloud-sync) · [weibaohui/dsh-sync](https://github.com/weibaohui/dsh-sync) | Keeping machines consistent through WebDAV / S3 or a private Git mirror | Sync is one of five capabilities here — alongside export/import, scheduling, marketplace and profile instance launch/stop |
+| `cp -r ~/.dsh` (or Git on the home dir) | Free, zero setup, fine for a purely textual config | No secret handling, no path remapping, no capture of `link:` / `file:` plugin installs, no session-log work, no conflict handling or rollback |
+
+**Short version**: for a one-command snapshot of everything, `dsh-backup` is excellent. If what you want is *move this working environment to another machine — and keep it in sync — with a review step before anything is written*, that is exactly what this plugin is for.
+
+---
+
 ## ✨ Highlights
 
 | Icon | Feature | In one line |
@@ -140,12 +155,21 @@ dsh plugin --profile web add dsh-config-manager@latest
 
 > 💡 Just copy-paste the command: `@latest` ensures you get the newest build.
 >
-> 🐛 **`@latest` installed an old version?** That's pnpm 11's `minimumReleaseAge` supply-chain policy, not a cache issue: versions published less than ~30 days ago are excluded from resolution until whitelisted. Two fixes:
-> - Install an exact version once (it auto-whitelists, then `@latest` works):
->   ```bash
->   dsh plugin --profile web add dsh-config-manager@0.1.8
->   ```
-> - Or disable the age gate with a one-liner (adds `minimumReleaseAge: 0` at the top of the profile's `pnpm-workspace.yaml`):
+> 🐛 **If `@latest` installed an old version**: that's pnpm 11's `minimumReleaseAge` supply-chain policy (not a cache issue) — releases published less than ~30 days ago are excluded from version resolution until whitelisted, so `@latest` can silently resolve to an older build. This one-liner never goes stale: it asks npm which version is actually latest, then installs exactly that.
+>
+> ```powershell
+> # Windows (PowerShell)
+> $v = (npm view dsh-config-manager version).Trim(); dsh plugin --profile web add "dsh-config-manager@$v"
+> ```
+>
+> ```bash
+> # macOS / Linux
+> dsh plugin --profile web add "dsh-config-manager@$(npm view dsh-config-manager version)"
+> ```
+>
+> You only need this once — installing any exact version whitelists the package and `@latest` works normally afterwards. After restarting DSH, **Settings → Backup & Migration → About** shows the version you are actually running (and pops up the release notes whenever it changes).
+>
+> - Or disable the age gate entirely with a one-liner (adds `minimumReleaseAge: 0` at the top of the profile's `pnpm-workspace.yaml`):
 >   ```powershell
 >   $f = "$env:USERPROFILE\.dsh\profiles\web\pnpm-workspace.yaml"
 >   $c = Get-Content $f -Raw

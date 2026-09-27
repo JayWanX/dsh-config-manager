@@ -26,6 +26,7 @@ import {
   EnvironmentLockOwnedByAnotherError,
   EnvironmentLockUnavailableError,
   createPlatformProcessIdentityProbe,
+  parseLinuxProcessStarttime,
   runWithMutationLock,
   withMutationLock,
   LOCK_SCHEMA_VERSION,
@@ -1206,5 +1207,21 @@ test('§11.5-p5 真实平台集成（真 probe + 真文件）：identity 相符 
   const r = await m2.recoverStaleLock();
   assert.equal(r.ok, true, `精确判定的残留锁必须可显式回收: ${r.detail}`);
   assert.deepEqual(fssync.readdirSync(locksDir), [], '回收后目录必须为空（ownership + sidecar 均已清理）');
+});
+
+test('§11.5-p6 linux `/proc/<pid>/stat` 解析：comm 含空格/括号时也要取到字段 22（starttime），取不到即 null', () => {
+  // 为什么必须切掉 (comm)：comm 里可以带空格与括号（可执行文件名 / 线程名），按空格整行分割会整体错位。
+  // 样本自带对照：字段 22 = starttime = 987654321，字段 24 = rss = 4321 ——
+  // 取错下标会拿到 rss，而 rss **随内存占用变化**：同一进程两次探测都能不同，
+  // 于是活着的 owner 被判成「PID 被复用」的残留锁（CI 实测；Windows 走 Get-Process 分支所以本地看不出来）。
+  const stat = '4796 (node (worker)) S 1 4796 4796 0 -1 4194560 1234 0 0 0 5 6 0 0 20 0 3 0 987654321 12345678 4321 18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 17 18 0 0 0 0 0 0 0 0 0 0 0 0 0 0';
+  assert.equal(parseLinuxProcessStarttime(stat), '987654321');
+  assert.notEqual(parseLinuxProcessStarttime(stat), '4321', 'rss（字段 24）不是进程身份');
+  // 身份必须恒定：同一份 stat 反复解析给出同一个值
+  assert.equal(parseLinuxProcessStarttime(stat), parseLinuxProcessStarttime(stat));
+  // 取不到一律 null（绝不退回恒定假身份，那会把不同进程判成同一个 owner）
+  assert.equal(parseLinuxProcessStarttime('4796 (node) S 1'), null, '字段不足 → null');
+  assert.equal(parseLinuxProcessStarttime('garbage'), null, '没有 (comm) 括号 → null');
+  assert.equal(parseLinuxProcessStarttime('4796 (node) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 x'), null, '字段 22 非数字 → null');
 });
 

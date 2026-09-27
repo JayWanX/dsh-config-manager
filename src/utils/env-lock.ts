@@ -403,6 +403,26 @@ function normaliseIdentityOut(platform: NodeJS.Platform, stdout: string): string
 }
 
 /**
+ * 解析 Linux `/proc/<pid>/stat` 的 starttime（进程创建时刻，单位 ticks）。
+ *
+ * stat 的格式是 `pid (comm) state ppid …`，而 **comm 可以包含空格与括号**（可执行文件名 / 线程名），
+ * 所以必须先切掉 `(comm)`：字段 1=pid、2=comm、3=state … 22=starttime。以最后一个 `)` 之后的空白
+ * 分隔数组下标 k 对应字段 k+3，因此 starttime = 下标 **19**。
+ * （取 21 会拿到 rss —— 那是个随内存占用变化的值，同一个进程两次探测都能不同：CI 上实测因此
+ * 把活着的 owner 判成「PID 被复用」的残留锁，见本函数被抽出来的原因。）
+ *
+ * 取不到（没有括号 / 字段不足 / 非数字）→ null。**绝不**退回一个恒定假身份 —— 那会把不同进程
+ * 判成同一个 owner，比拿不到身份危险得多。
+ */
+export function parseLinuxProcessStarttime(statText: string): string | null {
+  const close = statText.lastIndexOf(')')
+  if (close < 0) return null
+  const fields = statText.slice(close + 1).trim().split(/\s+/)
+  const starttime = fields[19]
+  return starttime !== undefined && /^\d+$/.test(starttime) ? starttime : null
+}
+
+/**
  * 平台进程身份探测（默认实现；issue #36 的精确判据）：
  *  - linux：读 `/proc/<pid>/stat` 的 starttime（第 22 字段）——不 spawn 任何进程；
  *  - win32：`Get-Process` 的 `StartTime.ToFileTimeUtc()`；
@@ -470,9 +490,8 @@ export function createPlatformProcessIdentityProbe(opts: ProcessIdentityProbeOpt
     if (!alive) return { alive, osProcessStartIdentity: null }
     if (platform === 'linux') {
       try {
-        const l = fssync.readFileSync(`/proc/${pid}/stat`, 'utf8').toString()
-        const afterComm = l.slice(l.lastIndexOf(')') + 1).trim().split(/\s+/)
-        return { alive, osProcessStartIdentity: `linux:${afterComm[21] ?? 'unknown'}` }
+        const starttime = parseLinuxProcessStarttime(fssync.readFileSync(`/proc/${pid}/stat`, 'utf8').toString())
+        return { alive, osProcessStartIdentity: starttime === null ? null : `linux:${starttime}` }
       } catch {
         return { alive, osProcessStartIdentity: null }
       }

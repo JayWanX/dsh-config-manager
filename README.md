@@ -1,5 +1,11 @@
 # 🎒 DSH Config Manager
 
+[![npm version](https://img.shields.io/npm/v/dsh-config-manager?label=npm)](https://www.npmjs.com/package/dsh-config-manager)
+[![npm downloads](https://img.shields.io/npm/dm/dsh-config-manager?label=downloads%2Fmonth)](https://www.npmjs.com/package/dsh-config-manager)
+[![GitHub stars](https://img.shields.io/github/stars/xiajiajun516/dsh-config-manager?label=stars)](https://github.com/xiajiajun516/dsh-config-manager/stargazers)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/xiajiajun516/dsh-config-manager/blob/main/LICENSE)
+[![DSH plugin](https://img.shields.io/badge/DSH-plugin-blueviolet)](https://github.com/deepseek-ai/deepseek-harness)
+
 **DeepSeek Harness Backup, Restore & Migration Plugin.**
 
 Backup, restore, export, import, migrate and sync your complete DeepSeek Harness (DSH) configuration — settings, model providers, plugins, MCP servers, skills, agent presets and workspaces — and restore your whole environment on a new machine with one click.

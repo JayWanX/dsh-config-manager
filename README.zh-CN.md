@@ -1,5 +1,11 @@
 # 🎒 DSH Config Manager
 
+[![npm version](https://img.shields.io/npm/v/dsh-config-manager?label=npm)](https://www.npmjs.com/package/dsh-config-manager)
+[![npm downloads](https://img.shields.io/npm/dm/dsh-config-manager?label=downloads%2Fmonth)](https://www.npmjs.com/package/dsh-config-manager)
+[![GitHub stars](https://img.shields.io/github/stars/xiajiajun516/dsh-config-manager?label=stars)](https://github.com/xiajiajun516/dsh-config-manager/stargazers)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/xiajiajun516/dsh-config-manager/blob/main/LICENSE)
+[![DSH plugin](https://img.shields.io/badge/DSH-plugin-blueviolet)](https://github.com/deepseek-ai/deepseek-harness)
+
 **DeepSeek Harness（DSH）配置备份、恢复与迁移插件。**
 
 DSH Config Manager 是一个 DeepSeek Harness 配置备份与迁移插件：一键备份、恢复、导出、导入和迁移完整 DSH 配置，包括——

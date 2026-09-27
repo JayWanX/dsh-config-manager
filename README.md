@@ -155,7 +155,18 @@ dsh plugin --profile web add dsh-config-manager@latest
 
 > 💡 Just copy-paste the command: `@latest` ensures you get the newest build.
 >
-> 🐛 **If `@latest` installed an old version**: that's pnpm 11's `minimumReleaseAge` supply-chain policy (not a cache issue) — releases published less than ~30 days ago are excluded from version resolution until whitelisted, so `@latest` can silently resolve to an older build. This one-liner never goes stale: it asks npm which version is actually latest, then installs exactly that.
+> 🐛 **If `@latest` installed an old version**: that's pnpm's `minimumReleaseAge` supply-chain policy (not a cache issue). The gate is evaluated **per version, at resolution time**: a release younger than the threshold (~30 days) stays invisible to `@latest` until it ages past it — and the clock restarts for every future release. Installing an exact version once fixes *that one version only*; the next release published is invisible to `@latest` again. It is **not** a one-time fix.
+>
+> **Permanent fix (recommended)** — exempt this single package from the age gate. Add to the profile's `pnpm-workspace.yaml` (`~/.dsh/profiles/web/pnpm-workspace.yaml`):
+>
+> ```yaml
+> minimumReleaseAgeExclude:
+>   - dsh-config-manager
+> ```
+>
+> After that `@latest` resolves the newest release normally — including every future release.
+>
+> **One-off fix** — ask npm which version is actually latest and install exactly that. Repeat it each time a newer version has been published:
 >
 > ```powershell
 > # Windows (PowerShell)
@@ -167,7 +178,7 @@ dsh plugin --profile web add dsh-config-manager@latest
 > dsh plugin --profile web add "dsh-config-manager@$(npm view dsh-config-manager version)"
 > ```
 >
-> You only need this once — installing any exact version whitelists the package and `@latest` works normally afterwards. After restarting DSH, **Settings → Backup & Migration → About** shows the version you are actually running (and pops up the release notes whenever it changes).
+> After restarting DSH, **Settings → Backup & Migration → About** shows the version you are actually running (and pops up the release notes whenever it changes).
 >
 > - Or disable the age gate entirely with a one-liner (adds `minimumReleaseAge: 0` at the top of the profile's `pnpm-workspace.yaml`):
 >   ```powershell

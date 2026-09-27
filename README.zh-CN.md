@@ -158,7 +158,18 @@ dsh plugin --profile web add dsh-config-manager@latest
 
 > 💡 照着复制就行：`@latest` 确保装到最新版。
 >
-> 🐛 **`@latest` 装到了旧版？** 这是 **pnpm 11 的 `minimumReleaseAge` 供应链发布年龄策略**（不是缓存）：发布不足约 30 天的新版本会被排除出版本解析，直到进入白名单，所以 `@latest` 可能悄悄解析成旧构建。下面这行不会过期——它先问 npm「当前真正的最新版本是多少」，再按精确版本安装：
+> 🐛 **`@latest` 装到了旧版？** 这是 **pnpm 的 `minimumReleaseAge` 供应链发布年龄策略**（不是缓存）。这个门槛**按版本、在解析时**判定：发布不足阈值（约 30 天）的版本对 `@latest` 不可见，直到它「变老」——而**每个新版本都会重新计一次**。所以「装一次精确版本就永久正常」是错的：它只解决当时那一个版本，之后作者一发新版，`@latest` 又会装到旧版，**不是一次性修复**。
+>
+> **永久解决（推荐）**——只把这一个包排除在年龄门槛之外。在 profile 的 `pnpm-workspace.yaml`（`~/.dsh/profiles/web/pnpm-workspace.yaml`）里加上：
+>
+> ```yaml
+> minimumReleaseAgeExclude:
+>   - dsh-config-manager
+> ```
+>
+> 之后 `@latest` 会一直解析到最新发布版，包括以后再发的新版本。
+>
+> **临时解决**——先问 npm「当前真正的最新版本是多少」，再按精确版本安装；每当有新版本发布都要重跑一次：
 >
 > ```powershell
 > # Windows（PowerShell）
@@ -170,7 +181,7 @@ dsh plugin --profile web add dsh-config-manager@latest
 > dsh plugin --profile web add "dsh-config-manager@$(npm view dsh-config-manager version)"
 > ```
 >
-> 只需做一次——装过一次精确版本即自动进入白名单，之后 `@latest` 一直正常。重启 DSH 后，可在 **设置 → 备份与迁移 → 关于** 看到实际运行的版本（版本变化时也会自动弹出更新内容）。
+> 重启 DSH 后，可在 **设置 → 备份与迁移 → 关于** 看到实际运行的版本（版本变化时也会自动弹出更新内容）。
 >
 > - 或一行命令彻底关闭年龄门槛（在 profile 的 `pnpm-workspace.yaml` 顶部加 `minimumReleaseAge: 0`）：
 >   ```powershell

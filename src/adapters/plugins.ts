@@ -12,7 +12,7 @@
  */
 import { isDeepStrictEqual } from 'node:util';
 import { sha256Hex } from '../utils/hashing.ts';
-import { installSpecFor, resolveProfileNameFromArgv } from '../core/plugin-cli.ts';
+import { installSpecFor, resolveProcessProfileName } from '../core/plugin-cli.ts';
 import { LOCAL_PLUGIN_DIR } from '../core/local-plugin-pack.ts';
 import type { PackLocalPluginsResult } from '../core/local-plugin-pack.ts';
 import { msgOf, zhMsg } from '../core/messages.ts';
@@ -610,7 +610,7 @@ export class PluginsAdapter implements ConfigAdapter<PluginsSection> {
         }
         // 执行日志：记录实际将发起的子进程命令行（与宿主 DshPluginsFacade 的
         // dsh plugin --profile <p> add <spec> 一致）；仅非敏感文本，渲染前 UI 再 redact 兜底
-        ctx.onLog?.(`$ dsh plugin --profile ${ctx.target.profile ?? resolveProfileNameFromArgv()} add ${installSpecFor(name, spec)}`);
+        ctx.onLog?.(`$ dsh plugin --profile ${ctx.target.profile ?? resolveProcessProfileName()} add ${installSpecFor(name, spec)}`);
         // 透传中止信号：用户「跳过当前插件」→ 宿主 kill 子进程 + 清半装状态 → 抛 ImportUserSkippedError
         const result = await ctx.target.plugins.install(name, spec, ctx.signal);
         const suffix = result.needsRestart ? msg('adapter.pluginRestartSuffix') : '';
@@ -630,7 +630,7 @@ export class PluginsAdapter implements ConfigAdapter<PluginsSection> {
           warning: true,
           // 保留 warning（§34.17 非致命）：一个装不上的插件不得拖垮已成功导入的其余配置；
           // message 附可复制的手动安装命令（profile 解析与 M1 宿主一致）。
-          message: (item.kind === 'Update' ? msg('adapter.pluginUpdateFailed', { name, msg: reason, profile: resolveProfileNameFromArgv() }) : msg('adapter.pluginInstallFailed', { name, msg: reason, profile: resolveProfileNameFromArgv() })),
+          message: (item.kind === 'Update' ? msg('adapter.pluginUpdateFailed', { name, msg: reason, profile: resolveProcessProfileName() }) : msg('adapter.pluginInstallFailed', { name, msg: reason, profile: resolveProcessProfileName() })),
         };
       }
     }

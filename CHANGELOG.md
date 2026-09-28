@@ -9,6 +9,42 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 > **Release workflow**: on tag push, CI extracts the current version's section as the release notes highlights;
 > the build fails fast if the section is missing, so you cannot forget to update it.
 
+## [0.1.66] - 2026-09-28
+
+> 本轮修两个上游回报的缺陷：**DSH 0.2.0 线不再被兼容闸静默跳过** —— 14 条 `@deepseek-ai/dsh-*` peer
+> 从「带预发布版的 caret」`^0.1.0-rc.6` 改为显式上下界 `>=0.1.0-rc.6 <0.3.0-0`（caret 的真实上界是
+> `<0.2.0-0`，把 0.2.0 的任何预发布版都挡在闸外，安装侧直接报 `incompatible-version`）；以及
+> **DSH Desktop 的档案不再被认成 web** —— 改从宿主 boot 时 `provide` 的 `profileContext` 服务解析
+> 当前档案，再退化到 `--profile` 与 `DSH_PROFILE` / `DSH_PROFILE_DIR` 环境变量。
+>
+> **Theme**: two upstream-reported bugs — the DSH 0.2.0 line is no longer silently skipped by the
+> compatibility gate, and the desktop profile is no longer mistaken for `web`.
+
+### 修复 / Fixed
+
+- 🚪 **兼容闸：DSH 0.2.0 线不再被静默跳过（issue #53）**：DSH ≥ 0.1.7 的加载器会对每一条名字为
+  `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 的 peer 跑 `semver.satisfies(runtime, range, { includePrerelease: true })`，
+  任一不满足即**整份 bundle 被跳过**（stderr 只多一行 `skipping profile bundle`，进程照常起来、功能静默消失）。
+  旧声明 `^0.1.0-rc.6` 的真实区间是 `>=0.1.0-rc.6 <0.2.0-0` —— 带预发布版的 caret 会把上界钉在下一个 minor 的
+  `-0`，于是 `0.2.0` 的**任何**预发布版（含 `0.2.0-rc.1`）都在区间外。14 条 peer 统一改为显式区间
+  **`>=0.1.0-rc.6 <0.3.0-0`**（`-0` 把整条 `0.2.x` 含预发布版锚进区间，同时挡住 `0.3.0-0` 及以上）。
+  证据：用 `@deepseek-ai/dsh-app-boot@0.2.0-rc.1` 的 `evaluatePluginCompatibility` 真跑本插件 manifest
+  —— 改前 + runtime `0.2.0-rc.1` = INCOMPATIBLE（14 条全中），改后 + `0.1.5-rc.1` / `0.1.7-rc.2` / `0.2.0-rc.1`
+  全部 COMPATIBLE；回归护栏 = `tests/packaging-contract.test.ts` 的 P-3。
+  **Compatibility gate**: all 14 `@deepseek-ai/dsh-*` peers now use the explicit range `>=0.1.0-rc.6 <0.3.0-0`
+  instead of the prerelease caret whose real upper bound (`<0.2.0-0`) excluded every 0.2.0 prerelease. Verified
+  by running DSH's own `evaluatePluginCompatibility` against this manifest.
+- 🖥️ **档案识别：DSH Desktop 的档案不再被认成 web（issue #52）**：Desktop（Electron）外壳拉起宿主时
+  **不传 `--profile`**，插件此前只认 argv → 一律回退 `web`，于是「插件清单来源」「档案页当前运行标记」
+  「备份/导出/恢复目标」全落到 `profiles/web`（desktop 里装的插件永远看不到）。现在解析链为：
+  `config.profile` → 宿主 boot 时 `provide` 的 **`profileContext` 服务**（DSH ≥ 0.1.7，`{ name, dir, … }`，
+  唯一权威）→ `--profile` 启动参数（新增支持 `--profile=<name>` 形态）→ `DSH_PROFILE` / `DSH_PROFILE_DIR`
+  环境变量 → `web`；任一来源缺失/非法都继续回退、绝不抛错（新纯函数 `profileNameFromProfileContext` /
+  `resolveProfileNameFromEnv` / `resolveProcessProfileName`，均有单测）。顺带把「关于 → 插件清单来源」的
+  排查提示改为同时点名 profileContext / `--profile` / `DSH_PROFILE`。
+  **Profile detection**: the Electron shell never passes `--profile`, so the plugin now resolves the running
+  profile from the host-provided `profileContext` service first and only then falls back to argv and the
+  `DSH_PROFILE` / `DSH_PROFILE_DIR` environment variables.
 ## [0.1.65] - 2026-09-27
 
 > 本轮两件大事：**档案终于能真正切换** —— 「启动 / 停止该档案的独立实例」取代了那个写进文件、

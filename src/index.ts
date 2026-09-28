@@ -76,7 +76,7 @@ import { RunRegistry, type RunState } from './core/run-registry.ts'
 import { registerModelTools } from './core/model-tools.ts'
 import { makeMsg, msgOf, zhMsg } from './core/messages.ts'
 import type { MsgFunc } from './core/messages.ts'
-import { cleanupAbortedInstall, hasDshBundlePatch, installErrorFor, installSpecFor, listInstalledPlugins, resolveProfileDir, resolveProfileNameFromArgv, readProfileManifest, runDshPlugin, validateProfileName } from './core/plugin-cli.ts'
+import { cleanupAbortedInstall, hasDshBundlePatch, installErrorFor, installSpecFor, listInstalledPlugins, profileNameFromProfileContext, resolveProcessProfileName, resolveProfileDir, readProfileManifest, runDshPlugin, validateProfileName } from './core/plugin-cli.ts'
 import type { ConfigAdapter, CredentialsFacade, ExportUnit, FileSystemFacade, HostContext, ImportDecisions, ImportPlan, NamespaceInfo, PatchFileFacade, PlanItemKind, PluginInfo, PluginsFacade, SessionMoveResult, SessionParentRelation, SessionRewriteResult, SessionStoreFacade, SettingsFacade, WorkspaceFacade } from './core/types.ts'
 import { ImportUserSkippedError } from './core/types.ts'
 import { createAdapters, USER_PATCH_FILE } from './adapters/index.ts'
@@ -147,7 +147,7 @@ export const name = 'config-manager'
 export const inject = ['settings', 'credentials']
 
 /** Plugin version, kept in sync with package.json ("version"). */
-export const PLUGIN_VERSION = '0.1.65'
+export const PLUGIN_VERSION = '0.1.66'
 
 /** Plugin own package name — excluded from its own exported plugins list. */
 const PLUGIN_NAME = 'dsh-config-manager'
@@ -326,11 +326,21 @@ function resolveDshVersion(home: string): string {
 
 /* ------------------------------------------------------------ profile name */
 
-/** 解析管理的 profile：config.profile → 启动参数 --profile → 'web'。 */
-function resolveProfileName(config?: Config): string {
+/**
+ * 解析管理的 profile（优先级从上到下）：
+ *   ① `config.profile`（显式配置，运维覆盖入口）
+ *   ② 宿主 `profileContext` 服务（DSH ≥ 0.1.7 在 boot 时 provide；见
+ *      `profileNameFromProfileContext`）—— Desktop 外壳不传 `--profile`，
+ *      只有它知道真正启动的是哪个档案（issue #52）
+ *   ③ `--profile` 启动参数 → `DSH_PROFILE` / `DSH_PROFILE_DIR` → 'web'
+ * 全程不抛错：任一来源非法即继续回退（启动期绝不允许因 profile 名崩掉 apply）。
+ */
+function resolveProfileName(config: Config | undefined, ctx: Context): string {
   const configured = config?.profile
   if (configured !== undefined && configured !== '') return validateProfileName(configured)
-  return resolveProfileNameFromArgv()
+  const booted = profileNameFromProfileContext(readService<unknown>(ctx, 'profileContext'))
+  if (booted !== null) return booted
+  return resolveProcessProfileName()
 }
 
 /* ------------------------------------------------------- HostContext facades */
@@ -2849,7 +2859,7 @@ export function apply(ctx: Context, config?: Config): void {
   mkdirSync(marketDir, { recursive: true })
   mkdirSync(historyDir, { recursive: true })
 
-  const host = new ConfigManagerHostContext(ctx, homeDir, resolveProfileName(config))
+  const host = new ConfigManagerHostContext(ctx, homeDir, resolveProfileName(config, ctx))
   // issue #30：出站代理（插件私有，不改全局）。仅在检测到 HTTP(S)_PROXY 时生效；未配置则完全直连。
   // 打一条脱敏日志，便于用户确认「插件当前到底走没走代理」（凭据不进日志）。
   const proxySummary = activeProxySummary()

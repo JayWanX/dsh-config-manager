@@ -3,9 +3,10 @@
 > 本文件回答一个问题：**本插件支持哪个 DSH 版本区间，以及 DSH 升级时哪一部分会先破。**
 > 所有断言均标注取证位置（`file:line`）或标记为「未验证」。凡未实际读取文件确认的结论一律不写入本文件。
 
-- 适用插件版本：`dsh-config-manager@0.1.59`（`package.json:3`，与 `src/index.ts` 的 `export const PLUGIN_VERSION` 一致）
+- 适用插件版本：`dsh-config-manager@0.1.66`（`package.json:3`，与 `src/index.ts` 的 `export const PLUGIN_VERSION` 一致）
 - 取证环境：Windows，Node `v24.13.0`，npm `11.19.0`
 - 本机 DSH 部署：`@deepseek-ai/dsh@0.1.5-rc.1`（`D:\Apps\nodejs\node_global\node_modules\@deepseek-ai\dsh\package.json`）
+- 兼容闸取证（2026-09-28，issue #53）：另从 npm 取 `@deepseek-ai/dsh-app-boot@0.2.0-rc.1`、`@deepseek-ai/dsh@0.1.7-rc.2` 与 `@deepseek-ai/dsh@0.2.0-rc.1` 的 tarball 逐字读源码，并用 app-boot 导出的 `evaluatePluginCompatibility` 对**本插件的 manifest** 真跑判定（结果见 §3.3）
 
 ---
 
@@ -148,7 +149,7 @@ react, react/jsx-runtime, react-dom, react-dom/client,
 
 ### 3.1 peer 声明（`package.json:91-108`，共 14 个官方包 + react/react-dom）
 
-`@deepseek-ai/dsh-agent-presets`、`dsh-client-connection`、`dsh-client-locale`、`dsh-client-runtime`、`dsh-client-ui-settings`、`dsh-client-ui-slots`、`dsh-credentials`、`dsh-home-paths`、`dsh-host-plugin-inventory`、`dsh-host-webserver`、`dsh-llm`、`dsh-settings`、`dsh-system-prompt`、`dsh-tools` —— **全部声明为 `^0.1.0-rc.6`**；`react` / `react-dom` 为 `^18.2.0`。
+`@deepseek-ai/dsh-agent-presets`、`dsh-client-connection`、`dsh-client-locale`、`dsh-client-runtime`、`dsh-client-ui-settings`、`dsh-client-ui-slots`、`dsh-credentials`、`dsh-home-paths`、`dsh-host-plugin-inventory`、`dsh-host-webserver`、`dsh-llm`、`dsh-settings`、`dsh-system-prompt`、`dsh-tools` —— **全部声明为 `>=0.1.0-rc.6 <0.3.0-0`**（0.1.66 起，显式上下界；改前为带预发布版的 caret `^0.1.0-rc.6`，见 §3.3）；`react` / `react-dom` 为 `^18.2.0`。
 
 ### 3.2 本机三套并存的实际版本
 
@@ -179,24 +180,36 @@ react, react/jsx-runtime, react-dom, react-dom/client,
 
 ### 3.3 「rc 期 semver 不可靠」——实测结论
 
-用 DSH 自带 `semver` 实测 `^0.1.0-rc.6`（本插件全部 peer 的范围）：
+**旧声明（≤ 0.1.65，已被 issue #53 修掉）**：14 条 peer 全是**带预发布版的 caret** `^0.1.0-rc.6`。用 DSH 自带 `semver` 实测：
 
-| 候选版本 | 默认 `semver.satisfies` | `{includePrerelease:true}` |
+| 候选版本 | `^0.1.0-rc.6` 默认 | `^0.1.0-rc.6` + `{includePrerelease:true}` |
 |---|---|---|
 | `0.1.0-rc.6` | ✅ true | ✅ true |
 | `0.1.5-rc.2`（profile 实际） | ❌ **false** | ✅ true |
 | `0.1.5-rc.1`（DSH 本体） | ❌ **false** | ✅ true |
 | `0.1.6`（假设正式版） | ✅ true | ✅ true |
 | `0.1.99` | ✅ true | ✅ true |
+| `0.2.0-rc.1`（npm `next`，2026-09-28） | ❌ false | ❌ **false** |
 | `0.2.0` | ❌ false | ❌ false |
 | `0.1.0-rc.5`（更旧的 rc） | ❌ false | ❌ false |
 
+根因：`semver.validRange('^0.1.0-rc.6')` = **`>=0.1.0-rc.6 <0.2.0-0`** —— 带预发布版的 caret，上界会被补成「下一个 minor 的 `-0`」，于是 `0.2.0` 的**任何**预发布版都落在区间之外。
+
+**现行声明（0.1.66 起）**：`>=0.1.0-rc.6 <0.3.0-0` —— 显式上下界，`-0` 把整条 `0.2.x`（含其预发布版）锚进区间。同一份 semver、同一组候选版本实测：
+
+| 候选版本 | `>=0.1.0-rc.6 <0.3.0-0` + `{includePrerelease:true}` |
+|---|---|
+| `0.1.0-rc.5` | ❌ false |
+| `0.1.0-rc.6` / `0.1.5-rc.1` / `0.1.5-rc.2` / `0.1.7-rc.2` | ✅ true |
+| `0.2.0-rc.1` / `0.2.0` / `0.2.9` | ✅ true |
+| `0.3.0-0` / `0.3.0-rc.1` / `1.0.0` | ❌ false |
+
 **结论与风险**：
 
-1. `^0.1.0-rc.6` 在**默认语义**下**不匹配任何 `0.1.x-rc.y`（y>6）**。语义上，`^0.1.0-rc.6` 的 `<upper>` 是 `0.1.0` 的最后一个 prerelease —— 按 semver 规范，`0.1.0-rc.7` 会匹配，但 `0.1.1-rc.1` 这类**更高 patch 的 prerelease 不匹配**。本插件当前靠 `autoInstallPeers: false` + link 安装「绕过」了这条规则，而不是「满足」了它。
-2. **一旦有人打开 `autoInstallPeers`，或走严格 peer 校验的包管理器（pnpm strict-peer-dependencies / npm 的 peer 校验），peer 会立刻报冲突** —— 因为 profile 装的是 `0.1.5-rc.2`，默认语义下不满足 `^0.1.0-rc.6`。这是本插件**最脆的一条声明**。
-3. `0.2.0` 不匹配 → **DSH 一旦进 `0.2.x`，本插件全部 peer 范围集体失效**，无论 rc 与否。
-4. rc 期 semver 不可靠的根因：prerelease 段的存在使「兼容区间」的实际边界依赖工具的 `includePrerelease` 选择，而 npm / pnpm / 各 loader 的选择并不统一。**因此本插件的兼容性事实上靠「运行时实测 + 优雅降级」维持，而不是靠 semver 保证。**
+1. 兼容闸的判定式（读 `@deepseek-ai/dsh-app-boot@0.2.0-rc.1` 源码的 `evaluatePluginCompatibility`，`lib/index.js:286-313`）是 `semver.satisfies(runtimeVersion, range, { includePrerelease: true })`，只检查名字为 `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 的 peer；**任一不满足 → 整份 bundle 在启动时被跳过**（stderr 只多一行 `skipping profile bundle`，进程照常起来、功能静默消失）。0.1.5-rc.1 还没有这道闸。
+2. **真跑判定**（runtime = `0.2.0-rc.1`，manifest = 本插件）：改前 `^0.1.0-rc.6` → **INCOMPATIBLE（14 条 peer 全中）**；改后 → **COMPATIBLE**。`0.1.5-rc.1` / `0.1.7-rc.2` / `0.2.0-rc.1` 三种 runtime 全部 COMPATIBLE。回归护栏：`tests/packaging-contract.test.ts` 的 **P-3**（钉住 14 条 peer 一律是显式上下界，caret/tilde 一律红灯）。
+3. 旧声明的另外两处脆弱点也在现行区间下消失：**默认语义**下 `^0.1.0-rc.6` 不匹配任何 `0.1.x-rc.y`（`x>0` 或 `y>6`，因为 `<upper>` 被钉在 `0.1.0` 那一格），所以一旦打开 `autoInstallPeers` 或走 pnpm `strict-peer-dependencies` / npm 的 peer 校验就立刻报冲突 —— 现在 profile 实际装的 `0.1.5-rc.2` 在默认语义下也满足 `>=0.1.0-rc.6 <0.3.0-0`。
+4. rc 期 semver 不可靠的根因：prerelease 段的存在使「兼容区间」的实际边界依赖工具的 `includePrerelease` 选择，而 npm / pnpm / 各 loader 的选择并不统一。**因此本插件的兼容性事实上靠「运行时实测 + 优雅降级」维持，而不是靠 semver 保证** —— peer 只是**安装期闸门**，不构成运行时承诺（真正运行时 import 的官方包只有 §1.3 的 4 个）。
 
 ### 3.4 API 面漂移实证（rc.6 vs rc.2）
 
@@ -252,8 +265,8 @@ react, react/jsx-runtime, react-dom, react-dom/client,
 | **R8** | `settings.section` Slot 契约变化（owner props、`register` 字段、`inject` face 形态） | 设置页注册 | 设置页 section 消失或白屏；控制台报 Slot 注册失败 | `src/client/index.ts:111-118`；对照 DSH 的 `dsh-client-ui-settings` SlotMap |
 | **R9** | `ctx.locale.register/bind/getLocale` 契约变化 | 全部 5 套 locale 字典 + `UiT` | 界面文案回退成裸 key（如 `section.label`）或英文/中文错配 | `src/client/index.ts:87-105`；`src/ui/i18n.ts`（缺 key 静默返回 key 本身） |
 | **R10** | `dsh.client.inject` / `dsh.client.platform` 字段校验变严（例如要求 inject 名字必须命中 boot graph） | client 半装载 | 设置页不出现；控制台报 client-modules 图相关错误 | 现状为「未命中即跳过、不抛错」（`dsh-client-modules/lib/client.js:265-268`），若 DSH 改为抛错则本节结论失效 |
-| **R11** | 插件加载器改为**强制 peer / engines 校验** | 安装/启动期 | 插件装不上或启动即被拒；报 peer 冲突（因 profile 为 `0.1.5-rc.2`，默认语义不满足 `^0.1.0-rc.6`） | §3.3 的 semver 实测表；检查 profile 是否开了 `autoInstallPeers` |
-| **R12** | DSH 进入 `0.2.x` | 全部 peer 范围 | 同 R11，且与 rc 无关（`^0.1.0-rc.6` 的上界是 `0.2.0`） | §3.3 表末行 |
+| **R11** | 插件加载器改为**强制 peer / engines 校验**（0.1.7 起已落地为兼容闸） | 安装/启动期 | 插件装不上，或启动即被**静默跳过**（stderr 一行 `skipping profile bundle`） | 闸门判定式见 §3.3；peer 范围必须在 `{includePrerelease:true}` 下满足实际 runtime（`tests/packaging-contract.test.ts` 的 P-3 已钉住 14 条 peer 的形状） |
+| **R12** | DSH 进入 `0.3.x` | 全部 peer 范围 | 同 R11（现行上界 `<0.3.0-0` 恰好挡住 `0.3.0-0` 及以上的预发布版；`0.2.x` 已放行） | §3.3 现行区间表末行；越过 0.3 前必须按 M8 重采证据集 |
 | **R13** | `$DSH_HOME/cordis.patch.yml` 或 profile patch 文件格式变化 | MCP 分区、prompts 分区、插件激活行 | MCP/prompts 导入后不生效；`patch 行` 解析报错 | `src/index.ts` 的 `PROFILE_PATCH_FILE` 与 patch 读写实现（`patchFile.readPatchLines`）；`src/adapters/mcp.ts`；`src/adapters/prompts.ts` |
 | **R14** | profile 目录布局变化（`profiles/<name>/` 或 `profiles/node_modules`） | `resolveDshVersion`（版本显示）、`resolveProfileDir`、插件 CLI 通道 | 关于页版本显示 `unknown`；插件安装/列举失败 | `src/index.ts` 的 `resolveDshVersion`（两个候选路径）；`src/core/plugin-cli.ts` |
 
@@ -274,8 +287,9 @@ react, react/jsx-runtime, react-dom, react-dom/client,
 
 ### 规则 M1 —— peer 上界被越过（硬规则）
 
-只要本插件声明支持的最高 DSH 系列从 `0.1.x` 变为 `0.2.x`，**必须**升 minor/major 并同步改 `peerDependencies` 全部 14 个范围。
-依据：`^0.1.0-rc.6` 对 `0.2.0` 实测判定为 **false**（§3.3）。
+现行区间 `>=0.1.0-rc.6 <0.3.0-0` **同时声明支持 `0.1.x` 与 `0.2.x`（含两者的预发布版）**（0.1.66 起，issue #53）。
+**任何对上界的改动都是改兼容声明**（扩大支持范围或收窄都算）：必须按 M8 重采证据集、同步改 `peerDependencies` 全部 14 个范围，并更新 `tests/packaging-contract.test.ts` 的 P-3 期望值。
+依据：旧的 `^0.1.0-rc.6` 对 `0.2.0-rc.1` 与 `0.2.0` 实测均为 **false**（上界 `0.2.0-0`）；现行区间实测见 §3.3。
 
 ### 规则 M2 —— 任一硬依赖服务被移除或改名
 
@@ -337,6 +351,8 @@ react, react/jsx-runtime, react-dom, react-dom/client,
 | `dsh-tools` `defineTool` 在 rc.8 与 rc.2 之间的签名差异 | 仅验证了两版都存在该导出，未比对参数 schema | 实测两版均命中 `defineTool` probe |
 | `0.1.0-rc.6` → `0.1.5-rc.2` 之间 `SettingsProvider` **方法签名**（非导出名）的变化 | 未逐个方法做行为比对 | 确认 `settingsNamespace` 等导出名被移除，且插件有探测降级 |
 | 各风险项（R1–R14）的**实际发生概率** | 需要 DSH 的发布计划，本仓库不可得 | 仅给出「契约暴露面」排序（§5.1），非概率 |
+| **在本机真机运行 DSH 0.1.7-rc.2 / 0.2.0-rc.1**（issue #53） | 本机全局装的是 `0.1.5-rc.1`，未做运行版本切换 | 逐字读两个版本的 `dsh-app-boot` / `dsh` 源码确认闸门判定式；用 `evaluatePluginCompatibility` 真跑本插件 manifest（三种 runtime 全 COMPATIBLE）；区间语义用 DSH 自带 semver 实测 |
+| **在真实 DSH Desktop 上复现 issue #52** | 无桌面版环境 | 读 `@deepseek-ai/dsh@0.1.7-rc.2` 与 `0.2.0-rc.1` 的 `profile-boot` 源码，确认 boot 时确实 `hostCtx.provide('profileContext', { name, dir, patchPath, … })`（`0.1.5-rc.1` 尚无）；解析链为纯函数并有单测（`src/core/plugin-cli.test.ts`）；**end-to-end 未验证** |
 
 ---
 

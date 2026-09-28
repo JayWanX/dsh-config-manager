@@ -179,7 +179,7 @@ UI 自查：DESIGN.md 一致(token/组件/spacing/radius/状态语义)、响应�
   `dsh web` 重启后当然还是 web；真机：设 PROVA 为下次启动 → 重启仍进 web）——2026-09 该标记与按钮**整体移除**：它只会让用户以为
   切换成功了。真正可用的切换只有两种：① **另起独立实例**（本插件「启动/停止该档案」= `dsh --profile <名> --port <空闲端口>` detached +
   从子进程日志抓带 token 的认证 URL + HTTP 探活 + 按 `process.kill(pid,0)` 判活；生态里的 dshm / DSH Launcher 走的都是这条）；
-  ② 把用户的启动命令/快捷方式换成 `dsh --profile <名>`（插件无法远程改别人的启动入口，所以只能给命令）。五条硬约束：
+  ② 把用户的启动命令/快捷方式换成 `dsh --profile <名>`（插件无法远程改别人的启动入口，所以只能给命令）。**当前档案的识别（issue #52，2026-09）**：宿主在 boot 时 `provide('profileContext', { name, dir, … })`（DSH ≥ 0.1.7 取证）—— Desktop 外壳**不传 `--profile`**，只认 argv 会把 desktop 认成 web（插件清单来源 / 档案页「当前运行」/ 备份·导出·恢复目标全落到 `profiles/web`）；解析链恒为 `config.profile` → `profileContext` → `--profile` → `DSH_PROFILE`/`DSH_PROFILE_DIR` → `web`（`src/index.ts` 的 `resolveProfileName` + `src/core/plugin-cli.ts`，由 `src/core/plugin-cli.test.ts` 钉住）。五条硬约束：
   ⓐ **只对 web 形态可启动**（headless/generic 如 base 模板 spawn 出去是用户看不见的进程 → `notLaunchable` + 终端命令，绝不假装成功）；
   ⓑ **实例台账是唯一事实**（`<dataDir>/launches.json`：pid/port/url/log；`listRunning` 按 pid 存活过滤并清死记录，UI 的「启动 ↔ 停止」就是它的投影——
   DSH 不认识插件启动的进程，不记账就永远关不掉）；

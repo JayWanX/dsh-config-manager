@@ -58,23 +58,97 @@ export function resolveProfileDir(homeDir: string, profile: string): string {
 }
 
 /**
- * 从启动参数解析 profile 名：`--profile <name>` → 缺省 'web'。与宿主 apply 时的
- * resolveProfileName 同源（config 覆盖仅 apply 处有；报告/适配器场景用本函数即可）。
+ * `--profile <name>` 的合法取值（同时支持 `--profile <name>` 与 `--profile=<name>`）；
+ * 没给 / 缺值 / 值以 '-' 开头 / 校验非法 → null（宽容语义，绝不抛错）。
  * argv 参数化便于测试；缺省读当前进程 argv。
- * 宽容语义：缺值 / 值以 '-' 开头 / 校验非法 → 一律回退 'web'。消息构建路径
- * （applyItem 失败分支、补行等）绝不允许因 profile 名抛错破坏非致命 warning；
- * 且 launcher 在启动时已拒绝非法 profile，此分支实际不可达。
  */
-export function resolveProfileNameFromArgv(argv: readonly string[] = process.argv.slice(2)): string {
-  const at = argv.indexOf('--profile')
-  if (at === -1) return 'web'
-  const value = argv[at + 1]
-  if (value === undefined || value === '' || value.startsWith('-')) return 'web'
-  try {
-    return validateProfileName(value)
-  } catch {
-    return 'web'
+export function profileNameFromArgv(argv: readonly string[]): string | null {
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (token === undefined) continue
+    let value: string | undefined
+    if (token === '--profile') value = argv[i + 1]
+    else if (token.startsWith('--profile=')) value = token.slice('--profile='.length)
+    else continue
+    if (value === undefined || value === '' || value.startsWith('-')) return null
+    try {
+      return validateProfileName(value)
+    } catch {
+      return null
+    }
   }
+  return null
+}
+
+/**
+ * 从 profile 目录的绝对路径取叶子名（`profileContext.dir` / `DSH_PROFILE_DIR`）：
+ * 两种分隔符都切（POSIX 上也可能拿到 Windows 形态路径），取不到 / 非法 → null。
+ */
+export function profileNameFromDir(dir: string): string | null {
+  const leaf = dir.trim().replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''
+  if (leaf === '') return null
+  try {
+    return validateProfileName(leaf)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 从宿主 `profileContext` 服务的值里取 profile 名（issue #52）。
+ *
+ * DSH ≥ 0.1.7 在 boot 时 `hostCtx.provide('profileContext', { name, dir, patchPath, … })`
+ * （取证：0.1.7-rc.2 / 0.2.0-rc.1 的 `@deepseek-ai/dsh` 中 profile-boot 的 provide 调用），
+ * 这是「真正启动了哪个档案」的**唯一权威**：DSH Desktop（Electron 外壳）拉起宿主时
+ * **不传 `--profile`**（只在 Electron 层把 projectDir / profileContext 交给宿主），
+ * 只认 argv 会把 desktop 档案认成 'web'，于是插件清单来源、档案页「当前运行」标记、
+ * 备份/导出/恢复目标全部落到 profiles/web。
+ *
+ * 纯函数便于单测：`name` 缺失/非法时退到 `dir` 的叶子名；两者都取不到 → null
+ * （调用方继续回退到 --profile / 环境变量 / web）。
+ */
+export function profileNameFromProfileContext(value: unknown): string | null {
+  if (value === null || typeof value !== 'object') return null
+  const fields = value as { name?: unknown; dir?: unknown }
+  if (typeof fields.name === 'string' && fields.name.trim() !== '') {
+    try {
+      return validateProfileName(fields.name.trim())
+    } catch {
+      // name 非法 → 继续尝试 dir（DSH 的消费点是 profile.dir，见 app-boot 的 preflight）
+    }
+  }
+  return typeof fields.dir === 'string' ? profileNameFromDir(fields.dir) : null
+}
+
+/**
+ * 从进程环境解析 profile 名：`DSH_PROFILE`（名字）→ `DSH_PROFILE_DIR`（绝对目录，取叶子名）。
+ * 由启动外壳注入；DSH 自身（0.1.5 / 0.1.7 / 0.2.0 全量扫描）**从不写这两个变量**，
+ * 所以它只是 profileContext 之外的一道兜底。两条都读不到 / 非法 → null，绝不抛错。
+ */
+export function resolveProfileNameFromEnv(env: Readonly<Record<string, string | undefined>> = process.env): string | null {
+  const direct = env.DSH_PROFILE
+  if (typeof direct === 'string' && direct.trim() !== '') {
+    try {
+      return validateProfileName(direct.trim())
+    } catch {
+      // 值非法（空 / 含分隔符 / 保留名）→ 继续尝试 DSH_PROFILE_DIR
+    }
+  }
+  const dir = env.DSH_PROFILE_DIR
+  if (typeof dir === 'string' && dir.trim() !== '') return profileNameFromDir(dir)
+  return null
+}
+
+/**
+ * 进程侧 profile 名（不依赖 Cordis ctx）：`--profile` 启动参数 →
+ * `DSH_PROFILE` / `DSH_PROFILE_DIR` 环境变量 → 'web'。
+ * 宿主 apply 的真实优先级更高一层（config.profile → profileContext 服务），见 src/index.ts。
+ */
+export function resolveProcessProfileName(
+  argv: readonly string[] = process.argv.slice(2),
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): string {
+  return profileNameFromArgv(argv) ?? resolveProfileNameFromEnv(env) ?? 'web'
 }
 
 interface ProfileManifest {

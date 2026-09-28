@@ -6,18 +6,59 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   classifyDshPluginFailure, installErrorFor, isTransientDshPluginFailure,
-  resolveProfileNameFromArgv,
+  profileNameFromArgv, profileNameFromDir, profileNameFromProfileContext,
+  resolveProcessProfileName, resolveProfileNameFromEnv,
   type DshPluginResult,
 } from './plugin-cli.ts';
 
-test('resolveProfileNameFromArgv: --profile 取值 / 缺省 web / 非法值宽容回退', () => {
-  assert.equal(resolveProfileNameFromArgv(['--profile', 'tui']), 'tui');
-  assert.equal(resolveProfileNameFromArgv(['web', '--profile', 'headless', 'x']), 'headless');
-  assert.equal(resolveProfileNameFromArgv(['--profile']), 'web', '缺值回退');
-  assert.equal(resolveProfileNameFromArgv(['--profile', '--flag']), 'web', '值以 - 开头回退');
-  assert.equal(resolveProfileNameFromArgv([]), 'web');
-  assert.equal(resolveProfileNameFromArgv(['--profile', '../evil']), 'web', '非法值不抛错回退（消息构建路径安全）');
+test('profileNameFromArgv: 取值（含 --profile=<name>）/ 空数组 / 非法值宽容回退（不抛错）', () => {
+  assert.equal(profileNameFromArgv(['--profile', 'tui']), 'tui');
+  assert.equal(profileNameFromArgv(['web', '--profile', 'headless', 'x']), 'headless');
+  assert.equal(profileNameFromArgv(['--profile=headless']), 'headless', '--profile=x 形态');
+  assert.equal(profileNameFromArgv(['--profile']), null, '缺值');
+  assert.equal(profileNameFromArgv(['--profile=']), null, '空值');
+  assert.equal(profileNameFromArgv(['--profile', '--flag']), null, '值以 - 开头');
+  assert.equal(profileNameFromArgv([]), null);
+  assert.equal(profileNameFromArgv(['-x', '--profile=a/b']), null, '非法值 → null（交由上层继续回退）');
+  assert.equal(profileNameFromArgv(['--profile', '../evil']), null, '非法值不抛错（消息构建路径安全）');
 });
+
+test('resolveProfileNameFromEnv: DSH_PROFILE → DSH_PROFILE_DIR 叶子名 → null', () => {
+  assert.equal(resolveProfileNameFromEnv({ DSH_PROFILE: 'desktop' }), 'desktop');
+  assert.equal(resolveProfileNameFromEnv({ DSH_PROFILE: '  desktop  ' }), 'desktop', '两端空白去除');
+  assert.equal(resolveProfileNameFromEnv({ DSH_PROFILE_DIR: 'C:\\Users\\me\\.dsh\\profiles\\desktop' }), 'desktop', 'Windows 形态目录（POSIX 上同样解析）');
+  assert.equal(resolveProfileNameFromEnv({ DSH_PROFILE_DIR: '/home/me/.dsh/profiles/work/' }), 'work');
+  assert.equal(resolveProfileNameFromEnv({ DSH_PROFILE: '../evil', DSH_PROFILE_DIR: '/h/.dsh/profiles/work' }), 'work', 'DSH_PROFILE 非法 → 继续尝试 DSH_PROFILE_DIR');
+  assert.equal(resolveProfileNameFromEnv({}), null);
+  assert.equal(resolveProfileNameFromEnv({ DSH_PROFILE: '   ', DSH_PROFILE_DIR: '' }), null);
+  assert.equal(resolveProfileNameFromEnv({ DSH_PROFILE_DIR: '/h/.dsh/profiles/node_modules' }), null, '保留名 → null');
+});
+
+test('profileNameFromProfileContext: 取宿主 profileContext 服务的 name，退化到 dir（issue #52）', () => {
+  assert.equal(profileNameFromDir('/a/b/profiles/work/'), 'work');
+  assert.equal(profileNameFromDir(''), null);
+  assert.equal(profileNameFromProfileContext({ name: 'desktop', dir: '/home/me/.dsh/profiles/desktop' }), 'desktop');
+  assert.equal(profileNameFromProfileContext({ name: ' desktop ' }), 'desktop');
+  assert.equal(profileNameFromProfileContext(null), null);
+  assert.equal(profileNameFromProfileContext(undefined), null);
+  assert.equal(profileNameFromProfileContext('desktop'), null, '非对象 → null（不猜）');
+  assert.equal(profileNameFromProfileContext({}), null);
+  assert.equal(profileNameFromProfileContext({ name: '' }), null);
+  assert.equal(profileNameFromProfileContext({ name: 42 }), null);
+  assert.equal(profileNameFromProfileContext({ name: '../evil' }), null, '非法名且无 dir → null');
+  assert.equal(profileNameFromProfileContext({ name: '../evil', dir: '/h/.dsh/profiles/work' }), 'work', 'name 非法 → 退到 dir 叶子名');
+  assert.equal(profileNameFromProfileContext({ dir: 'C:\\Users\\me\\.dsh\\profiles\\desktop' }), 'desktop', '缺 name → 用 dir（Windows 形态）');
+  assert.equal(profileNameFromProfileContext({ dir: '/h/.dsh/profiles/node_modules' }), null, 'dir 叶子是保留名 → null');
+});
+
+test('resolveProcessProfileName: --profile > DSH_PROFILE > 缺省 web', () => {
+  assert.equal(resolveProcessProfileName(['--profile', 'tui'], {}), 'tui');
+  assert.equal(resolveProcessProfileName(['--profile', 'tui'], { DSH_PROFILE: 'desktop' }), 'tui', '显式参数优先于外壳注入的环境变量');
+  assert.equal(resolveProcessProfileName([], { DSH_PROFILE: 'desktop' }), 'desktop');
+  assert.equal(resolveProcessProfileName([], { DSH_PROFILE_DIR: '/h/.dsh/profiles/work' }), 'work');
+  assert.equal(resolveProcessProfileName([], {}), 'web');
+});
+
 
 test('classify: ERR_PNPM_PUBLIC_HOIST_PATTERN_DIFF → hoist-pattern-diff (recoverable)', () => {
   const f = classifyDshPluginFailure('ERR_PNPM_PUBLIC_HOIST_PATTERN_DIFF\nsome pnpm output');

@@ -625,12 +625,17 @@ export class PluginsAdapter implements ConfigAdapter<PluginsSection> {
         // 用户跳过：原样上抛（引擎 applyOne 捕获 → skipped + skippedByUser，不触发回滚）
         if (ctx.signal?.aborted) throw err;
         const reason = err instanceof Error ? err.message : String(err);
+        // 提示里的 profile 必须与**实际安装目标**同源（ctx.target.profile = 宿主解析出的
+        // config.profile → profileContext → --profile → env → web）。此前这里单独调
+        // resolveProcessProfileName()（只认 argv/env）：Desktop 外壳不传 --profile，
+        // 真机于是出现「安装用的是 desktop、提示却写 dsh plugin --profile web add …」的自相矛盾。
+        const hintProfile = ctx.target.profile ?? resolveProcessProfileName();
         return {
           ok: false,
           warning: true,
           // 保留 warning（§34.17 非致命）：一个装不上的插件不得拖垮已成功导入的其余配置；
           // message 附可复制的手动安装命令（profile 解析与 M1 宿主一致）。
-          message: (item.kind === 'Update' ? msg('adapter.pluginUpdateFailed', { name, msg: reason, profile: resolveProcessProfileName() }) : msg('adapter.pluginInstallFailed', { name, msg: reason, profile: resolveProcessProfileName() })),
+          message: (item.kind === 'Update' ? msg('adapter.pluginUpdateFailed', { name, msg: reason, profile: hintProfile }) : msg('adapter.pluginInstallFailed', { name, msg: reason, profile: hintProfile })),
         };
       }
     }

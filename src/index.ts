@@ -76,7 +76,7 @@ import { RunRegistry, type RunState } from './core/run-registry.ts'
 import { registerModelTools } from './core/model-tools.ts'
 import { makeMsg, msgOf, zhMsg } from './core/messages.ts'
 import type { MsgFunc } from './core/messages.ts'
-import { cleanupAbortedInstall, hasDshBundlePatch, installErrorFor, installSpecFor, listInstalledPlugins, profileNameFromProfileContext, resolveProcessProfileName, resolveProfileDir, readProfileManifest, runDshPlugin, validateProfileName } from './core/plugin-cli.ts'
+import { cleanupAbortedInstall, hasDshBundlePatch, installAnchorFromProfileContext, installErrorFor, installSpecFor, listInstalledPlugins, profileNameFromProfileContext, resolveProcessProfileName, resolveProfileDir, readProfileManifest, runDshPlugin, validateProfileName } from './core/plugin-cli.ts'
 import type { ConfigAdapter, CredentialsFacade, ExportUnit, FileSystemFacade, HostContext, ImportDecisions, ImportPlan, NamespaceInfo, PatchFileFacade, PlanItemKind, PluginInfo, PluginsFacade, SessionMoveResult, SessionParentRelation, SessionRewriteResult, SessionStoreFacade, SettingsFacade, WorkspaceFacade } from './core/types.ts'
 import { ImportUserSkippedError } from './core/types.ts'
 import { createAdapters, USER_PATCH_FILE } from './adapters/index.ts'
@@ -147,7 +147,7 @@ export const name = 'config-manager'
 export const inject = ['settings', 'credentials']
 
 /** Plugin version, kept in sync with package.json ("version"). */
-export const PLUGIN_VERSION = '0.1.66'
+export const PLUGIN_VERSION = '0.1.67'
 
 /** Plugin own package name — excluded from its own exported plugins list. */
 const PLUGIN_NAME = 'dsh-config-manager'
@@ -307,19 +307,42 @@ function resolveAppLanguage(ctx: Context): 'zh' | 'en' {
   }
 }
 
-/** Resolve the real DSH version from the profile dependency tree (read-only). */
-function resolveDshVersion(home: string): string {
-  const candidates = [
+/** 读一个 package.json 的 version；不可读 / 不是非空字符串 → null。 */
+function readPackageVersion(path: string): string | null {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as { version?: unknown }
+    return typeof parsed.version === 'string' && parsed.version !== '' ? parsed.version : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 当前真正在跑的 DSH 版本（只读）。
+ *
+ * 优先级（**顺序就是真伪顺序**，桌面端实测）：
+ *  ① `profileContext.installAnchor` —— 拉起本宿主的那份 `@deepseek-ai/dsh/package.json`。
+ *     Desktop 从 `app.asar` 内加载运行时（0.2.0-rc.2），**磁盘上其它任何位置都没有它**；
+ *  ② 当前档案自己的依赖树 `<home>/profiles/<profile>/node_modules/...`；
+ *  ③ `<home>/profiles/node_modules/...`（pnpm hoisted 树）与 <home>/profiles/web/...。
+ *
+ * 为什么不能用 ③ 打头（原实现的 bug）：那棵树是 web 档案装出来的 **hoisted 副本**，
+ * 真机上它是 0.1.5-rc.1，而 Desktop 实际跑的是 0.2.0-rc.2 —— 「关于」页与导出 manifest
+ * 的 DSH 版本因此整个报错版本号。
+ */
+export function resolveDshVersion(home: string, profile?: string, installAnchor?: string | null): string {
+  const candidates: string[] = []
+  if (typeof installAnchor === 'string' && installAnchor !== '') candidates.push(installAnchor)
+  if (profile !== undefined && profile !== '') {
+    candidates.push(join(home, 'profiles', profile, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'))
+  }
+  candidates.push(
     join(home, 'profiles', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
     join(home, 'profiles', 'web', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
-  ]
+  )
   for (const p of candidates) {
-    try {
-      const parsed = JSON.parse(readFileSync(p, 'utf8')) as { version?: unknown }
-      if (typeof parsed.version === 'string' && parsed.version !== '') return parsed.version
-    } catch {
-      // try the next candidate
-    }
+    const version = readPackageVersion(p)
+    if (version !== null) return version
   }
   return 'unknown'
 }
@@ -1018,7 +1041,9 @@ export class ConfigManagerHostContext implements HostContext {
 
   constructor(ctx: Context, homeDir: string, profile: string) {
     this.homeDir = homeDir
-    this.dshVersion = resolveDshVersion(homeDir)
+    // 「当前 DSH 版本」= 拉起本宿主的那份 runtime（profileContext.installAnchor），
+    // 而不是磁盘上可能早已过期的 hoisted 副本（Desktop 实测：0.2.0-rc.2 vs 0.1.5-rc.1）。
+    this.dshVersion = resolveDshVersion(homeDir, profile, installAnchorFromProfileContext(readService<unknown>(ctx, 'profileContext')))
     this.profile = profile
     this.language = resolveAppLanguage(ctx)
     this.msg = makeMsg(this.language)

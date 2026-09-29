@@ -26,10 +26,11 @@ import { get } from 'node:http'
 import { dirname, join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { atomicWriteFileSync } from '../utils/atomic-write.ts'
+import { resolveDesktopCarrier } from '../utils/desktop-carrier.ts'
 import { DshProfileError } from './dsh-profile-manager.ts'
 import { resolveProcessControl, stopPid, type ResolvedProcessControl } from './process-control.ts'
 import {
-  DSH_PROFILE_LAUNCH_TIMEOUT_MS, isLaunchableShape,
+  DSH_PROFILE_LAUNCH_TIMEOUT_MS, isLaunchableShape, isManagedProfileName,
   type DshProfileLaunchRecord, type DshProfileLaunchResult, type DshProfileLaunchWarning, type DshProfileShape,
   type DshProfileStopOutcome,
 } from './dsh-profile-shared.ts'
@@ -42,6 +43,8 @@ export interface DshCliCommand {
   prefixArgs: string[]
   /** 是否经 shell（Windows 的 .cmd/.bat 在 Node ≥ 22 必须经 shell，否则 EINVAL） */
   shell: boolean
+  /** 需要额外/覆写的子进程环境（Desktop 载体要 ELECTRON_RUN_AS_NODE=1）；缺省只继承。 */
+  env?: Readonly<Record<string, string>>
 }
 
 /** 启动器可注入的副作用（测试 / 隔离验证用；缺省即真实实现）。 */
@@ -155,7 +158,18 @@ export function defaultResolveCli(): DshCliCommand | null {
     return { command: process.execPath, prefixArgs: [argv1], shell: false }
   }
   const fromPath = findOnPath(['dsh.cmd', 'dsh.exe', 'dsh'])
-  if (fromPath === null) return null
+  if (fromPath === null) {
+    // Desktop 兜底：**只装了桌面端**的机器 PATH 上没有 dsh，此前一律 launcherUnavailable
+    // （功能直接不可用）。桌面端自带的 @deepseek-ai/dsh-desktop-host/lib/cli.js 本身就是一条
+    // 完整的普通 CLI（用桌面端内置 runtime + 内置 pnpm），可以拉起任意档案。
+    // 顺序说明：PATH 上的 dsh 仍然优先 —— 各档案的 node_modules 就是那份 dsh 装的，
+    // 用同一份启动最不容易踩版本混用。
+    const carrier = resolveDesktopCarrier()
+    if (carrier !== null) {
+      return { command: carrier.execPath, prefixArgs: [carrier.cliPath], shell: false, env: carrier.env }
+    }
+    return null
+  }
   return { command: fromPath, prefixArgs: [], shell: /\.(cmd|bat)$/i.test(fromPath) }
 }
 
@@ -270,6 +284,10 @@ export class DshProfileLauncher {
     不允许同名多开，否则 UI 的「停止」指向哪一个都说不清，浏览器里也会出现两个同 home 的实例。
    */
   async launch(input: DshProfileLaunchInput): Promise<DshProfileLaunchResult> {
+    // Desktop 独占档案：普通 dsh CLI 对它直接报 'profile "desktop" is managed
+    // exclusively by the Electron application' 并退出 —— 走 launchFailed 只会把用户
+    // 推给一条看不懂的错误。这里直接以 managedProfile 拒绝，并说明该去哪开。
+    if (isManagedProfileName(input.name)) throw new DshProfileError('managedProfile')
     if (!isLaunchableShape(input.shape)) throw new DshProfileError('notLaunchable')
     if (this.listRunning().some((r) => r.name === input.name)) throw new DshProfileError('alreadyRunning')
     if (this.deps.isProfileRunning(input.name)) throw new DshProfileError('alreadyRunning')
@@ -289,7 +307,8 @@ export class DshProfileLauncher {
     let exited: number | null | undefined
     const child = this.deps.spawnDetached(cli.command, args, {
       cwd: this.cwd,
-      env: { ...process.env, DSH_HOME: this.homeDir },
+      // cli.env 必须能覆写（Desktop 载体：ELECTRON_RUN_AS_NODE=1）；DSH_HOME 恒为最后一项
+      env: { ...process.env, ...cli.env, DSH_HOME: this.homeDir },
       logFile,
       shell: cli.shell,
     })

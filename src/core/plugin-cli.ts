@@ -21,6 +21,7 @@ import { readFileSync, rmSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 
 import { atomicWriteFileSync } from '../utils/atomic-write.ts'
+import { isDesktopProfile, resolveDesktopCarrier } from '../utils/desktop-carrier.ts'
 import { isRescueActiveSync } from './boot-rescue.ts'
 import type { PluginInfo } from './types.ts'
 
@@ -118,6 +119,23 @@ export function profileNameFromProfileContext(value: unknown): string | null {
     }
   }
   return typeof fields.dir === 'string' ? profileNameFromDir(fields.dir) : null
+}
+
+/**
+ * 从宿主 `profileContext` 取**当前运行时的安装锚点**（issue #桌面端兼容）：
+ * `installAnchor` 是 **拉起本宿主那份** `@deepseek-ai/dsh/package.json` 的绝对路径
+ * （dsh 的 profile-boot 在 boot 时写进 profileContext；Desktop 传的是
+ * `<app.asar>/dsh/node_modules/@deepseek-ai/dsh/package.json`）。
+ *
+ * 为什么必须用它：磁盘上 `<home>/profiles/node_modules/@deepseek-ai/dsh/package.json`
+ * 是 web profile 装出来的 **hoisted 旧副本**（真机：Desktop 运行时 0.2.0-rc.2，该文件却是
+ * 0.1.5-rc.1），只按磁盘猜会让「关于」页与备份 manifest 的 DSH 版本整个报错。
+ * 取不到 / 非字符串 / 空串 → null（调用方继续按磁盘候选回退）。
+ */
+export function installAnchorFromProfileContext(value: unknown): string | null {
+  if (value === null || typeof value !== 'object') return null
+  const anchor = (value as { installAnchor?: unknown }).installAnchor
+  return typeof anchor === 'string' && anchor.trim() !== '' ? anchor.trim() : null
 }
 
 /**
@@ -368,13 +386,39 @@ function spawnEnv(): NodeJS.ProcessEnv {
   return { ...process.env, CI: 'true', PATH: parts.join(':') }
 }
 
+/** 一次 CLI 调用的启动描述（env 只在需要覆写子进程环境时出现）。 */
+export interface DshCliArgv {
+  file: string
+  args: string[]
+  cwd: string | undefined
+  viaShell: boolean
+  /** 额外/覆写的子进程环境（Desktop 载体需要 ELECTRON_RUN_AS_NODE=1）。 */
+  env?: Readonly<Record<string, string>>
+}
+
 /**
  * 重放启动当前宿主进程的 dsh CLI：
+ *  - **Desktop 保留档案（`--profile desktop`）**：普通 dsh CLI 会硬拒绝（见
+ *    `utils/desktop-carrier.ts` 的说明），必须改用桌面端自带的 CLI 载体
+ *    `@deepseek-ai/dsh-desktop-host/lib/cli.js`（它以 `manageDesktopProfile: true` 启动
+ *    runCli，并用桌面端内置 runtime + 内置 pnpm）。检测不到载体时落回下面的通用路径，
+ *    失败信息由 classifyDshPluginFailure 的 desktop-profile-reserved 分类给可操作说明；
  *  - process.argv[1] 是 dsh 入口（全局 bin / 源码启动的 bin.ts / bin.js）→ 用
  *    当前 Node 重新执行该入口（execArgv 原样保留，cwd 靠近入口保持相对导入可解析）；
  *  - 否则退回 PATH 上的 `dsh`（Windows 是 .cmd，需经 shell）。
  */
-export function dshArgv(): { file: string; args: string[]; cwd: string | undefined; viaShell: boolean } {
+export function dshArgv(profile?: string, carrier: ReturnType<typeof resolveDesktopCarrier> = resolveDesktopCarrier()): DshCliArgv {
+  if (profile !== undefined && isDesktopProfile(profile)) {
+    if (carrier !== null) {
+      return {
+        file: carrier.execPath,
+        args: [carrier.cliPath],
+        cwd: dirname(carrier.cliPath),
+        viaShell: false,
+        env: carrier.env,
+      }
+    }
+  }
   const entry = process.argv[1]
   if (entry !== undefined && /[\\/](?:bin\.(?:js|ts)|dsh)$/.test(entry)) {
     const abs = resolve(entry)
@@ -472,11 +516,12 @@ export function runDshPlugin(
   timeoutMs: number = INSTALL_TIMEOUT_MS,
   signal?: AbortSignal,
 ): Promise<DshPluginResult> {
-  const { file, args, viaShell } = dshArgv()
+  const { file, args, viaShell, env: argvEnv } = dshArgv(profile)
   return new Promise((resolvePromise) => {
     const child = spawnShim(file, [...args, 'plugin', '--profile', profile, ...pluginArgs], {
       cwd: profileDir,
-      env: spawnEnv(),
+      // argvEnv 覆盖 spawnEnv：Desktop 载体子进程必须带 ELECTRON_RUN_AS_NODE=1
+      env: { ...spawnEnv(), ...argvEnv },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
       viaShell,
@@ -536,6 +581,7 @@ export type DshPluginFailureCode =
   | 'transient-network'       // 瞬时网络故障（直接重试通常即可）
   | 'pnpm-missing'            // pnpm 不在 PATH（dsh 转发层报错）
   | 'patch-file-missing'      // patchedDependencies 指向的 patch 文件不存在（issue #35）
+  | 'desktop-profile-reserved' // dashboard 保留档案：普通 dsh CLI 拒绝 --profile desktop（桌面端兼容）
 
 export interface DshPluginFailure {
   code: DshPluginFailureCode
@@ -624,6 +670,17 @@ export function classifyDshPluginFailure(output: string): DshPluginFailure | nul
       code: 'transient-network',
       recoverable: true,
       message: '拉取依赖时网络临时失败（安装会重放整个依赖树，任何一个既有依赖抖动都会中断本次操作）；稍后直接重试通常即可 / a transient network failure while fetching dependencies (installs replay the whole dependency tree, so any existing dependency can hiccup); a plain retry usually succeeds',
+    }
+  }
+  // 桌面端保留档案：普通 dsh CLI（< 0.2 的旧版尤其）对 `--profile desktop` 直接报
+  // 'profile "desktop" is managed exclusively by the Electron application' 并且**什么都不做**。
+  // 正常情况下宿主已经是 Desktop（走 dsh-desktop-host/lib/cli.js 载体），命中这里说明载体检测
+  // 失败（例如插件在普通 dsh web 里运行、却把安装目标指到了 desktop 档案）。给可操作说明。
+  if (/profile\s+"desktop"\s+is managed exclusively by the Electron application/i.test(output)) {
+    return {
+      code: 'desktop-profile-reserved',
+      recoverable: false,
+      message: 'desktop 是 DeepSeek Harness Desktop 独占管理的保留档案，普通 dsh CLI 拒绝操作它；请在桌面端应用内重试（新版本插件会自动改用桌面端自带的 CLI 载体），或改用其它档案 / the "desktop" profile is managed exclusively by the DeepSeek Harness Desktop application and the plain dsh CLI refuses to touch it; retry from inside the Desktop app (a current version of this plugin switches to the Desktop-bundled CLI carrier) or target another profile',
     }
   }
   if (output.includes('pnpm not found on PATH')) {

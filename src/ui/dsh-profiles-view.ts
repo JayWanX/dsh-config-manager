@@ -9,7 +9,7 @@
  * 绝不 import 用 node fs 的引擎（否则 client bundle 会带上 node 内置模块依赖而整插件不加载）。
  */
 import {
-  checkProfileName, isLaunchableShape,
+  checkProfileName, isLaunchableShape, isManagedProfileName,
   type DshProfileCopyWarning, type DshProfileIssue, type DshProfileLaunchResult, type DshProfileLaunchWarning,
   type DshProfileMeta, type DshProfileRunningView, type DshProfileShape, type DshProfileStopOutcome,
 } from '../profiles/dsh-profile-shared.ts'
@@ -151,11 +151,25 @@ export function restartCommand(name: string): string {
 }
 
 /**
- * 能否「用该档案启动」独立实例：只有 web 形态有浏览器 GUI。
+ * 能否「用该档案启动」独立实例：
+ *  - 只有 web 形态有浏览器 GUI（headless/generic spawn 出去只会是用户看不见的进程）；
+ *  - Desktop 独占档案（desktop）命令行根本起不来 —— 普通 dsh CLI 对它硬报
+ *    'profile "desktop" is managed exclusively by the Electron application'。
  * 判据在 shared（宿主引擎共用同一份），这里只是视图层的名字。
  */
-export function canLaunchProfile(shape: DshProfileShape): boolean {
-  return isLaunchableShape(shape)
+export function canLaunchProfile(profile: Pick<DshProfileMeta, 'name' | 'shape'>): boolean {
+  if (isManagedProfileName(profile.name)) return false
+  return isLaunchableShape(profile.shape)
+}
+
+/**
+ * 「启动被挡下」的原因分类 —— UI 据此选文案：managed 档案**不能**给
+ * `dsh --profile desktop` 这条命令（那条命令本身就是被拒绝的那条），只能指路桌面端应用。
+ */
+export type ProfileLaunchBlockReason = 'managed' | 'notWeb'
+
+export function launchBlockReason(profile: Pick<DshProfileMeta, 'name' | 'shape'>): ProfileLaunchBlockReason {
+  return isManagedProfileName(profile.name) ? 'managed' : 'notWeb'
 }
 
 /** 启动回执的界面语义：ready = 已就绪（有 URL）；pending = 进程起来了但还没探通/没抓到 URL。 */

@@ -28,7 +28,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { atomicWriteFileSync } from '../utils/atomic-write.ts'
 import { resolveProfileDir, validateProfileName } from '../core/plugin-cli.ts'
 import {
-  DSH_PROFILE_TEMPLATES, checkProfileName, classifyShape,
+  DSH_PROFILE_TEMPLATES, checkProfileName, classifyShape, isManagedProfileName,
   type DshProfileCopyWarning, type DshProfileDetail, type DshProfileErrorCode, type DshProfileIssue,
   type DshProfileMeta, type DshProfilePatchReload,
 } from './dsh-profile-shared.ts'
@@ -246,6 +246,9 @@ export class DshProfileManager {
 
   /** 重命名（目录级移动；同步修正 package.json 的 name 字段）。 */
   rename(name: string, newName: string): DshProfileMeta {
+    // Desktop 独占档案：改名 = 桌面端下次启动时找不到自己的档案（它会按 web 模板重建一个空的，
+    // 已装插件全部消失），而普通 dsh CLI 连 --profile desktop 都拒绝。直接拒绝并说明原因。
+    if (isManagedProfileName(name)) throw new DshProfileError('managedProfile')
     const reason = checkProfileName(newName)
     if (reason !== null) throw new DshProfileError(reason)
     const from = this.requireProfile(name)
@@ -319,8 +322,12 @@ export class DshProfileManager {
   /**
    * 物理删除 profile 目录（rmSync recursive；目录内 junction 只删链接本身）。
    * 当前运行中的 profile 需要 allowCurrent=true 显式确认（删除会让重启后的实例直接失败）。
+   *
+   * Desktop 独占档案（desktop）**一律拒绝**（连 allowCurrent 也不行）：它由桌面端应用自己
+   * 初始化与维护，删掉之后桌面端要么起不来、要么按 web 模板重建一个空档案（插件全丢）。
    */
   remove(name: string, opts: { allowCurrent?: boolean } = {}): void {
+    if (isManagedProfileName(name)) throw new DshProfileError('managedProfile')
     const dir = this.requireProfile(name)
     if (name === this.currentProfile() && opts.allowCurrent !== true) {
       throw new DshProfileError('currentProfile')

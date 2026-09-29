@@ -14,7 +14,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { DshPluginsFacade, ensureActivationRow } from './index.ts';
+import { DshPluginsFacade, ensureActivationRow, resolveDshVersion } from './index.ts';
 import { resolveProfileDir } from './core/plugin-cli.ts';
 import type { DshPluginResult } from './core/plugin-cli.ts';
 import type { PatchChange, PatchFileFacade } from './core/types.ts';
@@ -247,6 +247,37 @@ test('ensureActivationRow: bundle 包跳过（reconcile 已维护 bundles）', a
     assert.equal(patchFile.lines.size, 0, 'bundle 包不写 patch 行');
   } finally {
     cleanup();
+  }
+});
+
+
+/* ------------------------------- resolveDshVersion（桌面端 About 页版本错误） */
+
+test('resolveDshVersion：优先 profileContext.installAnchor（真正在跑的那份 runtime）', () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-ver-'));
+  try {
+    // 磁盘上的 hoisted 旧副本（真机形态：web 档案装出来的 0.1.5-rc.1）
+    const hoisted = join(home, 'profiles', 'node_modules', '@deepseek-ai', 'dsh')
+    mkdirSync(hoisted, { recursive: true })
+    writeFileSync(join(hoisted, 'package.json'), JSON.stringify({ version: '0.1.5-rc.1' }), 'utf8')
+    // 桌面端真正在跑的运行时（app.asar 内那份）
+    const anchorDir = join(home, 'fake-asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh')
+    mkdirSync(anchorDir, { recursive: true })
+    const anchor = join(anchorDir, 'package.json')
+    writeFileSync(anchor, JSON.stringify({ version: '0.2.0-rc.2' }), 'utf8')
+
+    assert.equal(resolveDshVersion(home, 'desktop', anchor), '0.2.0-rc.2', '必须报真正在跑的版本，而不是磁盘上过期的 hoisted 副本')
+    // installAnchor 不可读 → 退到当前档案自己的依赖树
+    const profileDsh = join(home, 'profiles', 'cmtest', 'node_modules', '@deepseek-ai', 'dsh')
+    mkdirSync(profileDsh, { recursive: true })
+    writeFileSync(join(profileDsh, 'package.json'), JSON.stringify({ version: '0.1.7' }), 'utf8')
+    assert.equal(resolveDshVersion(home, 'cmtest', join(home, 'missing', 'package.json')), '0.1.7')
+    // 都没有 → hoisted 树 → 仍可取；全不可读 → unknown
+    assert.equal(resolveDshVersion(home, 'nope', null), '0.1.5-rc.1')
+    assert.equal(resolveDshVersion(join(home, 'empty-home'), 'nope', null), 'unknown')
+    assert.equal(resolveDshVersion(home, 'web', '   '), '0.1.5-rc.1', '空白 installAnchor 视为没有')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
   }
 });
 

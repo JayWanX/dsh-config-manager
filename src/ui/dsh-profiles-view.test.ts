@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 
 import {
   bundleLines, canLaunchProfile, copyWarningKey, dependencyLines, formatBytes, formatProfileTime,
-  isProfileRunning, issueLabelKey, launchState, launchWarningKey, profileInstallCommand, profileRowAction,
+  isProfileRunning, issueLabelKey, launchBlockReason, launchState, launchWarningKey, profileInstallCommand, profileRowAction,
   profileRowFacts, profilesPanelPhase, restartCommand, runningRecordFor, shapeLabelKey, sortProfilesForDisplay,
   stopResultKey, suggestCopyName, summarizeProfiles, validateProfileNameInput,
 } from './dsh-profiles-view.ts'
@@ -138,9 +138,20 @@ test('restartCommand / shapeLabelKey / issueLabelKey', () => {
 })
 
 test('canLaunchProfile：「用该档案启动」只对 web 形态开放（其余形态没有浏览器界面）', () => {
-  assert.equal(canLaunchProfile('web'), true)
-  assert.equal(canLaunchProfile('headless'), false)
-  assert.equal(canLaunchProfile('generic'), false)
+  assert.equal(canLaunchProfile({ name: 'work', shape: 'web' }), true)
+  assert.equal(canLaunchProfile({ name: 'work', shape: 'headless' }), false)
+  assert.equal(canLaunchProfile({ name: 'work', shape: 'generic' }), false)
+  // Desktop 独占档案：桌面端 profile 的 bundles 里确实有 dsh-web-app（形态确实是 web），
+  // 但普通 dsh CLI 对 --profile desktop 硬性拒绝 → 一律不可启动（真机：点「启动」只会拿到
+  // 'profile "desktop" is managed exclusively by the Electron application'）。
+  assert.equal(canLaunchProfile({ name: 'desktop', shape: 'web' }), false, 'desktop 档案不可启动');
+  assert.equal(canLaunchProfile({ name: 'DESKTOP', shape: 'web' }), false, '大小写不敏感（与 dsh CLI 同口径）');
+})
+
+test('launchBlockReason：managed 档案不能给 dsh --profile desktop 那条命令（它本身就是被拒的那条）', () => {
+  assert.equal(launchBlockReason({ name: 'desktop', shape: 'web' }), 'managed')
+  assert.equal(launchBlockReason({ name: 'desktop', shape: 'generic' }), 'managed')
+  assert.equal(launchBlockReason({ name: 'work', shape: 'headless' }), 'notWeb')
 })
 
 test('launchState / launchWarningKey：就绪判据必须「已探通且有 URL」，告警逐条可本地化', () => {

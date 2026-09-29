@@ -3,7 +3,7 @@
 > 本文件回答一个问题：**本插件支持哪个 DSH 版本区间，以及 DSH 升级时哪一部分会先破。**
 > 所有断言均标注取证位置（`file:line`）或标记为「未验证」。凡未实际读取文件确认的结论一律不写入本文件。
 
-- 适用插件版本：`dsh-config-manager@0.1.66`（`package.json:3`，与 `src/index.ts` 的 `export const PLUGIN_VERSION` 一致）
+- 适用插件版本：`dsh-config-manager@0.1.67`（`package.json:3`，与 `src/index.ts` 的 `export const PLUGIN_VERSION` 一致）
 - 取证环境：Windows，Node `v24.13.0`，npm `11.19.0`
 - 本机 DSH 部署：`@deepseek-ai/dsh@0.1.5-rc.1`（`D:\Apps\nodejs\node_global\node_modules\@deepseek-ai\dsh\package.json`）
 - 兼容闸取证（2026-09-28，issue #53）：另从 npm 取 `@deepseek-ai/dsh-app-boot@0.2.0-rc.1`、`@deepseek-ai/dsh@0.1.7-rc.2` 与 `@deepseek-ai/dsh@0.2.0-rc.1` 的 tarball 逐字读源码，并用 app-boot 导出的 `evaluatePluginCompatibility` 对**本插件的 manifest** 真跑判定（结果见 §3.3）
@@ -226,6 +226,18 @@ react, react/jsx-runtime, react-dom, react-dom/client,
 `dsh-credentials` 的导出：rc.6 为 4 项，rc.2 为 10 项（新增 `credentialKey` / `credentialKeyId` / `credentialKeyScope` / `isCredentialKeySegment` / `isCredentialRefName` / `parseCredentialKey`），`credentialRef` 两版都在 → **本插件不受影响**。
 
 > **未验证**：`dsh-settings@0.1.0-rc.8` 的导出面（仓库内未安装该版本），以及 `dsh-tools@0.1.5-rc.2` 与 `0.1.0-rc.8` 之间 `defineTool` 签名的差异。`defineTool` 在两版均存在（实测 probe 命中），但签名未比对。
+
+### 3.5 DSH Desktop（Electron 外壳）的两个硬事实（2026-09-30 取证）
+
+| 事实 | 取证位置 | 对本插件的影响 |
+|---|---|---|
+| **`desktop` 是 Electron 独占保留档案**：普通 CLI 对 `--profile desktop` **无条件**报 `error: profile "desktop" is managed exclusively by the Electron application` | `@deepseek-ai/dsh@0.1.5-rc.1` 与 `0.2.0-rc.2` 的 `lib/bin.js` 中 `rejectElectronProfile`（`plugin` 子命令分支只在 `manageDesktopProfile` 为真时跳过它）；0.2.0 的 `lib/plugin-BGnVfe_D.js` 对 desktop 额外要求 `package.json` 已存在 | 插件通道（安装/更新/卸载/恢复）在桌面端一度**全部失败**；0.1.67 起改走下面的 CLI 载体 |
+| **桌面端自带 CLI 载体 = `@deepseek-ai/dsh-desktop-host/lib/cli.js`**：它以 `runCli({ manageDesktopProfile: true, packageManager })` 启动，用桌面端内置 runtime 与内置 pnpm；宿主进程由 Electron 主进程以 Node 模式拉起，`process.argv[1]` 即同包的 `lib/index.js` | `app.asar` 内 `dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js`（`runDesktopCli`）与 `lib/index.js`（`main()` 读 `process.argv[2..6]`）；Electron 主进程 `lib/main.js` 的 `HostProcess.start()`（`spawn(node, ['--expose-internals', <runtimeDir>/node_modules/@deepseek-ai/dsh-desktop-host/lib/index.js, runtimeDir, projectDir, primaryRuntime, pnpm, nodeBin])`，env 带 `ELECTRON_RUN_AS_NODE=1`） | 插件据此识别载体（`src/utils/desktop-carrier.ts`）并在目标是 desktop 档案时改用它 |
+| **运行时在 `app.asar` 内**：桌面端的 `@deepseek-ai/dsh` 是 `0.2.0-rc.2`，磁盘上 `<home>/profiles/node_modules/@deepseek-ai/dsh` 却是 web 档案 hoisted 出来的 `0.1.5-rc.1` | `app.asar` 内 `dsh/node_modules/@deepseek-ai/dsh/package.json`（`version: 0.2.0-rc.2`）vs 本机 `<DSH_HOME>/profiles/node_modules/@deepseek-ai/dsh/package.json`（`0.1.5-rc.1`） | 「关于」页与导出 manifest 的 DSH 版本一度报错版本号；0.1.67 起优先读 `profileContext.installAnchor`（= `app.asar` 内那份 `package.json`） |
+| **`profileContext` 是宿主 boot 时 provide 的服务**（含 `name` / `dir` / `patchPath` / **`installAnchor`** / `startedBundles` / `packageManager`…），desktop 才带 `packageManager` | 0.2.0-rc.2 的 `dsh/lib/profile-boot-BZ2ZjNWi.js` 的 `profileContext` 构造 + `hostCtx.provide("profileContext", …)` | 档案识别（issue #52）、DSH 版本（0.1.67）都从这里取；`packageManager` 可作为「是否桌面端」的旁证 |
+
+> 真机复核（2026-09-30，隔离 `DSH_HOME`）：桌面端载体 `plugin --profile desktop add <pkg>` 落盘成功（`package.json` 依赖 + `node_modules` + pnpm 日志），
+> 同一命令用普通 `dsh` 仍按设计拒绝；载体 `--profile <name> --port <n> --no-open` 也能正常拉起实例并在 stdout 打出 `dsh web: http://127.0.0.1:<port>/?token=…`。
 
 ---
 

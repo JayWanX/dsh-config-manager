@@ -153,11 +153,29 @@ export const DSH_PROFILE_TEMPLATES: readonly DshProfileTemplate[] = [
 ]
 
 /**
+ * Desktop（Electron 外壳）**独占管理**的保留档案名。
+ *
+ * 硬事实（DSH 0.1.5-rc.1 / 0.2.0-rc.2 的 `@deepseek-ai/dsh/lib/bin.js`）：普通 dsh CLI 对
+ * `--profile desktop` 无条件报 `error: profile "desktop" is managed exclusively by the
+ * Electron application`；只有桌面端自带的 `@deepseek-ai/dsh-desktop-host/lib/cli.js`
+ * （以 `manageDesktopProfile: true` 启动）才放行。所以它既不能自建，也不能被本插件启动/删除/改名。
+ */
+export const DESKTOP_PROFILE_NAME = 'desktop' // 宿主侧的同一字面量在 src/utils/desktop-carrier.ts（那边不能 import 本模块），由 desktop-carrier.test.ts 互钉
+
+/**
+ * 该 profile 名是否由 Desktop 应用独占管理（大小写不敏感，与 dsh CLI 的
+ * `profile.toLowerCase() === 'desktop'` 同口径）。
+ */
+export function isManagedProfileName(name: string): boolean {
+  return name.trim().toLowerCase() === DESKTOP_PROFILE_NAME
+}
+
+/**
  * 不允许自建的保留名：shipped template 名（DSH 会自行按模板初始化，手建语义冲突）
  * + Electron 独占的 desktop（CLI 明确拒绝）。
  */
 export const RESERVED_PROFILE_NAMES: readonly string[] = [
-  'web', 'headless', 'sdk', 'sdk-minimal', 'acp', 'desktop',
+  'web', 'headless', 'sdk', 'sdk-minimal', 'acp', DESKTOP_PROFILE_NAME,
 ]
 
 /** engine 错误码（用户可见文案由 UI 层按 code 映射 i18n；未知 code 才回退 message）。 */
@@ -180,6 +198,8 @@ export type DshProfileErrorCode =
   | 'instanceRunning'
   /** 复制档案中途失败（目标目录已回滚，磁盘上不留半套副本） */
   | 'copyFailed'
+  /** 该档案由 Desktop 应用独占管理（启动 / 删除 / 改名一律拒绝，操作它会让桌面端起不来） */
+  | 'managedProfile'
 
 /** 复制档案的非致命告警码（UI 按码映射文案，绝不静默）。 */
 export type DshProfileCopyWarning =

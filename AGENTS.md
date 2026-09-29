@@ -200,6 +200,13 @@ UI 自查：DESIGN.md 一致(token/组件/spacing/radius/状态语义)、响应�
   新增字段必须同时进 `toProfilesStoreSlice`（`run-store.test.ts` 的键集合 + 镜像不漏字段用例会红）。详见 `DEVELOPERS.md` 状态管理细则。
   改这块前先读 `src/profiles/dsh-profile-launcher.ts` 的文件头与 `src/profiles/dsh-profile-launcher.test.ts`
   （真机验证脚本：`outputs/launch-verify/`）。
+- **DSH Desktop（Electron 桌面端）的保留档案 `desktop`：插件操作必须走桌面端自带的 CLI 载体**（2026-09 真机：导入 10 个插件全红，每条都是 `error: profile "desktop" is managed exclusively by the Electron application`）。硬事实与接线：
+  ⓐ `desktop` 是 **Electron 独占保留档案** —— 普通 CLI 对 `--profile desktop` **无条件**拒绝（`@deepseek-ai/dsh@0.1.5-rc.1` / `0.2.0-rc.2` 的 `lib/bin.js` 里 `rejectElectronProfile`；`plugin` 子命令只在 `manageDesktopProfile` 为真时跳过它，0.2.0 还额外要求该档案的 `package.json` 已存在）；
+  ⓑ **唯一放行的入口 = 桌面端自带的 `@deepseek-ai/dsh-desktop-host/lib/cli.js`**（它以 `runCli({ manageDesktopProfile: true, packageManager })` 启动，用桌面端内置 runtime + 内置 pnpm）。宿主进程由 Electron 主进程以 Node 模式拉起：`process.argv[1]` 就是同包的 `lib/index.js`，同目录的 `cli.js` 即载体 → 识别在 `src/utils/desktop-carrier.ts`，接线在 `core/plugin-cli.ts` 的 `dshArgv(profile)`（目标是 desktop 时改用它，并补 `ELECTRON_RUN_AS_NODE=1`；检测不到载体则落回原路径，由新的失败分类 `desktop-profile-reserved` 给可操作说明）；
+  ⓒ **桌面端在 `app.asar` 里跑 0.2.0-rc.2，磁盘上 `<home>/profiles/node_modules/@deepseek-ai/dsh` 却是 web 档案 hoisted 出来的 0.1.5-rc.1** —— 「当前 DSH 版本」只能从 `profileContext.installAnchor`（= 拉起本宿主的那份 `package.json`）取（`resolveDshVersion`），按磁盘猜一定报错版本号（「关于」页 + 导出 manifest 同源）；
+  ⓓ `desktop` 的 bundles 里**确实有** `@deepseek-ai/dsh-web-app`（`classifyShape` 判定为 web），所以**只看形态会误放行「启动」**（spawn 出去只会拿到上面那条英文拒绝）；删除/改名会让桌面端下次启动按 web 模板重建一个空档案（插件全丢）→ 启动/删除/改名三者一律以 `managedProfile` 拒绝（连 `allowCurrent` 也不行），UI 文案不再给 `dsh --profile desktop` 那条本就是被拒的命令；
+  ⓔ **只装了桌面端（PATH 上没有 `dsh`）的机器**，启动器此前恒 `launcherUnavailable` → 现在回退到载体；**PATH 上的 `dsh` 仍然优先**（各档案的 `node_modules` 就是那份装的，同一份启动最不容易踩版本混用）；
+  ⓕ 插件安装失败提示里的 profile 必须与**实际安装目标**同源（`ctx.target.profile ?? resolveProcessProfileName()`）—— 桌面端外壳不传 `--profile`，只调 `resolveProcessProfileName()` 会写出「装的是 desktop、提示却让用户跑 `--profile web`」的自相矛盾。
 - **复制档案（`POST /profiles/copy`）的三条硬约束**（2026-09 实测落地）：① **必须跑链接重指向** —— async
   `fs.promises.cp` 与 `cpSync` 行为不同：cpSync 会把 junction 展开成真实目录，而 `promises.cp` 只把链接照抄，
   留下的是**指向源档案**的绝对路径（实测真机 cmtest：48 个 junction 里 37 个在源档案树内），源档案一删副本就缺包；

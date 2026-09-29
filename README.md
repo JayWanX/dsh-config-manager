@@ -197,6 +197,19 @@ dsh plugin --profile web add dsh-config-manager@latest
 >     Write-Output "Already present, nothing to do"
 >   }
 >   ```
+>
+> 🐛 **Install rejected for a version you never installed?** Symptom: pnpm logs `+ dsh-config-manager ^0.1.66`, yet DSH reports `Plugin dsh-config-manager@0.1.44 is incompatible with dsh …` and rolls the install back.
+>
+> The cause is neither pnpm nor version resolution. After installing, DSH runs a compatibility check that reads this plugin's `cordis.patch.yml` mount row (`name: 'dsh-config-manager'`) and **resolves that package again** — and Node's resolution chain honours `NODE_PATH`. If your global npm root (`npm root -g`) still holds an **old copy of the same package** (for example a `npm i -g dsh-config-manager` of 0.1.44 from earlier), the check compares **that** copy's `peerDependencies` and reports a version pnpm never installed.
+>
+> Confirm and fix:
+>
+> ```powershell
+> npm ls -g dsh-config-manager         # output means a global copy exists
+> npm i -g dsh-config-manager@latest   # upgrade it (or npm uninstall -g dsh-config-manager to remove it)
+> ```
+>
+> Then retry the install. As long as that global copy exists and is incompatible with your DSH, every profile (`web` / `desktop` / custom) is rejected the same way.
 
 ---
 

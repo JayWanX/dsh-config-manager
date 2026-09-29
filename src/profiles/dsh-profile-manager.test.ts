@@ -323,6 +323,39 @@ test('remove：物理删除目录；当前 profile 需显式确认', () => {
   }
 })
 
+test('desktop 保留档案：删除与改名一律拒绝（managedProfile），只读操作照常', async () => {
+  const { mgr, home, cleanup } = makeManager()
+  try {
+    // Desktop 档案由 Electron 外壳自己初始化（不是本插件 create 出来的），这里按真实形态落盘
+    const dir = join(home, 'profiles', 'desktop')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({
+      name: 'dsh-profile-desktop', private: true,
+      dependencies: { 'dsh-config-manager': '^0.1.66' },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-config-manager'] } },
+    }, null, 2) + '\n')
+
+    // 只读路径必须照常工作（否则用户连自己的桌面端档案都看不到）
+    assert.equal(mgr.list().some((p) => p.name === 'desktop'), true)
+    assert.equal(mgr.detail('desktop').shape, 'web')
+
+    assert.throws(() => mgr.remove('desktop'), (e: unknown) => e instanceof DshProfileError && e.code === 'managedProfile')
+    // 连 allowCurrent 也不行：删掉之后桌面端要么起不来、要么按 web 模板重建一个空档案（插件全丢）
+    assert.throws(() => mgr.remove('desktop', { allowCurrent: true }), (e: unknown) => e instanceof DshProfileError && e.code === 'managedProfile')
+    assert.throws(() => mgr.rename('desktop', 'desktop2'), (e: unknown) => e instanceof DshProfileError && e.code === 'managedProfile')
+    assert.equal(existsSync(join(dir, 'package.json')), true, '被拒后目录必须原样保留')
+
+    // 反向：把别的档案改名成 desktop 走的是保留名校验，不是这条
+    mgr.create('work', 'base')
+    assert.throws(() => mgr.rename('work', 'desktop'), (e: unknown) => e instanceof DshProfileError && e.code === 'reservedName')
+    // 从桌面端档案复制出来是合法的（复制是「拿一份可改的等价副本」，不动源档案）
+    const { meta } = await mgr.copy('desktop', 'desktop-copy')
+    assert.equal(meta.name, 'desktop-copy')
+    assert.equal(existsSync(join(home, 'profiles', 'desktop', 'package.json')), true, '源档案不受影响')
+  } finally {
+    cleanup()
+  }
+})
 
 test('模板清单：与官方 shipped template 的 bundle 组合一致（含 base 起步）', () => {
   const byId = new Map(DSH_PROFILE_TEMPLATES.map((t) => [t.id, t]))

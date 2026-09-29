@@ -200,6 +200,19 @@ dsh plugin --profile web add dsh-config-manager@latest
 >     Write-Output "已存在，无需修改"
 >   }
 >   ```
+>
+> 🐛 **安装被拒，但报错的版本你从没装过？** 症状：日志里 pnpm 明明写了 `+ dsh-config-manager ^0.1.66`，DSH 却报 `Plugin dsh-config-manager@0.1.44 is incompatible with dsh …` 并把安装回滚了。
+>
+> 原因既不在 pnpm 也不在版本解析：DSH 安装后还会做一次兼容校验，其中一步会读本插件 `cordis.patch.yml` 里的挂载行（`name: 'dsh-config-manager'`）并**再次解析这个包**，而 Node 的解析链会经过 `NODE_PATH`。若你的全局 npm 目录（`npm root -g`）里留着一份**同名旧版**（例如以前 `npm i -g dsh-config-manager` 装的 0.1.44），校验就会拿**那一份**的 `peerDependencies` 去比对 —— 于是报出一个 pnpm 根本没装的版本号。
+>
+> 确认与修复：
+>
+> ```powershell
+> npm ls -g dsh-config-manager         # 有输出 = 全局确实存在一份
+> npm i -g dsh-config-manager@latest   # 升到兼容版（或 npm uninstall -g dsh-config-manager 直接删掉）
+> ```
+>
+> 之后重试安装即可。只要全局那份还在且与当前 DSH 不兼容，装哪个 profile（`web` / `desktop` / 自建）都会被同样拒绝。
 
 ---
 

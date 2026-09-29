@@ -5,11 +5,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  classifyDshPluginFailure, installErrorFor, isTransientDshPluginFailure,
+  classifyDshPluginFailure, dshArgv, installAnchorFromProfileContext, installErrorFor, isTransientDshPluginFailure,
   profileNameFromArgv, profileNameFromDir, profileNameFromProfileContext,
   resolveProcessProfileName, resolveProfileNameFromEnv,
   type DshPluginResult,
 } from './plugin-cli.ts';
+import type { DesktopCarrier } from '../utils/desktop-carrier.ts';
 
 test('profileNameFromArgv: 取值（含 --profile=<name>）/ 空数组 / 非法值宽容回退（不抛错）', () => {
   assert.equal(profileNameFromArgv(['--profile', 'tui']), 'tui');
@@ -175,4 +176,55 @@ test('installErrorFor: 未识别 → stderr 尾部摘要', () => {
   const e = installErrorFor('pkg-a', r);
   assert.match(e.message, /exit 1/);
   assert.match(e.message, /mystery error line/);
+});
+
+/* ------------------------------------- 桌面端兼容（Desktop 保留档案） */
+
+test('installAnchorFromProfileContext：取宿主 profileContext.installAnchor（真正在跑的那份 runtime）', () => {
+  assert.equal(
+    installAnchorFromProfileContext({ installAnchor: 'C:\\Apps\\DSH\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh\\package.json' }),
+    'C:\\Apps\\DSH\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh\\package.json',
+  );
+  assert.equal(installAnchorFromProfileContext({ installAnchor: '  /x/dsh/package.json  ' }), '/x/dsh/package.json', '两端空白去除');
+  assert.equal(installAnchorFromProfileContext({}), null);
+  assert.equal(installAnchorFromProfileContext({ installAnchor: '' }), null);
+  assert.equal(installAnchorFromProfileContext({ installAnchor: 42 }), null);
+  assert.equal(installAnchorFromProfileContext(null), null);
+  assert.equal(installAnchorFromProfileContext('x'), null, '非对象 → 不猜');
+});
+
+const CARRIER: DesktopCarrier = {
+  cliPath: 'C:\\Apps\\DSH\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\cli.js',
+  execPath: 'C:\\Apps\\DSH\\DeepSeek Harness.exe',
+  env: { ELECTRON_RUN_AS_NODE: '1' },
+};
+
+test('dshArgv：desktop 档案走桌面端 CLI 载体（普通 dsh CLI 对它硬拒绝）', () => {
+  const argv = dshArgv('desktop', CARRIER);
+  assert.equal(argv.file, CARRIER.execPath, '必须用 Electron 主程序（Node 模式）启动载体');
+  assert.deepEqual(argv.args, [CARRIER.cliPath], 'argv[1] 就是宿主同目录的 cli.js');
+  assert.equal(argv.viaShell, false, 'exe 直接 spawn，不经 cmd.exe');
+  assert.deepEqual(argv.env, { ELECTRON_RUN_AS_NODE: '1' });
+  assert.equal(dshArgv('DESKTOP', CARRIER).file, CARRIER.execPath, '大小写不敏感（dsh CLI 同口径）');
+});
+
+test('dshArgv：非 desktop 档案 / 检测不到载体 → 落回通用路径（不改变既有行为）', () => {
+  // 非 desktop 档案：即便载体存在也必须走通用路径（普通 dsh 入口 / PATH 上的 dsh）
+  const web = dshArgv('web', CARRIER);
+  assert.notEqual(web.file, CARRIER.execPath, 'web 档案不得被塞进桌面端载体');
+  // 检测不到载体时，desktop 也落回通用路径 —— 真实失败信息由分类器给出（见下一条）
+  const fallback = dshArgv('desktop', null);
+  assert.notEqual(fallback.file, CARRIER.execPath);
+});
+
+test('classify: profile "desktop" is managed exclusively → desktop-profile-reserved（可操作说明）', () => {
+  const output = 'error: profile "desktop" is managed exclusively by the Electron application';
+  const f = classifyDshPluginFailure(output);
+  assert.equal(f?.code, 'desktop-profile-reserved');
+  assert.equal(f?.recoverable, false);
+  assert.match(f!.message, /desktop/);
+  assert.match(f!.message, /DeepSeek Harness Desktop/);
+  assert.match(f!.message, /Desktop-bundled CLI carrier/, '双语消息（zh / en 同一字符串）');
+  const e = installErrorFor('@scope/pkg', { exitCode: 1, timedOut: false, stdout: '', stderr: output });
+  assert.match(e.message, /desktop-profile-reserved/);
 });

@@ -139,6 +139,25 @@ test('launch：非 web 形态直接 notLaunchable（不 spawn 隐形进程）', 
   } finally { h.cleanup() }
 })
 
+
+test('launch：desktop 独占档案一律 managedProfile（桌面端 profile 形态就是 web，光看形态会误放行）', async () => {
+  const h = makeHarness()
+  try {
+    // 真机上 desktop 的 bundles 里确实有 @deepseek-ai/dsh-web-app → 形态是 web，
+    // 但普通 dsh CLI 对 --profile desktop 硬性拒绝：必须以 managedProfile 挡在 spawn 之前，
+    // 否则用户只会拿到一句 'profile "desktop" is managed exclusively by the Electron application'。
+    await assert.rejects(
+      () => h.launcher.launch({ name: 'desktop', shape: 'web' }),
+      (e: unknown) => e instanceof DshProfileError && e.code === 'managedProfile',
+    )
+    await assert.rejects(
+      () => h.launcher.launch({ name: 'DESKTOP', shape: 'web' }),
+      (e: unknown) => e instanceof DshProfileError && e.code === 'managedProfile',
+    )
+    assert.deepEqual(h.args, [], '被拒时绝不 spawn 任何进程')
+  } finally { h.cleanup() }
+})
+
 test('launch：定位不到 dsh CLI → launcherUnavailable（给出可行动的失败，而不是假装启动）', async () => {
   const h = makeHarness({ cli: null })
   try {

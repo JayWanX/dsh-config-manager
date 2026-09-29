@@ -9,6 +9,56 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 > **Release workflow**: on tag push, CI extracts the current version's section as the release notes highlights;
 > the build fails fast if the section is missing, so you cannot forget to update it.
 
+## [0.1.67] - 2026-09-30
+
+> 本轮修 **DSH Desktop（Electron 桌面端）真实可用的最后一公里**：桌面端的保留档案 `desktop`
+> 此前**装不上任何插件** —— 普通 `dsh` CLI 对 `--profile desktop` 无条件报
+> `profile "desktop" is managed exclusively by the Electron application`（导入页 10 个插件全红）。
+> 现在改走桌面端自带的 CLI 载体（`@deepseek-ai/dsh-desktop-host/lib/cli.js`，用桌面端内置 runtime +
+> 内置 pnpm）；同时修掉「关于」页把 DSH 版本显示成磁盘上过期副本、手动安装提示写错 profile、
+> 档案页对 desktop 的启动/删除/改名三个会伤到桌面端的动作。
+>
+> **Theme**: the last mile for the DSH Desktop (Electron) app — the reserved `desktop` profile could
+> not install any plugin (the plain `dsh` CLI rejects `--profile desktop` unconditionally), so this
+> release routes plugin operations through the Desktop-bundled CLI carrier; it also fixes the About
+> page reporting a stale on-disk DSH version, the manual-install hint naming the wrong profile, and
+> the three profile actions (launch / delete / rename) that would damage the Desktop installation.
+
+### 修复 / Fixed
+
+- 🖥️ **DSH Desktop：`desktop` 保留档案的插件安装/更新/卸载/恢复不再全军覆没**：DSH 把 `desktop` 定为
+  Electron 独占保留档案（0.1.5-rc.1 与 0.2.0-rc.2 的 `@deepseek-ai/dsh/lib/bin.js` 里 `rejectElectronProfile`
+  都是**无条件**拒绝），而本插件的插件通道恒为「重放当前宿主的 dsh 入口 / PATH 上的 dsh」—— 在桌面端里
+  两者都指向普通 CLI，于是导入 10 个插件得到 10 条同样的失败。现在：
+  ① 宿主进程识别（`src/utils/desktop-carrier.ts`）—— Desktop 外壳以 Node 模式拉起宿主时，
+  `process.argv[1]` 就是 `…/@deepseek-ai/dsh-desktop-host/lib/index.js`，同目录的 **`cli.js`** 正是
+  「普通 CLI + 桌面端保留档案例外」的入口（它以 `runCli({ manageDesktopProfile: true, packageManager })`
+  启动，用桌面端内置 runtime 与内置 pnpm 跑 `runPlugin`，并在 `--profile desktop` 上跳过那道拒绝）；
+  ② 目标是 `desktop` 档案时改用它（`dshArgv(profile)`），子进程补 `ELECTRON_RUN_AS_NODE=1`；
+  ③ 检测不到载体时落回原路径，并由新的失败分类 **`desktop-profile-reserved`** 给出可操作说明，
+  不再只丢一句英文错误。真机验证：临时 `DSH_HOME` + 空 desktop 档案 → 载体 CLI `add` 成功落盘
+  `package.json` 依赖与 `node_modules`（同一命令普通 `dsh` 仍按设计拒绝）。
+  **Desktop plugin operations**: when the target profile is the reserved `desktop` one, plugin
+  install/update/remove now run through the Desktop-bundled CLI carrier instead of the plain `dsh` CLI.
+- 🔢 **「关于」页 / 导出 manifest 的 DSH 版本不再是从磁盘上捡来的过期副本**：`resolveDshVersion` 此前只读
+  `<home>/profiles/node_modules/@deepseek-ai/dsh/package.json`（web 档案 hoisted 出来的那份），真机上它是
+  **0.1.5-rc.1**，而桌面端实际跑的是 **0.2.0-rc.2**（运行时在 `app.asar` 内，磁盘上别处找不到）。现在优先
+  读宿主 boot 时 `provide` 的 `profileContext.installAnchor`（= 拉起本宿主的那份 `@deepseek-ai/dsh/package.json`），
+  再退到当前档案的依赖树、hoisted 树。
+  **DSH version**: resolved from the running runtime's install anchor first, so the About page and export
+  manifests report what is actually running.
+- 🧭 **插件安装失败提示里的 profile 与实际安装目标同源**：此前 message 单独调 `resolveProcessProfileName()`
+  （只认 argv / 环境变量），桌面端外壳不传 `--profile` → 真机出现「安装用的是 desktop、提示却写
+  `dsh plugin --profile web add …`」的自相矛盾。现在与执行日志一样取自 `ctx.target.profile`。
+  **Manual-install hint**: the suggested command now names the profile the plugin was actually installed into.
+- 🚫 **档案页不再对 `desktop` 做会伤到桌面端的动作**：① 「启动」此前会因为形态是 web（bundles 里确实有
+  `@deepseek-ai/dsh-web-app`）而放行，spawn 出去只会拿到上面那条英文拒绝 → 现在以新的 **`managedProfile`**
+  错误码在 spawn 之前拒绝，并指路「请直接在桌面端应用里打开」；② 「删除 / 重命名」desktop 档案会让桌面端
+  下次启动时按 web 模板重建一个空档案（已装插件全部消失），同样一律拒绝（删除连 `allowCurrent` 也不行）；
+  ③ 只装了桌面端（PATH 上没有 `dsh`）的机器，启动器此前恒 `launcherUnavailable` —— 现在回退到桌面端自带的
+  CLI 载体；PATH 上的 `dsh` 仍然优先（各档案的 `node_modules` 就是那份装的，避免版本混用）。
+  **Profile page**: launch/delete/rename are refused for the reserved `desktop` profile with a clear reason,
+  and the launcher falls back to the Desktop carrier when no `dsh` is on PATH.
 ## [0.1.66] - 2026-09-28
 
 > 本轮修两个上游回报的缺陷：**DSH 0.2.0 线不再被兼容闸静默跳过** —— 14 条 `@deepseek-ai/dsh-*` peer

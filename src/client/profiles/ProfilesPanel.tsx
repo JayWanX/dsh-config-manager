@@ -33,7 +33,7 @@ import { Modal } from '../common/Modal.tsx'
 import { toast } from '../common/toast-store.ts'
 import {
   bundleLines, canLaunchProfile, copyWarningKey, dependencyLines, formatBytes, formatProfileTime, issueLabelKey,
-  launchState, launchWarningKey, profileInstallCommand, profileRowAction, profileRowFacts, profilesPanelPhase,
+  launchBlockReason, launchState, launchWarningKey, profileInstallCommand, profileRowAction, profileRowFacts, profilesPanelPhase,
   restartCommand, runningRecordFor, shapeLabelKey, sortProfilesForDisplay, stopResultKey, summarizeProfiles,
   suggestCopyName, validateProfileNameInput,
 } from '../../ui/dsh-profiles-view.ts'
@@ -61,7 +61,7 @@ function selectProfilesSlice(): PanelState {
 }
 
 /** host 侧 engine 错误码 → 文案（未知错误回退到通用模板，不显示裸英文码）。 */
-const ERROR_CODES = ['notLaunchable', 'launcherUnavailable', 'launchFailed', 'alreadyRunning', 'notRunning', 'stopFailed', 'instanceRunning', 'exists', 'notFound', 'currentProfile', 'invalidName', 'reservedName', 'unknownTemplate'] as const
+const ERROR_CODES = ['notLaunchable', 'launcherUnavailable', 'launchFailed', 'alreadyRunning', 'notRunning', 'stopFailed', 'instanceRunning', 'exists', 'notFound', 'currentProfile', 'invalidName', 'reservedName', 'unknownTemplate', 'managedProfile'] as const
 
 function profileErrorText(t: TranslateNS<'config-manager'>, error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
@@ -287,7 +287,7 @@ export function ProfilesPanel({ api, t }: ProfilesPanelProps) {
    */
   const doLaunch = (profile: DshProfileMeta): void => {
     if (state.launching !== null) return
-    if (!canLaunchProfile(profile.shape)) {
+    if (!canLaunchProfile(profile)) {
       patch({ launchResult: null, launchBlocked: profile.name, error: null })
       return
     }
@@ -365,6 +365,10 @@ export function ProfilesPanel({ api, t }: ProfilesPanelProps) {
   /** 启动回执 / 非 Web 提示（切片字段的本地别名，渲染段与改造前同形） */
   const launch = state.launchResult
   const launchBlocked = state.launchBlocked
+  // 「启动被挡下」的原因：managed（Desktop 独占档案）不能给 `dsh --profile desktop` 命令 —— 那条命令正是被拒绝的那条。
+  const launchBlockedReason = launchBlocked === null
+    ? 'notWeb' as const
+    : launchBlockReason({ name: launchBlocked, shape: profileList.find((p) => p.name === launchBlocked)?.shape ?? 'generic' })
   /** 最近一次复制回执（切片字段的本地别名） */
   const copyResult = state.copyResult
 
@@ -407,13 +411,19 @@ export function ProfilesPanel({ api, t }: ProfilesPanelProps) {
       {/* —— 「启动该档案」的反馈：就绪给带 token 的认证 URL；没就绪给告警 + 日志路径 —— */}
       {launchBlocked !== null && (
         <Banner kind="warn">
-          <div>{t('profiles.launch.notWeb', { name: launchBlocked })}</div>
-          <div className={css.actionRow}>
-            <code className={css.mono}>{restartCommand(launchBlocked)}</code>
-            <Button size="sm" onClick={() => { copyText(restartCommand(launchBlocked), t) }}>
-              {t('profiles.copy')}
-            </Button>
-          </div>
+          {launchBlockedReason === 'managed' ? (
+            <div>{t('profiles.launch.managed', { name: launchBlocked })}</div>
+          ) : (
+            <>
+              <div>{t('profiles.launch.notWeb', { name: launchBlocked })}</div>
+              <div className={css.actionRow}>
+                <code className={css.mono}>{restartCommand(launchBlocked)}</code>
+                <Button size="sm" onClick={() => { copyText(restartCommand(launchBlocked), t) }}>
+                  {t('profiles.copy')}
+                </Button>
+              </div>
+            </>
+          )}
         </Banner>
       )}
       {launch !== null && (
@@ -564,7 +574,7 @@ export function ProfilesPanel({ api, t }: ProfilesPanelProps) {
                         <Button
                           size="sm"
                           variant="primary"
-                          title={canLaunchProfile(profile.shape) ? t('profiles.launch.hint') : t('profiles.launch.notWeb', { name: profile.name })}
+                          title={canLaunchProfile(profile) ? t('profiles.launch.hint') : launchBlockReason(profile) === 'managed' ? t('profiles.launch.managed', { name: profile.name }) : t('profiles.launch.notWeb', { name: profile.name })}
                           disabled={state.launching !== null || state.stopping !== null}
                           onClick={() => { doLaunch(profile) }}
                         >

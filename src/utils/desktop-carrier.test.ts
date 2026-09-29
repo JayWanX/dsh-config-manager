@@ -12,10 +12,12 @@ import { join } from 'node:path'
 import { DESKTOP_PROFILE_NAME, isDesktopHostProcess, isDesktopProfile, resolveDesktopCarrier } from './desktop-carrier.ts'
 import { DESKTOP_PROFILE_NAME as SHARED_DESKTOP_NAME, isManagedProfileName } from '../profiles/dsh-profile-shared.ts'
 
-const HOST_DIR = 'C:\\Apps\\DSH\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib'
-const HOST_ARGV1 = `${HOST_DIR}\\index.js`
-const HOST_CLI = `${HOST_DIR}\\cli.js`
-const ELECTRON_EXE = 'C:\\Apps\\DSH\\DeepSeek Harness.exe'
+// 用 node:path 拼路径：实现里也是 join/dirname，这样用例在 Windows 与 Linux CI 上同义
+// （写死反斜杠的 Windows 字面量在 POSIX 上 dirname 会退化成 '.'，是自欺欺人的断言）
+const HOST_DIR = join('Apps', 'DSH', 'resources', 'app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib')
+const HOST_ARGV1 = join(HOST_DIR, 'index.js')
+const HOST_CLI = join(HOST_DIR, 'cli.js')
+const ELECTRON_EXE = join('Apps', 'DSH', 'DeepSeek Harness.exe')
 
 test('resolveDesktopCarrier：只认 dsh-desktop-host 主入口 + 同目录真实存在的 cli.js', () => {
   const carrier = resolveDesktopCarrier({ argv1: HOST_ARGV1, execPath: ELECTRON_EXE, exists: (p) => p === HOST_CLI })
@@ -32,7 +34,7 @@ test('resolveDesktopCarrier：只认 dsh-desktop-host 主入口 + 同目录真�
 
 test('resolveDesktopCarrier：非桌面宿主 → null（不猜、不误伤普通 dsh web）', () => {
   const exists = (): boolean => true
-  assert.equal(resolveDesktopCarrier({ argv1: 'D:\\n\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js', exists }), null, '普通 dsh web 的 bin.js')
+  assert.equal(resolveDesktopCarrier({ argv1: join('n', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'), exists }), null, '普通 dsh web 的 bin.js')
   assert.equal(resolveDesktopCarrier({ argv1: HOST_CLI, exists }), null, 'argv1 是 cli.js 而不是 index.js → 不认（只认宿主主入口）')
   assert.equal(resolveDesktopCarrier({ argv1: undefined, exists }), null)
   assert.equal(resolveDesktopCarrier({ argv1: '', exists }), null)

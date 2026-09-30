@@ -10,6 +10,15 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    # lucide 与 lucide-react 必须**同版本**（`src/client/common/morph-icons.test.ts` 的
+    # 「lucide 与 lucide-react 必须同版本（防静态/形变两套图形）」把它钉成硬约束）。
+    # 拆成两个 PR 时，先合的那个必然让 main 红灯（实测 #50 合完、#51 因同一批 lock 冲突合不进来），
+    # 所以这里按组发布：一次 PR 同时升级两件套。
+    groups:
+      lucide-suite:
+        patterns:
+          - "lucide"
+          - "lucide-react"
 
   # GitHub Actions（.github/workflows/）
   - package-ecosystem: github-actions

@@ -130,6 +130,61 @@ export interface PlanItemProgress {
   detail?: string;
 }
 
+/**
+ * 已验证归档的**进程内**缓存（跨请求共享）。
+ *
+ * 为什么必须跨请求：宿主每次请求都新建 Importer/Analyzer（`makeImporter()`，见 src/index.ts
+ * 与 src/routes/*.ts），于是实例级 `bundleCache` 在两个请求之间永远命中不了 —— 一次导入向导
+ * （analyze → plan → execute，且每改一次决策还会再 plan）会把同一个 ZIP 完整读入 + 全量解压
+ * + 逐条 SHA-256 校验 3~4 次（实测单次全量解压 108 ms / 29 MiB 归档，全程阻塞事件循环）。
+ *
+ * 安全边界（不许放宽）：
+ *  - 缓存键 = **绝对路径 + 文件大小 + mtimeMs**；文件被改写（大小或时间变了）→ 自动重新校验；
+ *  - **只有只读入口**（`analyzeImport` / `createImportPlan`）会**读**它；`executeImportPlan`
+ *    （真正写盘的那一步）一律 `refresh`：每次执行前重新读盘 + 重新校验，关掉「校验通过之后、
+ *    写盘之前文件被换掉」的 TOCTOU 窗口；
+ *  - 只缓存 ≤ 64 MiB 的归档：Bundle 持有整个 ZIP 缓冲，不能让进程为两个大包常驻几百 MB。
+ */
+const verifiedBundles = new Map<string, { stamp: string; bundle: Bundle; at: number }>();
+const VERIFIED_CACHE_MAX_ENTRIES = 2;
+const VERIFIED_CACHE_TTL_MS = 120_000;
+const VERIFIED_CACHE_MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
+
+/** 清空已验证归档缓存（测试用；宿主在「归档被本插件自己改写」等场景也可调用）。 */
+export function clearVerifiedBundleCache(): void {
+  verifiedBundles.clear();
+}
+
+/** 归档身份（大小 + mtime）；stat 失败 → null = 本次不参与缓存（绝不凭路径猜）。 */
+async function archiveStamp(zipPath: string): Promise<{ stamp: string; size: number } | null> {
+  try {
+    const st = await fs.stat(zipPath);
+    return { stamp: `${st.size}|${st.mtimeMs}`, size: st.size };
+  } catch {
+    return null;
+  }
+}
+
+/** 过期即删；超过条目上限时淘汰最旧的（按写入时刻）。 */
+function pruneVerifiedBundles(): void {
+  const now = Date.now();
+  for (const [key, entry] of verifiedBundles) {
+    if (now - entry.at > VERIFIED_CACHE_TTL_MS) verifiedBundles.delete(key);
+  }
+  while (verifiedBundles.size > VERIFIED_CACHE_MAX_ENTRIES) {
+    let oldestKey: string | undefined;
+    let oldestAt = Number.POSITIVE_INFINITY;
+    for (const [key, entry] of verifiedBundles) {
+      if (entry.at < oldestAt) {
+        oldestAt = entry.at;
+        oldestKey = key;
+      }
+    }
+    if (oldestKey === undefined) break;
+    verifiedBundles.delete(oldestKey);
+  }
+}
+
 export class Analyzer {
   private readonly ctx: HostContext;
   private readonly adapters: ConfigAdapter[];
@@ -156,9 +211,25 @@ export class Analyzer {
 
   /* ---------------- 第 1-6 步：ZIP 读入 → 安全解析 → manifest → 完整性 → schema ---------------- */
 
-  private async loadBundle(zipPath: string): Promise<Bundle> {
+  /**
+   * 读入 + 校验归档。
+   *
+   * @param mode `reuse` = 只读入口（analyze / plan）：同一份归档（路径 + 大小 + mtime 全同）
+   *   可以复用**已校验**的结果；`refresh` = 写盘入口（execute）：一律重新读盘 + 重新校验，
+   *   不给「校验后文件被换掉」留窗口。
+   */
+  private async loadBundle(zipPath: string, mode: 'reuse' | 'refresh'): Promise<Bundle> {
     const cached = this.bundleCache.get(zipPath);
     if (cached) return cached;
+
+    const identity = await archiveStamp(zipPath);
+    if (mode === 'reuse' && identity !== null) {
+      const hit = verifiedBundles.get(zipPath);
+      if (hit !== undefined && hit.stamp === identity.stamp && Date.now() - hit.at <= VERIFIED_CACHE_TTL_MS) {
+        this.bundleCache.set(zipPath, hit.bundle);
+        return hit.bundle;
+      }
+    }
 
     // 1. 选 ZIP（存在性）
     let raw: Uint8Array;
@@ -197,7 +268,9 @@ export class Analyzer {
       for (const name of archive.names()) {
         if (name === MANIFEST_FILE || name === CHECKSUMS_FILE) continue;
         try {
-          entries.set(name, archive.readEntry(name));
+          // 异步解压：这是全仓**唯一**逐条解压全部条目的地方，`inflateRawSync` 会整段阻塞
+          // 事件循环（实测 29 MiB 归档 108 ms，大备份就是几秒的界面冻结）。判据与同步版逐字相同。
+          entries.set(name, await archive.readEntryAsync(name));
         } catch {
           entries.delete(name); // 损坏条目在完整性阶段即失败
           checksums.ok = false;
@@ -253,6 +326,11 @@ export class Analyzer {
 
     const bundle: Bundle = { archive, manifest, checksums, zipWarnings, migrationWarnings };
     this.bundleCache.set(zipPath, bundle);
+    // 写入跨请求缓存：execute（refresh）也写 —— 它刚做过完整校验，这份结果对后续只读入口同样有效。
+    if (identity !== null && identity.size <= VERIFIED_CACHE_MAX_ARCHIVE_BYTES) {
+      verifiedBundles.set(zipPath, { stamp: identity.stamp, bundle, at: Date.now() });
+      pruneVerifiedBundles();
+    }
     return bundle;
   }
 
@@ -384,7 +462,7 @@ export class Analyzer {
     zipPath: string,
     opts: { decryptedCredentials?: Map<string, string> } = {},
   ): Promise<ImportAnalysis> {
-    const bundle = await this.loadBundle(zipPath);
+    const bundle = await this.loadBundle(zipPath, 'reuse');
     const { manifest, zipWarnings } = bundle;
     const analyzed = await this.analyzeBundle(bundle);
 
@@ -510,7 +588,7 @@ export class Analyzer {
     decisions: ImportDecisions,
     opts: { decryptedCredentials?: Map<string, string> } = {},
   ): Promise<ImportPlan> {
-    const bundle = await this.loadBundle(zipPath);
+    const bundle = await this.loadBundle(zipPath, 'reuse');
     const analyzed = await this.analyzeBundle(bundle);
     const { manifest } = bundle;
 
@@ -604,7 +682,9 @@ export class Analyzer {
       bootSafetyAudit?: () => Promise<BootSafetyReport>;
     } = {},
   ): Promise<ImportResult> {
-    const bundle = await this.loadBundle(zipPath);
+    // 写盘入口一律 refresh：**不复用**跨请求缓存，绝不能拿「几分钟前校验过」的结果去改用户数据
+    // （校验通过之后、真正写盘之前归档被换掉，是这条路径必须自己关掉的窗口）。
+    const bundle = await this.loadBundle(zipPath, 'refresh');
     const analyzed = await this.analyzeBundle(bundle);
     applyMappingsToSections(analyzed.sections, plan.pathMappings, this.fileCollectionIds());
 

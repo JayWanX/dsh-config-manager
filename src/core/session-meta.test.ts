@@ -8,9 +8,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { makeContext } from '../adapters/test-helpers.ts';
+import { makeContext, MemFs } from '../adapters/test-helpers.ts';
 import type { ExportUnit } from './types.ts';
-import { applySessionMeta, applySessionMetaToPlanItems, applySessionParentLinks, projectKeyOf, readSessionMeta, subagentParentMap } from './session-meta.ts';
+import { applySessionMeta, applySessionMetaToPlanItems, applySessionParentLinks, clearSessionMetaCache, projectKeyOf, readSessionMeta, subagentParentMap } from './session-meta.ts';
 
 const HOME = 'C:\\Users\\alice';
 const UUID_A = '19495390-402b-463d-a4cc-882287c1f04e';
@@ -227,4 +227,90 @@ test('applySessionParentLinks：子代理会话标出父对话（两种目录名
   assert.equal(out[2]!.parentSessionId, undefined, '非 sessions 分区原样透传');
   assert.equal(units[0]!.parentSessionId, undefined, '纯函数：不改原对象');
   assert.deepEqual(applySessionParentLinks(units, new Map()), units, '空映射 → 原样返回');
+});
+
+/* ---------------- 进程内缓存（mtime 失效）----------------
+ * 为什么要有这些用例：`/export-preview`（sessions 有单元时）与 `/plan` 会各调一次
+ * `readSessionMeta`，每次都要解析 1.57 MB 的 `session_projcache.json`（本机实测 7.3 ms）。
+ * 缓存能命中、也能**及时失效**这两件事都必须被钉住：只测「命中」会掩盖「永远用陈旧数据」。
+ */
+
+/** 统计 readFile 次数的 MemFs：缓存命中必须体现为「一次都不读」。 */
+class CountingFs extends MemFs {
+  readonly reads: string[] = [];
+  override async readFile(rel: string): Promise<Uint8Array> {
+    this.reads.push(rel);
+    return super.readFile(rel);
+  }
+}
+
+/** 把 seedStorages 的文件表接到计数门面上，并登记两份 storage 的 mtime。 */
+async function seededCounting(home: string, mtime: number): Promise<{ ctx: ReturnType<typeof makeContext>; fs: CountingFs }> {
+  const seeded = await seedStorages(home);
+  const fs = new CountingFs(home);
+  fs.files = seeded.fs.files;
+  fs.setMtime('storages/session_projcache.json', mtime);
+  fs.setMtime('storages/workspace.json', mtime);
+  const ctx = makeContext('win32', home);
+  ctx.fs = fs;
+  return { ctx, fs };
+}
+
+test('readSessionMeta：mtime 未变 → 命中进程内缓存（第二次一次都不读盘）', async () => {
+  clearSessionMetaCache();
+  const { ctx, fs } = await seededCounting('C:\\Users\\cache-hit', 1000);
+  const first = await readSessionMeta(ctx);
+  assert.equal(fs.reads.length, 2, '首次要读 projcache + workspace 两份');
+  const second = await readSessionMeta(ctx);
+  assert.equal(fs.reads.length, 2, '缓存命中不得再读盘');
+  assert.equal(second.bySessionId.get(UUID_A)?.title, first.bySessionId.get(UUID_A)?.title);
+});
+
+test('readSessionMeta：任一存储文件 mtime 变化 → 缓存立即失效并读到新内容', async () => {
+  clearSessionMetaCache();
+  const { ctx, fs } = await seededCounting('C:\\Users\\cache-invalidate', 2000);
+  assert.equal((await readSessionMeta(ctx)).bySessionId.get(UUID_B)?.title, undefined, '初始缓存里没有 B 的标题');
+  await ctx.fs.writeFile('storages/session_projcache.json', Buffer.from(JSON.stringify({
+    tables: { sessions: { [`session-${UUID_B}`]: { rows: { title: { val: '改过标题' } } } } },
+  }), 'utf8'));
+  fs.setMtime('storages/session_projcache.json', 2001);
+  assert.equal((await readSessionMeta(ctx)).bySessionId.get(UUID_B)?.title, '改过标题', 'mtime 变了必须重新解析');
+});
+
+test('readSessionMeta：读不到 mtime（未登记）→ 不缓存，每次重读', async () => {
+  clearSessionMetaCache();
+  const seeded = await seedStorages('C:\\Users\\cache-nomtime');
+  const fs = new CountingFs('C:\\Users\\cache-nomtime');
+  fs.files = seeded.fs.files;
+  const ctx = makeContext('win32', 'C:\\Users\\cache-nomtime');
+  ctx.fs = fs;
+  await readSessionMeta(ctx);
+  assert.equal(fs.reads.length, 2);
+  await readSessionMeta(ctx);
+  assert.equal(fs.reads.length, 4, '无法判定新鲜度时不得用缓存（宁可多读，不可陈旧）');
+});
+
+test('readSessionMeta：门面完全没有 mtimeMs 能力（老宿主）→ 同样不缓存', async () => {
+  clearSessionMetaCache();
+  const seeded = await seedStorages('C:\\Users\\cache-nocap');
+  const fs = new CountingFs('C:\\Users\\cache-nocap');
+  fs.files = seeded.fs.files;
+  Object.defineProperty(fs, 'mtimeMs', { value: undefined, configurable: true });
+  const ctx = makeContext('win32', 'C:\\Users\\cache-nocap');
+  ctx.fs = fs;
+  await readSessionMeta(ctx);
+  await readSessionMeta(ctx);
+  assert.equal(fs.reads.length, 4, '老宿主（无 mtimeMs）每次都要重新解析');
+});
+
+test('clearSessionMetaCache：清空后下一次调用重新读盘', async () => {
+  clearSessionMetaCache();
+  const { ctx, fs } = await seededCounting('C:\\Users\\cache-clear', 3000);
+  await readSessionMeta(ctx);
+  await readSessionMeta(ctx);
+  assert.equal(fs.reads.length, 2, '命中缓存');
+  clearSessionMetaCache();
+  await readSessionMeta(ctx);
+  assert.equal(fs.reads.length, 4, '清空后必须重读（宿主可在存储重载信号上调用）');
+  clearSessionMetaCache();
 });

@@ -960,6 +960,26 @@ export class DshFileSystemFacade implements FileSystemFacade {
   }
 
   /**
+   * 文件字节数（只读预览用；不存在 / 读不到 → null）。
+   *
+   * 与 mtimeMs 同一条安全约定：`this.abs()` 的越界错误向上抛（被 catch 吞成 null 会让
+   * 「越界」看起来像「正常缺文件」）。非普通文件返回 null —— 交给调用方退回 readFile，
+   * 由那条路径给出真实错误，而不是返回一个毫无意义的目录 size。
+   *
+   * 为什么需要它：`/export-preview` 只需要「N 个文件 / X MiB」，实测本机会话树 941 个文件
+   * / 528 MB，走 readFile 取长度要 2.27 s、常驻内存 +306 MiB；stat 只取元数据。
+   */
+  async statSize(relPath: string): Promise<number | null> {
+    const target = this.abs(relPath)
+    try {
+      const st = await fs.stat(target)
+      return st.isFile() ? st.size : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
    * 绝对路径 realpath（issue #45 会话归位）。
    *
    * 与 DSH 的 realpathNormalize 同语义：只接受**已存在**的目录，解析符号链接 / `..` /
@@ -2605,25 +2625,35 @@ function makeRoutes(deps: RoutesDeps): { routes: WebRoute[]; scheduler: AutoSync
           for (const adapter of adapters) {
             if (!selected.includes(adapter.id)) continue
             try {
-              // includeSecrets=false：与真实导出同口径（值剥离），只统计不落盘
-              const section = await adapter.export(host, { includeSecrets: false })
+              // includeSecrets=false：与真实导出同口径（值剥离），只统计不落盘。
+              // 分区实现了 preview() 时走它：选择器只要「单元 / 条目数 / 体积」，不需要文件内容
+              // —— 实测本机会话树 941 个文件 / 528 MB，走 export() 要 2.27 s、+306 MiB 常驻。
+              const summary = adapter.preview !== undefined
+                ? await adapter.preview(host, { includeSecrets: false })
+                : undefined
+              const section = summary?.section ?? await adapter.export(host, { includeSecrets: false })
               // 文件类分区：大小按文件字节合计；JSON 分区：stringify 估算
-              let size = 0
-              if (isFileSection(adapter.id)) {
-                const files = (section.data as { files?: { data: Uint8Array }[] }).files ?? []
-                size = files.reduce((acc, f) => acc + f.data.length, 0)
-              } else {
-                size = Buffer.byteLength(stringifyJsonSafe(section.data), 'utf8')
+              let size = summary?.sizeBytes ?? 0
+              if (summary === undefined) {
+                if (isFileSection(adapter.id)) {
+                  const files = (section.data as { files?: { data: Uint8Array }[] }).files ?? []
+                  size = files.reduce((acc, f) => acc + f.data.length, 0)
+                } else {
+                  size = Buffer.byteLength(stringifyJsonSafe(section.data), 'utf8')
+                }
               }
               const count = section.counts ? Object.values(section.counts).reduce((a, b) => a + b, 0) : 0
               // Phase 1：可单独勾选的单元。listUnits 是**零 I/O** 纯函数（输入即本次 export 的产物），
               // 因此枚举明细不额外读盘；未实现 listUnits 的分区 items = [] = 不可细分（整体开关）。
-              let items: ExportUnit[] = []
-              try {
-                items = adapter.listUnits?.(section) ?? []
-              } catch {
-                // 单元枚举失败不拖垮预览：退化为「不可细分」，用户仍可整分区导出
-                items = []
+              // preview() 的 items 与 listUnits 同口径，但体积来自 stat（不读内容）。
+              let items: ExportUnit[] = summary?.items ?? []
+              if (summary === undefined) {
+                try {
+                  items = adapter.listUnits?.(section) ?? []
+                } catch {
+                  // 单元枚举失败不拖垮预览：退化为「不可细分」，用户仍可整分区导出
+                  items = []
+                }
               }
               // sessions：单元级活跃时间（会话日志 mtime）—— 元数据缓存没覆盖的会话靠它排序
               if (adapter.id === 'sessions' && items.length > 0 && adapter.unitActivityTimes !== undefined) {

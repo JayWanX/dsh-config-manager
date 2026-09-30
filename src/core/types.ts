@@ -64,6 +64,21 @@ export interface ExportSection<T = unknown> {
 }
 
 /**
+ * `/export-preview` 的只读摘要（内存中间表示，**不是格式的一部分**）。
+ *
+ * `section` 是**无内容**形态：文件类分区里每个条目的 `data` 为空、`contentHash` 为空串，
+ * 只保留 `relativePath`（单元枚举与 `unitActivityTimes` 只认它）。调用方**绝不能**把它当
+ * 导出产物交给 exporter / importer / 快照 —— 它只服务于预览端点。
+ */
+export interface SectionPreview<T = unknown> {
+  section: ExportSection<T>;
+  /** 分区体积（字节；文件类 = 成员文件大小合计，JSON 分区 = stringify 估算） */
+  sizeBytes: number;
+  /** 单元清单（与 `listUnits()` 同口径；文件类的体积来自 stat 而非读盘） */
+  items: ExportUnit[];
+}
+
+/**
  * 分区内「可单独勾选的最小单元」（Phase 1 条目级导出选择）。
  *
  * 单元是**语义整体、不可再拆**：一个技能目录 bundle、一个会话目录、一个插件包。
@@ -322,6 +337,17 @@ export interface FileSystemFacade {
    * （全量导出 + 告警），绝不假定 0——把未知当成「最旧」会静默丢掉最近的会话。
    */
   mtimeMs?(relPath: string): Promise<number | null>;
+  /**
+   * 文件字节数（文件不存在 / 读不到 → null）。
+   *
+   * 用途：**只读预览**（`/export-preview` 与文件类分区的 `preview()`）—— 选择器只需要
+   * 「N 个文件 / X MiB」这两个数字，不需要内容。实测（本机 941 个会话文件 / 528 MB）：
+   * 走 readFile 取长度要 2.27 s、常驻内存 +306 MiB，只为算几个数字；`statSize` 走 stat，
+   * 时间与内存都掉一个量级。
+   *
+   * 可选：未实现时预览退回 readFile 取长度（行为与改造前一致，只慢不坏）。
+   */
+  statSize?(relPath: string): Promise<number | null>;
   mkdir(dir: string): Promise<void>;
   /**
    * 绝对路径的 realpath（issue #45 会话归位用）。
@@ -807,6 +833,18 @@ export interface ConfigAdapter<TSection = unknown> {
   /** 读取当前 DSH 该类别配置 → 导出数据（无秘密值）。
    *  实现方应尊重 `options.includeItems?.[this.id]`（条目级选择，见 adapters/units.ts）。 */
   export(ctx: HostContext, options: ExportOptions): Promise<ExportSection<TSection>>;
+
+  /**
+   * 可选：**只读预览**（`/export-preview` 用）。
+   *
+   * 与 `export()` 的唯一区别：文件类分区**不读文件内容、不算 SHA-256**，体积取自
+   * `ctx.fs.statSize`（该门面方法未实现时退回 export 语义）。其余语义（条目级白名单、
+   * 单元分组、单分区字节闸门、告警文案）必须与 `export()` **同口径** ——
+   * 「预览说会带什么」与「导出真的带什么」一旦分叉，用户就会按预览勾选却拿到别的包。
+   *
+   * 未实现的本分区由调用方退回 `export()`（JSON 分区体积小，代价可忽略）。
+   */
+  preview?(ctx: HostContext, options: ExportOptions): Promise<SectionPreview<TSection>>;
 
   /**
    * 可选（Phase 1）：把本分区的导出产物拆成「可单独勾选的最小单元」清单。

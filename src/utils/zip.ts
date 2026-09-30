@@ -181,6 +181,16 @@ function deflateRawAsync(data: Buffer): Promise<Buffer> {
   });
 }
 
+/**
+ * 异步 inflate（读侧）：与 `zlib.inflateRawSync` 是同一 zlib 实现、同一 `maxOutputLength` 语义，
+ * 但交给 libuv 线程池 —— 读侧唯一的整段阻塞点就在这里（导入时逐条校验全部条目）。
+ */
+function inflateRawAsync(data: Buffer, maxOutputLength: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    zlib.inflateRaw(data, { maxOutputLength }, (err, out) => { if (err) reject(err); else resolve(out); });
+  });
+}
+
 /** 组装 ZIP 字节（全部条目 method=8 deflate，UTF-8 文件名，含中央目录与 EOCD）。
  *  `limits.maxEntries` 缺省 = 读侧默认上限（10_000），且**只允许收紧**：传入更大值会被钳到该上限，
  *  确保产物恒能被默认解析器读回（t36）。 */
@@ -345,23 +355,9 @@ export class ZipArchive {
 
   /** 读取并解压单条目（带 CRC32 / 尺寸 / 体积预算 / 压缩比校验） */
   readEntry(name: string): Uint8Array {
-    const meta = this.metas.find((m) => m.name === name);
-    if (!meta) throw new ZipSafetyError(`ZIP 中不存在条目: ${name}`);
+    const meta = this.metaOf(name);
     if (meta.isDirectory) return Buffer.alloc(0);
-
-    const lhOffset = meta.localOffset;
-    const lh = this.buf.subarray(lhOffset, lhOffset + 30);
-    if (lh.length < 30 || lh.readUInt32LE(0) !== LOCAL_SIG) {
-      throw new ZipSafetyError(`条目 "${name}" 的本地文件头损坏`);
-    }
-    const nameLen = lh.readUInt16LE(26);
-    const extraLen = lh.readUInt16LE(28);
-    const dataStart = lhOffset + 30 + nameLen + extraLen;
-    if (dataStart + meta.compressedSize > this.buf.length) {
-      throw new ZipSafetyError(`条目 "${name}" 数据越界`);
-    }
-    const raw = this.buf.subarray(dataStart, dataStart + meta.compressedSize);
-
+    const raw = this.rawBytes(name, meta);
     let out: Buffer;
     if (meta.method === 0) {
       out = raw;
@@ -374,7 +370,61 @@ export class ZipArchive {
     } else {
       throw new ZipSafetyError(`条目 "${name}" 使用未知压缩方法 ${meta.method}`);
     }
+    return this.accept(name, meta, out);
+  }
 
+  /**
+   * `readEntry` 的**异步**版本：同一套判据（本地文件头 / 越界 / 尺寸 / CRC / 预算 / 压缩比），
+   * 逐字节同结果，只是解压交给 libuv 线程池。
+   *
+   * 为什么必须有它：`inflateRawSync` 会整段阻塞事件循环 —— 实测本机 29 MiB 归档全量解压
+   * 阻塞 108 ms（导入向导 analyze→plan→execute 会各来一次，大备份就是几秒的界面冻结）。
+   * 导入的完整性校验是**唯一**需要逐条解压全部条目的地方，它必须走这条异步路径。
+   */
+  async readEntryAsync(name: string): Promise<Uint8Array> {
+    const meta = this.metaOf(name);
+    if (meta.isDirectory) return Buffer.alloc(0);
+    const raw = this.rawBytes(name, meta);
+    let out: Buffer;
+    if (meta.method === 0) {
+      out = raw;
+    } else if (meta.method === 8) {
+      try {
+        out = await inflateRawAsync(raw, this.limits.maxSingleBytes);
+      } catch (err) {
+        throw new ZipSafetyError(`条目 "${name}" 解压失败: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    } else {
+      throw new ZipSafetyError(`条目 "${name}" 使用未知压缩方法 ${meta.method}`);
+    }
+    return this.accept(name, meta, out);
+  }
+
+  /** 条目元数据查找（不存在 → 抛错）。解压前后的判据由调用方共享。 */
+  private metaOf(name: string): ZipEntryMeta {
+    const meta = this.metas.find((m) => m.name === name);
+    if (!meta) throw new ZipSafetyError(`ZIP 中不存在条目: ${name}`);
+    return meta;
+  }
+
+  /** 本地文件头校验 + 定位压缩字节区间（越界 → 抛错）。 */
+  private rawBytes(name: string, meta: ZipEntryMeta): Buffer {
+    const lhOffset = meta.localOffset;
+    const lh = this.buf.subarray(lhOffset, lhOffset + 30);
+    if (lh.length < 30 || lh.readUInt32LE(0) !== LOCAL_SIG) {
+      throw new ZipSafetyError(`条目 "${name}" 的本地文件头损坏`);
+    }
+    const nameLen = lh.readUInt16LE(26);
+    const extraLen = lh.readUInt16LE(28);
+    const dataStart = lhOffset + 30 + nameLen + extraLen;
+    if (dataStart + meta.compressedSize > this.buf.length) {
+      throw new ZipSafetyError(`条目 "${name}" 数据越界`);
+    }
+    return this.buf.subarray(dataStart, dataStart + meta.compressedSize);
+  }
+
+  /** 解压后的验收：尺寸 → CRC32 → 解压总量预算 → 压缩比（zip bomb）。两处解压路径共用同一套判据。 */
+  private accept(name: string, meta: ZipEntryMeta, out: Buffer): Buffer {
     if (out.length !== meta.uncompressedSize) {
       throw new ZipSafetyError(`条目 "${name}" 解压尺寸不符（${out.length} ≠ ${meta.uncompressedSize}）`);
     }

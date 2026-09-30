@@ -35,23 +35,38 @@ export function unitAllowed(allow: readonly string[] | undefined, id: string): b
   return allow === undefined || allow.includes(id);
 }
 
-/** 白名单是否让该分区整体为空（= 用户取消了整个分区，不是「导出空分区」）。 */
-export function allowListEmptiesSection(allow: readonly string[] | undefined): boolean {
-  return allow !== undefined && allow.length === 0;
-}
-
 /** 由「成员文件」归并出单元清单（体积 = 成员文件字节合计；零 I/O）。 */
 export function unitsFromFiles(
   sectionId: string,
   files: readonly { relativePath: string; data: Uint8Array }[],
   unitIdOf: (rel: string) => string,
 ): ExportUnit[] {
+  return unitsFromEntries(
+    sectionId,
+    files.map((f) => ({ relativePath: f.relativePath, sizeBytes: f.data.byteLength })),
+    unitIdOf,
+  );
+}
+
+/**
+ * 由「路径 + 已知体积」归并出单元清单（零 I/O）。
+ *
+ * 为什么要有这一份：只读预览（`/export-preview`）拿不到文件内容（也不该读），体积来自
+ * `ctx.fs.statSize`。若预览改用「data 为空的 FilesSection」喂 `unitsFromFiles`，
+ * 每个单元的体积会变成 0，选择器显示的体积全错。两份实现必须**同一套聚合规则**，
+ * 否则预览与导出会算出不同的单元体积（`file-collection.test.ts` 钉住两者逐项相等）。
+ */
+export function unitsFromEntries(
+  sectionId: string,
+  entries: readonly { relativePath: string; sizeBytes: number }[],
+  unitIdOf: (rel: string) => string,
+): ExportUnit[] {
   const byUnit = new Map<string, { count: number; size: number }>();
-  for (const f of files) {
+  for (const f of entries) {
     const unit = unitIdOf(f.relativePath);
     const cur = byUnit.get(unit) ?? { count: 0, size: 0 };
     cur.count += 1;
-    cur.size += f.data.length;
+    cur.size += f.sizeBytes;
     byUnit.set(unit, cur);
   }
   return [...byUnit.entries()].map(([unit, agg]) => ({

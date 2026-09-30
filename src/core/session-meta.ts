@@ -66,9 +66,56 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 /**
- * 读取会话标题与工作区注册表。任何一步失败都只让**对应部分**退化，绝不影响导出。
+ * 进程内索引缓存。
+ *
+ * 为什么需要：一次交互里 `/export-preview`（sessions 分区有单元时）与 `/plan` 会各调一次
+ * `readSessionMeta`，每次都要读 + 解析 1.57 MB 的 `session_projcache.json`（本机实测 7.3 ms/次）
+ * 与 workspace.json，而这两份缓存在一次交互里不会变。
+ *
+ * 失效判据 = **两个存储文件各自的 mtime**；任一读不到（宿主未实现 `mtimeMs` / 文件缺失）
+ * 就**完全不缓存** —— 宁可多读一次，也绝不拿陈旧索引去猜用户的会话归属。
+ * 键含 `homeDir`（同进程可能服务多份 home）。
+ */
+const metaCache = new Map<string, { key: string; index: SessionMetaIndex }>();
+
+/** 清空索引缓存（测试用；宿主在收到「DSH 存储已重载」信号时也可调用）。 */
+export function clearSessionMetaCache(): void {
+  metaCache.clear();
+}
+
+/** 文件 mtime（毫秒；门面未实现 / 读不到 → null = 无法判定新鲜度，调用方不得缓存）。 */
+async function mtimeOf(ctx: HostContext, rel: string): Promise<number | null> {
+  if (ctx.fs.mtimeMs === undefined) return null;
+  try {
+    return (await ctx.fs.mtimeMs(rel)) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 读取会话标题与工作区注册表（带 mtime 失效的进程内缓存，见 `metaCache`）。
+ *
+ * 语义与无缓存版**逐字相同**：任何一步失败都只让对应部分退化，绝不抛错。
+ * 返回的索引视为**只读**（调用方 `applySessionMeta*` 不改它）——缓存会把同一份 Map 再发出去。
  */
 export async function readSessionMeta(ctx: HostContext): Promise<SessionMetaIndex> {
+  const cacheId = `${ctx.homeDir}\u0000${SESSION_PROJCACHE}\u0000${WORKSPACE_STORE}`;
+  const projMtime = await mtimeOf(ctx, SESSION_PROJCACHE);
+  const wsMtime = await mtimeOf(ctx, WORKSPACE_STORE);
+  const stamp = projMtime === null || wsMtime === null ? null : `${projMtime}|${wsMtime}`;
+  if (stamp !== null) {
+    const hit = metaCache.get(cacheId);
+    if (hit !== undefined && hit.key === stamp) return hit.index;
+  }
+  const index = await loadSessionMeta(ctx);
+  if (stamp === null) metaCache.delete(cacheId);
+  else metaCache.set(cacheId, { key: stamp, index });
+  return index;
+}
+
+/** 无缓存实现（`readSessionMeta` 的实体）。 */
+async function loadSessionMeta(ctx: HostContext): Promise<SessionMetaIndex> {
   const index = emptySessionMeta();
 
   const cache = asRecord(await readJsonSafe(ctx, SESSION_PROJCACHE));

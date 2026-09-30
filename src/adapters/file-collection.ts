@@ -21,9 +21,9 @@ import type { RecursiveListing } from '../utils/recursive-walk.ts';
 import type { FilesSection, SectionId } from '../schema/types.ts';
 import type {
   ApplyResult, ConfigAdapter, ExportOptions, ExportSection, ExportUnit, HostContext,
-  ImportContext, PlanItem, Portability, ValidationResult,
+  ImportContext, PlanItem, Portability, SectionPreview, ValidationResult,
 } from '../core/types.ts';
-import { defaultUnitId, unitAllowed, unitsFromFiles } from './units.ts';
+import { defaultUnitId, unitAllowed, unitsFromEntries, unitsFromFiles } from './units.ts';
 import { validateJsonSection } from './json-section.ts';
 
 /**
@@ -49,6 +49,15 @@ export const MAX_FILE_SECTION_BYTES = 256 * 1024 * 1024;
 
 /** 字节闸门告警里最多列出的单元数（其余折叠成 "(+ N)"，避免大分区把报告撑爆；与 link-report 同口径） */
 const MAX_UNITS_PER_GATE_WARNING = 5;
+
+/**
+ * 只读预览下文件条目的占位内容（长度 0）。
+ *
+ * 为什么可用空内容：预览产出的 `FilesSection` 只在内存里流转（选择器只需要 `relativePath`
+ * 与体积），**绝不**进 ZIP / 快照 / 导入路径 —— 空内容一旦被误当导出产物，写出去的会是空文件。
+ * 因此 `preview()` 的返回值在类型注释里明确标注「不是格式的一部分」（见 types.ts 的 SectionPreview）。
+ */
+const EMPTY_DATA = new Uint8Array(0);
 
 /** 告警文案里的体积（人类可读；纯数值格式化，不含用户可见散文） */
 function formatBytes(bytes: number): string {
@@ -118,7 +127,60 @@ export abstract class FileCollectionAdapter implements ConfigAdapter<FilesSectio
   }
 
   async export(ctx: HostContext, options: ExportOptions): Promise<ExportSection<FilesSection>> {
+    const collected = await this.collect(ctx, options, 'content');
+    return {
+      sectionId: this.id,
+      data: { version: 1, files: collected.entries },
+      counts: { files: collected.entries.length },
+      warnings: collected.warnings,
+    };
+  }
+
+  /**
+   * 只读预览（`/export-preview`）：与 `export()` **共用同一个内核**（`collect`），
+   * 只把「读文件内容 + SHA-256」换成 `ctx.fs.statSize`。
+   *
+   * 为什么必须共用：预览说的「会带哪些单元、各多大」就是用户勾选的依据，一旦与真实导出
+   * 分叉，用户会按预览勾选却拿到不同的包（`file-collection.test.ts` 逐项断言两者相等）。
+   */
+  async preview(ctx: HostContext, options: ExportOptions): Promise<SectionPreview<FilesSection>> {
+    const collected = await this.collect(ctx, options, 'size');
+    return {
+      section: {
+        sectionId: this.id,
+        data: { version: 1, files: collected.entries },
+        counts: { files: collected.entries.length },
+        warnings: collected.warnings,
+      },
+      sizeBytes: collected.totalBytes,
+      items: unitsFromEntries(this.id, collected.sizes, (rel) => this.unitIdOf(rel)),
+    };
+  }
+
+  /**
+   * 分区收集内核（`export` / `preview` 共用）。
+   *
+   * - `mode === 'content'`：读文件内容 + 算 SHA-256（真实导出）；
+   * - `mode === 'size'`：只取字节数（`ctx.fs.statSize`），不解码、不哈希（预览）。
+   *
+   * 两种模式共用**同一套**单元分组、条目级白名单、单分区字节闸门与告警生成 ——
+   * 因此「预览的单元 / 体积 / 告警」与「导出的单元 / 体积 / 告警」逐项相等。
+   *
+   * 返回值里的 `entries` **只含** `relativePath`/`data`/`contentHash` 三个字段：
+   * `FilesSection` 是备份格式的一部分，多带内部字段会被序列化出去；体积走旁路 `sizes`。
+   */
+  private async collect(
+    ctx: HostContext,
+    options: ExportOptions,
+    mode: 'content' | 'size',
+  ): Promise<{
+    entries: FilesSection['files'];
+    sizes: { relativePath: string; sizeBytes: number }[];
+    totalBytes: number;
+    warnings: string[];
+  }> {
     const files: FilesSection['files'] = [];
+    const sizes: { relativePath: string; sizeBytes: number }[] = [];
     const warnings: string[] = [];
     const allow = options.includeItems?.[this.id];
     // issue #37：用「跟随 junction/符号链接」的遍历，并把跟随/跳过的链接写进告警——
@@ -162,28 +224,34 @@ export abstract class FileCollectionAdapter implements ConfigAdapter<FilesSectio
     const limit = this.sectionByteLimit();
     let usedBytes = 0;
     const droppedUnits: string[] = [];
-    const keptByRel = new Map<string, FilesSection['files'][number]>();
+    const keptByRel = new Map<string, { entry: FilesSection['files'][number]; sizeBytes: number }>();
     for (const unitId of unitOrder) {
       const room = limit - usedBytes;
-      const pending: { rel: string; file: FilesSection['files'][number] }[] = [];
+      const pending: { rel: string; entry: FilesSection['files'][number]; sizeBytes: number }[] = [];
       let unitBytes = 0;
       for (const member of unitEntries.get(unitId) ?? []) {
-        const data = await ctx.fs.readFile(member.rel);
-        unitBytes += data.byteLength;
+        const read = await this.readMember(ctx, member.rel, mode);
+        unitBytes += read.sizeBytes;
         if (unitBytes > room) break;
-        pending.push({ rel: member.rel, file: { relativePath: member.relPath, data, contentHash: sha256Hex(data) } });
+        pending.push({
+          rel: member.rel,
+          sizeBytes: read.sizeBytes,
+          entry: { relativePath: member.relPath, data: read.data, contentHash: read.contentHash },
+        });
       }
       if (unitBytes > room) {
         droppedUnits.push(unitId);
         continue;
       }
       usedBytes += unitBytes;
-      for (const p of pending) keptByRel.set(p.rel, p.file);
+      for (const p of pending) keptByRel.set(p.rel, { entry: p.entry, sizeBytes: p.sizeBytes });
     }
     // ③ 按 ① 的顺序落盘（未触发闸门时与改造前的文件顺序逐项一致）
     for (const rel of considered) {
-      const file = keptByRel.get(rel);
-      if (file !== undefined) files.push(file);
+      const kept = keptByRel.get(rel);
+      if (kept === undefined) continue;
+      files.push(kept.entry);
+      sizes.push({ relativePath: kept.entry.relativePath, sizeBytes: kept.sizeBytes });
     }
     // 绝不静默：被整块剔除的单元写进告警（导出报告可见），并给出上限与实际保留量
     if (droppedUnits.length > 0) {
@@ -199,12 +267,28 @@ export abstract class FileCollectionAdapter implements ConfigAdapter<FilesSectio
     }
     if (rels.length === 0) warnings.push(msgOf(ctx)('adapter.dirEmpty', { type: this.displayName }));
     warnings.push(...linkWarnings(msgOf(ctx), this.displayName, listing));
-    return {
-      sectionId: this.id,
-      data: { version: 1, files },
-      counts: { files: files.length },
-      warnings,
-    };
+    return { entries: files, sizes, totalBytes: usedBytes, warnings };
+  }
+
+  /**
+   * 读一个成员文件。
+   *
+   * - `content`：读内容并按需算 SHA-256（真实导出）；
+   * - `size`：优先 `ctx.fs.statSize`（只 stat，不读内容）；门面未实现或返回 null（文件消失 /
+   *   读不到）时**退回 readFile** —— 与改造前把「读不到」暴露成同一个错误，绝不把未知体积
+   *   当成 0（0 会让字节闸门少算，把本该剔除的单元放进预览，预览与导出就分叉了）。
+   */
+  private async readMember(
+    ctx: HostContext,
+    rel: string,
+    mode: 'content' | 'size',
+  ): Promise<{ data: Uint8Array; sizeBytes: number; contentHash: string }> {
+    if (mode === 'size') {
+      const size = (await ctx.fs.statSize?.(rel)) ?? null;
+      if (size !== null) return { data: EMPTY_DATA, sizeBytes: size, contentHash: '' };
+    }
+    const data = await ctx.fs.readFile(rel);
+    return { data, sizeBytes: data.byteLength, contentHash: mode === 'content' ? sha256Hex(data) : '' };
   }
 
   /** 单元清单（零 I/O：直接由 export 产物归并）。 */

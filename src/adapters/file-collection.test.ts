@@ -20,13 +20,14 @@ import assert from 'node:assert/strict';
 import { FileCollectionAdapter, MAX_FILE_SECTION_BYTES } from './file-collection.ts';
 import { SkillsAdapter } from './skills.ts';
 import { listFilesDetailed } from './link-report.ts';
-import { makeContext, sha256Hex } from './test-helpers.ts';
+import { makeContext, MemFs, sha256Hex } from './test-helpers.ts';
 import { AgentPresetsAdapter } from './agent-presets.ts';
 import { AgentInstructionsAdapter } from './agent-instructions.ts';
 import { SessionsAdapter } from './sessions.ts';
 import { SelfAdapter } from './self.ts';
 import { makeMsg, zhMsg } from '../core/messages.ts';
 import { validateJsonSection } from './json-section.ts';
+import { defaultUnitId, unitsFromEntries, unitsFromFiles } from './units.ts';
 import type { FileEntry } from '../schema/types.ts';
 import type { MockHostContext } from './test-helpers.ts';
 
@@ -252,5 +253,100 @@ test('validate：5 个文件类分区的 object 守卫并入骨架后，用户�
     const message = (await adapter.validate(null as never)).issues[0]?.message ?? '';
     assert.equal(message.includes(adapter.id), false, adapter.id + '：文案不得退化成 <subject> 数据必须是对象');
   }
+});
+
+/* ---------------- ⑧ 只读预览（preview）：与导出同口径，且不读文件内容 ---------------- */
+
+/**
+ * 统计 readFile 调用的 MemFs。
+ *
+ * 「预览不读内容」这件事必须用**调用次数**钉住，而不是靠体积数字反推 —— 体积相同
+ * 也可能仍然读了 528 MB（那正是要修的性能问题）。
+ */
+class CountingFs extends MemFs {
+  readonly reads: string[] = [];
+  override async readFile(rel: string): Promise<Uint8Array> {
+    this.reads.push(rel);
+    return super.readFile(rel);
+  }
+}
+
+/** 模拟「宿主门面没有实现 statSize」的旧宿主：在实例上遮蔽原型方法（预览应退回 readFile）。 */
+function dropStatSize(ctx: MockHostContext): void {
+  Object.defineProperty(ctx.fs, 'statSize', { value: undefined, configurable: true });
+}
+
+test('preview：不读文件内容（readFile 零调用），且单元/体积/条目数/告警与 export 逐项相等', async () => {
+  const ctx = makeContext('win32', 'C:\\Users\\alice');
+  ctx.fs = new CountingFs(ctx.homeDir);
+  await ctx.fs.writeFile('skills/alpha/SKILL.md', new Uint8Array(100));
+  await ctx.fs.writeFile('skills/alpha/extra.md', new Uint8Array(50));
+  await ctx.fs.writeFile('skills/beta/SKILL.md', new Uint8Array(7));
+  const adapter = new ProbeAdapter(1024 * 1024);
+
+  const exported = await adapter.export(ctx, { includeSecrets: false });
+  const readsAfterExport = (ctx.fs as CountingFs).reads.length;
+  const previewed = await adapter.preview(ctx, { includeSecrets: false });
+  const readsDuringPreview = (ctx.fs as CountingFs).reads.slice(readsAfterExport);
+
+  assert.deepEqual(readsDuringPreview, [], '预览不得读任何文件内容（体积必须来自 statSize）');
+  assert.equal(previewed.sizeBytes, 157, '体积 = 成员文件字节合计');
+  assert.deepEqual(previewed.items, adapter.listUnits(exported), '预览的单元清单必须与导出的 listUnits 逐项相同');
+  assert.deepEqual(previewed.section.counts, exported.counts);
+  assert.deepEqual(previewed.section.warnings, exported.warnings);
+  assert.deepEqual(
+    previewed.section.data.files.map((f) => f.relativePath),
+    exported.data.files.map((f) => f.relativePath),
+    '预览的文件集合与顺序必须与导出相同',
+  );
+  assert.ok(
+    previewed.section.data.files.every((f) => f.data.length === 0 && f.contentHash === ''),
+    '预览产出的 FilesSection 是无内容形态（绝不进 ZIP：空内容一旦被当导出产物就会写出空文件）',
+  );
+});
+
+test('preview：字节闸门下的剔除与告警与 export 逐项相等（预览说会带什么，导出就带什么）', async () => {
+  const ctx = makeContext('win32', 'C:\\Users\\alice');
+  await ctx.fs.writeFile('skills/big/a.md', new Uint8Array(100));
+  await ctx.fs.writeFile('skills/big/b.md', new Uint8Array(100));
+  await ctx.fs.writeFile('skills/small/c.md', new Uint8Array(10));
+  // 闸门 150 B：big 单元 200 B 整块放不下，small 单元 10 B 放得下
+  const adapter = new ProbeAdapter(150);
+
+  const exported = await adapter.export(ctx, { includeSecrets: false });
+  const previewed = await adapter.preview(ctx, { includeSecrets: false });
+
+  assert.deepEqual(paths(exported), ['small/c.md'], '导出：放不下的单元整块剔除');
+  assert.deepEqual(previewed.items.map((u) => u.label), ['small'], '预览：被剔除的单元不得出现在选择器里');
+  assert.equal(previewed.sizeBytes, 10);
+  assert.deepEqual(previewed.section.warnings, exported.warnings, '闸门告警必须逐字相同（绝不静默）');
+});
+
+test('preview：宿主未实现 statSize 时退回 readFile，体积与导出一致（只慢，不坏）', async () => {
+  const ctx = makeContext('win32', 'C:\\Users\\alice');
+  ctx.fs = new CountingFs(ctx.homeDir);
+  dropStatSize(ctx);
+  await ctx.fs.writeFile('skills/a/x.md', new Uint8Array(33));
+  const adapter = new ProbeAdapter(1024 * 1024);
+
+  const exported = await adapter.export(ctx, { includeSecrets: false });
+  const readsAfterExport = (ctx.fs as CountingFs).reads.length;
+  const previewed = await adapter.preview(ctx, { includeSecrets: false });
+
+  assert.equal((ctx.fs as CountingFs).reads.length, readsAfterExport + 1, '退回路径按文件读一次（只取长度）');
+  assert.equal(previewed.sizeBytes, 33);
+  assert.deepEqual(previewed.items, adapter.listUnits(exported));
+});
+
+test('unitsFromEntries：与 unitsFromFiles 对同一批文件给出逐项相同的单元（两条聚合规则只有一份）', () => {
+  const files = [
+    { relativePath: 'a/1.md', data: new Uint8Array(10) },
+    { relativePath: 'a/2.md', data: new Uint8Array(5) },
+    { relativePath: 'b.md', data: new Uint8Array(3) },
+  ];
+  assert.deepEqual(
+    unitsFromEntries('skills', files.map((f) => ({ relativePath: f.relativePath, sizeBytes: f.data.byteLength })), defaultUnitId),
+    unitsFromFiles('skills', files, defaultUnitId),
+  );
 });
 

@@ -60,6 +60,16 @@ export class MemFs implements FileSystemFacade {
   async mtimeMs(relPath: string): Promise<number | null> {
     return this.mtimes.get(this.key(relPath)) ?? null;
   }
+  /**
+   * 文件字节数（只读预览用）。
+   *
+   * 语义与真实门面一致：**读不到 → null**（不返回 0）—— 0 会让字节闸门少算，
+   * 让预览把本该剔除的单元也列出来，与真实导出分叉。
+   */
+  async statSize(relPath: string): Promise<number | null> {
+    const v = this.files.get(this.key(relPath));
+    return v === undefined ? null : v.byteLength;
+  }
   async listRecursive(dir: string): Promise<string[]> {
     const base = normalizePath(this.homeDir);
     const prefix = normalizePath(dir) === '' ? base : `${base}/${normalizePath(dir)}`;

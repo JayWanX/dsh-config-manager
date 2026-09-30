@@ -9,6 +9,81 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 > **Release workflow**: on tag push, CI extracts the current version's section as the release notes highlights;
 > the build fails fast if the section is missing, so you cannot forget to update it.
 
+## [0.1.68] - 2026-09-30
+
+> 本轮把**性能、发版门禁、卫生**三件事一起收口：只读预览不再为了显示几个数字读完整棵会话树
+> （真机 941 个文件 / 528 MB：**2271 ms → ~0.4 s、常驻内存 +306 MiB → 近零**）；导入不再把同一份
+> 归档重复解压 3~4 次，也不再让同步解压阻塞界面（29 MiB 归档全量同步解压实测阻塞事件循环 108 ms）；
+> 两道**写在文档里却从未真正生效**的发版门禁落进 CI；插件的显示元数据（中文名/简介 + 自定义图标）
+> 与一批死代码、逐字重复的实现一起清掉。
+>
+> **Theme**: performance, release gates and hygiene in one pass — the read-only preview no longer reads
+> the whole session tree just to show a few numbers (2271 ms → ~0.4 s, +306 MiB RSS → near zero), imports
+> no longer re-inflate the same archive 3–4 times or block the event loop while doing it, the two release
+> gates that were documented but never enforced are now real CI steps, and the plugin now shows a
+> localized name/summary plus a custom icon in the plugin manager.
+
+### ⚡ 性能 / Performance
+
+- 👁️ **只读预览不再读文件内容**：新增 `ConfigAdapter.preview()`（文件类分区由 `FileCollectionAdapter`
+  实现）与 `FileSystemFacade.statSize`。它只把「读文件内容 + SHA-256」换成一次 `stat`，**单元分组 /
+  条目白名单 / 单分区字节闸门 / 告警生成与真实导出逐字共用**同一个内核（`collect(ctx, options, mode)`）
+  —— 预览是用户勾选的唯一依据，一旦与导出口径分叉，用户就会按预览勾选却拿到别的包（已由
+  `file-collection.test.ts` 的「逐项相等」断言钉住）。宿主未实现 `statSize` 时自动退回旧行为，只慢不坏。
+  **Read-only preview** now takes sizes from `stat` instead of reading every file, sharing the exact same
+  unit grouping / byte gate / warnings as the real export.
+- 📦 **导入不再重复解压同一份归档**：逐条完整性校验改走 `ZipArchive.readEntryAsync`（`inflateRaw` 交
+  libuv 线程池），不再用 `inflateRawSync` 阻塞事件循环；同时加了一层**跨请求**的「已验证归档」缓存
+  —— 宿主每次请求都新建 Analyzer（`makeImporter()`），实例级缓存跨请求恒不命中，于是 analyze → plan →
+  execute（每改一次决策还会再 plan）会把同一个 ZIP 读入 + 全量解压 + 逐条校验 3~4 次。缓存键 =
+  **路径 + 文件大小 + mtime**，且只有只读入口读它；**`executeImportPlan` 一律重新读盘 + 重新校验**
+  （把「校验通过之后、写盘之前被换掉」的 TOCTOU 窗口关掉，已由 `analyzer-cache.test.ts` 的篡改用例钉住）。
+  **Import de-duplication**: async entry inflation plus a cross-request verified-archive cache; the
+  destructive `execute` path always re-reads and re-verifies.
+- 🧠 **会话元数据按 mtime 缓存**：1.57 MB 的 `storages/session_projcache.json` 此前每次预览、每次 `/plan`
+  都要解析（实测 7.3 ms/次）；现在按两份 storage 文件的 mtime 失效，**任一读不到 mtime 就不缓存**
+  （宁可多读，不拿陈旧索引猜会话归属）。
+
+### 🚦 发版门禁 / Release gates
+
+- 🔒 **CHANGELOG 亮点段门禁挪到 `npm publish` 之前**：它原本嵌在 tag-only 的 release 步骤里 —— 漏写
+  时流水线会红，**但包已经发到 npm**（同版本号不可重发）；`workflow_dispatch` 路径更是整段跳过门禁、
+  照常发布。现在是 publish 之前的独立 step，两条触发路径都跑。
+  **The CHANGELOG gate now runs before publishing**, on both tag and manual dispatches.
+- 🔢 **「三处版本同步」有了自动化断言**：`tests/packaging-contract.test.ts` 的 `V-1` 四条（源码正则读
+  `PLUGIN_VERSION`，不 import 宿主入口）——漏改任一处 `npm test` 直接红灯（变异验证：改成 `0.0.0-test`
+  → 红灯）。此前只靠人记得。
+- 🧪 **`tests/**` 纳入类型检查**：228 个测试文件长期在根 `tsconfig` 的 `include` 之外，实测积压 **43 条**
+  错误（0 条在 `src/**`）。新增 `tsconfig.tests.json` + `npm run typecheck:tests`，43 条全部修完
+  （只改 `tests/**`，未放宽任何编译选项），并接进 `ci.yml` 成为真实门禁。
+  **`tests/**` is now type-checked** (43 pre-existing errors fixed) and wired into CI.
+
+### 🎨 插件元数据 / Plugin metadata
+
+- 🖼️ **插件管理页显示中文名/简介与自定义图标**：DSH ≥ 0.1.7-rc.1 的 `readPluginMeta` 只读两处声明 ——
+  `package.json` 顶层的 `icon`（相对路径、包内、SVG/PNG/JPEG/WebP、≤ 256 KiB）与 `locale/<语言>.json`
+  的 `meta.title` / `meta.description`，两者都要经 `exports` 才读得到（`locale/en.json` 是「是否扫描该
+  目录」的开关）。本版本补上 `icon.svg`、`locale/{en,zh}.json` 与 `exports["./locale/*.json"]`，
+  并用 `tests/packaging/plugin-metadata.test.ts` 把这些规则逐条钉住（改坏任一条都会静默退回包名 + 英文
+  简介 + 默认图标）。
+  **Localized name/summary + custom icon** in the plugin manager (`icon` + `locale/*.json` `meta.*`).
+
+### 🧹 卫生 / Hygiene
+
+- 🧽 删除 **45 个零引用 CSS class**（`config-manager.module.css` 净 −350 行）与 **17 项全仓零引用导出**
+  （`as*Section` ×9、`hashFile`、`isAcquired`/`isTokenValid`、`CHECKSUMS_ALGORITHM`、硬编码中文表
+  `HISTORY_KIND_LABELS` 等）。
+- ♻️ 收敛逐字重复的实现：`readTextSafe` ×3 与 `sanitizeFileName`/`sanitizeFilePart` 合入宿主专用
+  `src/profiles/dsh-profile-io.ts`（返回 `string | null`，调用方 `?? ''` **保住原有的 null / '' 语义差异**）；
+  `isENOENT`/`isRecord` 合入**零依赖** `src/utils/guards.ts`（客户端也要 import，带 node 依赖会让整个插件
+  加载失败）；`quoteGitValue` 合入 `src/utils/git-quote.ts`；`maskHighEntropy` 合入既有
+  `src/security/redaction.ts`（正则保持模块私有，注释写明不得改用 `re.test()`）。
+- 🎯 修复会卡住发版的 CI flake 根因：`env-lock.test.ts` 三处**固定 sleep** 改为条件等待（等 sidecar 落盘、
+  等在途 `.tmp` 出现）—— 固定 60 ms 在负载下会整段错过 175 ms 退避窗口，让「release 时有在途写」这个
+  前提根本不成立却照常变绿。
+- 🔗 **dependabot 把 lucide 与 lucide-react 并成一个 group**：两者被
+  `morph-icons.test.ts` 钉成「必须同版本」，拆成两个 PR 时先合的那个必然让 main 红灯（本次实测踩到）。
+
 ## [0.1.67] - 2026-09-30
 
 > 本轮修 **DSH Desktop（Electron 桌面端）真实可用的最后一公里**：桌面端的保留档案 `desktop`

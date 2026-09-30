@@ -141,7 +141,7 @@ test('issue #39：宿主解析认 refs 块 → 凭据随包回填，不再进待
   });
 });
 
-test('G-19：归档里带值的凭据必须全部进计划并写回（含未被 settings 引用的 ref；本机已有也照常写回）', async () => {
+test('G-22：归档里带值的凭据必须全部进计划并写回（含未被 settings 引用的 ref；本机已有也照常写回）', async () => {
   await withTmp(async (dir) => {
     const homeA = path.join(dir, 'home-a');
     const src = makeContext('win32', homeA);

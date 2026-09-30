@@ -8,7 +8,8 @@
 
 ```bash
 npm install --legacy-peer-deps   # 安装依赖（部分 DSH 核心包未发布公共 registry，需跳过 peer 解析）
-npm run typecheck                # 类型检查（tsc --noEmit）
+npm run typecheck                # 类型检查：根 tsconfig（只覆盖 src/**）
+npm run typecheck:tests          # 类型检查：tsconfig.tests.json（src/** + tests/**，CI 已接）
 npm run build                    # 构建：Host 半 lib/（tsc）+ client bundle lib/client.js（tsdown）
 npm run bundle                   # 仅重建 client bundle（tsdown）
 npm test                         # 运行全部测试（node --test，192 个）
@@ -61,11 +62,12 @@ CI 流水线：`typecheck → 192 测试 → build → npm pack → npm publish�
 `.github/workflows/ci.yml` 与发布流水线**分离**，对 `pull_request`（目标 `main`）、`push`（`main`）与 `workflow_dispatch` 触发：
 
 ```
-install → typecheck → npm test（全量套件，不按目录裁剪）→ build（tsc + tsdown）→ npm pack（打包与 files 白名单校验）
+install → typecheck（src）→ typecheck:tests（tests/**）→ npm test（全量套件，不按目录裁剪）→ build（tsc + tsdown）→ bundle 自包含护栏 → npm pack（打包与 files 白名单校验）
 ```
 
 - **零发布副作用**：不含向 registry 推送的步骤，不申请 OIDC 发布凭据，权限仅 `permissions: contents: read`
-- **单 job 跑完整阶梯**：install → typecheck → test → build → pack，一步失败即整体红；**禁用「允许失败」、不加自动重试**（全量测试实测 1558 项约 88 秒，无需拆 job；耗时由 concurrency + timeout 控制）
+- **单 job 跑完整阶梯**：install → typecheck → typecheck:tests → test → build → pack，一步失败即整体红；**禁用「允许失败」、不加自动重试**（全量测试实测 1558 项约 88 秒，无需拆 job；耗时由 concurrency + timeout 控制）
+- **`tests/**` 是独立一条类型检查**：根 tsconfig 只 include `src/**`，历史上 228 个测试文件长期在类型检查之外并积压 43 条错误（2026-09 修完并接进 CI）；`tsconfig.tests.json` 未进版本库时该 step 会 TS5083 报错，提交时必须带上它
 - **安装契约与发布一致**：Node 24 + `npm ci --legacy-peer-deps`（部分 DSH 核心包只声明在 peerDependencies，普通 `npm ci` 必红）
 - **并发**：`concurrency.group: ci-${{ github.ref }}` + `cancel-in-progress`，同一分支的新提交自动取消旧运行
 - **PR 要求**：合并进 `main` 前需 ci.yml 全绿；**发布仍是打 tag → `publish.yml`**（见上一节），两条流水线互不触发
@@ -133,10 +135,11 @@ install → typecheck → npm test（全量套件，不按目录裁剪）→ bui
 - **Utility**：`src/utils/` 或模块私有；带业务语义的纯函数优先 `src/ui/`。
 
 ### 🚀 发布（打 tag 全自动）
-CI `.github/workflows/publish.yml`：tag `v*` push → typecheck → test → build → pack → npm publish(OIDC) → GitHub Release。
+CI `.github/workflows/publish.yml`：tag `v*` push → typecheck（src + tests）→ test → build → 护栏 → pack → **CHANGELOG 亮点段门禁** → npm publish(OIDC) → GitHub Release。
 步骤：①bump 三处版本；②`CHANGELOG.md` 顶部加当前版本双语亮点段（漏写 CI fail-fast，release 由 `.github/scripts/extract-release-notes.py` 抽取）；③push main；④`git tag -a vX.Y.Z && push`。
-注意：手动 `workflow_dispatch` 不建 Release；npm 用 OIDC 无长令牌；版本 `0.1.x`；commit 惯例 `chore: bump to X.Y.Z`；不配 `.github/release.yml`（无 PR+label，GitHub 默认 conventional 分组更好）。
-CI 门禁：`.github/workflows/ci.yml` 对 `pull_request`→main 与 `push`→main 跑 typecheck/test/build/pack（最小权限、零发布副作用）；**发版仍只走 tag → `publish.yml`**，两条流水线互不重叠。
+**门禁顺序**（2026-09 修正）：亮点段抽取 + 非空校验是**独立 step，排在 `npm publish` 之前**且不带 `if:` —— 两条触发路径都会执行。此前它嵌在「Create GitHub Release（tag-only）」步骤里，于是 CHANGELOG 漏写时流水线会红但包**已经发到 npm**（同版本号不可重发），而 `workflow_dispatch` 路径更是整段跳过该门禁、照常发布。
+注意：手动 `workflow_dispatch` 不建 Release（该步骤仍为 tag-only），但**发布与亮点段门禁照常执行**（无 tag 时版本号取 `package.json.version`）；npm 用 OIDC 无长令牌；版本 `0.1.x`；commit 惯例 `chore: bump to X.Y.Z`；不配 `.github/release.yml`（无 PR+label，GitHub 默认 conventional 分组更好）。
+CI 门禁：`.github/workflows/ci.yml` 对 `pull_request`→main 与 `push`→main 跑 typecheck（src）/ typecheck:tests / test / build / 护栏 / pack（最小权限、零发布副作用）；**发版仍只走 tag → `publish.yml`**，两条流水线互不重叠。
 
 #### 状态管理
 - 高频可恢复流程(Export/Import)状态在 `run-store.ts`；新视图需「切 tab 不丢/刷新恢复」就入 runStore。

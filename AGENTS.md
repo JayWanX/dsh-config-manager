@@ -24,9 +24,10 @@ src/adapters/  13适配器(settings/ui/providers/plugins/mcp/prompts/skills/agen
 src/sync/      SyncEngine+Git/WebDav+AutoSyncScheduler+config/state/history/sync-selection
 src/market/    GitMarketReader+index-parser+security校验+builtin；github-repos.ts+my-repo.ts+git-file-writer.ts
 src/migrations/ schema迁移链(registry+v1→v2占位)
-src/profiles/  档案=DSH自带profile：dsh-profile-shared(零依赖类型/常量/纯函数)+dsh-profile-manager(列表/详情/新建/重命名/复制/物理删)+process-control(存活/优雅→强杀)+dsh-profile-launcher(独立实例：spawn/挑端口/抓认证URL/探活/停止/台账)+dsh-profile-runtime(心跳：谁在跑/停别的实例)
+src/profiles/  档案=DSH自带profile：dsh-profile-shared(零依赖类型/常量/纯函数)+dsh-profile-manager(列表/详情/新建/重命名/复制/物理删)+process-control(存活/优雅→强杀)+dsh-profile-launcher(独立实例：spawn/挑端口/抓认证URL/探活/停止/台账)+dsh-profile-runtime(心跳：谁在跑/停别的实例)+dsh-profile-io(**宿主专用**：readTextSafe/sanitizeFilePart，走 node:fs —— 绝不能被浏览器半 import，所以不放进零依赖的 dsh-profile-shared)
 src/ui/        框架无关UI逻辑(纯函数/控制器，无React，node可测)  ← 业务逻辑必须在此
 src/utils/     paths/zip/hashing/json/logger/atomic-write/env-lock/recursive-walk（跟随 junction 的递归遍历内核，issue #37）
+               +guards（零依赖纯判定 isRecord/isENOENT，两端都可 import）+git-quote（git config 值转义）
 src/client/    React壳(浏览器半)  ← 只做装配
 tests/ 集成测试(node --test)；docs/README.md 文档索引；docs/design/ 设计文档；docs/spec/ 对外契约(格式规格/schema/兼容矩阵/已知缺口)；
                docs/seo/ 曝光审计记录；docs/handoff/ 阶段交接文档(历史归档，非当前状态)；其余文档一律进 docs/，根目录只放对外文档
@@ -40,6 +41,7 @@ tests/ 集成测试(node --test)；docs/README.md 文档索引；docs/design/ �
 
 ## 🔢 版本三处必须同步（最易漏）
 `package.json.version` ≡ `src/index.ts` 的 `PLUGIN_VERSION`(约L124) ≡ `package-lock.json` 根对象 version(L3) 与 `packages[""].version`(L9)。bump 后跑 `npm run typecheck` 确认。
+**已有自动化断言**：`tests/packaging-contract.test.ts` 的 `V-1` 四条（源码级正则读 `PLUGIN_VERSION`，不 import 宿主入口）——任一处漏改即 `npm test` 红灯，不再是「只靠人记得」。
 
 ## 🚀 发布（打 tag 全自动）
 
@@ -83,6 +85,9 @@ tests/ 集成测试(node --test)；docs/README.md 文档索引；docs/design/ �
 - 设计决策看 `docs/design/`（上游依据，实现规格在下游）。
 - **对外契约看 `docs/spec/`**：与 `docs/design/` 性质不同——`design/` 是**上游设计依据**（写给本仓库），`spec/` 是**对外契约**（写给第三方实现者，应能在不读 `src/` 的前提下据此实现兼容的 exporter/importer）。含：`bundle-format-v1.md`（格式规格）、`bundle-manifest.schema.json`（机器可校验）、`compat-matrix.md`（DSH 兼容区间与升级风险）、`headless-consumption.md`（无 UI 栈消费引擎）、`sync-channel-v1.md`（**同步通道**快照格式：远端布局 / 内容寻址外置 / 删除墓碑）、`known-gaps.md`（已知缺口登记）。**改格式行为必须同步 `spec/`，并重跑 `tests/conformance/`。**
 - **client bundle 自包含护栏**：`src/utils/bundle-scan.ts`（零依赖扫描内核，**多趟并集**避免注释内反引号导致的状态失衡假阴性）+ `src/client/bundle-selfcontained.test.ts`（产物护栏，白名单仅 react/react-dom/react-dom/client/react/jsx-runtime）。**必须 Build 之后单独跑**——`npm test` 在 Build 前执行，此时 `lib/client.js` 不存在，测试会跳过；故 `ci.yml`/`publish.yml` 各有一独立步骤。注释里的同名字符串会造成假阳性（本仓库实测过）。
+- **只读预览与导出必须同口径**（2026-09）：`/export-preview` 走 `ConfigAdapter.preview?()`（文件类分区由 `FileCollectionAdapter` 实现），它只把「读文件内容 + SHA-256」换成 `ctx.fs.statSize`，**单元分组 / 条目白名单 / 单分区字节闸门 / 告警生成逐字共用**同一个内核（`file-collection.ts` 的 `collect(ctx, options, mode)`）。为什么必须共用：预览是用户勾选的唯一依据，一旦与真实导出分叉，用户会按预览勾选却拿到别的包（`file-collection.test.ts` 断言两者逐项相等）。**`preview()` 产出的 `FilesSection` 是无内容形态**（`data` 长度 0 / `contentHash` 空串），只在内存里流转，**不得**交给 exporter/importer/快照。实测收益：本机会话树 941 个文件 / 528 MB，预览从 2271 ms / RSS +306 MiB 降到 ~0.4 s / 近零常驻。
+- **已验证归档跨请求缓存**（`src/core/analyzer.ts` 的 `verifiedBundles`，2026-09）：宿主 `makeImporter()` **每请求新建** Importer/Analyzer，实例级 `bundleCache` 跨请求恒不命中，于是 analyze→plan→execute（每改一次决策还会再 plan）会把同一个 ZIP 读入 + 全量解压 + 逐条 SHA-256 校验 3~4 次。三条硬边界：① 缓存键 = **路径 + 文件大小 + mtimeMs**（stat 失败即不缓存）；② **只有只读入口**（`analyzeImport` / `createImportPlan`）读它，`executeImportPlan` 一律 `refresh` —— 每次都重新读盘 + 重新校验，关掉「校验后、写盘前被换掉」的 TOCTOU 窗口（`src/core/analyzer-cache.test.ts` 用「plan 后篡改归档 → execute 必须被完整性校验拦下」钉住）；③ 只缓存 ≤ 64 MiB 的归档，条目上限 2 + TTL 120 s。配套：逐条完整性校验改走 `ZipArchive.readEntryAsync`（`inflateRaw` 走 libuv 线程池），不再用 `inflateRawSync` 阻塞事件循环（实测 29 MiB 归档全量同步解压阻塞 108 ms）。
+- **`readSessionMeta` 有 mtime 失效的进程内缓存**（1.57 MB 的 `storages/session_projcache.json` 每次预览/每次 `/plan` 都要解析，实测 7.3 ms）：键 = homeDir + 两个 storage 文件的 mtime，**任一读不到 mtime 就不缓存**（宁可多读，不可拿陈旧索引猜会话归属）；测试用 `clearSessionMetaCache()` 隔离。
 - DI 走 Cordis fiber：client 经 `ctx.slots.inject('settings.section')`+`inject:()=>({api,syncApi,...})`；host 可选服务 `ctx.get()` 惰取。
 
 ## 🛠️ 开发规范
@@ -112,13 +117,15 @@ tests/ 集成测试(node --test)；docs/README.md 文档索引；docs/design/ �
 ## 🧪 命令
 ```bash
 npm install --legacy-peer-deps   # 必须带：部分 DSH 核心只在 peerDependencies
-npm run typecheck                # tsc --noEmit
+npm run typecheck                # tsc --noEmit（根 config，只覆盖 src/**）
+npm run typecheck:tests          # tsc -p tsconfig.tests.json（把 tests/** 一起纳入；CI 已接）
 npm run build                    # tsc(host lib/) + tsdown(client lib/client.js)
 npm test                         # node --test src/**/*.test.ts tests/**/*.test.ts
 npm run smoke                    # 仅 core 冒烟
 npm run bundle                   # 仅重建 client bundle
 ```
 - 无 lint/format 脚本，只以 typecheck 兜底（历史 `eslint-disable` 是遗留）。
+- **`tests/**` 的类型检查是独立一条命令**（`tsconfig.tests.json`）：根 config 只 include `src/**`，历史上 228 个测试文件长期在类型检查之外（实测曾积压 43 条错误，已修完并接进 CI）。改动测试后请跑 `npm run typecheck:tests`。
 - CSS Modules 由 tsdown+lightningcss 编译为内联注入，单文件 `lib/client.js` 自带样式；**新增样式只能在 `config-manager.module.css`**。
 
 ## 🎨 UI / DESIGN SYSTEM（最高优先级）

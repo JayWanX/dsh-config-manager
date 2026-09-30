@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Config Manager",
+    "description": "Back up, restore, export, import, migrate and sync your complete DSH configuration: settings, plugins, MCP servers, skills, agent presets and workspaces."
+  }
+}

@@ -87,9 +87,15 @@ importers:
       lightningcss:
         specifier: 1.33.0
         version: 1.33.0
+      lucide:
+        specifier: ^1.47.0
+        version: 1.48.0
       lucide-react:
         specifier: ^1.41.0
         version: 1.47.0(react@18.3.1)
+      morphicons:
+        specifier: ^1.7.1
+        version: 1.7.1(react@18.3.1)
       react:
         specifier: ^18.3.1
         version: 18.3.1
@@ -1640,6 +1646,29 @@ packages:
     resolution: {integrity: sha512-o8C23aXpNQypRY73W7fW02EyvWJinEMXgKeGjFoKym0zj3Q73hD97A1IQps1g8C14HTGsOpZL0Am+xjfgFZAbg==}
     peerDependencies:
       react: ^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0
+
+  lucide@1.48.0:
+    resolution: {integrity: sha512-8FglIlGkcIItJjJfLUiqAufUCdbtnTOsdG02/fxXd4oIt+NrcrEVH8t0ZcKAfawxHckorO5qJ9XDfnJbdf0TOg==}
+
+  morphicons@1.7.1:
+    resolution: {integrity: sha512-q5ylxy5/d7vBg0OAzanlooXf05PekovMYDuuQVpr6vAQZxl99lrJbaIi+jJ32PXQf9WEEaDO2pbNBsx1ZhEnFQ==}
+    peerDependencies:
+      react: '>=18'
+      react-native: '>=0.71'
+      react-native-svg: '>=14'
+      svelte: '>=5'
+      vue: '>=3.3'
+    peerDependenciesMeta:
+      react:
+        optional: true
+      react-native:
+        optional: true
+      react-native-svg:
+        optional: true
+      svelte:
+        optional: true
+      vue:
+        optional: true
 
   obug@2.1.4:
     resolution: {integrity: sha512-4a+OsYv9UktOJKE+l1A4OufDgdRF9PifWj+tJnHURo/P+WOxpG4GzUFL9qCalmWauao6ogiG+QvnCovwPoyAWA==}
@@ -3376,6 +3405,12 @@ snapshots:
 
   lucide-react@1.47.0(react@18.3.1):
     dependencies:
+      react: 18.3.1
+
+  lucide@1.48.0: {}
+
+  morphicons@1.7.1(react@18.3.1):
+    optionalDependencies:
       react: 18.3.1
 
   obug@2.1.4: {}

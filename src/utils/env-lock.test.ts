@@ -247,6 +247,30 @@ async function waitForSub(get: () => string, sub: string, timeoutMs = 10_000): P
   }
 }
 
+/**
+ * 条件等待**目录里出现**满足谓词的条目（命中即返回，超时抛错）。
+ *
+ * 为什么不用固定 sleep：心跳写链的「在途窗口」只有约 175 ms（renameWithRetry 的 25/50/100 ms 退避），
+ * 固定睡 60 ms 在负载下可能整段错过 —— 那会让「release 时确有在途写」这个前提根本没成立，
+ * 测试却照常变绿（假通过）。这里等的是**可观测事实**，等不到就响亮地失败。
+ */
+async function waitForDirEntry(
+  dir: string,
+  pred: (name: string) => boolean,
+  what: string,
+  timeoutMs = 5_000,
+): Promise<string> {
+  const t0 = Date.now();
+  for (;;) {
+    const hit = fssync.readdirSync(dir).find(pred);
+    if (hit !== undefined) return hit;
+    if (Date.now() - t0 > timeoutMs) {
+      throw new Error(`超时等待「${what}」，当前目录内容：${fssync.readdirSync(dir).join(', ') || '（空）'}`);
+    }
+    await sleepReal(5);
+  }
+}
+
 function childHeader(): string {
   return `import { pathToFileURL } from 'node:url';
 const { EnvironmentLockManager } = await import(pathToFileURL(process.env.LOCK_ABS).href);
@@ -1037,8 +1061,8 @@ test('L3 release 必须 drain 在途 heartbeat 写：不得残留原子写临时
   assert.equal(res.state, 'ACQUIRED');
   const id = res.token!.instanceId;
   const hbPath = path.join(locksDir, heartbeatFile(id));
-  // 让 heartbeat 写链持续有在途写（interval 1ms）
-  await sleepReal(60);
+  // 条件等待首写落盘（心跳 interval 1ms），不再固定睡 60 ms 猜它写过了
+  await waitForDirEntry(locksDir, (n) => n === path.basename(hbPath), 'heartbeat sidecar 首次落盘');
   // 占用 sidecar 路径（目录）→ 之后的 heartbeat 写 rename 失败并进入退避重试（在途窗口 ≈175ms）。
   // 写链持续在写，rm 与 mkdir 之间存在竞争，故用有界重试把占位目录稳定建立起来。
   let occupied = false;
@@ -1052,7 +1076,9 @@ test('L3 release 必须 drain 在途 heartbeat 写：不得残留原子写临时
     }
   }
   assert.equal(occupied, true, '应能把 sidecar 路径占位为目录（用于制造确定性的在途写）');
-  await sleepReal(60); // 至少一次写已进入退避重试窗口
+  // 条件等待**观测到**在途写：`.dshcm.*.tmp` 只在退避重试窗口（≈175 ms）内存在。
+  // 固定睡 60 ms 在负载下可能整段错过窗口 —— 前提不成立却照常变绿（假通过）。
+  await waitForDirEntry(locksDir, (n) => n.startsWith('.dshcm.') && n.endsWith('.tmp'), '在途原子写临时文件（退避重试窗口）');
   await mgr.release(res.token!);
   // 核心断言：release 返回时在途写必须已 drain —— 不得留下原子写临时文件
   // （未修复时 cleanupHeartbeat 与在途 rename 竞争，.dshcm.*.tmp 会残留 → after-hook rmSync 报 ENOTEMPTY）
@@ -1085,7 +1111,9 @@ test('L3-2 release 的 ownership-lost 分支必须 drain 在途 heartbeat 写（
     catch { await sleepReal(10); }
   }
   assert.equal(occupied, true, '应能把 sidecar 路径占位为目录（用于制造确定性的在途写）');
-  await sleepReal(60); // 至少一次写已进入退避重试窗口
+  // 条件等待**观测到**在途写：`.dshcm.*.tmp` 只在退避重试窗口（≈175 ms）内存在。
+  // 固定睡 60 ms 在负载下可能整段错过窗口 —— 前提不成立却照常变绿（假通过）。
+  await waitForDirEntry(locksDir, (n) => n.startsWith('.dshcm.') && n.endsWith('.tmp'), '在途原子写临时文件（退避重试窗口）');
   // 篡改 ownership.instanceId → release 走 ownership-lost 分支（抛错、不 unlink、保留 activeToken）
   const owner = (await readOwnershipByMgr(mgr))!;
   owner.owner.instanceId = 'EVIL-OTHER';

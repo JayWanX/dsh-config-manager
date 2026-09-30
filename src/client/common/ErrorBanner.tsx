@@ -6,7 +6,7 @@
  * 渲染结果只含 Reason / Suggested action / Item，绝不出现密钥原文。
  */
 import { useMemo } from 'react'
-import { formatActionableError, toActionableError } from '../../ui/errors.ts'
+import { toActionableError } from '../../ui/errors.ts'
 import { redact } from '../../security/redaction.ts'
 import { zhUiT, type UiT } from '../../ui/i18n.ts'
 import { Button } from './ui.tsx'
@@ -75,7 +75,3 @@ export function ErrorList({ errors }: { errors: readonly string[] }) {
   )
 }
 
-/** formatActionableError 的文本化出口（供非 React 渲染场景复用） */
-export function formatErrorText(error: unknown): string {
-  return formatActionableError(toActionableError(error))
-}

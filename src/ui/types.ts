@@ -9,8 +9,8 @@
  */
 import type { SectionId } from '../schema/types.ts';
 import type {
-  CompatibilityScore, ImportAnalysis, ImportDecisions, ImportPlan, ImportResult,
-  ItemResolution, PathIssue, PlanItem, Portability, RollbackReport,
+  ImportAnalysis, ImportDecisions, ImportPlan, ImportResult,
+  ItemResolution, PathIssue, PlanItem, Portability,
 } from '../core/types.ts';
 
 /* ---------------- 导出（规范 §1 / §21） ---------------- */
@@ -138,15 +138,6 @@ export interface PathMappingDraft {
 /** 与 core PathMapping.appliesTo 对齐的取值（留空数组 = 全应用） */
 export type PathMappingAppliesTo = 'workspaces' | 'mcp' | 'pluginConfig' | 'skills';
 
-/* ---------------- 兼容性（规范 §30） ---------------- */
-
-export interface CompatibilityView {
-  score: CompatibilityScore;
-  sourceDsh: string;
-  targetDsh: string;
-  description: string;
-}
-
 /* ---------------- 报告（规范 §21 / §22 / §17） ---------------- */
 
 /** 导入结果按分区的统计（report.ts 用） */
@@ -160,12 +151,6 @@ export interface ImportSectionStat {
 }
 
 export type ImportResultAction = 'fixIssues' | 'viewDetails' | 'done';
-
-export interface RollbackView {
-  report: RollbackReport | null;
-  /** 是否有可展示的人工恢复清单（partial 回滚时） */
-  hasManualRecovery: boolean;
-}
 
 /* ---------------- 控制器公共依赖注入 ---------------- */
 
@@ -207,11 +192,6 @@ export interface ImportPort {
       decryptPassword?: string;
     },
   ): Promise<ImportResult>;
-}
-
-/** 选项构造辅助：从 PlanItem 提取稳定决策键（与 core analyzer.applyItemResolution 的 id 语义一致） */
-export function itemDecisionKey(item: PlanItem): string {
-  return item.id;
 }
 
 /* ---------------- Recovery（Phase 5：引导式恢复工作流） ---------------- */

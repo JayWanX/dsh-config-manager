@@ -25,6 +25,7 @@ import { promisify } from 'node:util';
 
 import { validateRepoUrl } from '../sync/sync-config.ts';
 import { atomicWriteFile } from '../utils/atomic-write.ts';
+import { quoteGitValue } from '../utils/git-quote.ts';
 import type { GitAuthor, GitCredentialProvider, GitExecFn, GitExecResult } from '../sync/git/git-transport.ts';
 
 const execFileAsync = promisify(execFile);
@@ -109,11 +110,6 @@ const defaultExec: GitExecFn = async (cmd, args, opts) => {
     };
   }
 };
-
-/** git config 值里的路径转义：含空白/引号时用引号包裹（Windows 路径转正斜杠） */
-function quoteGitValue(value: string): string {
-  return /[\s"']/.test(value) ? `"${value.replace(/"/g, '\\"')}"` : value;
-}
 
 /** 错误/日志脱敏：repoUrl（原文）与 token（原文与 URL 编码形态）一律替换 */
 function makeMask(repoUrl: string, token: string): (text: string) => string {

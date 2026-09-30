@@ -30,6 +30,7 @@
  */
 import fs from 'node:fs/promises';
 import { verifyChecksums } from '../utils/hashing.ts';
+import { isENOENT } from '../utils/guards.ts';
 import { CHECKSUMS_FILE, MANIFEST_FILE, parseManifest } from '../schema/manifest.ts';
 import { describeVersion, isSupported } from '../schema/versions.ts';
 import { SECTION_FILE_PREFIXES, SECTION_JSON_PATHS } from '../schema/config.ts';
@@ -123,10 +124,6 @@ const SECRETS_ENC_RE = /^security\/[^/]*\.enc$/;
 
 function msgOfError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-function isENOENT(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'ENOENT';
 }
 
 /** 空结果骨架（各阶段失败时统一构造，避免漏字段） */

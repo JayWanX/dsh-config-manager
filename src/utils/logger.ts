@@ -14,7 +14,7 @@
  * 直接踩「日志全程脱敏」硬不变量。现在本文件**不保留任何名单、不保留近似实现**：
  * 名单或判定口径变更只需改 secret-scanner 一处，宿主日志与导出/同步脱敏自动同口径。
  */
-import { isSensitiveFieldName, normalizeFieldName } from '../security/secret-scanner.ts';
+import { normalizeFieldName } from '../security/secret-scanner.ts';
 import { redact as redactText, redactValue as redactMeta } from '../security/redaction.ts';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
@@ -36,12 +36,6 @@ export function parseLogLevel(raw: string | undefined, fallback: LogLevel = 'war
 /** 附加字段名规范化：security 侧的 extra 参与「规范化精确命中」，故先按同一口径归一 */
 function normalizeExtra(extra: readonly string[]): string[] {
   return extra.map(normalizeFieldName);
-}
-
-/** 字段名是否敏感：委托 security 侧唯一口径（`isSensitiveFieldName`）。
- *  保留导出仅为兼容既有引用；新代码直接用 secret-scanner 的实现。 */
-export function isSensitiveField(field: string): boolean {
-  return isSensitiveFieldName(field);
 }
 
 /**

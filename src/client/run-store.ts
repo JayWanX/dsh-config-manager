@@ -59,6 +59,7 @@ import type { SyncStartResponse } from './sync/sync-api.ts'
 import type { ChannelSyncState, SyncChannel } from './sync/sync-view.ts'
 import { DEFAULT_SYNC_SESSIONS_LIMIT, defaultChannelSyncState } from './sync/sync-view.ts'
 import { REDACTED, redact } from '../security/redaction.ts'
+import { isRecord } from '../utils/guards.ts'
 
 import type { MyItemEntry } from './market/my-configs-api.ts'
 import type { MyInstallSlice, MyWizardSlice } from './market/my-configs-view.ts'
@@ -337,9 +338,6 @@ export interface MoreStoreSlice {
   /** 「更多」下的子视图：进行中 / 迁移历史 / 关于 */
   moreSub: 'runs' | 'history' | 'about'
 }
-
-/** 「更多」子视图类型。 */
-export type MoreSubTab = MoreStoreSlice['moreSub']
 
 /* ------------------------------------------------- 持久化（非敏感）状态形状 */
 
@@ -1203,11 +1201,6 @@ export function parsePersistedState(raw: string): PersistedState | null {
     ? { ...defaultMoreState(), ...p['more'] as unknown as MoreStoreSlice }
     : { moreSub }
   return { v: 1, view: mirroredView, panel, export: exp as PersistedExportState, import: imp as PersistedImportState, sync, market, snapshots: migratedSnapshots, profiles, recovery, more }
-}
-
-/** 运行时不变量小工具：值为普通对象。 */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /* ----------------------------------------------------- 控制器 rehydrate */

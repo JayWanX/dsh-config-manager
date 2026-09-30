@@ -28,6 +28,7 @@ import path from 'node:path'
 import os from 'node:os'
 import crypto from 'node:crypto'
 import { atomicWriteFile } from './atomic-write.ts'
+import { isENOENT } from './guards.ts'
 
 // ---------- 常量 ----------
 
@@ -263,11 +264,6 @@ export async function runWithMutationLock<T>(
   } finally {
     await release()
   }
-}
-
-/** 判断某 state 是否意味着「未获得锁（被挡）」；ACQUIRED 才放行 destructive */
-export function isAcquired(state: LockState): boolean {
-  return state === 'ACQUIRED'
 }
 
 /** 一次 recover 的返回 */
@@ -514,12 +510,13 @@ function defaultProbe(): ProcessIdentityProbe {
   return createPlatformProcessIdentityProbe()
 }
 
-function isENOENT(e: unknown): boolean {
-  return typeof e === 'object' && e !== null && (e as { code?: unknown }).code === 'ENOENT'
-}
-
-/** 解析 lock 文件 JSON，损坏/非法 → null */
-function parseJsonSafe(text: string): unknown {
+/**
+ * 解析 lock 文件 JSON，损坏/非法 → null。
+ *
+ * 名字里带 lock：它与 `utils/json.ts` 的 `parseJsonSafe`（深度/体积上限、超限抛
+ * `JsonDepthError`）**语义不同** —— 这里是「损坏即 null」，不得合并成同一个函数。
+ */
+function readLockJsonSafe(text: string): unknown {
   try { return JSON.parse(text) as unknown } catch { return null }
 }
 
@@ -921,7 +918,7 @@ export class EnvironmentLockManager {
       // ACL 不可读（EACCES 等）→ 视为 corrupt-unknown（无法确证 owner），安全侧
       return { kind: 'corrupt' }
     }
-    const parsed = parseJsonSafe(text) as LockOwnershipRecord | null
+    const parsed = readLockJsonSafe(text) as LockOwnershipRecord | null
     if (parsed === null || typeof parsed !== 'object' || parsed.schemaVersion !== LOCK_SCHEMA_VERSION
       || typeof parsed.owner?.instanceId !== 'string') {
       return { kind: 'corrupt' }
@@ -934,7 +931,7 @@ export class EnvironmentLockManager {
     const sbPath = path.join(this.locksDir, `${HEARTBEAT_PREFIX}${instanceId}`)
     let text: string
     try { text = await this.io.readFileText(sbPath) } catch (e) { if (isENOENT(e)) return null; throw e }
-    const parsed = parseJsonSafe(text) as HeartbeatRecord | null
+    const parsed = readLockJsonSafe(text) as HeartbeatRecord | null
     if (parsed === null || typeof parsed !== 'object' || parsed.ownerInstanceId !== instanceId) return null
     return parsed
   }
@@ -1048,7 +1045,7 @@ export class EnvironmentLockManager {
       // 读不到 captured（异常）→ quarantine，不 rename 回
       return { ok: false, removed: false, state: 'LOCK_IO_ERROR', detail: '捕获文件读取失败，保留 recovering 供诊断' }
     }
-    const captured = parseJsonSafe(capturedText) as LockOwnershipRecord | null
+    const captured = readLockJsonSafe(capturedText) as LockOwnershipRecord | null
     if (isCorruptReclaim) {
       // corrupt 回收：captured 无有效 owner（无 instanceId 可校验）→ 只确认它仍是非缺省非法内容 → unlink
       // （captured 若已变成有效 owner，即 successor 在 rename 后才出现于 ownershipPath，与此 recovering 无涉）
@@ -1235,7 +1232,3 @@ export class EnvironmentLockUnavailableError extends Error {
   }
 }
 
-/** 便捷：以 token 授权当前持有（供 nested operation 判断复用）—— 等价于 manager.validate 的纯函数形态 */
-export function isTokenValid(manager: EnvironmentLockManager, ctx: MutationLockContext | undefined): ctx is MutationLockContext {
-  return ctx !== undefined && typeof ctx === 'object' && manager.validate(ctx.token)
-}

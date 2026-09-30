@@ -28,18 +28,6 @@ export function isAbsolutePath(p: string): boolean {
   return false;
 }
 
-/** 路径是否为 home 目录（~ 或用户主目录开头） */
-export function isHomePath(p: string, homeDir: string): boolean {
-  const norm = normalizePath(p);
-  const home = normalizePath(homeDir);
-  return norm === '~' || norm === home || norm.startsWith(home + '/') || norm.startsWith('~/');
-}
-
-/** 目标平台与当前平台是否一致 */
-export function isSamePlatform(a: string, b: string): boolean {
-  return a === b;
-}
-
 /** ZIP 条目名安全检查（Zip Slip / 绝对路径 / 盘符 / NUL，规范 §19.1-2）。
  * 规则与 node:path 解耦：纯分段校验，跨平台无歧义。 */
 export function isPathSafe(entryName: string): boolean {

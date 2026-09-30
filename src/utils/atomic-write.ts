@@ -20,6 +20,7 @@ import fs from 'node:fs/promises';
 import fssync from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { isENOENT } from './guards.ts';
 
 // ---------- 常量 ----------
 
@@ -160,10 +161,6 @@ function fsyncDirSyncSafe(p: string): void {
   } finally {
     if (fd !== null) try { fssync.closeSync(fd); } catch { /* ignore */ }
   }
-}
-
-function isENOENT(e: unknown): boolean {
-  return typeof e === 'object' && e !== null && (e as { code?: unknown }).code === 'ENOENT';
 }
 
 function isRetryableLockCode(code: string | undefined): boolean {

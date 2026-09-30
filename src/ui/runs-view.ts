@@ -198,10 +198,3 @@ export function cancelDialogModel(
   }
 }
 
-/** 「已应用/未执行」的用户可读摘要参数（null → 壳层显示「未知」而不是编个数字）。 */
-export function cancelCostParams(model: CancelDialogModel): { applied: string; pending: string } {
-  return {
-    applied: model.appliedCount === null ? '' : String(model.appliedCount),
-    pending: model.pendingCount === null ? '' : String(model.pendingCount),
-  }
-}

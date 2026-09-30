@@ -3,15 +3,9 @@
  * m4 的 security/integrity.ts 可在此之上强化（本模块已实现规范 §18 全部语义）。
  */
 import crypto from 'node:crypto';
-import fs from 'node:fs/promises';
 
 export function sha256Hex(data: Uint8Array | string): string {
   return crypto.createHash('sha256').update(data).digest('hex');
-}
-
-export async function hashFile(filePath: string): Promise<string> {
-  const data = await fs.readFile(filePath);
-  return sha256Hex(data);
 }
 
 /** 生成一组 ZIP 相对路径 → SHA-256 的校验表（路径必须为 ZIP 内正斜杠相对路径） */

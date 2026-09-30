@@ -209,14 +209,6 @@ export interface RescueBannerInput {
   applied: boolean
 }
 
-export type RescueBannerKey = 'recovery.rescue.active' | 'recovery.rescue.applied'
-
-/** 主文案：未激活 → null（不渲染）；激活但本进程还没重启 → 重启提示；已生效 → 只陈述状态。 */
-export function rescueBannerKey(input: RescueBannerInput): RescueBannerKey | null {
-  if (!input.active) return null
-  return input.applied ? 'recovery.rescue.applied' : 'recovery.rescue.active'
-}
-
 export type RescueHintKey = 'recovery.rescue.appliedHint' | 'recovery.rescue.restartHint'
 
 /** 第二行提示：已生效时改说「退出同样要重启」，否则说「需要重启才生效」。 */

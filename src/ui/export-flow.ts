@@ -38,14 +38,6 @@ export function normalizeExportFileName(raw: string): string {
   return /\.zip$/i.test(trimmed) ? trimmed : `${trimmed}.zip`
 }
 
-/** 导出附加选项（P0-④：自定义文件名/备注——经 ExportFlow.run 透传给 host /export） */
-export interface ExportExtraOptions {
-  /** 自定义导出文件名（.zip；缺省宿主自动命名） */
-  fileName?: string
-  /** 导出备注（写入 exports/.backup-notes.json；缺省无） */
-  note?: string
-}
-
 /**
  * 清单读取失败的**分区**（UI-07）。
  *

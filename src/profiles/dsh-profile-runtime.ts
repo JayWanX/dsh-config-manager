@@ -16,9 +16,10 @@
  *    过期阈值是刷新间隔的 3 倍（20s 刷 / 60s 判死），避免刚启动/忙时误判成可重复启动；
  *  - **只能停别人**（`stopExternal`）：停自己会死在响应途中；当前实例由用户关窗口/终端结束。
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { atomicWriteFileSync } from '../utils/atomic-write.ts'
+import { readTextSafe, sanitizeFilePart } from './dsh-profile-io.ts'
 import { DshProfileError } from './dsh-profile-manager.ts'
 import { resolveProcessControl, stopPid, type ProcessControlDeps } from './process-control.ts'
 import type { DshProfileStopResult } from './dsh-profile-launcher.ts'
@@ -132,7 +133,7 @@ export class DshProfileRuntimeRegistry {
 
   /** 某个 profile 的心跳文件绝对路径 */
   fileFor(name: string): string {
-    return join(this.dir(), `${sanitizeFileName(name)}.json`)
+    return join(this.dir(), `${sanitizeFilePart(name)}.json`)
   }
 
   /** 自报/刷新心跳（幂等；apply 时写一次，之后由 startHeartbeat 定期刷）。 */
@@ -184,7 +185,7 @@ export class DshProfileRuntimeRegistry {
     for (const entry of entries) {
       if (!entry.endsWith('.json')) continue
       const file = join(dir, entry)
-      const record = parseRuntimeRecord(readTextSafe(file))
+      const record = parseRuntimeRecord(readTextSafe(file) ?? '')
       if (record === null || !runtimeRecordLive(record, { isAlivePid: this.proc.isAlivePid, now, staleMs: this.staleMs })) {
         // 坏文件 / 死实例：清理（写入端总是原子写合法 JSON，所以坏文件不可能是在写的实例）
         rmSync(file, { force: true })
@@ -215,14 +216,3 @@ export class DshProfileRuntimeRegistry {
   }
 }
 
-function sanitizeFileName(name: string): string {
-  return name.replace(/[^A-Za-z0-9._-]/g, '_')
-}
-
-function readTextSafe(path: string): string {
-  try {
-    return readFileSync(path, 'utf8')
-  } catch {
-    return ''
-  }
-}

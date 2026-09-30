@@ -75,20 +75,6 @@
   color: inherit;
 }
 
-/* 键盘提示 */
-.kbd {
-  display: inline-block;
-  padding: 0 5px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-bottom-width: 2px;
-  border-radius: 4px;
-  background: var(--dsw-alias-bg-layer-2);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 10.5px;
-  line-height: 16px;
-  color: var(--dsw-alias-label-secondary);
-}
-
 /* ================================================================ §2 Shell */
 
 /* —— 顶部导航条：左侧页签（圆角分段条），右侧图标动作 ——
@@ -1286,87 +1272,11 @@
   white-space: nowrap;
 }
 
-/* —— 统计块（指标） —— */
-.statGrid,
-.metricGrid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.statCard,
-.metricCard {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 10px 12px;
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-layer-2);
-  min-width: 0;
-}
-
-/* 可点击统计卡（button 元素需重置默认样式） */
-button.statCard {
-  font: inherit;
-  color: inherit;
-  text-align: left;
-  width: 100%;
-  cursor: pointer;
-}
-
-button.statCard:hover {
-  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 45%, var(--dsw-alias-border-l1));
-}
-
-button.statCard:focus-visible {
-  outline: 2px solid var(--dsw-alias-state-business-primary);
-  outline-offset: 1px;
-}
-
 /* 页头行内的横幅：占满剩余宽度（刷新按钮靠右） */
 .actionRow .banner {
   flex: 1 1 auto;
   min-width: 0;
   margin: 0;
-}
-
-.statValue {
-  display: flex;
-  align-items: baseline;
-  gap: 5px;
-  font-size: 19px;
-  font-weight: 700;
-  line-height: 1.2;
-  color: var(--dsw-alias-label-primary);
-}
-
-.metricValue {
-  font-size: 19px;
-  font-weight: 700;
-  line-height: 1.2;
-}
-
-.statValueSmall {
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.statLabel,
-.metricLabel {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--dsw-alias-label-tertiary);
-}
-
-.statMeta,
-.metricMeta {
-  font-size: 11px;
-  color: var(--dsw-alias-label-tertiary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .warnText {
@@ -2186,19 +2096,6 @@ button.statCard:focus-visible {
   margin-top: 8px;
 }
 
-/* 定时备份卡：事实行与设置行沿用统一下边距节奏（替代组件内联 style） */
-.scheduleFacts {
-  margin-top: 8px;
-}
-
-.scheduleRow {
-  margin-top: 10px;
-}
-
-.scheduleNote {
-  margin-top: 6px;
-}
-
 .authorRow .groupLabel {
   margin-bottom: 0;
 }
@@ -2224,10 +2121,6 @@ button.statCard:focus-visible {
   gap: 8px;
   flex-wrap: wrap;
   margin-bottom: 8px;
-}
-
-.pushRight {
-  margin-left: auto;
 }
 
 /* ================================================================ §7 Page: Overview（控制中心） */
@@ -2351,13 +2244,6 @@ button.statCard:focus-visible {
   gap: 8px;
   flex-wrap: wrap;
   margin-bottom: 10px;
-}
-
-/* —— 备份位置信息块（两列 kv） —— */
-.infoGrid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 4px 24px;
 }
 
 .infoRow {
@@ -2618,12 +2504,6 @@ button.statCard:focus-visible {
   white-space: nowrap;
 }
 
-/* CJK 断行纪律：插入语不劈词 */
-.quickActionHint,
-.todoText {
-  line-break: strict;
-}
-
 /* 活动空态（紧凑） */
 .activityEmpty {
   padding: 16px;
@@ -2632,185 +2512,41 @@ button.statCard:focus-visible {
   text-align: center;
 }
 
-.ovGrid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 200px;
-  gap: 10px;
-  align-items: start;
-}
-
-.ovMain {
-  min-width: 0;
-}
-
-.ovSide {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-/* 快速操作：紧凑网格 */
-.quickGrid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 6px;
-  margin-bottom: 10px;
-}
-
-.quickAction {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 9px 10px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 7px;
-  background: var(--dsw-alias-bg-base);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.quickAction:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 45%, var(--dsw-alias-border-l2));
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 5%, transparent);
-}
-
-.quickAction:focus-visible {
-  outline: 2px solid var(--dsw-alias-state-business-primary);
-  outline-offset: 1px;
-}
-
-.quickAction:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.quickActionSymbol {
-  font-size: 13px;
-  color: var(--dsw-alias-state-business-primary);
-  line-height: 1;
-}
-
-.quickActionTitle {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--dsw-alias-label-primary);
-}
-
-.quickActionHint {
-  font-size: 10.5px;
-  line-height: 1.45;
-  color: var(--dsw-alias-label-tertiary);
-}
-
-/* 活动列表 */
-.ovActivity {
-  display: flex;
-  flex-direction: column;
-}
-
-.ovActivityItem {
-  display: flex;
-  align-items: flex-start;
-  gap: 7px;
-  padding: 6px 0;
-  border-bottom: 1px solid color-mix(in srgb, var(--dsw-alias-border-l1) 55%, transparent);
-  font-size: 11.5px;
-  min-width: 0;
-}
-
-.ovActivityItem:last-child {
-  border-bottom: none;
-}
-
-.ovActivityTime {
-  flex: none;
-  width: 58px;
-  color: var(--dsw-alias-label-tertiary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 10.5px;
-  padding-top: 1px;
-}
-
-.ovActivityText {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow-wrap: anywhere;
-  color: var(--dsw-alias-label-secondary);
-}
-
-/* 待办/建议行 */
-.todoRow {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 10px;
-  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary) 35%, transparent);
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 7%, transparent);
-  font-size: 12px;
-  margin-bottom: 6px;
-}
-
-.todoRow:last-child {
-  margin-bottom: 0;
-}
-
-.todoText {
-  flex: 1 1 auto;
-  min-width: 0;
-  color: var(--dsw-alias-label-primary);
-}
-
 /* ================================================================ §8 Page: Backups */
 
-.snapshotList,
-.backupFileList {
+.snapshotList {
   display: flex;
   flex-direction: column;
   gap: 6px;
   margin-bottom: 10px;
 }
 
-.snapshotRow,
-.backupFileRow {
+.snapshotRow {
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 8px;
   background: var(--dsw-alias-bg-layer-2);
   padding: 9px 12px;
 }
 
-.snapshotRow[data-selected],
-.backupFileRow[data-selected] {
+.snapshotRow[data-selected] {
   border-color: var(--dsw-alias-state-business-primary);
   background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 7%, transparent);
 }
 
-.snapshotRowHeader,
-.backupFileMeta {
+.snapshotRowHeader {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 12px;
 }
 
-.snapshotRowMain,
-.backupFileName {
+.snapshotRowMain {
   flex: 1 1 auto;
   min-width: 0;
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.backupFileNote {
-  font-size: 11px;
-  color: var(--dsw-alias-label-tertiary);
 }
 
 /* 咨询卡「建议依据」：去重后每条独占一行。
@@ -2904,33 +2640,6 @@ button.statCard:focus-visible {
   min-height: 280px;
 }
 
-/* 导出分组目录（两列致密勾选网格） */
-.exportGrid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 8px 12px;
-  margin-bottom: 10px;
-}
-
-.exportGroup {
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-layer-2);
-  padding: 10px 12px;
-  min-width: 0;
-}
-
-.exportItems {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.exportItem {
-  min-width: 0;
-  padding: 1px 0;
-}
-
 /* ------------------------------------------------------------------
    内容选择器（ContentPicker · Phase 1 条目级导出选择）
    两级树：分区（可折叠）→ 最小可拆单元。与只读的「分区构成」网格
@@ -3015,19 +2724,6 @@ button.statCard:focus-visible {
   border-top: 1px solid color-mix(in srgb, var(--dsw-alias-border-l1) 55%, transparent);
 }
 
-.pickerRow {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 0;
-  min-width: 0;
-}
-
-.pickerRow > :first-child {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
 /* 单元行缩进，视觉从属其分区 */
 .pickerUnit {
   animation: itemEnter var(--cm-motion-base) var(--cm-motion-ease-out);
@@ -3050,8 +2746,8 @@ button.statCard:focus-visible {
 }
 
 /* 级联树行：左侧 chevron（点它只展开**这一棵子树**）+ 勾选框占满剩余宽度。
-   与 .pickerRow 的区别只在首子节点是固定宽度的控件而不是可伸缩的勾选框 ——
-   所以另起一个类，不去改 .pickerRow 的既有规则（其它调用处零影响）。 */
+   与普通勾选行的区别只在首子节点是固定宽度的控件而不是可伸缩的勾选框 ——
+   所以另起一个类，不去改既有勾选行规则（其它调用处零影响）。 */
 .pickerTreeRow {
   display: flex;
   align-items: center;
@@ -3195,14 +2891,6 @@ button.statCard:focus-visible {
   margin: 0 0 10px;
 }
 
-.optionsHeader {
-  display: block;
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--dsw-alias-label-tertiary);
-  margin-bottom: 8px;
-}
-
 /* 并排字段（双列栅格）内的 .field 归零下边距：行间距由容器负责，否则两个字段各差 10px。
    原先是 4 处内联 style={{ marginBottom: 0 }}，按「style 属性只允许极小修补」改成语义类（UI-21）。 */
 .secretFields .field {
@@ -3232,10 +2920,6 @@ button.statCard:focus-visible {
   padding-left: 18px;
   font-size: 11.5px;
   color: var(--dsw-alias-label-secondary);
-}
-
-.wizardCard {
-  margin: 0 0 10px;
 }
 
 .wizardStepperRow {
@@ -4075,13 +3759,6 @@ button.statCard:focus-visible {
 
 /* ================================================================ §10-13 过渡页样式（逐页重建时替换/细化） */
 
-.syncChannelHead {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
 .historyGroup {
   margin-bottom: 12px;
 }
@@ -4337,19 +4014,6 @@ button.profileRowMain:hover {
 
 /* 设置弹窗收缩（<900px 视口：弹窗变 100vw-48px，内容列变窄） */
 @media (max-width: 900px) {
-  .ovGrid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .statGrid,
-  .metricGrid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .quickGrid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .secretFields {
     grid-template-columns: 1fr;
   }

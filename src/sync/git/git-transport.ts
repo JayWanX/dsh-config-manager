@@ -39,6 +39,7 @@ import type {
 } from '../transport.ts';
 import { parseJsonSafe } from '../../utils/json.ts';
 import { atomicWriteFile } from '../../utils/atomic-write.ts';
+import { quoteGitValue } from '../../utils/git-quote.ts';
 import { SECTION_FILE_PREFIXES } from '../../schema/config.ts';
 import type { FilesSection, SectionData, SectionId } from '../../schema/types.ts';
 import { zhMsg } from '../../core/messages.ts';
@@ -142,11 +143,6 @@ const defaultExec: GitExecFn = async (cmd, args, opts) => {
     };
   }
 };
-
-/** git config 值里的路径转义：含空白/引号时用引号包裹（Windows 路径转正斜杠） */
-function quoteGitValue(value: string): string {
-  return /[\s"']/.test(value) ? `"${value.replace(/"/g, '\\"')}"` : value;
-}
 
 /** 实现 SyncTransport 的 git 通道。所有操作前 ensureRepo() 保证工作副本就绪，网络命令带凭据。 */
 export class GitTransport implements SyncTransport {

@@ -10,11 +10,7 @@ import { parseJsonSafe } from '../utils/json.ts';
 import { isPathSafe } from '../utils/paths.ts';
 import { sectionMetaOf } from './section-registry.ts';
 import { sectionDataVersionIssue } from './versions.ts';
-import type {
-  CredentialsSection, FilesSection, McpSection, PluginsSection,
-  PromptsSection, ProvidersSection, SectionData, SectionId,
-  SettingsSection, UiSection, WorkspacesSection,
-} from './types.ts';
+import type { SectionData, SectionId } from './types.ts';
 
 /* —— 分区集合与 ZIP 布局：单一来源是 section-registry.ts，此处仅原样再导出（保持既有 import 路径可用） —— */
 export {
@@ -158,13 +154,3 @@ export function validateSectionData(sectionId: SectionId, data: unknown): Sectio
   return issues;
 }
 
-/** 分区 JSON 载荷的类型收窄（供 adapter / analyzer 使用） */
-export function asSettingsSection(data: unknown): SettingsSection { return data as SettingsSection; }
-export function asUiSection(data: unknown): UiSection { return data as UiSection; }
-export function asProvidersSection(data: unknown): ProvidersSection { return data as ProvidersSection; }
-export function asPluginsSection(data: unknown): PluginsSection { return data as PluginsSection; }
-export function asMcpSection(data: unknown): McpSection { return data as McpSection; }
-export function asPromptsSection(data: unknown): PromptsSection { return data as PromptsSection; }
-export function asWorkspacesSection(data: unknown): WorkspacesSection { return data as WorkspacesSection; }
-export function asCredentialsSection(data: unknown): CredentialsSection { return data as CredentialsSection; }
-export function asFilesSection(data: unknown): FilesSection { return data as FilesSection; }

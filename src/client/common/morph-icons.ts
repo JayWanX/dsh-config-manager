@@ -70,8 +70,6 @@ export const MORPH_ICONS = {
   copyDone: CopyCheck,
 } satisfies Record<string, IconNode>
 
-export type MorphIconName = keyof typeof MORPH_ICONS
-
 /**
  * 形变弹簧参数：**临界阻尼**（无过冲）。
  *

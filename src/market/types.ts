@@ -212,12 +212,6 @@ export interface MarketStatusResponse {
   bootAutoRefreshed?: boolean;
 }
 
-/** POST /market/add | /market/remove 响应：{ ok, markets } */
-export interface MarketMutateResponse {
-  ok: boolean;
-  markets: MarketSummary[];
-}
-
 /** POST /market/refresh 响应：{ ok, items, market } */
 export interface MarketRefreshResponse {
   ok: boolean;

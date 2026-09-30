@@ -27,7 +27,9 @@ import { dirname, join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { atomicWriteFileSync } from '../utils/atomic-write.ts'
 import { resolveDesktopCarrier } from '../utils/desktop-carrier.ts'
+import { isRecord } from '../utils/guards.ts'
 import { DshProfileError } from './dsh-profile-manager.ts'
+import { readTextSafe, sanitizeFilePart } from './dsh-profile-io.ts'
 import { resolveProcessControl, stopPid, type ResolvedProcessControl } from './process-control.ts'
 import {
   DSH_PROFILE_LAUNCH_TIMEOUT_MS, isLaunchableShape, isManagedProfileName,
@@ -220,11 +222,11 @@ export class DshProfileLauncher {
       findFreePort: deps.findFreePort ?? defaultFindFreePort,
       probe: deps.probe ?? defaultProbe,
       sleep: deps.sleep ?? ((ms) => delay(ms)),
-      readLog: deps.readLog ?? readTextSafe,
+      readLog: deps.readLog ?? ((file) => readTextSafe(file) ?? ''),
       now: deps.now ?? (() => Date.now()),
       isAlivePid: this.proc.isAlivePid,
       killPid: this.proc.killPid,
-      readState: deps.readState ?? (() => readTextSafe(this.stateFile())),
+      readState: deps.readState ?? (() => readTextSafe(this.stateFile()) ?? ''),
       writeState: deps.writeState ?? ((text) => { saveStateFile(this.stateFile(), text) }),
       isProfileRunning: deps.isProfileRunning ?? (() => false),
     }
@@ -370,11 +372,11 @@ export function parseLaunches(text: string): DshProfileLaunchRecord[] {
   } catch {
     return []
   }
-  const rows = Array.isArray(parsed) ? parsed : (isPlainRecord(parsed) && Array.isArray(parsed['launches']) ? parsed['launches'] : null)
+  const rows = Array.isArray(parsed) ? parsed : (isRecord(parsed) && Array.isArray(parsed['launches']) ? parsed['launches'] : null)
   if (rows === null) return []
   const out: DshProfileLaunchRecord[] = []
   for (const row of rows) {
-    if (!isPlainRecord(row)) continue
+    if (!isRecord(row)) continue
     const { name, port, pid, url, logFile, startedAt } = row
     if (typeof name !== 'string' || name === '') continue
     if (typeof port !== 'number' || !Number.isInteger(port)) continue
@@ -397,28 +399,9 @@ export function serializeLaunches(records: readonly DshProfileLaunchRecord[]): s
   return `${JSON.stringify({ schemaVersion: 1, launches: sorted }, null, 2)}\n`
 }
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 /** 原子落盘（先写临时文件再 rename；半截 JSON 会让「运行中」判定失真）。 */
 function saveStateFile(file: string, text: string): void {
   atomicWriteFileSync(file, text, { mode: 0o644 })
-}
-
-
-
-/** 文件名片段清洗（profile 名已过校验；这里只是防意外字符）。 */
-function sanitizeFilePart(name: string): string {
-  return name.replace(/[^A-Za-z0-9._-]/g, '_')
-}
-
-function readTextSafe(path: string): string {
-  try {
-    return readFileSync(path, 'utf8')
-  } catch {
-    return ''
-  }
 }
 
 /** 真实 spawn：detached + stdout/stderr 全进日志文件（与 dshm/DSHgo 同一做法）。 */

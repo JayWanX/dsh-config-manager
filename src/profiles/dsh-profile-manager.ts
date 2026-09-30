@@ -21,12 +21,14 @@
  * 物理删除：remove() 走 rmSync(recursive)，profile 目录内的 junction（pnpm 链接）
  * 只删链接本身，不会跟随进 pnpm store。
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs'
 // 复制走 async fs（整档案上万个文件，cpSync 会把宿主事件循环卡住二十多秒）
 import { copyFile, cp, mkdir, readdir, readlink, rm, stat, symlink, unlink } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { atomicWriteFileSync } from '../utils/atomic-write.ts'
+import { isRecord } from '../utils/guards.ts'
 import { resolveProfileDir, validateProfileName } from '../core/plugin-cli.ts'
+import { readTextSafe } from './dsh-profile-io.ts'
 import {
   DSH_PROFILE_TEMPLATES, checkProfileName, classifyShape, isManagedProfileName,
   type DshProfileCopyWarning, type DshProfileDetail, type DshProfileErrorCode, type DshProfileIssue,
@@ -77,10 +79,6 @@ export interface DshProfileManagerOptions {
   currentProfile?: () => string
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 /**
  * `candidate` 是否落在 `root` **内部**（root 自身不算）。
  * 跨盘符时 `relative` 会回一个绝对路径 → 判为「不在内部」（路径来自别的卷，不能重指向）。
@@ -89,15 +87,6 @@ function isInsideDir(root: string, candidate: string): boolean {
   const rel = relative(root, candidate)
   if (rel === '' || isAbsolute(rel)) return false
   return rel !== '..' && !rel.startsWith(`..${sep}`)
-}
-
-/** 读文本文件；不可读返回 null（调用方决定是 prompt 还是 issue）。 */
-function readTextSafe(path: string): string | null {
-  try {
-    return readFileSync(path, 'utf8')
-  } catch {
-    return null
-  }
 }
 
 /** 「档案」= DSH profile 的读写引擎（同步 fs；profile 数量级为个位数，无需异步）。 */

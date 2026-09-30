@@ -37,6 +37,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { atomicWriteFile } from '../utils/atomic-write.ts';
+import { isRecord } from '../utils/guards.ts';
 import { parseJsonSafe } from '../utils/json.ts';
 
 // ---------- 常量 ----------
@@ -151,11 +152,6 @@ export function adviceFor(kind: CrashKind | null, crashed: boolean): CrashAdvice
 }
 
 // ---------- boot-state 读写 ----------
-
-/** 普通对象判定（数组 / null / 原始值均不算）。 */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 /** crashReason 是否为合法枚举值。 */
 function isCrashKind(value: unknown): value is CrashKind {

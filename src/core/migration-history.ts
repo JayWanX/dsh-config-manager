@@ -27,7 +27,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { atomicWriteFile } from '../utils/atomic-write.ts';
-import { redact } from '../security/redaction.ts';
+import { maskHighEntropy, redact } from '../security/redaction.ts';
 import { scanAndRedact } from '../security/secret-scanner.ts';
 import { sha256Hex } from '../utils/hashing.ts';
 
@@ -151,18 +151,8 @@ const defaultIo: MigrationIo = {
 };
 
 // ---------- Redaction（双保险） ----------
-
-/** journal 级高熵长 token 掩码（复用 journal 语义，独立实现避免跨层依赖）。 */
-const HIGH_ENTROPY_RE = /([A-Za-z0-9+/_=-]{28,})/g;
-
-/** 结构化时间戳/文件名形态：日期段必须由连字符连接（ISO 日期 YYYY-MM-DD 或
- *  紧凑时间戳 YYYYMMDD-HHMMSS）。连字符不存在于 hex/base64 token 中，豁免不会误放行随机密钥。 */
-const DATE_STAMP_RE = /\d{4}-\d{2}-\d{2}|\d{8}-\d{6}/;
-
-/** 高熵长 token 掩码（日期戳形态豁免）。 */
-function maskHighEntropy(text: string): string {
-  return text.replace(HIGH_ENTROPY_RE, (run) => (DATE_STAMP_RE.test(run) ? run : '[REDACTED]'));
-}
+// 高熵长 token 掩码与 journal 语义完全一致 → 唯一实现在 `security/redaction.ts`
+// （`maskHighEntropy`；HIGH_ENTROPY_RE 带 `/g`，其 lastIndex 语义见该处注释）。
 
 /**
  * 历史文本强脱敏：redact（结构化字段 + 已知值形状）+ 高熵长 token 掩码。

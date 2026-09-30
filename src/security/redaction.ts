@@ -38,6 +38,25 @@ const VALUE_PATTERNS: { name: string; re: RegExp }[] = [
 /** URL query 中的敏感参数值（保留参数名，只替换值） */
 const URL_QUERY_RE = /([?&](?:token|api[_-]?key|key|secret|access[_-]?token|password|auth)=)([^&\s"']+)/gi;
 
+/* ---------------- 高熵长 token（journal / 迁移历史强脱敏共用） ---------------- */
+
+/** 高熵值形状（长 hex/base64/随机 id）：结构化 redact() 覆盖不了任意 secret，journal / 迁移
+ *  历史级强脱敏补挡。
+ *
+ *  ⚠️ 带 `/g`：当前唯一用法是 `text.replace(re, cb)`（`String.replace` 内部会重置 lastIndex）。
+ *  **不得改用 `re.test(run)` 做判定** —— `/g` 正则的 lastIndex 会跨调用泄漏，同一 token 会时而
+ *  命中时而漏（漏 = 明文落盘）。确需独立判定时用 `new RegExp(re.source)`（无 `/g`）。 */
+const HIGH_ENTROPY_RE = /([A-Za-z0-9+/_=-]{28,})/g;
+
+/** 结构化时间戳/文件名形态：日期段必须由连字符连接（ISO 日期 YYYY-MM-DD 或紧凑时间戳
+ *  YYYYMMDD-HHMMSS）。连字符不存在于 hex/base64 token 中，豁免不会误放行随机密钥。 */
+const DATE_STAMP_RE = /\d{4}-\d{2}-\d{2}|\d{8}-\d{6}/;
+
+/** 高熵长 token 掩码（日期戳形态豁免；回调逐个 run 判定，避免误伤文件名/时间戳）。 */
+export function maskHighEntropy(text: string): string {
+  return text.replace(HIGH_ENTROPY_RE, (run) => (DATE_STAMP_RE.test(run) ? run : '[REDACTED]'));
+}
+
 /* ---------------- redact ---------------- */
 
 function replaceSensitiveField(text: string, re: RegExp, blacklist: readonly string[]): string {

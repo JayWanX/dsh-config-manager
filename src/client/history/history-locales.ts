@@ -159,23 +159,3 @@ export const en = {
   'history.result.skipped': 'Skipped',
 } as const satisfies Record<HistoryKey, string>;
 
-/** history 纯函数的 kind 展示映射（供 UI 层直接使用）。 */
-export const HISTORY_KIND_LABELS: Record<MigrationKind, string> = {
-  import: '导入',
-  restore: '快照恢复',
-  rollback: '回滚',
-  'profile-create': '档案新建',
-  'profile-select': '设置下次启动档案',
-  'profile-switch': '档案切换',
-  'profile-delete': '档案删除',
-  'profile-rename': '档案重命名',
-  'profile-save': '档案保存',
-  'profile-import': '档案导入',
-  'sync-apply': '一键同步应用',
-  autosync: '自动同步',
-  recovery: '恢复/回滚编排',
-  backup: '定时备份',
-  'backup-manual': '手动备份',
-  'snapshot-delete': '快照删除',
-  'snapshot-prune': '快照保留清理',
-};

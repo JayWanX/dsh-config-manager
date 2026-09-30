@@ -231,14 +231,10 @@ export const CloseIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name
 export const DeleteIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="delete" {...p} />
 export const DownloadIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="download" {...p} />
 export const InspectIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="inspect" {...p} />
-export const ViewIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="view" {...p} />
-export const CopyIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="copy" {...p} />
 export const ArrowRightIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="arrowRight" {...p} />
-export const ChevronRightIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="chevronRight" {...p} />
 export const ChevronDownIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="chevronDown" {...p} />
 export const PreviewIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="preview" {...p} />
 export const SnapshotIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="snapshot" {...p} />
-export const OkIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="ok" {...p} />
 export const CheckIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="check" {...p} />
 export const WarnIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="warn" {...p} />
 export const ErrorIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="error" {...p} />

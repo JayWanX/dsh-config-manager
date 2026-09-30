@@ -18,7 +18,6 @@ import {
 } from '../utils/hashing.ts';
 import type { ChecksumVerifyResult } from '../utils/hashing.ts';
 
-export const CHECKSUMS_ALGORITHM = 'sha256' as const;
 export const SHA256_HEX_RE = /^[0-9a-f]{64}$/i;
 /** 与 core ZIP 条目数上限一致的默认表大小上限 */
 export const DEFAULT_MAX_CHECKSUM_ENTRIES = 10_000;

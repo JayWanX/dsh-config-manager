@@ -13,7 +13,7 @@ import path from 'node:path';
 import { Exporter } from '../../src/core/exporter.ts';
 import { Importer } from '../../src/core/importer.ts';
 import { createAdapters } from '../../src/adapters/index.ts';
-import { createLogger, redact as loggerRedact, redactValue as loggerRedactValue, type LogLevel, type LogSink } from '../../src/utils/logger.ts';
+import { createLogger, redact as loggerRedact, redactValue as loggerRedactValue, type LogLevel } from '../../src/utils/logger.ts';
 import { redact } from '../../src/security/redaction.ts';
 import { makeContext, MemSnapshotStore, type MockHostContext } from '../../src/adapters/test-helpers.ts';
 
@@ -27,13 +27,6 @@ async function withTmp<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
-}
-
-/** 收集日志的内存 sink */
-function collectingSink(): { sink: LogSink; lines: { level: LogLevel; message: string; meta?: unknown }[] } {
-  const lines: { level: LogLevel; message: string; meta?: unknown }[] = [];
-  const sink: LogSink = (level, message, meta) => { lines.push({ level, message, meta }); };
-  return { sink, lines };
 }
 
 /** 给 ctx 换上收集日志的 logger */

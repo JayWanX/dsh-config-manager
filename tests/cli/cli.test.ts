@@ -86,7 +86,7 @@ test('C-03 pickDefaultSnapshotId：取最近非 rolled-back；全回滚/空 → 
 test('C-04 validateSnapshotId：拒绝路径分隔符与保留名', () => {
   assert.equal(validateSnapshotId('3f2b1c0e-1234-5678-9abc-def012345678'), '3f2b1c0e-1234-5678-9abc-def012345678');
   for (const bad of ['', '.', '..', 'a/b', 'a\\b']) {
-    assert.throws(() => validateSnapshotId(bad), undefined, `应拒绝: ${JSON.stringify(bad)}`);
+    assert.throws(() => validateSnapshotId(bad), `应拒绝: ${JSON.stringify(bad)}`);
   }
 });
 
@@ -217,7 +217,6 @@ test('C-09 runCli restore --dry-run：零写入（不还原文件、不建 pre-r
     assert.ok(!out.join('\n').includes('恢复完成'), 'dry-run 不打印执行报告');
     await assert.rejects(
       fs.readdir(path.join(dir, 'pre-restore')),
-      undefined,
       'dry-run 不得创建 pre-restore 副本目录',
     );
   });

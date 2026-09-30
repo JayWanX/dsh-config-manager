@@ -153,7 +153,8 @@ function relativeTargetLayer(fromRel: string, spec: string): string | null {
   const abs = path.resolve(path.dirname(fromAbs), spec);
   const rel = path.relative(SRC_ROOT, abs).split(path.sep).join('/');
   if (rel.startsWith('..')) return null; // 越出 src 的路径（不应出现）
-  return rel.split('/')[0];
+  // rel 非空时 split 必然有首段；noUncheckedIndexedAccess 下显式兜底（与「越出 src」同语义）
+  return rel.split('/')[0] ?? null;
 }
 
 /* ---------------------------------------------------------------- 断言 */
@@ -166,7 +167,8 @@ test('F7 架构边界：各层 import 依赖方向守护（违规即失败并列
     const rel = path.relative(SRC_ROOT, file).split(path.sep).join('/');
     // 入口层豁免：src/index.ts（host 入口）、src/cli/**（CLI 入口，仍受 @deepseek-ai 全局约束）
     const isEntry = rel === 'index.ts' || rel.startsWith('cli/');
-    const layer = rel.split('/')[0];
+    // rel 相对 SRC_ROOT，首段即层名（空串 = rel 为空，LAYER_RULES 未命中 → 由下面 continue 跳过）
+    const layer = rel.split('/')[0] ?? '';
     const rule = LAYER_RULES[layer];
     const fileViolations = new Set<string>(); // 同文件同 spec 的 type/value 双 import 去重
 

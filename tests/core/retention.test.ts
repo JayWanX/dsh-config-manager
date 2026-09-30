@@ -15,6 +15,7 @@ import {
   FileSnapshotStore, SNAPSHOT_RETENTION_LIMIT, selectPruneCandidates,
 } from '../../src/core/backup.ts';
 import { listSnapshots } from '../../src/core/restore.ts';
+import type { SnapshotEntry } from '../../src/core/types.ts';
 
 async function withTmp<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-cm-retention-'));
@@ -34,7 +35,7 @@ async function seedSnapshot(dir: string, id: string, createdAt: string): Promise
 }
 
 function minSnapshot(id: string, createdAt: string): {
-  id: string; createdAt: string; sourceZip: string; entries: unknown[];
+  id: string; createdAt: string; sourceZip: string; entries: SnapshotEntry[];
 } {
   return { id, createdAt, sourceZip: `${id}.zip`, entries: [] };
 }

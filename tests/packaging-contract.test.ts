@@ -6,7 +6,13 @@
  * 回归时不会报警（例如把 UI 包误加回 runtime `dependencies`，或删掉 sourcemap 排除项）。
  * P-3 补上 DSH 兼容闸关心的 `peerDependencies` 范围（issue #53）。
  *
- * 本文件只读 `package.json`，零依赖（`node:test` + `node:assert`），不触碰网络与磁盘其它位置。
+ * V-1（版本四处一致）补上 AGENTS.md 的「发版门禁 ①」：`package.json.version` ≡
+ * `src/index.ts` 的 `PLUGIN_VERSION` ≡ `package-lock.json` 根 `version` ≡
+ * `package-lock.json.packages[""].version`（此前全库零断言：只改 `package.json`、漏改
+ * `src/index.ts`，CI 依旧全绿，用户端「关于」页显示的版本与安装包不同）。
+ *
+ * 本文件只读 `package.json` / `package-lock.json` / `src/index.ts` 三份文本，
+ * 零依赖（`node:test` + `node:assert`），不触碰网络与磁盘其它位置。
  * 每一条断言都做过变异验证（见文件末注释）：把对应字段改坏必须红灯。
  */
 import test from 'node:test';
@@ -17,11 +23,17 @@ import path from 'node:path';
 const repoRoot = path.resolve(import.meta.dirname, '..');
 
 interface PackageJson {
+  version?: string;
   dependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
   peerDependenciesMeta?: Record<string, { optional?: boolean }>;
   files?: string[];
   exports?: Record<string, { types?: string; default?: string }>;
+}
+
+interface PackageLockJson {
+  version?: string;
+  packages?: Record<string, { version?: string } | undefined>;
 }
 
 const pkg = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8')) as PackageJson;
@@ -158,4 +170,91 @@ test('P-3: 区间形态 = 显式下界 + `-0` 上界（caret/tilde 一律不匹�
     assert.ok(!shape.test(bad), `${bad} 不应通过形态校验`);
   }
 });
+
+/* ------------------------------------------ V-1: 版本四处一致（发版门禁 ①） */
+
+/**
+ * AGENTS.md「🔢 版本三处必须同步（最易漏）」/「发版前必做两道门禁 ①」：
+ *   `package.json.version` ≡ `src/index.ts` 的 `PLUGIN_VERSION`
+ *   ≡ `package-lock.json` 根对象 `version` ≡ `package-lock.json.packages[""].version`
+ * 实测此前**全库无任何断言**覆盖这条门禁（`ci.yml` / `publish.yml` 也没有对应步骤），
+ * 于是「只改 package.json 的版本、不改 src/index.ts」可以一路发到用户机器上：
+ * 安装的包是 0.1.99，而「关于」页（`GET /prefs` 回传的 `currentVersion`，源自
+ * `PLUGIN_VERSION`）与导出 manifest 的 `exporter.version` 仍是旧值。
+ *
+ * 为什么不 import `src/index.ts` 取真实值：那是宿主入口，import 会拉起整条 DSH/Cordis
+ * 依赖链与副作用；这里只需包字面量，源码级正则读取与同库其它源码守卫同口径。
+ */
+const pkgVersion = pkg.version;
+const lock = JSON.parse(
+  readFileSync(path.join(repoRoot, 'package-lock.json'), 'utf8'),
+) as PackageLockJson;
+
+/** 从 `src/index.ts` 提取 `export const PLUGIN_VERSION = '<version>'` 的字面量。 */
+function readPluginVersionFromSource(): string {
+  const source = readFileSync(path.join(repoRoot, 'src', 'index.ts'), 'utf8');
+  const match = /^export const PLUGIN_VERSION = '([^']+)'$/m.exec(source);
+  assert.ok(
+    match !== null,
+    "src/index.ts 必须存在形如 `export const PLUGIN_VERSION = '<版本>'` 的导出行" +
+      '（单引号字符串字面量，整行无缩进）——版本门禁无法从源码取值时不得静默通过',
+  );
+  const captured = match[1];
+  assert.ok(captured !== undefined && captured.length > 0, 'PLUGIN_VERSION 不得为空字符串');
+  return captured;
+}
+
+test("V-1: 四处版本自洽基准 —— package.json.version 存在且为语义化版本字符串", () => {
+  assert.equal(
+    typeof pkgVersion === 'string' && /^\d+\.\d+\.\d+(?:[-+].+)?$/.test(pkgVersion),
+    true,
+    `package.json.version 必须是非空的 <major>.<minor>.<patch> 形态字符串，实际: ${JSON.stringify(pkgVersion)}`,
+  );
+});
+
+test('V-1: src/index.ts 的 PLUGIN_VERSION 必须与 package.json.version 一致', () => {
+  const pluginVersion = readPluginVersionFromSource();
+  assert.equal(
+    pluginVersion,
+    pkgVersion,
+    `版本不同步：src/index.ts 的 PLUGIN_VERSION = ${pluginVersion}，` +
+      `package.json.version = ${String(pkgVersion)}。` +
+      '两处必须同时 bump —— 漏改 src/index.ts 时「关于」页与导出 manifest 的 exporter.version ' +
+      '会与实际安装的包不同（AGENTS.md「版本三处必须同步」/ 发版门禁 ①）',
+  );
+});
+
+test('V-1: package-lock.json 根对象 version 必须与 package.json.version 一致', () => {
+  assert.equal(
+    lock.version,
+    pkgVersion,
+    `版本不同步：package-lock.json 顶层 "version" = ${String(lock.version)}，` +
+      `package.json.version = ${String(pkgVersion)}。` +
+      '请在版本 bump 后重跑 `npm install --legacy-peer-deps` 让 lock 根对象同步（或手工改这一行）',
+  );
+});
+
+test('V-1: package-lock.json.packages[""].version 必须与 package.json.version 一致', () => {
+  const entry = lock.packages?.[''];
+  assert.ok(
+    entry !== undefined,
+    'package-lock.json 的 packages[""] 根条目缺失：lock 文件结构已损坏，请重跑 `npm install --legacy-peer-deps`',
+  );
+  assert.equal(
+    entry.version,
+    pkgVersion,
+    `版本不同步：package-lock.json 的 packages[""].version = ${String(entry.version)}，` +
+      `package.json.version = ${String(pkgVersion)}。` +
+      'lockfileVersion 3 的根条目版本与顶层 version 必须同源，否则 `npm ci` 与发布产物会各说各话',
+  );
+});
+
+/* ------------------------------------------------------------ 变异验证记录
+
+V-1（版本四处一致，2026-09 新增）：把 `src/index.ts` 的 `PLUGIN_VERSION` 临时改成
+`'0.0.0-test'` → 「V-1: src/index.ts 的 PLUGIN_VERSION 必须与 package.json.version 一致」
+**红灯**（AssertionError: actual `0.0.0-test` / expected `0.1.67`，其余 10 条仍绿）；
+改回 `'0.1.67'` 后 11/11 全绿，并用 `node` 读回确认磁盘上恢复原值。
+（P-1 / P-2 / P-3 的变异验证记录见 `docs/spec/known-gaps.md` §1 L1 与 issue #53。）
+*/
 

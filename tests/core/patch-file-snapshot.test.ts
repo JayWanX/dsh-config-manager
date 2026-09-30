@@ -14,9 +14,18 @@ import assert from 'node:assert/strict';
 import { createSnapshot, resolveFileTarget, resolveFileTargetRel, PLUGIN_PATCH_REF_PREFIX } from '../../src/core/backup.ts';
 import { rollback } from '../../src/core/rollback.ts';
 import { makeContext, MemSnapshotStore } from '../../src/adapters/test-helpers.ts';
+import { SECTION_IDS } from '../../src/schema/config.ts';
 import type { ImportPlan, PlanItem } from '../../src/core/types.ts';
+import type { SectionId } from '../../src/schema/types.ts';
 
 const HOME = 'C:\\Users\\bob';
+
+/** 全分区 0 计数的 estimatedActions（ImportPlan 要求完整 Record<SectionId, number>；键集合以 SECTION_IDS 为准） */
+function emptyEstimatedActions(): Record<SectionId, number> {
+  const out = {} as Record<SectionId, number>;
+  for (const id of SECTION_IDS) out[id] = 0;
+  return out;
+}
 
 function patchPlan(): ImportPlan {
   const items: PlanItem[] = [{
@@ -27,7 +36,7 @@ function patchPlan(): ImportPlan {
     severity: 'info',
     target: { adapter: 'plugins', ref: `${PLUGIN_PATCH_REF_PREFIX}patches/a.patch` },
   }];
-  return { items, globalStrategy: 'merge', pathMappings: [], missingSecrets: [], needsRestart: false, estimatedActions: {} };
+  return { items, globalStrategy: 'merge', pathMappings: [], missingSecrets: [], needsRestart: false, estimatedActions: emptyEstimatedActions() };
 }
 
 test('issue #35：patch 文件 ref 解析到 profiles/<profile>/ 下（不是 homeDir 根）', () => {

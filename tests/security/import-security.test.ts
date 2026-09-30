@@ -95,7 +95,6 @@ test('S-02 畸形 ZIP：合法但损坏的中央目录 → 拒绝', async () => 
 
 test('S-03 超大条目数：超出 maxEntries 上限 → analyzeImport 拒绝（zip bomb 条目数向量）', async () => {
   await withTmp(async (dir) => {
-    const evil = path.join(dir, 'many.zip');
     // 用「有效备份」改造成大量条目：直接构造合法 ZIP 但条目数超限由 parseZip 拒绝
     const src = makeContext('win32', 'C:\\Users\\alice');
     const validZip = path.join(dir, 'valid.zip');

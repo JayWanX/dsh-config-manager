@@ -32,15 +32,6 @@ import type { Snapshot } from '../../src/core/types.ts';
 
 const FP = 'fp-cw';
 
-async function withTmp<T>(fn: (dir: string) => Promise<T>): Promise<T> {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-cm-rec-cw-'));
-  try {
-    return await fn(dir);
-  } finally {
-    await fs.rm(dir, { recursive: true, force: true });
-  }
-}
-
 async function seedSnapshot(snapDir: string, operationId: string): Promise<Snapshot> {
   const store = new FileSnapshotStore({ dir: snapDir });
   const snapshot: Snapshot = {
@@ -101,6 +92,10 @@ async function setup(t: test.TestContext, opts: { state?: OperationJournal['stat
     snapshotExists: async (id) => id !== null && id !== '',
     getEnvironmentFingerprint: () => FP,
     clearSafeMode: async () => { await store.writeSafeMode(false); },
+    // 本用例不注入环境锁端口：按 src/index.ts 的无锁端口分支如实回答（FREE / 无可回收对象），
+    // 既让依赖齐全，也不谎称回收成功。
+    inspectLockState: async () => ({ state: 'FREE' }),
+    recoverStaleLock: async () => ({ ok: false, removed: false, state: 'FREE', detail: 'no lock port configured' }),
   });
   return { store, runs, snapshotsDir, homeDir, transactionsDir, host, orch, snap, opId };
 }

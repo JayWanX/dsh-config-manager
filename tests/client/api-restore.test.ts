@@ -36,7 +36,9 @@ test('C-01 api.snapshots()：GET 到 /snapshots，解析 { snapshots }', async (
     id: 'snap-1', createdAt: '2026-08-14T12:00:00.000Z', sourceZip: 'a.zip',
     status: 'done', entryCount: 2, hostFileBackupCount: 1, beforePluginCount: 1,
   }];
-  let called: FetchCall | null = null;
+  // 断言由回调同步赋值的捕获变量：不能写成 `= null` 初始化（CFA 会把类型窄化成 null，
+  // 后续 `called?.url` 落到 never）；明确赋值断言保留声明的 `FetchCall | null` 联合类型。
+  let called!: FetchCall | null;
   installFetchMock((call) => {
     called = call;
     return jsonResponse(200, { snapshots: metas });

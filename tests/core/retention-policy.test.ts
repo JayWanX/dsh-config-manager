@@ -19,6 +19,7 @@ import {
   FileSnapshotStore, selectPruneCandidates,
 } from '../../src/core/backup.ts';
 import type { PruneSelector } from '../../src/core/backup.ts';
+import type { SnapshotEntry } from '../../src/core/types.ts';
 import { DEFAULT_RETENTION_POLICY, selectPruneCandidatesByPolicy } from '../../src/sync/retention-policy.ts';
 import { listSnapshots } from '../../src/core/restore.ts';
 
@@ -48,7 +49,7 @@ async function seedSnapshot(dir: string, id: string, createdAt: string): Promise
 }
 
 function minSnapshot(id: string, createdAt: string): {
-  id: string; createdAt: string; sourceZip: string; entries: unknown[];
+  id: string; createdAt: string; sourceZip: string; entries: SnapshotEntry[];
 } {
   return { id, createdAt, sourceZip: `${id}.zip`, entries: [] };
 }

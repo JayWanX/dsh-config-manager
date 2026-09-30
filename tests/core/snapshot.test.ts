@@ -16,12 +16,21 @@ import { Importer } from '../../src/core/importer.ts';
 import { createSnapshot, FileSnapshotStore } from '../../src/core/backup.ts';
 import { createAdapters } from '../../src/adapters/index.ts';
 import { makeContext, MemSnapshotStore, type MockHostContext } from '../../src/adapters/test-helpers.ts';
+import { SECTION_IDS } from '../../src/schema/config.ts';
 import type {
   ApplyResult, ConfigAdapter, ExportOptions, ExportSection, HostContext,
   ImportContext, PlanItem, ValidationResult,
 } from '../../src/core/types.ts';
+import type { SectionId } from '../../src/schema/types.ts';
 
 const NS = ['general', 'llm-deepseek'];
+
+/** 全分区 0 计数的 estimatedActions（ImportPlan 要求完整 Record<SectionId, number>；键集合以 SECTION_IDS 为准） */
+function emptyEstimatedActions(): Record<SectionId, number> {
+  const out = {} as Record<SectionId, number>;
+  for (const id of SECTION_IDS) out[id] = 0;
+  return out;
+}
 
 async function withTmp<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-cm-snapshot-m1-'));
@@ -55,7 +64,7 @@ test('S-01 createSnapshot 生成 status=pending / beforePlugins / hostFileBackup
 
   const store = new MemSnapshotStore();
   const snapshot = await createSnapshot({
-    ctx, plan: { items: minPlan(), globalStrategy: 'replace', pathMappings: [], missingSecrets: [], needsRestart: false, estimatedActions: {} },
+    ctx, plan: { items: minPlan(), globalStrategy: 'replace', pathMappings: [], missingSecrets: [], needsRestart: false, estimatedActions: emptyEstimatedActions() },
     sourceZip: 'C:\\backup\\dsh-config.zip',
     store,
     adapters: [],
@@ -89,7 +98,7 @@ test('S-01b settings.yaml 缺失 → 探测并整文件备份 settings.json（ex
 
   const store = new MemSnapshotStore();
   const snapshot = await createSnapshot({
-    ctx, plan: { items: minPlan(), globalStrategy: 'replace', pathMappings: [], missingSecrets: [], needsRestart: false, estimatedActions: {} },
+    ctx, plan: { items: minPlan(), globalStrategy: 'replace', pathMappings: [], missingSecrets: [], needsRestart: false, estimatedActions: emptyEstimatedActions() },
     sourceZip: 'x.zip', store, adapters: [],
   });
 
@@ -108,7 +117,7 @@ test('S-01c ctx.profile 缺省 → hostFileBackups 不含 profiles/ 路径', asy
 
   const store = new MemSnapshotStore();
   const snapshot = await createSnapshot({
-    ctx, plan: { items: minPlan(), globalStrategy: 'replace', pathMappings: [], missingSecrets: [], needsRestart: false, estimatedActions: {} },
+    ctx, plan: { items: minPlan(), globalStrategy: 'replace', pathMappings: [], missingSecrets: [], needsRestart: false, estimatedActions: emptyEstimatedActions() },
     sourceZip: 'x.zip', store, adapters: [],
   });
   assert.ok(!(snapshot.hostFileBackups ?? []).some((b) => b.relPath.startsWith('profiles/')), '无 profile 时不应登记 profile patch');

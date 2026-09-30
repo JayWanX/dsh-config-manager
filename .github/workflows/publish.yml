@@ -51,6 +51,28 @@ jobs:
         # npm pack --pack-destination fails if the dir does not exist (fresh checkout).
         run: mkdir -p dist && npm pack --pack-destination ./dist
 
+      - name: CHANGELOG highlights guard (before publish)
+        # 为什么门禁必须放在 npm publish 之前：npm 上同一版本号不可重发，
+        # 若把「抽取 + 非空校验」留到后面的 release 步骤（带 tag 条件），
+        # CHANGELOG 漏写时只会让流水线变红，包却已经发到 npm；
+        # 而 workflow_dispatch 路径没有 tag，release 步骤整段被跳过，
+        # 门禁也会跟着被跳过，publish 却照常执行。
+        # 因此提前为独立步骤：push tag 与 workflow_dispatch 两条路径都执行，
+        # 产物仍写到 /tmp/highlights.md，供后面的 release 步骤原样复用。
+        run: |
+          # 手动触发没有 tag，改用 package.json 的版本号；
+          # extract-release-notes.py 内部会 lstrip("v")，tag 形态与纯版本都接受。
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="$GITHUB_REF_NAME"
+          else
+            VERSION="v$(node -p 'require("./package.json").version')"
+          fi
+          python3 .github/scripts/extract-release-notes.py "$VERSION" CHANGELOG.md > /tmp/highlights.md
+          if [ ! -s /tmp/highlights.md ]; then
+            echo "::error::CHANGELOG.md 缺少当前版本 $VERSION 的亮点段，请先在 CHANGELOG.md 顶部按 ## [vX.Y.Z] 补充（中英双语）后再发版"
+            exit 1
+          fi
+
       - name: Publish to npm (trusted publishing / OIDC)
         # No NODE_AUTH_TOKEN: the npm CLI obtains a short-lived registry token
         # via GitHub Actions OIDC. Requires a trusted publisher configured on
@@ -71,13 +93,9 @@ jobs:
           # ② 把自动生成的变更记录存到临时文件
           gh release view "$GITHUB_REF_NAME" --json body -q .body > /tmp/auto-notes.md
 
-          # ③ 从 CHANGELOG.md 抽取当前版本的双语亮点段（方式 3: CHANGELOG 承载亮点 + 默认 automatic grouping）
-          #    未写当前版本段则 fail fast，防止漏写导致 release 描述缺亮点。
-          python3 .github/scripts/extract-release-notes.py "$GITHUB_REF_NAME" CHANGELOG.md > /tmp/highlights.md
-          if [ ! -s /tmp/highlights.md ]; then
-            echo "::error::CHANGELOG.md 缺少当前版本 $GITHUB_REF_NAME 的亮点段，请先在 CHANGELOG.md 顶部按 ## [vX.Y.Z] 补充（中英双语）后再发版"
-            exit 1
-          fi
+          # ③ 双语亮点段已由前面的 "CHANGELOG highlights guard (before publish)" 步骤
+          #    抽取并做过非空校验，写入 /tmp/highlights.md（push tag 与 workflow_dispatch 两条路径都会执行）。
+          #    门禁放在 publish 之前才能保证漏写 CHANGELOG 时不会先把包发上 npm，故此处不再重复抽取。
 
           # ④ 拼装完整描述：双语亮点段 + 安装指引 + 变更记录
           cp /tmp/highlights.md /tmp/release-notes.md

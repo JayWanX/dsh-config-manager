@@ -62,6 +62,11 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Typecheck (tests)
+        # tests/** 不在根 tsconfig 的 include 内：用独立的 tsconfig.tests.json 单独过一遍类型检查。
+        # 此前 tests/** 是类型检查盲区（实测曾积压 43 条错误），该 step 让「测试代码也过类型检查」成为真实门禁。
+        run: npm run typecheck:tests
+
       - name: Test
         run: npm test
 

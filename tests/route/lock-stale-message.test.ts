@@ -27,7 +27,6 @@ import {
 import { printUsage } from '../../src/cli/index.ts';
 
 const here = import.meta.dirname ?? path.dirname(fileURLToPath(import.meta.url));
-const TOKEN = { tokenId: 't', managerId: 'm', instanceId: 'i', acquiredAt: 0 };
 
 /** 只注入 acquire 结果的极简 port（分类只看 state，不依赖真实文件）。 */
 function portOf(state: string, detail?: string): MutationLockPort {

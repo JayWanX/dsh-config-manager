@@ -28,6 +28,8 @@ import {
   needsMigration, isTooNew,
 } from '../src/schema/versions.ts';
 import { buildManifest, parseManifest, serializeManifest } from '../src/schema/manifest.ts';
+import { SECTION_IDS } from '../src/schema/config.ts';
+import type { SectionId } from '../src/schema/types.ts';
 
 /** 含未知字段的样例文档（未来版本可能新增的兼容键） */
 function docWithUnknown(): Record<string, unknown> {
@@ -36,6 +38,13 @@ function docWithUnknown(): Record<string, unknown> {
     'x-unknown-top': { future: true },
     futureField: 'keep-me',
   };
+}
+
+/** 分区存在性表：全 false 起底，按需打开（Manifest.sections 要求完整 Record<SectionId, boolean>；键集合以 SECTION_IDS 为准） */
+function sectionFlags(on: Partial<Record<SectionId, boolean>> = {}): Record<SectionId, boolean> {
+  const out = {} as Record<SectionId, boolean>;
+  for (const id of SECTION_IDS) out[id] = on[id] ?? false;
+  return out;
 }
 
 test('SC-01 已是当前版本：原样返回同一引用，applied 为空，未知字段保留', () => {
@@ -99,7 +108,7 @@ test('SC-07 未知字段保留：parseManifest 解析含未知键的 manifest �
     dshVersion: '0.1.0',
     platform: 'win32',
     arch: 'x64',
-    sections: { settings: true },
+    sections: sectionFlags({ settings: true }),
     containsSecrets: false,
     encrypted: false,
     encryption: null,

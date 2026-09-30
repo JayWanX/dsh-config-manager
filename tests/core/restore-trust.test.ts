@@ -12,7 +12,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { planRestore, validateSnapshotForRestore, type RestoreSnapshotVerdict } from '../../src/core/restore.ts';
+import { planRestore, validateSnapshotForRestore } from '../../src/core/restore.ts';
 import { FileSnapshotStore, createSnapshot } from '../../src/core/backup.ts';
 import { makeContext } from '../../src/adapters/test-helpers.ts';
 import type { Snapshot } from '../../src/core/types.ts';

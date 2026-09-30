@@ -31,7 +31,7 @@ import { Importer } from '../../src/core/importer.ts';
 import { createAdapters } from '../../src/adapters/index.ts';
 import { makeContext, MemSnapshotStore, type MockHostContext } from '../../src/adapters/test-helpers.ts';
 import { parseZip, writeZip } from '../../src/utils/zip.ts';
-import { sha256Hex, buildChecksums } from '../../src/utils/hashing.ts';
+import { sha256Hex } from '../../src/utils/hashing.ts';
 import { CHECKSUMS_FILE, MANIFEST_FILE, parseManifest } from '../../src/schema/manifest.ts';
 import { decryptCredentials, createEncryptionProvider, SecurityError } from '../../src/security/encryption.ts';
 import { isTooNew, describeVersion } from '../../src/schema/versions.ts';
@@ -703,7 +703,10 @@ test('VER-03 迁移链接入导入路径（G-06/G-07 已修复，B2 守卫已加
       'utf8',
     );
     const lines = analyzerSrc.split('\n');
-    const declAt = lines.findIndex((l) => l.includes('loadBundle(zipPath: string)'));
+    // 声明定位只认「方法名 + 首个参数」，**不锚定完整签名**：加参数（如 `mode: 'reuse' | 'refresh'`）
+    // 不该让守卫失效 —— 它守的是「方法体里有没有接线」，不是签名长什么样。守卫本身仍要求
+    // 声明行以 `{` 结尾，所以放宽定位不会让「找不到方法」变成静默通过。
+    const declAt = lines.findIndex((l) => /^\s*(?:private\s+)?async\s+loadBundle\s*\(\s*zipPath\s*:\s*string/.test(l));
     assert.ok(declAt >= 0, 'B2：必须能找到 loadBundle 的声明（守卫自身的前置条件）');
     const header = lines.slice(declAt, declAt + 2).join('\n');
     assert.ok(/\{\s*$/.test((lines[declAt] ?? '').trimEnd()), `B2：loadBundle 声明未按预期以 { 结尾（守卫失效）：${header}`);
@@ -1024,7 +1027,9 @@ test('INT-04 非空校验表语义不变（H2 回归）：表内条目照旧逐�
 
     assert.equal(analysis.valid, true, 'H2 回归：表存在且非空时行为不变');
     assert.deepEqual(analysis.errors, []);
-    assert.deepEqual(analysis.warnings, [], 'H2 回归：非空且完整的表不得产生任何完整性告警');
+    // 期望值显式标注为 string[]：`assert.deepEqual` 的断言签名会把 actual 窄化成期望值的类型，
+    // 写成裸 `[]` 会让 analysis.warnings 退化为 never[]（下一行的 w 变成 never）。
+    assert.deepEqual(analysis.warnings, [] as string[], 'H2 回归：非空且完整的表不得产生任何完整性告警');
     assert.ok(
       !analysis.warnings.some((w) => w.includes('未提供完整性校验表')),
       'H2 回归：表存在且非空时不得误报「未提供校验表」',

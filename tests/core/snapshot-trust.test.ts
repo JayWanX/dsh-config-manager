@@ -23,7 +23,16 @@ import {
 import { JournalStore, createJournalEntry, type OperationJournal } from '../../src/core/journal.ts';
 import { createAdapters } from '../../src/adapters/index.ts';
 import { makeContext } from '../../src/adapters/test-helpers.ts';
+import { SECTION_IDS } from '../../src/schema/config.ts';
 import type { Snapshot } from '../../src/core/types.ts';
+import type { SectionId } from '../../src/schema/types.ts';
+
+/** 全分区 0 计数的 estimatedActions（ImportPlan 要求完整 Record<SectionId, number>；键集合以 SECTION_IDS 为准） */
+function emptyEstimatedActions(): Record<SectionId, number> {
+  const out = {} as Record<SectionId, number>;
+  for (const id of SECTION_IDS) out[id] = 0;
+  return out;
+}
 
 async function withTmp<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-cm-snapshot-trust-'));
@@ -143,7 +152,7 @@ test('T-06 createSnapshot 携带 operation-bound binding 字段', async () => {
     const store = new FileSnapshotStore({ dir });
     const snap = await createSnapshot({
       ctx,
-      plan: { items: [], globalStrategy: 'replace', pathMappings: [], missingSecrets: [], needsRestart: false, estimatedActions: {} },
+      plan: { items: [], globalStrategy: 'replace', pathMappings: [], missingSecrets: [], needsRestart: false, estimatedActions: emptyEstimatedActions() },
       sourceZip: 'x.zip',
       store,
       adapters: createAdapters({ namespaces: ['general'] }),

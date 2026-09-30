@@ -257,7 +257,7 @@ test('R-07 F5 幽灵会话：恢复后校验快照会话 vs 磁盘实际文件�
     assert.deepEqual(report.ghostSessions, ['proj-b/s2'], '仅磁盘缺失的会话算幽灵');
     assert.ok(report.skipped.some((s) => s.includes('proj-b/s2')), '幽灵会话汇总进入 skipped 供报告展示');
     // 磁盘事实核对：s2 目录不存在
-    await assert.rejects(fs.access(path.join(f.homeDir, 'sessions', 'proj-b', 's2')), undefined, 's2 目录不存在');
+    await assert.rejects(fs.access(path.join(f.homeDir, 'sessions', 'proj-b', 's2')), 's2 目录不存在');
   });
 });
 
@@ -336,6 +336,6 @@ test('R-06 planRestore 零写入：预览不还原文件、不删除文件、不
       'exists',
       '快照时不存在、现已出现的文件在预览后仍存在（未删除）',
     );
-    await assert.rejects(fs.readdir(path.join(f.snapshotDir, 'pre-restore')), undefined, '预览不得创建 pre-restore 目录');
+    await assert.rejects(fs.readdir(path.join(f.snapshotDir, 'pre-restore')), '预览不得创建 pre-restore 目录');
   });
 });

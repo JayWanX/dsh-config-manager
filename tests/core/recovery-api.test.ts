@@ -23,15 +23,6 @@ import type { HostFileBackup, Snapshot } from '../../src/core/types.ts';
 
 const FP = 'fp';
 
-async function withTmp<T>(fn: (dir: string) => Promise<T>): Promise<T> {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-cm-rec-api-'));
-  try {
-    return await fn(dir);
-  } finally {
-    await fs.rm(dir, { recursive: true, force: true });
-  }
-}
-
 /** 构造 op-bound READY 快照（save 全链路：manifest + READY）。 */
 async function seedSnapshot(
   snapDir: string,
@@ -102,11 +93,18 @@ async function setup(t: test.TestContext, opts: { state?: OperationJournal['stat
     snapshotExists: async (id) => id !== null && id !== '',
     getEnvironmentFingerprint: () => FP,
     clearSafeMode: async () => { await store.writeSafeMode(false); },
+    // 本用例不注入环境锁端口：按 src/index.ts 的无锁端口分支如实回答（FREE / 无可回收对象），
+    // 既让依赖齐全，也不谎称回收成功。
+    inspectLockState: async () => ({ state: 'FREE' }),
+    recoverStaleLock: async () => ({ ok: false, removed: false, state: 'FREE', detail: 'no lock port configured' }),
   });
   return { store, runs, snapshotsDir, homeDir, transactionsDir, host, orch, snap, opId };
 }
 
-function mockExecutors(flags: { restoreRan?: boolean; rollbackRan?: boolean } = {}): (runId: string) => RecoveryExecutorFns {
+/** mock 执行器的「是否真的执行了破坏性动作」证据位（由回调写入，用例据此断言） */
+type ExecutorFlags = { restoreRan?: boolean; rollbackRan?: boolean };
+
+function mockExecutors(flags: ExecutorFlags = {}): (runId: string) => RecoveryExecutorFns {
   return () => ({
     performRestore: async () => { flags.restoreRan = true; return { full: true, failed: [] }; },
     performRollback: async () => { flags.rollbackRan = true; return { full: true, failed: [] }; },
@@ -216,7 +214,7 @@ test('confirm：wrong environment → 400（拒绝）', async (t) => {
 
 test('execute：缺 userConfirmed → 400（零副作用）', async (t) => {
   const h = await setup(t);
-  const flags = {};
+  const flags: ExecutorFlags = {};
   const r = await h.orch.execute(h.opId, false, mockExecutors(flags));
   assert.equal(r.status, 400);
   assert.equal(flags.restoreRan, undefined, '无确认不得执行');
@@ -225,7 +223,7 @@ test('execute：缺 userConfirmed → 400（零副作用）', async (t) => {
 
 test('execute：NEEDS_ATTENTION → RECOVERING，调 restore executor（rollback-recommended）', async (t) => {
   const h = await setup(t);
-  const flags = {};
+  const flags: ExecutorFlags = {};
   const r = await h.orch.execute(h.opId, true, mockExecutors(flags));
   assert.equal(r.status, 200);
   assert.equal(flags.restoreRan, true, 'rollback-recommended 调 restore executor');
@@ -234,7 +232,7 @@ test('execute：NEEDS_ATTENTION → RECOVERING，调 restore executor（rollback
 
 test('execute：RECOVERING 无验证 → decision needs-attention → 400（不执行）', async (t) => {
   const h = await setup(t, { state: 'RECOVERING' });
-  const flags = {};
+  const flags: ExecutorFlags = {};
   const r = await h.orch.execute(h.opId, true, mockExecutors(flags));
   assert.equal(r.status, 400, 'RECOVERING 无 verification → needs-attention，不得执行');
   assert.equal(flags.restoreRan, undefined, '不得执行破坏性动作');
@@ -355,7 +353,7 @@ test('retry：journal 非 NEEDS_ATTENTION → 409', async (t) => {
 
 test('retry：重算 decision + 重验 trusted snapshot → 执行', async (t) => {
   const h = await setup(t);
-  const flags = {};
+  const flags: ExecutorFlags = {};
   const r = await h.orch.retry(h.opId, true, mockExecutors(flags));
   assert.equal(r.status, 200);
   assert.equal(flags.restoreRan, true, 'retry 重算 decision 后执行');

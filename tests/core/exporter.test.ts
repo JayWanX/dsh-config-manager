@@ -16,7 +16,7 @@ import { Exporter } from '../../src/core/exporter.ts';
 import { createAdapters } from '../../src/adapters/index.ts';
 import { parseZip } from '../../src/utils/zip.ts';
 import { sha256Hex } from '../../src/utils/hashing.ts';
-import { parseManifest, CHECKSUMS_FILE, MANIFEST_FILE } from '../../src/schema/manifest.ts';
+import { CHECKSUMS_FILE, MANIFEST_FILE } from '../../src/schema/manifest.ts';
 import { createSecretScanner } from '../../src/security/secret-scanner.ts';
 import { makeContext, type MockHostContext } from '../../src/adapters/test-helpers.ts';
 import type { Manifest } from '../../src/schema/types.ts';

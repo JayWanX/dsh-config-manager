@@ -11,12 +11,15 @@
 #   [Feature] [Bug] xxx    -> enhancement + bug（双前缀标题两个都打）
 # 标题中后段出现的 [Bug] 不算（必须是开头）；重复标签会自动去重。
 #
+# 触发事件：opened / edited（仅标题变更）/ reopened —— 标题在创建之后才补上前缀同样会重新判定
+# （#61：作者关闭后把标题改成 [Feature] … 再重开，旧版只听 opened，于是漏打 enhancement）。
+#
 # 前置条件：这里用到的 bug / enhancement / ui 标签必须已存在于仓库，否则 GitHub 静默忽略。
 name: Auto label issues
 
 on:
   issues:
-    types: [opened]
+    types: [opened, edited, reopened]
 
 # 最小权限：标签属于 issue 资源，只需要 issues: write（不碰代码，不申请仓库写权限）
 permissions:
@@ -25,6 +28,9 @@ permissions:
 jobs:
   label:
     name: Label by title prefix
+    # edited 只在「标题确实变了」时跑：补正文（贴截图/日志）是高频操作，不该触发打标
+    # opened / reopened 没有 changes 字段，用 action 判断放行
+    if: github.event.action != 'edited' || github.event.changes.title != null
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -51,7 +57,8 @@ jobs:
           if [[ "$head_part" == *"[ui]"* ]]; then add_label ui; add_label bug; fi
 
           if [ -z "${labels// /}" ]; then
-            echo "标题开头没有 [Bug]/[Feature]/[UI] 前缀，跳过：$ISSUE_TITLE"
+            # notice 而不是普通 echo：让「该打标却跳过」出现在运行摘要里，不再是静默绿
+            echo "::notice::标题开头没有 [Bug]/[Feature]/[UI] 前缀，已跳过打标：$ISSUE_TITLE"
             exit 0
           fi
 

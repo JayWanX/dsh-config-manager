@@ -1,7 +1,8 @@
 /**
  * m-market：GitHubAuthRest 单测（docs/design/2026-08-20-my-configs-design.md §4.2 / §4.8）。
  *
- * 覆盖：getUser 200/401；createPublicRepo 201/422；repoExists 200/404；
+ * 覆盖：getUser 200/401；createPublicRepo 201/422；createRepo 201（private 缺省与显式）；
+ * listRepos 200/非数组/401（limit 截断 + 时间戳兜底）；repoExists 200/404；
  * ensureFork 复用已 fork 与新建 + 轮询就绪（含超时）；readFile 存在/404/目录；
  * openPullRequest（缺省固定官方目标）；listOpenPullRequests（head 过滤）；
  * 错误分类（unauthorized/validation_failed/rate_limited/network_error/server_error）
@@ -241,6 +242,102 @@ test('github-repos: createPublicRepo 422 → GitHubApiError/validation_failed（
     assert.equal(err.code, 'validation_failed');
     assert.equal(err.status, 422);
     assert.match(err.message, /Repository creation failed/);
+    assert.ok(!err.message.includes(token), '错误消息绝不回显 token');
+    return true;
+  });
+});
+
+/* ---------------------------------------------------------------- createRepo */
+
+test('github-repos: createRepo private:true 201 → 请求构造（POST /user/repos，auto_init）并返回仓库信息', async () => {
+  const { rest, calls } = installRest(() => jsonResponse(201, { ...REPO, private: true }));
+  const repo = await rest.createRepo('dsh-config-sync', { private: true, description: '同步仓库' });
+  assert.equal(repo.fullName, 'xiaojun/dsh-configs');
+  assert.equal(repo.cloneUrl, 'https://github.com/xiaojun/dsh-configs.git');
+  assert.equal(repo.private, true, 'private:true 必须原样回传（同步仓库强制私有）');
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.url, `${GITHUB_API_BASE}/user/repos`);
+  assert.equal(calls[0]?.init?.method, 'POST');
+  const payload = JSON.parse(bodyOf(calls[0]!)) as Record<string, unknown>;
+  assert.equal(payload['name'], 'dsh-config-sync');
+  assert.equal(payload['private'], true);
+  assert.equal(payload['auto_init'], true, 'auto_init 保证初始 commit 可 clone');
+  assert.equal(payload['description'], '同步仓库');
+});
+
+test('github-repos: createRepo 缺省选项 → private:false 且不带 description（与 createPublicRepo 同语义）', async () => {
+  const { rest, calls } = installRest(() => jsonResponse(201, REPO));
+  await rest.createRepo('dsh-configs');
+  const payload = JSON.parse(bodyOf(calls[0]!)) as Record<string, unknown>;
+  assert.equal(payload['private'], false, '缺省仍是公开仓库（保持既有语义）');
+  assert.equal(payload['auto_init'], true);
+  assert.ok(!('description' in payload), '空 description 不得进入请求体');
+});
+
+/* ---------------------------------------------------------------- listRepos */
+
+const REPO_LIST = [
+  { ...REPO, pushed_at: '2026-09-30T10:00:00Z', updated_at: '2026-09-30T11:00:00Z' },
+  {
+    ...REPO,
+    full_name: 'xiaojun/other',
+    html_url: 'https://github.com/xiaojun/other',
+    clone_url: 'https://github.com/xiaojun/other.git',
+    default_branch: 'master',
+    private: true,
+    pushed_at: null,
+    updated_at: '2026-09-01T00:00:00Z',
+  },
+];
+
+test('github-repos: listRepos 200 → GET /user/repos?sort=updated&per_page=100 并映射字段（含时间戳兜底）', async () => {
+  const { rest, calls, token } = installRest(() => jsonResponse(200, REPO_LIST));
+  const repos = await rest.listRepos();
+  assert.equal(repos.length, 2);
+
+  assert.equal(repos[0]?.fullName, 'xiaojun/dsh-configs');
+  assert.equal(repos[0]?.htmlUrl, 'https://github.com/xiaojun/dsh-configs');
+  assert.equal(repos[0]?.cloneUrl, 'https://github.com/xiaojun/dsh-configs.git');
+  assert.equal(repos[0]?.defaultBranch, 'main');
+  assert.equal(repos[0]?.private, false);
+  assert.equal(repos[0]?.fork, false);
+  assert.equal(repos[0]?.pushedAt, '2026-09-30T10:00:00Z');
+  assert.equal(repos[0]?.updatedAt, '2026-09-30T11:00:00Z');
+
+  assert.equal(repos[1]?.fullName, 'xiaojun/other');
+  assert.equal(repos[1]?.private, true);
+  assert.equal(repos[1]?.defaultBranch, 'master');
+  assert.equal(repos[1]?.pushedAt, '', 'pushed_at 为 null（空仓库）→ 空串，不抛错');
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.url, `${GITHUB_API_BASE}/user/repos?sort=updated&per_page=100`);
+  assert.equal(calls[0]?.init?.method, 'GET');
+  assert.ok(!(calls[0]?.url ?? '').includes(token), '仓库列表 URL 绝不携带 token');
+});
+
+test('github-repos: listRepos limit 截断（不翻页：只取第一页前 N 条）', async () => {
+  const { rest } = installRest(() => jsonResponse(200, REPO_LIST));
+  const repos = await rest.listRepos(1);
+  assert.equal(repos.length, 1);
+  assert.equal(repos[0]?.fullName, 'xiaojun/dsh-configs');
+});
+
+test('github-repos: listRepos 响应非数组 → GitHubApiError/invalid_response', async () => {
+  const { rest } = installRest(() => jsonResponse(200, { message: 'nope' }));
+  await assert.rejects(rest.listRepos(), (err: unknown) => {
+    assert.ok(err instanceof GitHubApiError);
+    assert.equal(err.code, 'invalid_response');
+    return true;
+  });
+});
+
+test('github-repos: listRepos 401 → GitHubApiError/unauthorized（token 失效可被上层映射为未登录）', async () => {
+  const { rest, token } = installRest(() => jsonResponse(401, { message: 'Bad credentials' }));
+  await assert.rejects(rest.listRepos(), (err: unknown) => {
+    assert.ok(err instanceof GitHubApiError);
+    assert.equal(err.code, 'unauthorized');
+    assert.equal(err.status, 401);
     assert.ok(!err.message.includes(token), '错误消息绝不回显 token');
     return true;
   });

@@ -1211,6 +1211,7 @@ export function SyncPanel({ api, t, cmT }: SyncPanelProps) {
           {/* 通道配置弹窗（渲染段拆到 ChannelConfigDialog，t42）：只配置**打开它的那条通道**，弹窗内不提供切换 */}
           <ChannelConfigDialog
             open={channelOpen}
+            api={api}
             t={t}
             uiT={uiT}
             channel={state.channel}

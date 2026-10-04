@@ -1,11 +1,16 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="DSH Config Manager">
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36" fill="none" role="img" aria-label="DSH Config Manager">
   <defs>
-    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#5B7CFA"/>
-      <stop offset="1" stop-color="#3B3AD1"/>
+    <linearGradient id="cm-snapshot-back" x1="4" y1="4" x2="26.1" y2="26.1" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#45E7A4"/>
+      <stop offset="1" stop-color="#145AF3"/>
+    </linearGradient>
+    <linearGradient id="cm-snapshot-front" x1="9.9" y1="9.9" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#67C7FE"/>
+      <stop offset="1" stop-color="#324DE2"/>
     </linearGradient>
   </defs>
-  <rect width="512" height="512" rx="112" fill="url(#tile)"/>
-  <path fill="#FFFFFF" d="M196 142 254 226H224V364H168V226H138Z"/>
-  <path fill="#FFFFFF" d="M316 370 258 286H288V148H344V286H374Z"/>
+  <rect x="4" y="4" width="22.1" height="22.1" rx="5.2" fill="url(#cm-snapshot-back)" fill-opacity="0.9"/>
+  <rect x="9.9" y="9.9" width="22.1" height="22.1" rx="5.2" fill="url(#cm-snapshot-front)"/>
+  <path d="M20.95 15.8V26.1" stroke="#FFFFFF" stroke-width="2.9" stroke-linecap="round"/>
+  <path d="M17.27 22.4L20.95 26.1L24.63 22.4" stroke="#FFFFFF" stroke-width="2.9" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

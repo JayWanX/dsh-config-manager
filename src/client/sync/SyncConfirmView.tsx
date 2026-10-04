@@ -19,13 +19,26 @@ import { ConsultCard } from '../consult/ConsultCard.tsx'
 import type { ConsultReport } from '../../core/migration-consult.ts'
 import type { SyncApi, SyncConfirmItem } from './sync-api.ts'
 import {
-  buildAdoptions, hasBulkDecidable, keepLocalAll, kindLabel, reviewItems, severityLabel,
+  buildAdoptions, confirmListSummary, hasBulkDecidable, keepLocalAll, kindLabel, reviewItems, severityLabel,
   summarizeConfirmItems, useRemoteAll, type BulkDecision, type SyncConflictResolution,
 } from './sync-view.ts'
 import type { ApplyItemsResponse } from './sync-api.ts'
 import type { TranslateNS } from '../client-types.ts'
 import type { SyncConfirmDecisions } from '../run-store.ts'
+import { compatibilityBadgeKind, compatibilityLevel, type CompatibilityLevel } from '../../ui/import-wizard.ts'
 import css from '../config-manager.module.css'
+
+/**
+ * 兼容性等级 → sync 字典键（sync 命名空间与 config-manager 命名空间是两本字典：
+ * 导入向导用 import.compatibility.score.*，这里用 syncflow.compat.*）。
+ * 等级判定与 Badge 语义色复用 src/ui 的纯函数 —— 不在视图里另写一套分级规则。
+ */
+const SYNC_COMPAT_KEYS: Record<CompatibilityLevel, Parameters<TranslateNS<'config-manager-sync'>>[0]> = {
+  excellent: 'syncflow.compat.excellent',
+  good: 'syncflow.compat.good',
+  partial: 'syncflow.compat.partial',
+  unsupported: 'syncflow.compat.unsupported',
+}
 
 export interface SyncConfirmViewProps {
   api: SyncApi
@@ -95,6 +108,8 @@ export function SyncConfirmView(props: SyncConfirmViewProps): ReactNode {
 
   // 仅需人工决策的项进入确认列表；非决策项（Create/Update 等）默认自动采用，不逐项展示
   const displayItems = useMemo(() => reviewItems(items), [items])
+  // 列表只渲染 reviewItems，摘要徽章统计的却是全量差异 —— 两个数字用于说明「其余项去哪了」
+  const listSummary = useMemo(() => confirmListSummary(items), [items]);
   // 批量按钮的可用性：列表里存在可批量决策项（Error 项除外，需逐项处理）
   const bulkDecidable = useMemo(() => hasBulkDecidable(displayItems), [displayItems]);
 
@@ -141,14 +156,25 @@ export function SyncConfirmView(props: SyncConfirmViewProps): ReactNode {
         if (res !== undefined) resolutions.set(it.itemId, res);
       }
       const adoptions = buildAdoptions(items, adoptedMap, resolutions);
-      const result = await api.applyItems({ syncSessionId, adoptions });
+      // T1：一键同步的确认页尚无「中止 / 跳过 / 引导」三选一控件（服务端已支持三态校验），
+      // 因此显式传 `guide`：不改变既有写入行为，也避免缺省 abort 把用户挡在门外。
+      const result = await api.applyItems({ syncSessionId, adoptions, sessionFormatDisposition: 'guide' });
+      // issue #56 第二条线：有未生效项（warning）时**不得**判成 done/绿色成功。
+      // 真机：插件安装失败（warning）排在凭据写入之前且中断了它，界面却弹绿 Toast
+      // 「已导入 N 个分区」，用户以为同步成功，密钥没进来是完全看不见的。
+      const ineffective = result.ineffective ?? [];
+      const partial = result.ok && ineffective.length > 0;
       setPhase(result.ok ? 'done' : 'failed');
       setApplyResult(result);
       // R-05：导入成功改走 Toast —— 在此处（而非 ApplyResultCard 渲染期）触发，
       // 保证每次 apply 恰好一次、且重渲染不会重复弹。失败分支**不**弹 Toast，
       // 由 ApplyResultCard 的 error Banner 承载（K-06：同卡内还有 warnings 明细与
       // 回滚危险按钮，用户必须停在此处决策）。
-      if (result.ok) {
+      if (partial) {
+        // 部分成功：warn 态 + 明确条数（自动消失的 Toast 不该承载「要不要回滚」的决策，
+        // 因此结果卡里同时置顶渲染同一结论）
+        toast.warn(t('syncflow.importPartialToast', { n: String(ineffective.length) }));
+      } else if (result.ok) {
         toast.ok(t('syncflow.importDone', { n: String(result.applied.length) }));
       }
     } catch (err) {
@@ -200,32 +226,43 @@ export function SyncConfirmView(props: SyncConfirmViewProps): ReactNode {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-      {compatibility !== undefined && (
-        <div className={css.statRow}>
-          <Badge kind="info">{compatibility}</Badge>
-        </div>
-      )}
       <Banner kind={needsReview ? 'warn' : 'info'}>
         {needsReview ? t('syncflow.needsReviewBadge') : t('syncflow.diffCount', { count: String(summary.total) })}
       </Banner>
+      {/* 差异概览：兼容性徽章与计数同排。此前兼容性独占一行 —— 弹窗顶部连着三行都在讲「现在什么状态」，
+          而真正要用户做的事（下面那份列表）被推得更靠下。映射用 src/ui 的纯函数（等级 + 语义色），
+          文案走 sync 字典 —— 不在这里另写分级规则。 */}
       <div className={css.statRow}>
+        {compatibility !== undefined && (
+          <Badge kind={compatibilityBadgeKind(compatibilityLevel(compatibility))}>
+            {t(SYNC_COMPAT_KEYS[compatibilityLevel(compatibility)])}
+          </Badge>
+        )}
         <Badge kind="info">{t('syncflow.diffCount', { count: String(summary.total) })}</Badge>
         <Badge kind="ok">{t('syncflow.adoptRemote')} {summary.adopted}</Badge>
         {summary.error > 0 && <Badge kind="error">{severityLabel('error', api.t)} × {summary.error}</Badge>}
         {summary.warning > 0 && <Badge kind="warn">{severityLabel('warning', api.t)} × {summary.warning}</Badge>}
       </div>
       <span className={css.hint}>{t('syncflow.adoptHint')}</span>
+      {/* 列表只有需人工决策的项，摘要徽章却是全量差异 —— 明确交代差集（autoCount=0 时不显示噪音） */}
+      {listSummary.autoCount > 0 && (
+        <span className={css.hint}>
+          {t('syncflow.listScope', { review: String(listSummary.reviewCount), auto: String(listSummary.autoCount) })}
+        </span>
+      )}
 
-      {/* 批量决策（作用于确认列表里的全部项；Error 项不在其列，需逐项处理） */}
+      {/* 批量决策（作用于确认列表里的全部项；Error 项不在其列，需逐项处理）。
+          两个按钮都是「快捷方式」，一律 ghost —— primary 只留给弹窗底部真正的主操作「确认导入」。 */}
       <div className={css.actionRow}>
         <Button variant="ghost" disabled={busy || !bulkDecidable} onClick={() => { applyBulkDecision(keepLocalAll(items)) }}>
           {t('syncflow.keepLocalAll')}
         </Button>
-        <Button variant="primary" disabled={busy || !bulkDecidable} onClick={() => { applyBulkDecision(useRemoteAll(items)) }}>
+        <Button variant="ghost" disabled={busy || !bulkDecidable} onClick={() => { applyBulkDecision(useRemoteAll(items)) }}>
           {t('syncflow.useRemoteAll')}
         </Button>
-        <span className={css.hint}>{t('syncflow.bulkHint')}</span>
       </div>
+      {/* 说明独占一行：与按钮挤在同一行时换行位置随按钮宽度/文案长度乱跳 */}
+      <span className={css.hint}>{t('syncflow.bulkHint')}</span>
 
       {/* 逐项差异列表（仅需人工决策的项）；固定容器限高 + 内部滚动，防止整页被拉长 */}
       <div className={css.confirmScroll}>
@@ -234,21 +271,25 @@ export function SyncConfirmView(props: SyncConfirmViewProps): ReactNode {
             const st = states[it.itemId] ?? { adopted: it.defaultAdopt };
             const isConflict = it.kind === 'Conflict';
             return (
-              <div key={it.itemId} className={css.statRow}>
-                <label className={css.checkboxRow}>
-                  <input
-                    type="checkbox"
-                    checked={st.adopted}
-                    disabled={busy}
-                    onChange={(e) => { setAdopted(it.itemId, e.target.checked) }}
-                  />
-                  <span>{kindLabel(it.kind, api.t)}</span>
-                </label>
-                <Badge kind={it.severity === 'error' ? 'error' : it.severity === 'warning' ? 'warn' : 'info'}>
-                  {severityLabel(it.severity, api.t)}
-                </Badge>
-                {/* 同步差异项描述由宿主/引擎拼装，可能含本地配置值 → 渲染前过 redact（安全自查） */}
-                <span>{redact(it.description)}</span>
+              <div key={it.itemId} className={css.confirmItem}>
+                {/* 首行 = 勾选 + 类型 + 级别 + 描述；冲突的解决方式另起一行 ——
+                    此前它们挤在同一个 flex 行里，描述被压成窄列、勾选框被撑高的冲突块顶到垂直居中。 */}
+                <div className={css.confirmItemHead}>
+                  <label className={css.checkboxRow}>
+                    <input
+                      type="checkbox"
+                      checked={st.adopted}
+                      disabled={busy}
+                      onChange={(e) => { setAdopted(it.itemId, e.target.checked) }}
+                    />
+                    <span>{kindLabel(it.kind, api.t)}</span>
+                  </label>
+                  <Badge kind={it.severity === 'error' ? 'error' : it.severity === 'warning' ? 'warn' : 'info'}>
+                    {severityLabel(it.severity, api.t)}
+                  </Badge>
+                  {/* 同步差异项描述由宿主/引擎拼装，可能含本地配置值 → 渲染前过 redact（安全自查） */}
+                  <span className={css.confirmItemDesc}>{redact(it.description)}</span>
+                </div>
                 {isConflict && (
                   <ConflictResolver
                     item={it}
@@ -370,13 +411,31 @@ interface ApplyResultCardProps {
 
 function ApplyResultCard({ result, busy, t, onRollback }: ApplyResultCardProps): ReactNode {
   const ok = result.ok;
+  /** issue #56：未生效项（warning）= 非致命但确实没写进去（旧宿主无字段 → 空数组） */
+  const ineffective = result.ineffective ?? [];
   return (
     <>
       {/* R-05：成功分支已改走 Toast（见 runApply）；此处只保留失败 Banner ——
           K-06 要求失败后用户停留本卡阅读 warnings 明细并决定是否回滚，
           自动消失的 Toast 无法承载这个决策入口。 */}
       {!ok && <Banner kind="error">{t('syncflow.importFailed')}</Banner>}
+      {/* issue #56：部分成功必须**留在卡里**（Toast 会消失，而用户需要据此判断
+          「我这次到底缺了什么、要不要回滚」）。措辞与事实同强度：不是失败，是 N 项没生效。 */}
+      {ok && ineffective.length > 0 && (
+        <Banner kind="warn">{t('syncflow.importPartial', { n: String(ineffective.length) })}</Banner>
+      )}
       {result.needsRestart && <Banner kind="warn">{t('syncflow.needsRestart')}</Banner>}
+      {/* 未生效项逐条列出（含可复制的手动修复命令，来自各 adapter 的 message） */}
+      {ineffective.length > 0 && (
+        <div>
+          <span className={css.fieldLabel}>{t('syncflow.ineffectiveItems')}</span>
+          <ul className={css.warnList}>
+            {ineffective.map((it) => (
+              <li key={it.itemId}>{redact(it.message ?? it.itemId)}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       {result.applied.length > 0 && (
         <div>
           <span className={css.fieldLabel}>{t('syncflow.importedSections')}</span>

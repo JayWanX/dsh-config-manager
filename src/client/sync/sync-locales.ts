@@ -17,6 +17,7 @@ export const zh = {
   'config.token': '认证 token',
   'config.tokenHint': '将安全写入 DSH credentials（引用名 {ref}），不会写入同步文件或日志。留空表示沿用已保存的凭据。',
   'config.tokenSaved': '凭据已配置',
+  'config.tokenMissing': '未配置令牌：可拉取公开仓库，无法推送',
   'config.tokenPlaceholder': 'ghp_…（可选）',
   // 配置保存（自动保存 + 显式保存按钮）
   'config.save': '保存配置',
@@ -30,6 +31,12 @@ export const zh = {
   // 通道入口卡（弹窗驱动：点按钮 → 弹窗内配置通道）
   'channel.open': '配置同步通道',
   'channel.openHint': '远程同步通过「同步通道」进行：Git 私有仓库或 WebDAV 服务器。点击按钮在弹窗中配置或修改。',
+  // 断开通道配置（用户实测要求：配置过就必须能删掉，否则打不通的通道会永久占位）
+  'channel.clear': '断开配置',
+  'channel.clearConfirmTitle': '断开同步通道配置？',
+  'channel.clearConfirmMessage': '将删除「{channel}」的本机配置、已保存的凭据与自动同步开关。远端快照与本机备份不受影响；断开后可重新配置。',
+  'channel.clearConfirm': '断开配置',
+  'channel.clearGitSignOut': 'Git 通道的访问令牌会被一并删除：GitHub 登录状态随之失效，需要重新登录（不会自动恢复）。',
   'channel.configured': '已配置',
   'channel.notConfigured': '未配置',
   'channel.currentUrl': '当前地址',
@@ -92,6 +99,7 @@ export const zh = {
   'syncflow.needsReviewBadge': '需人工决策',
   'syncflow.empty': '远端快照与本地一致（无变更）',
   'syncflow.diffCount': '共 {count} 项差异',
+  'syncflow.listScope': '下面列表逐项确认 {review} 项；其余 {auto} 项按默认方式自动采用，无需逐条处理。',
   'syncflow.keepLocalAll': '全部保留当前配置',
   'syncflow.useRemoteAll': '全部使用备份配置',
   'syncflow.bulkHint': '批量决策作用于上面列表里的全部待确认项（冲突项一并决定去留）；错误项需逐项处理。',
@@ -226,6 +234,10 @@ export const zh = {
   'toast.configSaveFailed': '保存通道配置失败',
   'toast.configSaved': '通道配置已保存',
   'toast.configNothingToSave': '请先填写通道地址再保存',
+  'toast.channelCleared': '{channel} 配置已断开',
+  'toast.githubCodeCopied': '已复制一次性授权代码 {code}',
+  'toast.githubCodeCopyFailed': '自动复制失败，请手动复制上面的一次性授权代码',
+  'toast.channelClearFailed': '断开通道配置失败',
   'toast.selectionSaveFailed': '同步设置保存失败',
   'toast.pushPreviewFailed': '推送预览失败',
   'toast.pushFailed': '推送失败',
@@ -237,12 +249,26 @@ export const zh = {
   'toast.autosyncUpdated': '自动同步设置已更新',
   'toast.snapshotsLoadFailed': '读取远端快照失败',
   'toast.snapshotsRefreshed': '远端快照列表已刷新',
+  // issue #59：远端**有但读不出来**的快照（列表跳过是必要防御，但绝不静默）
+  'toast.snapshotsUnreadable': '远端有 {n} 个快照读不出来（列表不完整），详见下方说明',
+  'snapshots.unreadableHint': '远端存在 {n} 个无法解析的快照，它们不会出现在列表里：{files}',
   // 页面级加载失败（M-16：就地错误态标题；loadError 此前无任何渲染点）
   'load.failed': '加载同步状态失败',
   // 公共
   'common.close': '关闭',
   'common.retry': '重试',
   'common.loading': '加载中…',
+  'common.infoHint': '查看说明',
+  'common.cancel': '取消',
+  'syncflow.importPartialToast': '部分成功：{n} 项未生效，请查看结果明细',
+  'syncflow.importPartial': '部分成功：{n} 项未生效（其余已写入，未整体回滚）',
+  'syncflow.ineffectiveItems': '未生效项',
+  'history.remoteMovedHint': '远端快照已移至产物库',
+  'history.remoteMovedAction': '去看看',
+  'syncflow.compat.excellent': '兼容性：优秀',
+  'syncflow.compat.good': '兼容性：良好（备份来自更旧的 DSH）',
+  'syncflow.compat.partial': '兼容性：部分兼容（跨平台 / 分区缺失 / 版本超前，需人工确认）',
+  'syncflow.compat.unsupported': '兼容性：不受支持（格式版本超出范围）',
 } as const;
 
 export const en: Record<keyof typeof zh, string> = {
@@ -255,6 +281,7 @@ export const en: Record<keyof typeof zh, string> = {
   'config.token': 'Auth token',
   'config.tokenHint': 'Securely written into DSH credentials (ref {ref}); never written into sync files or logs. Leave blank to reuse the saved credential.',
   'config.tokenSaved': 'Credential configured',
+  'config.tokenMissing': 'No token: public repos can be pulled, but pushing will fail',
   'config.tokenPlaceholder': 'ghp_… (optional)',
   // Config save (auto-save + explicit save button)
   'config.save': 'Save config',
@@ -267,6 +294,12 @@ export const en: Record<keyof typeof zh, string> = {
   // Channel entry card (dialog-driven: click the button → configure the channel in the dialog)
   'channel.open': 'Configure sync channel',
   'channel.openHint': 'Remote sync runs through a sync channel: a private Git repository or a WebDAV server. Click the button to configure or change it in the dialog.',
+  // Disconnect channel config (user report: once configured there was no way out)
+  'channel.clear': 'Disconnect',
+  'channel.clearConfirmTitle': 'Disconnect sync channel?',
+  'channel.clearConfirmMessage': 'This removes the local configuration of "{channel}", its saved credentials and its auto-sync switch. Remote snapshots and local backups are untouched; you can configure it again later.',
+  'channel.clearConfirm': 'Disconnect',
+  'channel.clearGitSignOut': 'The git channel access token is deleted too: your GitHub sign-in becomes invalid and must be redone (it does not come back automatically).',
   'channel.configured': 'Configured',
   'channel.notConfigured': 'Not configured',
   'channel.currentUrl': 'Current URL',
@@ -323,6 +356,7 @@ export const en: Record<keyof typeof zh, string> = {
   'syncflow.needsReviewBadge': 'Needs decision',
   'syncflow.empty': 'Remote snapshot matches local (no changes)',
   'syncflow.diffCount': '{count} change(s)',
+  'syncflow.listScope': '{review} item(s) are listed below for your decision; the other {auto} are adopted by default and need no per-item handling.',
   'syncflow.keepLocalAll': 'Keep all current',
   'syncflow.useRemoteAll': 'Use all backup',
   'syncflow.bulkHint': 'Bulk decisions apply to every pending item listed above (conflicts included); error items must be handled individually.',
@@ -453,6 +487,10 @@ export const en: Record<keyof typeof zh, string> = {
   'toast.configSaveFailed': 'Failed to save channel config',
   'toast.configSaved': 'Channel config saved',
   'toast.configNothingToSave': 'Enter a channel URL before saving',
+  'toast.channelCleared': '{channel} configuration disconnected',
+  'toast.githubCodeCopied': 'One-time code {code} copied to clipboard',
+  'toast.githubCodeCopyFailed': 'Auto-copy failed — copy the one-time code above manually',
+  'toast.channelClearFailed': 'Failed to disconnect the sync channel',
   'toast.selectionSaveFailed': 'Failed to save sync settings',
   'toast.pushPreviewFailed': 'Failed to build push preview',
   'toast.pushFailed': 'Push failed',
@@ -464,11 +502,25 @@ export const en: Record<keyof typeof zh, string> = {
   'toast.autosyncUpdated': 'Auto-sync settings updated',
   'toast.snapshotsLoadFailed': 'Failed to load remote snapshots',
   'toast.snapshotsRefreshed': 'Remote snapshot list refreshed',
+  // issue #59: remote snapshots that exist but cannot be read (skipping is defensive, never silent)
+  'toast.snapshotsUnreadable': '{n} remote snapshot(s) could not be read (list is incomplete) — see the note below',
+  'snapshots.unreadableHint': '{n} remote snapshot(s) cannot be parsed and are missing from this list: {files}',
   // Page-level load failure (M-16: inline error state; loadError had no render point before)
   'load.failed': 'Failed to load sync status',
   'common.close': 'Close',
   'common.retry': 'Retry',
   'common.loading': 'Loading…',
+  'common.infoHint': 'Show description',
+  'common.cancel': 'Cancel',
+  'syncflow.importPartialToast': 'Partly successful: {n} item(s) did not take effect — check the result details',
+  'syncflow.importPartial': 'Partly successful: {n} item(s) did not take effect (the rest were written; nothing rolled back)',
+  'syncflow.ineffectiveItems': 'Items that did not take effect',
+  'history.remoteMovedHint': 'Remote snapshots moved to the artifact library',
+  'history.remoteMovedAction': 'Open',
+  'syncflow.compat.excellent': 'Compatibility: excellent',
+  'syncflow.compat.good': 'Compatibility: good (backup from an older DSH)',
+  'syncflow.compat.partial': 'Compatibility: partial (cross-platform / missing sections / newer version — review)',
+  'syncflow.compat.unsupported': 'Compatibility: unsupported (format version out of range)',
 };
 
 /** 字典键联合（注册处 compile-time 校验） */

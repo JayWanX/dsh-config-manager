@@ -249,6 +249,52 @@ test('V-1: package-lock.json.packages[""].version 必须与 package.json.version
   );
 });
 
+/* ------------------------------------------------- G-21: git 源安装可构建（issue #58） */
+
+/**
+ * issue #58 的根因不是「往仓库里塞了不该有的东西」，而是**包缺少 git 安装所需的构建入口**：
+ * npm 上发的是预构建产物（`lib/`），而 `dsh plugin add git+https://...` 拿到的是**源码树** ——
+ * pnpm 需要在 clone 里跑一个构建脚本才能得到 `lib/`。此前 `scripts` 里没有任何 pnpm 认的
+ * 构建入口（`prepare` 只在**发布前**校验、不参与安装），于是 git 安装 100% 失败：
+ * ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED ... needs to execute build scripts。
+ *
+ * 三条断言把「git 安装能构建」钉成契约（真机复核：加白名单后
+ * `pnpm add git+file:///<repo>` 走完 prepare → lib/index.js 与 lib/client.js 均产出）。
+ */
+test('G-21: scripts.prepare 必须存在且真的跑构建（git 源安装的唯一构建入口）', () => {
+  const scripts = (pkg as { scripts?: Record<string, string> }).scripts ?? {};
+  const prepare = scripts['prepare'];
+  assert.ok(
+    typeof prepare === 'string' && prepare.trim() !== '',
+    'package.json 必须声明 scripts.prepare —— 缺了它 `dsh plugin add git+https://...` 必然失败'
+      + '（pnpm 在 clone 里找不到任何构建入口；npm 安装不受影响，所以本地与 CI 都不会报警）',
+  );
+  assert.match(
+    prepare,
+    /npm run build|npm run bundle/,
+    'scripts.prepare 必须调用本仓库的构建脚本（build/bundle）—— 换别的命令会让 git 安装'
+      + '得到一个没有 lib/ 的包（安装「成功」但插件加载即失败）',
+  );
+});
+
+test('G-21: files 白名单必须收进 lib/（git 安装的构建产物要能被打包）', () => {
+  const files = pkg.files ?? [];
+  assert.ok(
+    files.includes('lib'),
+    'files 未包含 lib：npm 忽略 .gitignore 但仍遵守 files —— 漏掉它会让发布产物缺少构建输出',
+  );
+});
+
+test('G-21: 构建产物目录被 gitignore（prepare 现构建的前提，不得提交 lib/）', () => {
+  const ignore = readFileSync(path.join(repoRoot, '.gitignore'), 'utf8');
+  assert.match(
+    ignore,
+    /^lib\/?$/m,
+    '.gitignore 必须忽略 lib/ —— 若把构建产物提交进仓库，git 安装拿到的可能是过期产物，'
+      + '而 prepare 的成败不再代表「源码能构建」',
+  );
+});
+
 /* ------------------------------------------------------------ 变异验证记录
 
 V-1（版本四处一致，2026-09 新增）：把 `src/index.ts` 的 `PLUGIN_VERSION` 临时改成

@@ -755,6 +755,20 @@ test('插件安装失败（rollbackOnError=true）→ 非致命 warning，不回
     assert.equal(settingsItem?.status, 'ok', 'settings 应正常导入');
     assert.equal((dst.settings.ns.get('general')?.value as { theme: string }).theme, 'dark', '已导入的 settings 保留，未被回滚');
     assert.ok(!dst.plugins.installed.has('needs-install'), '插件未装入');
+
+    // issue #56 第二条线：`ok: true` + 一串 warnings 不足以让上层说清「部分成功」。
+    // 真机：插件安装失败（warning）排在凭据写入之前且中断了它 → 密钥没导进来，
+    // 界面却只报「同步完成」。这里钉住「未生效项」被结构化回传。
+    assert.deepEqual(
+      (result.ineffective ?? []).map((i) => i.itemId),
+      ['plugin:needs-install'],
+      'warning 项必须进 ineffective（否则上层只能看到 ok:true）',
+    );
+    assert.equal(result.ineffective?.[0]?.adapter, 'plugin', '展示用的分区/步骤分类要带上');
+    assert.ok((result.ineffective?.[0]?.message ?? '').length > 0, '必须带上可读原因（含手动修复提示）');
+    // 语义边界：不改变既有结论 —— warning 仍不算失败、不回滚
+    assert.equal(result.ok, true, 'ineffective 不得把 ok 变成 false');
+    assert.equal(result.rollback, null, 'ineffective 不得触发回滚');
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }

@@ -1,7 +1,7 @@
 /**
  * ToastViewport —— 全局通知的渲染宿主（右下角堆叠）。
  *
- * 挂载在 `ConfigManagerSection` 根部（与 `.drawerPanel` 同级），而不是 Portal 到 body：
+ * 挂载在 `ConfigManagerSection` 根部（与 `.taskPanel` 同级），而不是 Portal 到 body：
  * 宿主设置弹窗 overlay 为 `position: fixed; z-index: 1000`（见 Modal.tsx 的
  * MODAL_ROOT_ID 说明），任何挂到 body 的固定层都会被它盖住而"隐形"。
  * 因此本组件用 `position: absolute` 贴合插件根节点（`.section` 已 position: relative），

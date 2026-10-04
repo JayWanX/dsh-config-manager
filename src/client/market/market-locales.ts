@@ -25,6 +25,8 @@ export const zh = {
   'list.browsed': '已重新浏览市场',
   'list.loading': '正在读取市场…',
   'list.noItems': '该市场暂无条目。',
+  // 产物库「安装」带的条目 id 在清单里找不到（作者已下架 / 索引已更新）→ 如实告知，不停在原地
+  'list.installMissing': '市场列表里没有这个条目（可能已被移除），已为你打开市场列表',
   'list.searchPlaceholder': '搜索名称 / 作者 / 描述…',
   'list.categoriesAll': '全部类别',
   'list.sectionsAll': '全部分区',
@@ -215,6 +217,7 @@ export const zh = {
   'common.retry': '重试',
   'common.loading': '加载中…',
   'common.unknownError': '未知错误',
+  'common.infoHint': '查看说明',
 } as const;
 
 export const en: Record<keyof typeof zh, string> = {
@@ -229,6 +232,7 @@ export const en: Record<keyof typeof zh, string> = {
   'list.browsed': 'Market re-browsed',
   'list.loading': 'Reading market…',
   'list.noItems': 'This market has no items.',
+  'list.installMissing': 'This item is no longer in the market list (it may have been removed). The list is shown instead.',
   'list.searchPlaceholder': 'Search name / author / description…',
   'list.categoriesAll': 'All categories',
   'list.sectionsAll': 'All sections',
@@ -403,6 +407,7 @@ export const en: Record<keyof typeof zh, string> = {
   'common.retry': 'Retry',
   'common.loading': 'Loading…',
   'common.unknownError': 'Unknown error',
+  'common.infoHint': 'Show description',
 };
 
 /** 字典键联合（注册处 compile-time 校验） */

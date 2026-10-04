@@ -28,6 +28,44 @@ test('toRecoveryView：无 incident → NORMAL + recoveryRequired=false', () => 
   assert.equal(v.recoveryRequired, false);
   assert.deepEqual(v.incidents, []);
   assert.equal(v.lock, null);
+  assert.equal(v.safeModeStuck, false, '未阻断时不渲染解除入口');
+  assert.equal(v.safeModeBlocked, false);
+});
+
+/* --------------- issue #56：SAFE MODE 仍在阻断时必须可见且可解除 --------------- */
+
+test('issue#56：结案但保护仍开着（blocked + clearable）→ safeModeStuck + recoveryRequired', () => {
+  const v = toRecoveryView(mkStatus({ safeMode: { blocked: true, clearable: true } }));
+  assert.equal(v.safeModeBlocked, true);
+  assert.equal(
+    v.safeModeStuck,
+    true,
+    '「面板空空、写操作却 423」的这一态必须给出可执行的解除入口',
+  );
+  // 与残留锁同一口径：阻断写操作 ⇒ 必须算「需要处理」，否则横幅与总览入口都不出现
+  assert.equal(v.recoveryRequired, true, 'SAFE MODE 阻断同样要让界面提示');
+  assert.deepEqual(v.incidents, [], '该态下确实没有 incident（这正是问题所在）');
+  assert.equal(v.lock, null);
+});
+
+test('issue#56：还有未解决 incident 时不给解除入口（clearable=false）', () => {
+  const v = toRecoveryView(mkStatus({
+    incidents: [{
+      operationId: 'op', operationType: 'import-apply', state: 'NEEDS_ATTENTION',
+      decision: 'needs-attention', snapshotId: null, reason: '', createdAt: '2026-01-01T00:00:00.000Z',
+    }],
+    safeMode: { blocked: true, clearable: false },
+  }));
+  assert.equal(v.safeModeBlocked, true, '保护确实开着');
+  assert.equal(v.safeModeStuck, false, '有事项可处理 ⇒ 不该出现「解除」按钮（宿主也会拒绝）');
+  assert.equal(v.recoveryRequired, true, '由 incident 驱动');
+});
+
+test('issue#56：旧宿主不返回 safeMode → 按未阻断处理（绝不误报保护）', () => {
+  const v = toRecoveryView(mkStatus());
+  assert.equal(v.safeModeBlocked, false);
+  assert.equal(v.safeModeStuck, false);
+  assert.equal(v.recoveryRequired, false);
 });
 
 // ---------- issue #31：残留锁（非 journal）必须可见且可执行 ----------

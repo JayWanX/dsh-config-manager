@@ -24,12 +24,42 @@
 
 ## 1. IA（信息架构）
 
-Shell（`ConfigManagerSection`）：导航条 + 页面内容 + 状态栏 + 活动抽屉。
+Shell（`ConfigManagerSection`）：导航条 + 内容区（页面 / 流程面板）+ 状态栏。
 
-- **一级导航（7 页签）**：总览 / 备份 / 导出 / 导入 / 同步 / 市场 / 档案。
-  export/import 为一级页面；旧「更多」面板由「活动与关于」抽屉取代
-  （run-store `parsePersistedState` 迁移旧值，`moreSub` 保留）。
-- **活动抽屉**：右侧 400px 滑出，含 活动记录 / 关于 两个子视图（Segmented 切换）。
+- **一级导航（图标 + 短标签页签）**：首页 / 产物库 / 导入 / 同步 / 市场 / 环境（UI v2，2026-10）。
+  页签数量**不随功能增长**：放不下的项由 `navLayout` 从末项起移进「更多 ▾」（见 §6 Shell）。
+- **v2 的四条核心修正**见 §1.1：对象与日志分离 / 每页 ≤3 子视图 / 未知值不显示 0 / 两个同步通道卡恒显示。
+### 1.1 UI v2 的页面构成（2026-10 重建，替代 v1 的子 tab 堆叠）
+
+| 页面 | 内容 | 子视图 |
+|---|---|---|
+| **首页** | 状态行（备份位置 / 最近备份 / 同步 / 恢复）+ 动作网格（带走配置 / 装进配置 / 回到过去）+ 最近产物（3 行） | 无（单页） |
+| **产物库** | 四源合一扁平列表（本机快照 / 备份文件 / 远端快照 / 市场产物） | 源筛选（全部 + 四源） |
+| **同步** | **Git 卡 + WebDAV 卡恒显示**（未配置走矮态 ≈56px）+ 同步记录 + 指路行 | 无（两张卡各自展开） |
+| **环境** | 档案（本机概况卡 + 档案列表）/ 维护与诊断（恢复面板 + 磁盘占用） | 2 个（Segmented） |
+
+三条**不得回退**的结构原则：
+
+1. **对象 vs 日志分离**：产物库放「东西」（快照 / 备份文件 / 远端快照），同步页只留「发生过什么」（操作日志）。
+   v1 把远端快照行与自动同步行混在同一张表里，主标识一个是 UUID 一个是时间戳 —— 而用户要回答
+   「我有哪些备份」和「上次同步成功了吗」是**两个问题**，不该共用一张表。
+2. **每页 ≤3 子视图**：v1 的备份页有 4 个子 tab（安全快照 / 备份文件 / 定时备份 / 事故恢复），
+   而它们在语义上是三类东西（历史对象 / 设置 / 事故处理）。v2 拆到产物库 + 环境两页。
+3. **未知值不显示 0**：读不到就是读不到 —— 磁盘占用读不到的子区标 `unreadable` 而不是 0；
+   恢复面板进度未知时显示占位而非 0%。数字撒谎比没有数字更糟。
+
+**同步：分区选择在通道卡内，不是全局一节**（`autosync` 与 `sync-selection` 都按通道独立，schema v2）——
+做成全局一节会让用户以为两个通道共用一份选择。
+**两个通道卡恒显示**：未配置的走矮态。不做「只显示已配置的」——配完 Git 回来后发现 WebDAV 的卡
+消失了只会被当成 bug；也不做手动折叠（少一层用户状态、少一个持久化字段）。
+
+---
+- **流程任务层（Task Mode，2026-10）**：导出 / 导入 / 逛市场 / 发布市场是**多阶段流程**，
+  活动 / 历史 / 关于是**只读视图**，它们统一由内容区上的全宽侧滑面板 `.taskPanel` 承载；
+  面板只在 `panel === task.origin` 时渲染（切走收起、切回续做），状态住 `runStore.task` 且**不持久化**。
+- **容器判据（选容器的唯一依据）**：多阶段向导 → Task 面板；单次决策 + 报告 → Modal。
+- **命令面板**：`⌘/Ctrl+K`，命令表在 `src/ui/commands.ts` —— 增一个功能 = 注册一条命令，
+  不必再往 564px 的导航条里挤一个页签。
 - **状态栏（28px 圆角条）**：状态点 + 就绪/进行中/恢复待处理 + 插件与 DSH 版本；
   与顶部页签条同款「圆角分段条」外观（四周留白 8px，不再通栏贴底）。
 - 页内子视图切换一律用 `Segmented`（如备份页：安全快照 / 备份文件 / 定时备份 / 事故恢复）。
@@ -96,7 +126,7 @@ Shell（`ConfigManagerSection`）：导航条 + 页面内容 + 状态栏 + 活�
   页面末尾另有 `.viewBody::after`（8px 实盒）作**底部呼吸区**：`.pagePad/.viewBody` 是
   `flex:1 1 auto + min-height:0`（缩到视口高），它们的 padding/外边距**不进滚动溢出区** ——
   内容一长，最后一排按钮就被压到底部状态栏上（用户实测）。伪元素是真实盒子，必然计入溢出。
-- 嵌套容器里的小节标题（卡片、抽屉小节）自带 `margin-bottom: 10px`（`.sectionTitleBlock`）；
+- 嵌套容器里的小节标题（卡片、面板小节）自带 `margin-bottom: 10px`（`.sectionTitleBlock`）；
   页面主体内该外边距被上面的归零规则接管。
 - 圆角：卡片 8px、控件（按钮/输入/选择）6px、分段容器 7px、徽章 9px、小标签 4px；
   顶部页签条 / 底部状态栏为 8px 圆角分段条（条内 .navTab 6px 药丸），
@@ -107,7 +137,7 @@ Shell（`ConfigManagerSection`）：导航条 + 页面内容 + 状态栏 + 活�
   slow 就是进度条的 300ms 推进）、
   `--cm-motion-ease-out`（`cubic-bezier(0.16,1,0.3,1)`，入场用）、`--cm-motion-ease-in-out`
   （循环动效用）；各处只引用变量，不再各写一遍毫秒值。现有动效清单：
-  颜色过渡 120ms ease（含状态点 / 步骤条的状态色）、进度条 300ms、抽屉滑入与通知入场 180ms、
+  颜色过渡 120ms ease（含状态点 / 步骤条的状态色）、进度条 300ms、面板滑入与通知入场 180ms、
   状态点脉冲 1.2s、
   **页面入场 180ms**（`.pagePad` 的 `pageEnter`：opacity + 4px 上浮；React 侧以 `key={panel}`
   重建节点，换页时重放一次）、**弹窗入场/退场**（`.dialogMask` 淡入 120ms + `.dialogContentCenter`
@@ -118,7 +148,7 @@ Shell（`ConfigManagerSection`）：导航条 + 页面内容 + 状态栏 + 活�
   **列表/条目入场**（`.snapshotList > *`、`.dataTable tbody tr`、`.pickerUnit`、`.restorePlan`、
   `.banner`、`.empty`，前 4 项各递进 24ms）、**骨架 shimmer 1.3s**（`.skeletonBar`）。
   图标形变仅限 `ExpandChevron`（折叠展开/收起；临界阻尼、无过冲，见 §6 第三方原语）。
-  **`prefers-reduced-motion: reduce` 下关掉装饰性动效**（页面/弹窗/抽屉/通知入场、状态点脉冲、
+  **`prefers-reduced-motion: reduce` 下关掉装饰性动效**（页面/弹窗/面板/通知入场、状态点脉冲、
   骨架 shimmer —— 骨架退化为静态占位块，信息不丢）——
   旋转与不定态进度**刻意保留**：它们承载「正在进行」这个状态本身，关掉会让用户以为界面卡死。
   形变侧由 morphicons 的 `reducedMotion="user"` 承担（CSS 选择器管不到 SVG 内的属性插值）。
@@ -143,12 +173,29 @@ Shell（`ConfigManagerSection`）：导航条 + 页面内容 + 状态栏 + 活�
 - `Banner`（四态；操作按钮一律**内嵌右侧**）
 - `Segmented`（页内子视图切换；受控）
 - `Card` / `Field` / `SectionTitle` / `Empty` / `Checkbox` / `Stepper`
+- `InfoHint`（`common/InfoHint.tsx`，ⓘ 说明原语，2026-10）：**说明性文案的唯一承载体**。
+  触发元素是 `<button type="button">`（复用既有 `InfoIcon`）；悬停 / 键盘聚焦 / 点击固定三通道打开，
+  再次点击取消固定，**固定态下按下任意位置（触发按钮自身除外）同样取消固定并关闭**（`mousedown` 捕获阶段、
+  不 `stopPropagation`，守卫 `t10`），Esc 关闭（捕获阶段 + `stopPropagation`，不连带关掉外层 Modal/侧滑面板），
+  鼠标移出且未固定时关闭。**键盘聚焦通道只认「用户在弹窗内把焦点移过来」**：Radix 弹窗挂载会把初始焦点
+  派给容器内第一个可聚焦元素（标题行的 ⓘ 常常正是它），该次聚焦的 `relatedTarget` 在弹窗之外 → 不打开，
+  焦点环也只在气泡打开时才画（`.infoHintBtn[data-open]:focus-visible`）—— 程序化初始焦点于是既不弹气泡
+  也不亮蓝框（2026-10-04 用户反馈「一进弹窗就自动选中 ⓘ」，守卫 `t11`）。
+  说明文本走 `aria-describedby`（多实例 id 由 `useId` 保证唯一），
+  可访问名取各自命名空间的字典键 `common.infoHint`；**不依赖原生 title**。
+  气泡**必须经 `createPortal` 渲进插件根容器**（`resolveModalRoot()` = `MODAL_ROOT_ID`，与 Modal 共用同一份
+  实现，**绝不 `document.body`**）—— 否则会被 `.dialogContentCenter` 的常驻 `transform` 变成 fixed 包含块
+  并遭 `.dialogBody` 的 `overflow-y:auto` 裁剪；定位仍走 `getBoundingClientRect()` 量测，
+  但夹紧基准是**宿主画布 ∪ 锚点**（画布 = 插件根容器可见矩形 ∩ 窗口；并进锚点只为让气泡贴得住自己的 ⓘ ——
+  弹窗卡片是 fixed、相对窗口居中，会伸出画布左缘，见 §7），下方空间不足且上方更宽裕 → 向上翻转，
+  多行折行（`white-space: pre-wrap` + `max-width`），因此 564×720 画布内不出界、**不被任何父级
+  overflow 裁剪**。哪些文案该进它、哪些必须常驻，见 §7「说明性文案分层」。
 - `Select`（`common/Select.tsx`，2026-09 替换**全部**原生 `<select>`，15 处）：自绘下拉。
   为什么必须自绘：`appearance: none` 只改触发器，**展开后的弹层仍是系统控件**（深色主题下是亮底
   系统菜单），且吃不到 `--dsw-*` token（§3 硬约束）。触发器复刻 `.input` 盒模型，弹层走
   layer-2 + 阴影 + 120ms 入场，chevron 180° 旋转标示展开态。
   自绘要多扛三件事，缺一不可：① **键盘语义**（↑/↓ 跳过禁用项并环绕、Home/End、Enter/Space 提交、
-  Esc 关闭且必须 `stopPropagation`——它可能位于 Radix 弹窗/活动抽屉内，冒泡会连带关掉外层）、
+  Esc 关闭且必须 `stopPropagation`——它可能位于 Radix 弹窗 / 侧滑面板内，冒泡会连带关掉外层）、
   ② **ARIA**（combobox + listbox + option，`aria-expanded`/`aria-activedescendant`/`aria-selected`/`aria-disabled`）、
   ③ **贴边翻转**（`data-align`：右侧剩余不足 260px 时改右对齐，否则弹层会被 `.section` 的 overflow 裁掉）。
   可测的索引推导（初始高亮/移动/首尾）在 `src/ui/select-model.ts`（node 单测）；组件只装配。
@@ -183,7 +230,7 @@ Shell（`ConfigManagerSection`）：导航条 + 页面内容 + 状态栏 + 活�
     diff 面板同理）—— 这是本仓库明确接受的取舍，换来两端都有动画。
     当前调用点：ContentPicker 的分区级与分组级、RestorePlanView 的「无动作」分组与行 diff。
   - `ViewSwitch`（视图切换入场）：带 `key` 的包装层，key 变化 = 重建节点 = 入场动画重放。
-    **只用于「分支渲染不同组件」的视图级切换**（备份页 4 个子视图、抽屉三段）。
+    **只用于「分支渲染不同组件」的视图级切换**（备份页 4 个子视图）。
     包装层透传纵向 flex 填充链（`.viewEnter` 自带 `flex: 1 1 auto` + column），
     否则子视图的 `flex: 1` 会失效、页面底部重新出现空洞。
     反例（禁用）：包住带 `useState` 的容器（如导入向导体）—— key 变化会把本地态归零（§9 #15）。
@@ -267,6 +314,18 @@ Shell（`ConfigManagerSection`）：导航条 + 页面内容 + 状态栏 + 活�
   - **操作列**（`.cellActions`）：`overflow: visible; text-overflow: clip` 覆盖 `.tableFixed`
     给所有单元格加的省略号 —— 该列是按钮组，列宽略紧时浏览器会在按钮后补一个「…」
     （备份页两张表都出现过）。宁可略微溢出也不截断；并给 `.tableFixed` 单元格左右各留 12px。
+- **磁盘占用卡**（备份页 → 备份文件子页，2026-09）：`.dataTable + .tableFixed + .tableCompact`（列 = 内容 /
+  占用 / 文件数 / 回收策略）+ 下方 `.actionRow[data-inline]` 的「立即清理」行。三条约定：
+  - **三档回收语义必须显式表达**：`可随时重建`（`Badge kind="ok"`，缓存/暂存）、`{保留期} 后自动回收`
+    （`Badge kind="info"`，导出产物/定时备份）、`用户数据 / 安全网（不自动清理）`（`.dim` 文本，快照/同步）。
+    可重建区**不显示保留期**（随时可清，给一个「7 天后自动回收」会误导）；到期的量另起一行
+    `.cellMetaNoteText`（`其中 X 已到回收条件`）。
+  - **未统计 ≠ 0 字节**：子区目录读不到时体积与文件数都留空并显示 `未统计`（`.dim`），顶部补一条
+    「部分目录读不到，合计不含它们」—— 显示 0 会让用户以为盘是空的。
+  - **数字同源**：卡里的合计、可回收量、按钮上的数字全部由**渲染出来的行现算**
+    （`src/ui/disk-usage-view.ts`），不直接用接口的聚合字段；否则宿主聚合与明细一旦漂移，
+    用户会按「可释放 600 B」点下去却只释放 0。清理是写操作：只清可重建区，导出产物必须显式勾选
+    （`Checkbox`）且确认框转 `danger`；**快照与同步数据永不在候选集内**。
 - **状态条**（Overview）：`.statStrip`（健康点 + 可点指标段，名词在前值加粗）。
 - **事实网格**：`.factGrid/.factCell/.factLabel/.factValue`（四列 label/value）。
 - **键值行** `.kvRow`、**分区构成** `.sectionGrid/.sectionRow`（共享组件
@@ -395,16 +454,22 @@ Shell（`ConfigManagerSection`）：导航条 + 页面内容 + 状态栏 + 活�
 - **进度条**：`.progressTrack` 5px + 确定宽度过渡 / `.progressIndeterminate`。
 
 ### Shell 与 Overlays
-- Shell：`.shellNav/.navStrip/.navTab/.navActions/.shellMain/.pagePad/.statusBar`；
+- Shell：`.shellNav/.navStrip/.navTab/.navMore/.navActions/.shellContent/.shellMain/.pagePad/.statusBar`；
   `.shellMain` 与 `.pagePad` 构成纵向 flex 链，页面可伸展填充（`.fillCard/.fillViewport`）。
-  - **页签条溢出可发现性（UI-19）**：`.navStrip` 是 `overflow-x: auto` 但滚动条被隐藏
-    （`scrollbar-width: none`）——英文界面（7 个英文页签 + 2 个文字动作按钮）在 564px 画布下会溢出，
-    而界面上原本没有任何「右边还有内容」的提示。壳层按 `scrollWidth/clientWidth/scrollLeft`
-    算出溢出侧并写入 `data-overflow="none|start|end|both"`（判定 = 纯函数
-    `navOverflowState`/`navOverflowAttr`，`src/ui/nav-overflow.ts`，node 可测），
-    CSS 只在真正溢出的那一侧画渐隐遮罩（`mask-image`，作用在元素自身绘制盒上，
-    不随内容滚动；`::after` 覆盖层在滚动容器里会跟着内容跑，不可用）。
-    放得下时不画任何遮罩（避免给放得下的界面凭添渐隐）。
+  - **导航容量（v2，取代 v1 的溢出遮罩）**：放不下就从**末项**开始移进「更多 ▾」，
+    绝不把页签藏在视口外（v1 是隐藏滚动条 + 两侧渐隐遮罩，用户得按住 shift 才滚得动）。
+    判定 = 纯函数 `navLayout(itemWidths, availWidth, moreWidth, gap) → { visible, overflow }`
+    （`src/ui/nav-model.ts`，node 可测）；宽度由壳层用 `.navMeasure` 实测 —— 它是
+    absolute + `visibility:hidden` 的**逐字节同构副本**（同一批 class、同一段文案），
+    因为标签文案随语言变化，按字数估算必然失准。
+    **度量不可信（未量到 / avail≤0）→ 一律全部可见**：宁可横向溢出这种视觉瑕疵，
+    也绝不因为量不出来就藏页签 —— 那是功能丢失，不是外观问题。
+    `.navMore` 与 `.navTab` **共用同一批 CSS 规则**（分组选择器）：同处一个分段条，
+    必须长得一模一样，分成两套写必然会漂移；且根节点必须 `flex: none`
+    （`.selectRoot` 缺省可收缩，空间一紧就被压扁，`navLayout` 的算账就白算了）。
+    当前页被藏进「更多」时按钮高亮（`.navMore[data-active]`），否则用户看不出「我在哪」。
+  - **动作区是三个纯图标按钮**（⌘K / 活动 / 关于）：v1 那两个文字按钮在英文界面下
+    各吃掉约 90px，等于每加一个动作就压缩一格页签容量。
   - **`.shellNav` 不铺背景色**（与 `.statusBar` 一致）：宿主设置面板底色随主题变化，
     实测暗色下 `--dsw-alias-bg-base`=#151517 而面板底色=#2c2c2e，铺底色会在导航条两侧
     形成一条比面板更暗的通栏色块（亮色下两者同为 #fff 才看不出来）。页签分组感由
@@ -438,24 +503,64 @@ Shell（`ConfigManagerSection`）：导航条 + 页面内容 + 状态栏 + 活�
   三条纪律：① 惰性 `useState(() => 查根节点)`（渲染期同步命中）；② `useLayoutEffect` 兜底
   （同一 commit 内根节点尚未进 DOM 时，重解析在绘制前完成）；③ 容器未知时**不渲染 Portal**
   （宁可晚一帧，也绝不走 body 回退）。
-- Drawer：`.drawerMask/.drawerPanel`（右侧 400px；Esc 仅在面板内消费，`stopPropagation`
-  避免关闭宿主弹窗）。
-- **运行中心（2026-09，活动抽屉第三段「进行中」）**：`.runsCenter/.runsSummary/.runsCardHead/
+- **Task 面板（Task Mode，2026-10，取代 v1 的 Drawer）**：`.taskPanel/.taskHead/.taskTitle/.taskBody`。
+  删抽屉的四条理由与四条硬约束：
+  ① **定位必须 `absolute; inset: 0`**（贴合 `.shellContent`，它 `position: relative`），
+     不是 `fixed` —— 抽屉用 `fixed` 是相对**视口**解析的，才需要
+     `@media (max-width:900px){ width: 100vw }` 那条错误补丁（已随抽屉删除）。
+     层叠 `z-index: 90`（Modal 是 101）。
+  ② **它不是模态**：不带遮罩、`role="region"`（**不是** `dialog`/`aria-modal`），
+     导航条 / 全局横幅 / 状态栏全部保持可点 —— 横幅可见是急救可达性的硬要求。
+  ③ **底下的页面保持挂载**：关闭是瞬时的，滚动位置、展开的那一行、已拉到的数据都还在。
+  ④ **入场只做 24px 轻位移**（`.taskPanelIn`，180ms）：面板本身满宽（564px），
+     「整幅滑入」要在 180ms 内扫过整屏，看着像闪一下。
+  ④.1 **换视图不重挂外壳**：`TaskShell` 不按 `kind` 加 `key` —— 按 kind 重挂会「先卸载旧面板、
+     再让新面板从 `opacity: 0` 入场」，两步之间露出的那一帧就是用户报告的闪烁。
+     外壳只在「无面板 ⇄ 有面板」时挂载/卸载，`.taskPanelIn` 因此每次开面板只放一次；
+     同一面板内的 kind 切换是**原地换内容**（头部、背景、层叠都不动）。
+  关闭途径集中在容器里：`← 返回` 恒有；`escToClose` **只给只读视图** ——
+  多阶段流程里可能有未保存的计划或已输入的密码，Esc 误退的代价太大。
+  删抽屉的直接理由：① 它带遮罩却只占画布 71%（564px 里的 400px），遮罩之下那 164px 没有价值；
+  ② 宽度绑的是**视口**而插件画布恒为 564px，同一个插件在不同窗口尺寸下是两副样子；
+  ③ 运行中心与迁移历史都是数据表，400px 一直在挤。
+- **MoreMenu**（`common/MoreMenu.tsx`）：导航条溢出的「更多 ▾」。四条实现契约**照抄 Select**
+  （absolute 不 portal / Esc 必须 `stopPropagation` / mousedown 关闭外部点击 / 高亮移动走
+  `ui/select-model.ts`）；差异只有语义：`aria-haspopup="menu"` + `role="menu"` +
+  `role="menuitemradio"` + `aria-checked`。弹层样式与 Select **共用** `.selectMenu/.selectOption`
+  （含 `[aria-checked='true']` 选中态），对齐量测共用 `common/menu-align.ts`
+  —— 宿主设置弹窗恒比视口窄，按 window 宽度判断必然误判（弹层会被 `.section` 裁掉）。
+- **CommandPalette**（`common/CommandPalette.tsx`）：`⌘/Ctrl+K`。命令表是**纯数据**
+  （`src/ui/commands.ts` 的 `COMMANDS` + `filterCommands`，node 单测覆盖匹配优先级 / 跳过禁用 /
+  稳定排序），组件只装配。走 `Modal`（Radix），focus trap / Esc / Portal 全部现成。
+  空查询按**分组**渲染、有查询按**相关度**平铺（有查询还插分组标题会打乱排序语义）。
+  **分组标题不是选项**：字号更小、更淡、不可选中，且非首组先起一条分隔线 ——
+  否则它和「灰掉的选项」长得一模一样（真机反馈：用户把三个分组标题当成了点不动的灰条）。
+  **目的地命令（页面 / 只读视图 / 流程面板）不设 `enabled`**：它们任何时候都能打开，
+  面板自己渲染空状态；灰显这个口子只留给「当前上下文真的做不了」的动作，且必须给得出原因
+  （`CommandItem.enabled`，今天没有一条命令用它）。
+  五条实现纪律：① 渲染顺序与高亮顺序**必须是同一个数组**，否则方向键跳得莫名其妙；
+  ② 快捷键**不抢输入框**里的 ⌘K（宿主别处也可能用它）；
+  ③ **只注册壳层真能执行的命令**：命令表的 id 与壳层 `runCommand` 的 `case` 必须逐条对应
+     （`commands.test.ts` 有双向源码守卫）—— 认不出的 id 会变成点了什么都不做的死选项；
+  ④ **每次打开复位** query 与高亮（面板组件常驻，不复位会把上次的过滤结果带出来）；
+  ⑤ **高亮必须滚进可视区**（列表限高，↑↓ 走到看不见的位置与键盘失灵没有区别）。
+- **运行中心（2026-09，现为 task 面板的「进行中」）**：`.runsCenter/.runsSummary/.runsCardHead/
   .runsCardTitle/.runsCounts/.runsLogTail/.runsLogLine/.runsCardActions/.runsOption(.runsOptionTitle
   / .runsOptionDesc/.runsOptionTag)` + 状态栏入口 `.statusAction`。
   - **入口双点、正文一处**：状态栏那句「N 个任务进行中」（`.statusText`）在有任务时**整句变成按钮**
     （`.statusAction`，无边框无底色，只加 hover 下划线 + 焦点环 —— 它是状态文本，不该看起来像按钮），
-    点开抽屉并落到「进行中」段；正文只有抽屉里的运行中心一份。**不新增一级页签**：564×720 下
-    7 个英文页签已溢出（见上「页签条溢出可发现性」），运行任务又是跨页面的，抽屉才是它的正确容器。
-  - **三段式 Segmented**：进行中（瞬时态，`/runs?scope=recent`）→ 迁移历史（持久审计）→ 关于。
-    两者**不得合并成一个视图**：前者终态 30 分钟后会被宿主 prune，混进历史页会出现
+    点开 **task 面板**的「进行中」；正文只有面板里的运行中心一份。**不新增一级页签**：
+    运行任务跨页面，而页签容量早已由 `navLayout` 自动收敛。
+  - **三段是三种 task kind，不再用 Segmented**：`runs`（瞬时态，`/runs?scope=recent`）/
+    `history`（持久审计）/ `about`，由面板的 `key={kind}` 重挂承担切换动效。
+    它们**不得合并成一个视图**：`runs` 的终态 30 分钟后会被宿主 prune，混进历史页会出现
     「刷新后历史里少了一半」的认知撕裂。
   - **决策框不是普通确认框**：`Modal` + `.runsOption` 单选卡（两个语义不同的出口：回滚 / 保留），
     代价数字（已应用 / 未执行）写在正文顶部，默认项带 `.runsOptionTag`「推荐」标记（推荐项跟随用户
     既有的「失败不回滚」偏好），底部动作走 `Modal.Footer`（`.statusSpacer` 推靠右）。
     「保留」下方**必须**带 `Banner kind="warn"`：审计只能压低 DSH 启动失败的概率，不能保证。
-  - 长内容纪律：日志尾部 `.runsLogTail` 限高 108px 内滚（同 §2 长列表规则），卡片列表靠在抽屉
-    自身的 `.drawerBody` 滚动里，**不得**再嵌套一层滚动容器。
+  - 长内容纪律：日志尾部 `.runsLogTail` 限高 108px 内滚（同 §2 长列表规则），卡片列表靠在面板
+    自身的 `.taskBody` 滚动里，**不得**再嵌套一层滚动容器。
   - **进度轨道三态（真机 bug 修复，用户报告「定时备份 / 自动同步 一直在加载」）**：轨道形态由
     `progressBarMode(view, active)`（纯函数，`src/client/common/progress-view.ts`）决定 ——
     有百分比 → 定长；**无百分比且在跑** → `.progressIndeterminate` 不定态动画；
@@ -479,8 +584,9 @@ Shell（`ConfigManagerSection`）：导航条 + 页面内容 + 状态栏 + 活�
     （`runs.lock.recoverRefused` / `recoverFailed`），**不得**报成功。回收动作 `userConfirmed=true`
     只由用户点击表达。
   - **每张卡片带相对时间**（`.runsCardTime`，右贴）：没有它，「正在跑」与「几小时前就结束的僵尸卡片」
-    在界面上完全一样。保留期说明 `.hint` **始终显示**（空列表时解释「为什么什么都没有」，
-    有列表时解释「为什么只有这些」）。
+    在界面上完全一样。保留期说明（`runs.retentionHint`）属 MOVE 类（机制怎么工作 + 省事提示），
+    收进列表头部摘要行的 `InfoHint`（ⓘ）；空列表「为什么什么都没有」的**常驻**解释由
+    `<Empty>`（`runs.empty`）承担，不得一并移入 ⓘ。
 
 ### 布局行原语（2026-09 补：把「行」的语义与间距集中定义，禁止各处内联 margin）
 - `.actionRow`：通用操作行（flex + nowrap→wrap，`margin: 0 0 10px`）。
@@ -523,14 +629,25 @@ flex-direction:column }` 让内部 input 拉满。市场筛选用 `.marketFilter
     **三步主线**：创建第一份备份 → 导出 ZIP 带走 → 在新机器导入回来。步骤序列来自纯函数
     `overviewFirstSteps()`（`ui/overview-view.ts`，有单测），组件不写死顺序与文案；
     首用恒为「第一步 current、其余 todo」——**不做状态推断**，推断属模型层职责。
-  - 状态条指标段**精确跳转**：备份文件→备份页「备份文件」、安全快照→「安全快照」、
-    定时备份→「定时备份」、远程同步→同步页（`METRIC_TARGET` 同时写 panel 与 snapshots.subTab，
-    只写 panel 会全部停在子页默认值）。
-  - 健康段仅在「存在未解决恢复事项」时渲染为按钮，直达备份页「事故恢复」；正常态是纯展示 span。
+- 状态条指标段**精确跳转**（v2 重写）：备份文件 / 安全快照 → **产物库并预置来源筛选**
+  （`navMetric` 写 `panel: 'library'` + `library.sourceFilter`，只写 panel 会停在默认筛选）；
+  定时备份 → **本页开设置弹窗**（它是设置不是对象，不必跳走）；远程同步 → 同步页。
+- 健康段仅在「存在未解决恢复事项」时渲染为按钮，直达**环境页「维护与诊断」**；正常态是纯展示 span。
   - 活动行容器 `.activityRows` 取 `flex: 0 1 auto; min-height: 0`（**不可用 `flex: none`**）：
     页面被压缩时列表须随之收缩并自身内滚，否则内容溢出卡片边框（曾实测 274px 内容 vs 205px 卡片）。
-- **Backups**：Segmented 四子视图；快照表（行点击→计划弹窗）、备份文件表
-  （图标操作 + 删除红色隔离 + 分隔线）、定时备份独立子视图（单行头：标题+结果徽章+上次+动作）。
+- **产物库**（v2）：源筛选 Segmented（全部 / 本机快照 / 备份文件 / 远端快照 / 市场产物）+ **扁平列表**。
+  行 = `.kindTag` 来源标签 + 标题 + 元信息 + 时间；展开态给详情对（`.artifactDetail`）。
+  能力集合 `ArtifactCapability = restore|import|pull|install|inspect|download|consult|pin|unpin|delete`
+  由 `src/ui/artifact-view.ts` 统一判定（四源共用一份模型），**行只冒泡能力，弹窗由页面级持有**。
+  **不做批量操作**、排序只有时间/名称；「改备注」已砍（收益低、状态多）。
+  - **高度契约（2026-10-04 用户要求）**：列表 `.artifactList` 与加载态 / 空态 `.libraryListState`
+    都是 `flex: 1 1 auto`，**永远吃掉剩余高度**（哪怕只有一两行）；工具栏（`.libraryFilters` /
+    `.librarySearch`）与底栏 `.libraryFooter` 是 `flex: none`。行数少时底栏恒贴底，不会吊在半空
+    留一大片空洞；内容超出由列表**自身内滚**（页面不整页滚）。
+  - **市场条目只有一个动作**：`install`（2026-10-04 用户要求）—— 它打开「逛市场」流程并**直达该条目**
+    （下载 + 校验 + 免责 + 分步审阅），与它同入口的「查看与对比」是重复项，已从能力集合里移除。
+- **环境**：Segmented 两子视图 ——「档案」（本机概况卡 + 档案列表；启动/停止/复制/删除沿用 v1 判定）
+  与「维护与诊断」（恢复面板 + 磁盘占用卡）。
 - **恢复计划预览（git 风格，2026-09 用户要求）**：计划弹窗从「一行条流水账」改为
   「摘要条 → 状态分组 → 点开逐行对照」三级：
   - 摘要条（`.statRow` + `Badge`）：将被还原 / 新增 / 将被删除 / 卸载插件 / 需人工处理 /
@@ -579,6 +696,19 @@ flex-direction:column }` 让内部 input 拉满。市场筛选用 `.marketFilter
   host 的 `current=` / `imported=` 永不显示），改文案只改字典。
   **不再用 `<pre>`**：`white-space: pre` 会让长配置横向溢出、出现左右滚动条。
   注意 `.conflictDetail` 亦被 `SyncConfirmView` 的 `<details>` 复用（该处非 pre，不受影响）。
+- **一键同步差异确认弹窗**（`SyncConfirmView`，2026-10-04 排版收敛）：
+  - 顶部**两行**：状态 Banner（需人工决策 / 差异数）→ `.statRow` 徽章行（兼容性 + 差异数 + 采用数 +
+    告警数，兼容性徽章并入本行，不再独占一行）；下面两行 `.hint`：勾选语义、**列表范围**
+    （`syncflow.listScope`：列表逐项确认 N 项 / 其余 M 项自动采用 —— 摘要徽章统计全量差异、
+    列表只渲染需人工决策项，必须把这个差集说出来，否则「共 57 项差异」而列表只有 1 行无解释）。
+  - 批量按钮（`.actionRow`，**全部 ghost**）与说明文字**各占一行**：primary 只留给弹窗底部的「确认导入」；
+    说明与按钮同排时换行位置随按钮文案乱跳。
+  - 列表行 `.confirmItem`（分隔线代替间距，末行不画线）：首行 `.confirmItemHead` = 勾选 + 类型标签 +
+    级别徽章 + `.confirmItemDesc`（`flex:1 1 200px` + `overflow-wrap:anywhere`，占满剩余宽度并允许折行）；
+    冲突的解决方式（`.conflictItem`）**另起一行**（`.confirmItemHead + .conflictItem` 补 8px 上边距）——
+    此前整条挤在一个 flex 行里，描述被压成窄列、勾选框被撑高的冲突块顶到垂直居中。
+  - 判定与数字全部来自 `src/client/sync/sync-view.ts` 的纯函数（`reviewItems` / `isListedItem` /
+    `confirmListSummary` / `hasBulkDecidable`），组件只装配。
 - **路径映射**（`PathMappingForm`）：每条 issue 一块 `.pathRow`，**纵向**堆叠 ——
   「原路径」块（标题 + 等宽路径 + kind）在上、「新路径」块（标题 + input）在下，各自整宽。
   两个块内的标题用块级元素（`.fieldLabel` 无 display 时是行内元素，会与 input 挤同一行）；
@@ -594,13 +724,16 @@ flex-direction:column }` 让内部 input 拉满。市场筛选用 `.marketFilter
     让「为什么是 review / block」可直接核对，而不是只有一个分数 —— 用户实测抱怨过
     「健康评分 89 / 建议：阻止执行」这种自相矛盾的展示（根因：结论曾由分数阈值决定，
     现在只由证据决定，见 `src/core/migration-consult.ts` 的 `HARD_BLOCKER_CODES`）。
-- **导出页（Export）**：工具栏 → 模式提示 → **安全选项**（`.groupLabel` = `export.security`）→
+- **导出页（Export）**：工具栏（末尾是 `export.hint` 的 ⓘ）→ **安全选项**（`.groupLabel` = `export.security`）→
   **命名行**（`.groupLabel` = `export.naming`）→ 进度/报告 → **「本次将导出」构成卡**
   （最后一个数据块，`Card.fillViewport` + `.compositionViewport` 内滚；合计口径与选择器 footer
   同源 = 同一个 `pickerSummary`，构成行只列真正会导出的分区）。
+  - **模式提示不再常驻**（2026-10 ⓘ 迁移，见 §7）：`export.hint`（默认导出推荐分区 + 去哪儿调整勾选）
+    已从页面正文收进工具栏 ⓘ（`ExportView.tsx` 工具栏末尾），首屏不再有那一行提示。
   - **分组标题（UI-11）**：两组输入区（安全选项 / 文件名与备注）外观相同，必须各有分组标题，
-    否则读不出边界；文件名与备注各带 **常驻** `.hint` 规则说明（UI-12，
-    `export.fileNameHint` / `export.noteHint`，先说明规则后报错）。
+    否则读不出边界；文件名与备注的规则说明（UI-12 的 `export.fileNameHint` / `export.noteHint`）
+    已收进字段标签旁的 ⓘ —— **常驻的只有非法时的 `.formError`**（`export.fileNameInvalid`，KEEP ①，
+    它本身重申了允许的字符集）。UI-12 的「先说明规则后报错」随之改写为「出错时由错误文案重申规则」。
   - **并排字段间距（UI-21）**：`.secretFields` 双列栅格内的 `.field` 归零下边距
     （`.secretFields .field { margin-bottom: 0 }`），分组说明行用 `.groupHintRow`（10px）
     —— 不得用内联 `style` 覆盖（AGENTS.md：style 属性只允许极小修补）。
@@ -665,8 +798,8 @@ flex-direction:column }` 让内部 input 拉满。市场筛选用 `.marketFilter
     我的配置侧「已上传列表 → 装回本地 → 进入向导页」；两侧都由父页给出**页头 = 标题 + 返回列表**
     （`.headRow` + `Button`），列表视图整块让位（我的配置侧用提前 return 实现，所有 hooks 仍在
     提前 return 之前声明）。Tab 栏（浏览市场 / 我的配置）保留，随时可切走。
-  - **步内内容区的高度（2026-09 用户要求，自适应版）**：`.marketReviewPage`（`flex: 1 1 auto;
-    min-height: 200px`）吃满 `.viewBody` 的剩余高度；**所有步骤的内容区共用同一条高度规则** ——
+  - **步内内容区的高度（2026-09 用户要求，自适应版；2026-10-04 修正 shrink）**：`.marketReviewPage`
+    （`flex: 1 0 auto; min-height: 200px`）吃满 `.viewBody` 的剩余高度；**所有步骤的内容区共用同一条高度规则** ——
     `flex: 1 1 auto; min-height: 200px; max-height: 800px; overflow: auto`，适用对象是
     「预览 / 冲突 / 结果 / 确认」的 `.marketReviewScroll` 与「选择内容」的
     `.marketReviewPage .pickerList`（**不改导出页选择器弹窗与导入页的既有规则**）。
@@ -674,7 +807,10 @@ flex-direction:column }` 让内部 input 拉满。市场筛选用 `.marketFilter
     800px 是上限（超长内容不把步骤撑爆）；② 外层 `.marketReviewPage .pickerRoot` 保持
     `flex: 1 1 auto` 且**不写 `min-height: 0`** —— 保留 flex 项的自动最小尺寸（= 内容），
     否则空间不足时树会溢出根盒、把底部按钮顶到重叠位置；③ 空间不足时**整页由 `.shellMain` 滚动**
-    （溢出的后代内容仍可达，不会被裁掉）。
+    （溢出的后代内容仍可达，不会被裁掉）；④ **`.marketReviewPage` 的 `flex-shrink` 必须为 0**
+    （`flex: 1 0 auto`）：shrink:1 会在空间不足时把本页压得比内容矮，内容**视觉溢出**自己的盒子，
+    最后一行按钮正好盖住 `.viewBody` 末尾那块 8px 呼吸区 —— 表现为「上一步 / 下一步」贴住底部
+    状态栏、零间距（2026-10-04 用户实测截图定位）。
   - **分区小结的行间节奏**：小结卡片复用冲突卡的 `.conflictItem` + `.conflictHead`，**必须**包在
     `.conflictList` 容器里 —— 间距由容器的 `gap: 8px` 提供，`.conflictItem` 自己不带上外边距，
     直接并排会贴在一起（2026-09 实测反馈）。
@@ -715,7 +851,8 @@ flex-direction:column }` 让内部 input 拉满。市场筛选用 `.marketFilter
   新实例就绪 → `Banner kind="ok"` + 「打开新实例」+ 复制带 token 的 URL；未就绪 → `Banner kind="warn"`
   + 逐条告警 + 日志路径（`.kvRow` + `.mono`），绝不谎报成功；
   ②**新建卡**（name `.input` + 模板 `.select` + primary 按钮，非空即内联 `.formError` 校验）；
-  ③**列表**（`.listHeaderRow` = 标题 + 统计 + 刷新，下接一行 `.hint` 说明「点击行看完整详情」；
+  ③**列表**（`.listHeaderRow` = 标题 + `profiles.list.hint` 的 ⓘ + 统计 + 刷新 —— 2026-10 ⓘ 迁移后
+  **不再下接一行 `.hint`**；同一键仍保留在行内可点信息区的 `title=`（KEEP ⑥ 防截断全量提示）；
   行 = `.profileRow` 内 `.profileRowHeader`：左为**整块可点信息区** `button.profileRowMain`（两行：
   `.profileRowTitle` = 档案名 `.profileRowName` + `.badgeRow` 徽章组（当前运行 / `:端口 运行中` / 形态 / 损坏），
   `.profileRowMeta` = **计数摘要**「N 个层 · patch M 条 · 依赖 K」+ node_modules + patchReload + 更新时间），
@@ -747,6 +884,55 @@ flex-direction:column }` 让内部 input 拉满。市场筛选用 `.marketFilter
     profile 时额外渲染 `Checkbox`（`profiles.deleteCurrentConfirm`），未勾选点确认只就地报错、不执行。
   - 旧的「切换预览」弹窗（计划项 diff + 咨询卡）随该功能一并移除；
     `ConsultCard` 仍在导入向导使用。
+
+- **离线救急台（`dcm web`，2026-10，独立于 DSH 设置弹窗）**：这是**唯一不挂在 DSH GUI 内的界面** ——
+  DSH 都起不来时它要在浏览器里可用，所以它**不消费 `--dsw-*` token、也不走 CSS Modules**：样式内联在
+  `src/cli/web/page.ts` 的 `STYLE` 常量里，由**服务端直出 HTML**（零脚本、零外链；CSP `default-src 'none'`）。
+  仍遵守本文件的精神与结构：
+  - **颜色仍按语义命名**（`--fg/--muted/--bg/--card/--surface/--line/--accent/--accent-hover/--on-accent/--ok/--warn/--bad/--scrim`），
+    并给出 `prefers-color-scheme: dark` 暗色一套 —— 因为 DSH 的 token 在这里不存在，只能自带；
+    token 的**语义**与本文 §3 对齐（ok=成功、warn=需注意、bad=危险/失败）。
+  - **救急台的设计系统有外部出处（2026-10）**：亮色取 **IBM Carbon**（`docs/design/reference/ibm-DESIGN.md`）的语义四色与 surface 画布，
+    暗色取 **Raycast**（`docs/design/reference/raycast-DESIGN.md`）的 surface 阶梯与语义 accent。逐条映射、只取的四节、
+    以及**全部偏离记录**在 `docs/design/2026-10-04-cli-rescue-console-carbon.md`。四条硬约束：
+    ① **处方角**（一律 `border-radius:0` —— Carbon 的「半径为 0 才是品牌」，胶囊 chip / cov 一并改方）；
+    ② **文字色取「能读的那一档」**：Carbon 的 `#24a148` / `#f1c21b` 只做填充，正文用 `#198038` / `#8e6a00`（AA 对比度由 `web.test.ts` 的 R3-02 逐对钉住）；
+    ③ **层级只用 surface 变化 + 1px hairline，禁止阴影**（Carbon 的 do/don't）；④ 字体仍走**系统栈（含中文字族）**，
+    绝不外链字体或任何资源（CSP `default-src 'none'` 不变，R3-01/R3-02 双守卫）。
+    ⑤ **三态主题（自动 / 浅色 / 深色，2026-10）**：页头品牌行右侧的三方按钮，选中态用 `--surface` 填充 + `aria-pressed` 表达；
+    载体是 **cookie `dcm-theme`（非敏感、`SameSite=Lax`、1 年）**—— 救急台每次启动换随机端口，只有 cookie 不区分端口能跨次记住，
+    且 R1-01 明确禁止该脚本使用 `localStorage`；脚本因此从 `<body>` 末尾移到 `<head>`（`data-theme` 必须在首帧前落地，否则强制主题会闪）；
+    **无脚本时整组隐藏**（`:root[data-dcm-js="1"]` 才显示），页面回落「自动跟随系统」= 改造前的行为；
+    暗色 token 刻意写两次（媒体查询 + `[data-theme="dark"]`）并由 R3-02 断言**逐字相同**（防漂移），详见设计文档 §8。
+  - **结构 = 页头（品牌 + 版本 + 只读徽章 + 页签 + 路径事实行）→ 内容区（每块一个 `.card`）→ 页脚（CLI 等价命令清单）**；
+    页签为八个（首页 / 磁盘占用 / 会话体检 / 档案与实例 / 恢复 / 导出 / 解锁 / 重装）：**每组页签对应一类
+    明确动作**（看 / 修 / 救 / 装），首页只放动作卡与能力边界，不重复渲染各页内容。
+  - **状态一律横幅优先**（`.banner.ok|warn|bad`）：SAFE MODE 激活 / 状态无法判定 / 有项目读不出来，
+    必须在页面顶部先说，再谈数据；「正常」用 `ok` 横幅明确说出口径（不靠「没有红字」暗示）。
+  - **表格是主数据结构**（`.card` 内的 `table`）：等宽列用 `td.num`（`tabular-nums`），路径/ID 用 `code`；
+    镜像本文件的两条纪律 —— ① **读不到的不显示 0**（磁盘子区未统计就写「未统计（读不到）」，
+    会话体检必须显示「未做深度校验 N 条」）；② **未体检 ≠ 没问题**，「另有 N 条未检查」必须常驻。
+  - **每个动作给等价 CLI 命令**（页脚 + 相关卡片）：即使有了写按钮也恒给命令行等价入口 —— 出问题时用户至少能复制走。
+  - **写动作 = 两段式（计划 → 确认 → 结果），页面无脚本**（2026-10 阶段 2）：确认页与执行页是两个独立请求，
+    靠 `<form method="post">` + **一次性 action token**（hidden input，用过即废，重复提交 400）串起来。三条呈现纪律：
+    ① **先给计划再给按钮**（会话修复页展示与 CLI 同源的逐条步骤表；磁盘页给出「可回收 / 已超期」字节数）；
+    ② **副作用写在按钮上方**（`.consequence` 块，先读后点）；③ **结果页逐条如实**（`.resultList`；被安全门拒绝时
+    写清门名与原因，绝不出现「已成功」而实际没做）。危险动作用 `.btnDanger`（描边红），普通动作用 `.btnPrimary`。
+  - **页签为四个**（首页 / 磁盘占用 / 会话体检 / 档案与实例）：档案页是「实例启停」的唯一入口，
+    每个可启动档案一张确认卡、不可启动的写清原因（桌面端独占 / 非 web 形态 / 已在运行）；
+    运行中的实例给「停止」卡，并区分 `本插件启动` 与 `外部实例`（后者按心跳 pid 停）。
+  - **高危动作的摩擦是设计的一部分**：重装页的确认码**只在终端打印**（页面里搜不到），
+    颜色上整页用 `banner bad` 起头；恢复页先渲染**零写入的计划表**再给执行按钮。
+    摩擦不能省 —— 这两件事的失败代价是「DSH 没了」，而救急台本身是给「已经出问题」的时刻用的。
+  - **展示文本一律先 `redact()` 再转义**（`page.ts` 的 `esc()` 是唯一出口）：救急台会渲染磁盘路径、
+    日志尾部与失败原因，里面可能夹带 `"apiKey": …` / `?token=…` —— §7 的纪律在插件 UI 之外同样适用。
+  - **页签为四个**（首页 / 磁盘占用 / 会话体检 / 档案与实例）：档案页是「实例启停」的唯一入口，
+    每个可启动档案一张确认卡、不可启动的写清原因（桌面端独占 / 非 web 形态 / 已在运行）；
+    运行中的实例给「停止」卡，并区分 `本插件启动` 与 `外部实例`（后者按心跳 pid 停）。
+  - **展示文本一律先 `redact()` 再转义**（`page.ts` 的 `esc()` 是唯一出口）：救急台会渲染磁盘路径、
+    日志尾部与失败原因，里面可能夹带 `"apiKey": …` / `?token=…` —— §7 的纪律在插件 UI 之外同样适用。
+  - 响应式：`.grid` 用 `auto-fit/minmax(280px)` 收窄即换行；表格允许横向滚动，不做移动端专属布局
+    （救急台的使用场景是本机浏览器）。
 
 ---
 
@@ -810,12 +996,105 @@ flex-direction:column }` 让内部 input 拉满。市场筛选用 `.marketFilter
   随 `overview.suggest.*` 死键一并删除（全仓 grep 确认零引用，含字符串/动态引用；对应单测同步移除），
   `src/ui/overview-view.ts` 不再产出 `overview.suggest.*` 键。
 
+### 说明性文案分层（InfoHint，2026-10）
+
+判定规则**已冻结**，逐字适用，**不得自行扩大或缩小**。承载体是 `common/InfoHint.tsx`；
+落地形态统一为 **v2**：`<InfoHint text={t('原键')} label={t('common.infoHint')} />`
+—— **可访问名取各自命名空间的 `common.infoHint`**（主字典 + market / sync / recovery 各有一份同口径副本，
+history 无 ⓘ 故不要求）；**不跨命名空间传 `t`**（`TranslateNS<'config-manager'>` 与其它命名空间的 `t`
+类型不兼容），也**不用可能 undefined 的 `copyT`**（组件内置的源语言回落只作兜底，调用点必须显式给可访问名）。
+
+**MOVE → ⓘ**（改为 `<InfoHint text={t('原键')} label={t('common.infoHint')} />`，并删掉原来那一行可见说明）：
+- 纯说明性文案：机制怎么工作 / 为什么这样设计 / 补充背景 / 边界与限制 / 示例 / 省事提示；
+- 输入规则类文案（如「仅允许字母数字、空格、- _ .」）—— 因为校验失败时错误文案本身会重申规则。
+
+**KEEP 常驻**（渲染与文案必须与改动前**逐字一致**，一处都不许动）：
+1. 校验错误 / 失败原因（`css.formError`、`ErrorBanner`、`ErrorList`、`ReportView` 的失败文本）；
+2. 安全与不可逆操作告警（加密、密钥、覆盖、删除、回滚、恢复、SAFE MODE）；
+3. 状态 / 进度 / 等待文本（运行中、已停止、等待 N 分钟、下载中）；
+4. 按钮与选项的禁用原因（`title=` 上的解释）；
+5. 空态解释（列表为空时说明「为什么什么都没有」的那一行）；
+6. 行内防截断的 `title=`（表格/列表/长路径上的全量提示，**不是**页面文案）；
+7. `SectionTitle` 的 `subtitle`（页级/分区级副标题）、`css.cellMeta` 元数据；
+8. `ConfirmDialog` / `Modal` 内的危险操作说明。
+
+**用法与边界**：
+- ⓘ 只承载**可选的补充信息**：任何用户「必须看到才能安全决策」的文本都不得移入（那正是 KEEP 的 8 类）；
+- 输入规则类文案移入后，校验失败的错误文案**必须仍然重申规则**，否则规则变得不可见；
+- **摆放：ⓘ 必须与它说明的标题/操作/控件**同一行**（贴在右侧），不得单独成行**（2026-10-03 用户反馈：
+  同步页与通道配置 / 分区选择弹窗里出现「孤零零一个图标」的断行）。四种落地形态：
+  ① 放进承载标题/标签的元素内（`<span className={css.groupLabel}>标题 <InfoHint … /></span>`，
+  见 AboutPanel / EnvironmentPanel）；② 放进该操作所在的 flex 行（`.actionRowTop` / `.actionRow`，
+  如「选择同步分区」「完成」旁）；③ **弹窗级说明**放进 `Modal.Header` 的 `trailing`（渲在标题与
+  `.dialogClose` 之间 —— 后者 `margin-left:auto`，所以 ⓘ 紧贴标题右侧）；④ **控件旁的说明**用
+  `.controlRow`（控件 + ⓘ 同一行，控件按自身宽度）。新增调用点按此摆放，下次迁移不再另起一套。
+- 触发按钮 18px、颜色取 `--dsw-alias-label-tertiary`，hover 必须给出可见 affordance
+  （`--dsw-alias-interactive-bg-hover` 底 + `label-primary` 前景）；固定态用主色 tint；
+- 样式只进 `config-manager.module.css`（`.infoHint / .infoHintBtn / .infoHintBubble`），
+  颜色/底色/边框/阴影全走 `--dsw-*` token；位置由组件量测后写入内联 `top/left`
+  （动态坐标无法用静态类表达，是本仓库「style 属性只允许极小修补」的正当例外，与 `Select` 的 `data-align` 同源）；
+- **渲染契约（t9 修 T7-F1，源码级守卫 `common/info-hint-guard.test.ts` 的 t9-1）**：气泡**必须经
+  `createPortal` 渲进插件根容器**（`resolveModalRoot()` = `#dsh-config-manager-root`，与 `Modal.tsx`
+  共用同一份实现；**绝不挂 `document.body`** —— 会被宿主 overlay z-index:1000 盖住，并连带 body
+  `pointer-events` 失效）。为什么非 portal 不可：`.dialogContentCenter` 带常驻
+  `transform: translate(-50%,-50%)`，按 CSS Transforms L1 会成为后代 `position: fixed` 的**包含块** ——
+  裸 fixed 的气泡在 Modal 内会整体偏移卡片位移，并被 `.dialogBody{overflow-y:auto}` 裁剪。
+- **气泡边界 = 宿主画布 ∪ 锚点，不是浏览器视口（t9 修 T7-F2 / 2026-10-04 修偏移，守卫 t9-2 + t11-2）**：
+  夹紧矩形取**插件根容器的可见矩形 ∩ 窗口**，容器缺失 / 尺寸为 0 / 交集退化时才回落窗口矩形；
+  再**并进锚点矩形**（只放宽、不收紧）—— 弹窗卡片是 `position:fixed`（相对浏览器窗口居中），而画布在宿主
+  设置弹窗里靠右（左边还有宿主导航），弹窗左半边的 ⓘ 会比画布左缘更靠左，严格夹进画布会把气泡整体推进
+  画布、与自己的 ⓘ 脱开（用户报告「提示文字位置有偏移」）；并入锚点后右侧 / 下方仍以画布为界。
+  「下方空间不足且上方更宽裕 → 向上翻转」保留。
+  `window.innerWidth/innerHeight` 在 `InfoHint.tsx` 里只允许各出现一次（即仅兜底分支）。
+
+- **Select 弹层：portal 进弹层容器 + 容器内绝对定位 + 夹紧（2026-10-04 两轮修复：先「被裁掉一截」，
+  再「位置偏移 / 选项点不动」）**：容器 = 弹窗内为**弹窗卡片**（`Modal.tsx` 的 `data-cm-dialog`），
+  否则为插件根容器（`resolveModalRoot()`）。为什么弹窗内非进卡片不可（`@radix-ui/react-dismissable-layer`
+  源码实证）：① 弹窗打开时执行 `body.style.pointerEvents = "none"`，只给 `Dialog.Content` 写回 `auto` ——
+  卡片外的菜单**收不到任何指针事件**（点不动、无 hover）；② 卡片外在 radix 眼里是「点了弹窗外」→ 弹窗被关掉；
+  ③ radix 的 `RemoveScroll` 只放行内容子树（`shards=[contentRef]`）→ 卡片外的长菜单滚不动；
+  ④ 卡片是 `position: fixed` 且相对**窗口**居中，而插件画布 `.section` 在宿主设置弹窗里靠右 ——
+  拿画布当夹紧基准会把卡片左半边的菜单整块推进画布（触发器 x≈18、菜单被推到画布左缘 + 8 ≈ 185）。
+  进卡片后菜单的包含块就是卡片（包含块链不经过 `.section` ⇒ 不被画布的 `overflow` 裁剪），
+  夹紧基准相应改用**视口**；画布内的普通下拉仍用 `canvasBounds()`（= 画布 ∩ 窗口）。
+  放置判据在 `src/ui/menu-placement.ts`（纯函数 + node 单测，与高亮模型同一分层）：下方放不下且上方更宽裕
+  → 向上翻转；左右越界 → 先右对齐再夹紧；空间不足 → 限高内滚。量测完成前靠 `[data-ready]` 不绘制
+  （同 `.infoHintBubble`）；打开期间跟随滚动 / 缩放重算。留在原地的弹层（导航条 MoreMenu）
+  继续用 `absolute + data-align`：它贴顶展开，没有下方的裁剪风险。
+- **ⓘ 的键盘聚焦必须由用户发起（2026-10-04，守卫 t11-1）**：Radix 的 FocusScope 在弹窗挂载时
+  `focusFirst(...)`，初始焦点落在容器内第一个可聚焦元素上 —— 标题行 trailing 的 ⓘ 常常正是它，
+  于是「一进弹窗就自动选中 ⓘ 并弹出气泡」。判据 = 聚焦事件的 `relatedTarget` 是否在同一
+  `[role=dialog]` 内（初始焦点来自弹窗外的触发器 / body / null → 忽略）；焦点环同时只在气泡打开时绘制，
+  所以程序化初始焦点既无气泡也无蓝框，而用户 Tab 到 ⓘ 时两者同时出现。
+- **本次落地（t1–t5 全量清单，共 42 键；机器化台账 `common/info-hint-guard.test.ts` 的 `MOVE_PINS`。
+  原为 43 键 —— 2026-10-04 用户要求移除产物库页首行，`snapshots.retentionHint` 随之退出台账）**：
+  - **common/（t1，2）**：`runs.retentionHint`（运行中心列表头部 ⓘ）、`picker.sessionWorkspaceLinked`
+    （选择器工具栏 ⓘ，仅当「会话 ↔ 工作区」配对确实存在时出现）；
+  - **sync/（t2，16）**：`channel.perChannelHint` / `config.repoUrlHint` / `github.description` /
+    `webdav.presetHint` / `webdav.urlHint` / `webdav.usernameHint` / `config.saveHint`（通道配置弹窗 7 处）、
+    `mode.sessionsPickHint` / `mode.pickerHint` / `mode.sessionsLimitHint` / `mode.sectionsHint`
+    （分区选择弹窗 4 处）、`mode.hint` / `mode.persistHint`（同步页）、`channel.openHint`（通道入口卡）、
+    `autosync.description` / `autosync.intervalHint`（自动同步卡）；
+  - **snapshots/ + export/（t3，13）**：`backupFiles.hint`、
+    `diskUsage.backupRetention`、`backupSchedule.hint` / `enabledHint` / `customHint`、
+    `retention.hint` / `keepLastHint` / `keepMonthlyHint` / `keepYearlyHint` / `retention.appliesTo`、
+    `export.hint`（工具栏）、`export.fileNameHint` / `export.noteHint`（字段标签旁）——**导出页 3 处**；
+  - **market/ + about/ + profiles/（t4，9）**：`myconfigs.login.hint`、`myconfigs.update.zipHint`、
+    `myconfigs.upload.form.nameHint`、`about.diag.hint`、`about.feedbackHint`、`about.update.offline`、
+    `about.cli.hint`、`profiles.create.hint`、`profiles.list.hint`（**档案列表 1 处**，
+    同一键在行内 `title=` 仍常驻）；
+  - **recovery/（t5，2）**：`sessions.desc`、`recovery.preview.hint`；
+  - **零 MOVE 的面板**：history / overview / import / consult（`.hint` 类全部命中 KEEP）。
+  `common/ui.tsx` 的 `Field.hint` / `SectionTitle.subtitle` 由调用方传入且大量命中 KEEP
+  （如 `export.encryptHint` 是安全告警），**不整体自动迁移**。逐键台账与 deferred 见
+  `docs/design/info-hint-migration.md`。
+
 ---
 
 ## 8. Responsive
 
 - 弹窗收缩（视口 <900px，弹窗变 100vw-48px）：`.ovGrid` 单列、统计/快捷网格 2 列、
-  `.secretFields` 单列、`.pagePad` padding 12px、抽屉全屏。
+  `.secretFields` 单列、`.pagePad` padding 12px。
 - 表格列宽用 th 显式宽度 + `table-layout: fixed` + 内容 ellipsis；先压缩次级列，
   最后主列；固定开销（时间/操作列）优先于内容列。
 

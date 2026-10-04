@@ -16,6 +16,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { isDefaultRetentionPolicy, selectRetentionKeepers } from './retention-policy.ts'
 import type { RetentionPolicy } from './retention-policy.ts'
+import { readContainerKind, type BackupContainerKind } from '../security/container-kind.ts'
 
 /** 定时备份产物前缀（区别于手动导出的 dsh-config-；同时是来源标识与清理豁免依据） */
 export const AUTO_BACKUP_PREFIX = 'dsh-config-auto-'
@@ -45,6 +46,27 @@ export interface BackupFileMeta {
   source: BackupFileSource
   /** 用户备注（手动导出时可选填写；null = 无备注） */
   note?: string | null
+  /**
+   * 容器形态（仅 `listBackupFiles(dir, { withContainerKind: true })` 时探测）。
+   * 界面据此决定「导入」要不要先走「解锁加密备份」阶段（issue #55）；未探测的调用方
+   * （保留策略 / 磁盘体检只要名称与时间）拿到 undefined，消费方按「非 encrypted」保守处理
+   * —— 等同既有明文路径，绝不让缺字段把明文备份挡在解锁页。
+   */
+  containerType?: BackupContainerKind
+}
+
+/** listBackupFiles 选项。 */
+export interface ListBackupFilesOptions {
+  /**
+   * **输出参数**：读目录失败（非 ENOENT）时写入原因，调用方据此如实展示
+   * —— 「读不到」与「没有备份」是两件事，前者绝不能显示成空列表。
+   */
+  unreadable?: string
+  /**
+   * 是否逐文件探测容器形态（DCA1 magic，只读前 4 字节）。
+   * 默认 false：保留策略（prune*）与磁盘体检不需要它，逐文件 open 是纯开销。
+   */
+  withContainerKind?: boolean
 }
 
 /** 备注清单文件名（exports 目录内；可随 self 分区白名单迁移——见 src/adapters/self.ts） */
@@ -116,13 +138,22 @@ export async function writeBackupNote(exportsDir: string, name: string, note: st
 
 /**
  * 列出导出目录下的全部备份 ZIP（*.zip，时间倒序），合并备注。
- * 目录缺失/不可读 → 返回空数组（不抛错）。
+ * 目录缺失（ENOENT）→ 返回空数组（不抛错）。
+ *
+ * **「读不到」不算「没有」**（验收 F2）：EACCES / EPERM / ENOTDIR 等一律回传
+ * `options.unreadable`（调用方如实展示），默认不传 → 行为与改造前一致。
+ *
+ * `options.withContainerKind` 打开时逐个探测容器形态（解密判定走 security/container-kind 单一实现）。
  */
-export async function listBackupFiles(exportsDir: string): Promise<BackupFileMeta[]> {
+export async function listBackupFiles(exportsDir: string, options: ListBackupFilesOptions = {}): Promise<BackupFileMeta[]> {
   let entries
   try {
     entries = await fs.readdir(exportsDir, { withFileTypes: true })
-  } catch {
+  } catch (error) {
+    const code = (error as { code?: string }).code
+    if (code !== 'ENOENT') {
+      options.unreadable = '导出目录读不出来（' + String(code ?? 'unknown') + '）：' + exportsDir
+    }
     return []
   }
   const notes = await readBackupNotes(exportsDir)
@@ -136,14 +167,17 @@ export async function listBackupFiles(exportsDir: string): Promise<BackupFileMet
     } catch {
       continue // 竞态删除/不可读：跳过该文件
     }
-    metas.push({
+    const meta: BackupFileMeta = {
       name: entry.name,
       path: target,
       sizeBytes: stat.size,
       mtimeMs: stat.mtimeMs,
       source: backupFileSource(entry.name),
       note: notes[entry.name] ?? null,
-    })
+    }
+    // 形态探测按需做：只读前 4 字节，文件级失败在 readContainerKind 内回落为 'zip'
+    if (options.withContainerKind === true) meta.containerType = await readContainerKind(target)
+    metas.push(meta)
   }
   metas.sort((a, b) => b.mtimeMs - a.mtimeMs)
   return metas

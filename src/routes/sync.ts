@@ -45,8 +45,9 @@ import { GitHubApiError } from '../market/github-repos.ts'
 import type { SectionId } from '../schema/types.ts'
 import { redact } from '../security/redaction.ts'
 import { readAutosyncConfig, writeAutosyncConfig } from '../sync/autosync-config.ts'
+import { isValidExportFileName } from '../sync/backup-files.ts'
 import { DeviceFlowStore } from '../sync/github-auth.ts'
-import { channelOf, isWebDavConfig, parseSyncChannel, readFullSyncConfig, writeSyncConfig } from '../sync/sync-config.ts'
+import { channelOf, clearSyncChannel, isWebDavConfig, parseSyncChannel, readFullSyncConfig, writeSyncConfig } from '../sync/sync-config.ts'
 import type { SyncConfig, SyncTransportType } from '../sync/sync-config.ts'
 import { SyncEngine } from '../sync/sync-engine.ts'
 import type { ApplyItemsReport } from '../sync/sync-engine.ts'
@@ -54,6 +55,7 @@ import { readSyncHistory } from '../sync/sync-history.ts'
 import { SYNC_SELECTION_SCHEMA_VERSION, normalizeSessionsInclude, normalizeSessionsLimit, writeSyncSelection } from '../sync/sync-selection.ts'
 import type { SyncSelection, SyncSelectionMode } from '../sync/sync-selection.ts'
 import { loadSyncState } from '../sync/sync-state.ts'
+import { resolveSessionFormatDisposition, sessionFormatAbortResponse } from './session-format.ts'
 import { readUiPrefs, updateUiPrefs } from '../sync/ui-prefs.ts'
 import type { UiPrefsChannel } from '../sync/ui-prefs.ts'
 import fs from 'node:fs/promises'
@@ -99,6 +101,7 @@ export function syncRoutes(env: RoutesEnv): WebRoute[] {
     syncPasswordConfigured,
     syncSectionCatalog,
     syncSessions,
+    tmpDir,
     tryAppendHistory,
     withMutationGate,
   } = env
@@ -166,6 +169,42 @@ export function syncRoutes(env: RoutesEnv): WebRoute[] {
     endpoint({ path: '/api/dsh-config-manager/sync/config', methods: ['POST'] }, async (req, res) => {
       const body = await requireJsonObject(req)
       try {
+        // -------------------------------------------------- 断开通道（用户要求：配置过就必须能删掉）
+        // 一条打不通的通道若没有出口，产物库的远端源与自动同步只会一直报读取失败。
+        // 这里一处清三项：sync-config 命名空间（活动通道自动回落到剩下的那条）、该通道在
+        // DSH credentials 里的全部凭据（token / WebDAV 口令 / 加密·解密密码）、该通道的
+        // 自动同步开关（对已删通道排期只会持续报错）。**只解除本机绑定**：远端快照与本机
+        // 备份一律不动（删除远端数据是另一个动作）。
+        // 排在 prepareSync 之前：清空请求不带地址，prepareSync 会直接 400。
+        if (body['clear'] === true) {
+          const channel = parseSyncChannel(body['transport'])
+          if (channel === undefined) {
+            writeJson(res, 400, { error: 'transport is required' })
+            return
+          }
+          const cleared = await clearSyncChannel(syncDir, channel)
+          // 凭据值永不回传；unset 幂等（本来就没配也不报错）
+          await credentials.unset(credentialRef(channel === 'git' ? SYNC_CREDENTIAL_REF : SYNC_WEBDAV_CREDENTIAL_REF))
+          await credentials.unset(credentialRef(syncPasswordRef('ENCRYPT', channel)))
+          await credentials.unset(credentialRef(syncPasswordRef('DECRYPT', channel)))
+          const auto = await readAutosyncConfig(syncDir, channel)
+          await writeAutosyncConfig(syncDir, channel, { ...auto, enabled: false, consecutiveFailures: 0 })
+          // 立即让调度器丢掉该通道的定时器（否则内存里的旧排期会继续对已删通道发请求）
+          if (scheduler) scheduler.reload().catch(() => { /* 尽力而为 */ })
+          // 「记住的通道」指向被删通道 → 改指剩下的那条：否则产物库/页面回填会继续拿它去请求
+          const prefs = await readUiPrefs(syncDir)
+          if (cleared.hasRemaining && prefs.lastSyncChannel === channel) {
+            await updateUiPrefs(syncDir, { lastSyncChannel: cleared.transport })
+          }
+          writeJson(res, 200, {
+            ok: true,
+            cleared: channel,
+            removed: cleared.removed,
+            configured: cleared.hasRemaining,
+            transport: cleared.transport,
+          })
+          return
+        }
         const syncCfg = await prepareSync(body)
         await writeSyncConfig(syncDir, syncCfg)
         const [cred, webdavCred] = await Promise.all([
@@ -480,6 +519,70 @@ export function syncRoutes(env: RoutesEnv): WebRoute[] {
         writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
       }
     }),
+    // ------------------------------------------------------ sync/download
+    // 「拉取即导入」：把远端快照**落地成本机 ZIP** 并返回路径，供导入向导消费。
+    // 与 /sync/pull 的分工：pull 只做只读差异预览（临时 ZIP 用完即删）；
+    // 本路由把 ZIP 留在**受控暂存区 tmpDir**（与 /upload 同区；导入向导按既有约定消费它）。
+    // **必须落在 isControlledPath 认得的根里**：/analyze、/plan、/execute 都按 roots 校验 zipPath，
+    // 落到 syncDir 下会被 400 挡回（真机 bug：产物库「拉取」进导入页报
+    // 'zipPath is required and must reference a staged backup'）。
+    // 同步目录本身也**刻意**不是暂存根 —— 那里放的是同步配置 / 状态 / 历史，不对外暴露。
+    // 只读远端：不改远端、不动同步基线（基线只在 apply 之后推进）。
+    endpoint({ path: '/api/dsh-config-manager/sync/download', methods: ['POST'] }, async (req, res) => {
+      const body = await requireJsonObject(req)
+      try {
+        const syncCfg = await prepareSync(body)
+        const engine = makeSyncEngine(syncCfg, { includeOptInSections: selectionHasOptInSections(channelOf(syncCfg)) })
+        const snapshotId = typeof body['snapshotId'] === 'string' && body['snapshotId'] !== '' ? body['snapshotId'] : undefined
+        // 可选落地文件名（产物库「下载」要给用户一个可辨识的名字，而不是固定的 snapshot.zip）。
+        // 不安全的名字直接 400 而不是「静默换名」：它会进 path.join(dir, name)，白名单是唯一防线。
+        const name = typeof body['name'] === 'string' ? body['name'] : undefined
+        if (name !== undefined && !isValidExportFileName(name)) {
+          writeJson(res, 400, { error: 'name must be a .zip file name (no path separators)' })
+          return
+        }
+        const savedDecryptPassword = await resolveSyncPassword(syncPasswordRef('DECRYPT', channelOf(syncCfg)))
+        const decryptPassword =
+          typeof body['decryptPassword'] === 'string' && body['decryptPassword'] !== ''
+            ? body['decryptPassword']
+            : savedDecryptPassword
+        const result = await withTimeout(
+          engine.downloadSnapshot({
+            dir: tmpDir,
+            ...(snapshotId === undefined ? {} : { snapshotId }),
+            ...(name === undefined ? {} : { name }),
+            ...(decryptPassword === undefined ? {} : { password: decryptPassword }),
+          }),
+          ROUTE_TIMEOUT_MS,
+          msg('host.syncPullTimeout'),
+        )
+        writeJson(res, 200, { ok: true, zipPath: result.path, snapshotId: result.snapshotId })
+      } catch (error) {
+        writeSyncRouteError(res, error)
+      }
+    }),
+    // ------------------------------------------------------ sync/snapshot-delete
+    // 产物库「远端快照 → 删除」（2026-10-04 用户要求）：**只删远端这一份**，不动本机配置与同步基线
+    // （语义与边界见 SyncEngine.deleteSnapshot）。与 /backup-files/delete、/snapshots/delete 同类，
+    // 是破坏性写动作 → 过 mutation gate：并发写入被明确挡成 423，而不是两次写入互相踩。
+    // 远端不存在视为成功（transport 契约），所以重复点删除不会报错。
+    endpoint({ path: '/api/dsh-config-manager/sync/snapshot-delete', methods: ['POST'] }, withMutationGate('sync-snapshot-delete', async (req, res) => {
+      const body = await requireJsonObject(req)
+      try {
+        const rawId = body['snapshotId']
+        const snapshotId = typeof rawId === 'string' ? rawId.trim() : ''
+        if (snapshotId === '') {
+          writeJson(res, 400, { error: 'snapshotId is required' })
+          return
+        }
+        const syncCfg = await prepareSync(body)
+        const engine = makeSyncEngine(syncCfg)
+        await withTimeout(engine.deleteSnapshot(snapshotId), ROUTE_TIMEOUT_MS, msg('host.syncPullTimeout'))
+        writeJson(res, 200, { ok: true, snapshotId })
+      } catch (error) {
+        writeSyncRouteError(res, error)
+      }
+    })),
     // ------------------------------------------------------ sync/snapshots-list
     // m-sync-v2：远端历史快照列表（供「选择历史快照」下拉）。
     endpoint({ path: '/api/dsh-config-manager/sync/snapshots-list', methods: ['POST'] }, async (req, res) => {
@@ -502,7 +605,15 @@ export function syncRoutes(env: RoutesEnv): WebRoute[] {
             dshVersion: m.manifest.dshVersion,
           }))
         const state = await loadSyncState(syncDir)
-        writeJson(res, 200, { ok: true, snapshots, currentSnapshotId: state.lastSnapshotId === '' ? undefined : state.lastSnapshotId })
+        // issue #59：把「远端有但读不出来」的快照如实回传（绝不静默跳过）——
+        // 否则用户看到的是「push 报成功但列表为空」这种矛盾状态，无从自查。
+        const unreadable = engine.unreadableSnapshots()
+        writeJson(res, 200, {
+          ok: true,
+          snapshots,
+          currentSnapshotId: state.lastSnapshotId === '' ? undefined : state.lastSnapshotId,
+          ...(unreadable.length === 0 ? {} : { unreadable: unreadable.map((u) => ({ file: u.file, reason: u.reason })) }),
+        })
       } catch (error) {
         writeSyncRouteError(res, error)
       }
@@ -539,6 +650,13 @@ export function syncRoutes(env: RoutesEnv): WebRoute[] {
           writeJson(res, 200, { ok: false, syncSessionId: '', snapshotId: preview.snapshotId, items: [], needsReview: false, compatibility: 'unsupported', message: preview.message ?? '同步预览失败' })
           return
         }
+        // T1：abort 处置在**预览阶段**就阻断（此刻仍零写入：临时 ZIP 与内存会话都还没登记）。
+        const disposition = await resolveSessionFormatDisposition(syncDir, body['sessionFormatDisposition'])
+        const blocked = sessionFormatAbortResponse(preview.plan, disposition, msg)
+        if (blocked !== null) {
+          writeJson(res, 409, blocked)
+          return
+        }
         const syncSessionId = syncSessions.set({
           zipPath: preview.zipPath,
           plan: preview.plan,
@@ -559,6 +677,9 @@ export function syncRoutes(env: RoutesEnv): WebRoute[] {
           items,
           needsReview,
           compatibility: preview.analysis.compatibility,
+          // T1：把「读不了的会话」结构化回传（缺省 = 本机版本无法判定/没有这类会话）——
+          // 同步确认页据此渲染三选一，并把这些单元默认不勾选。可选字段：旧客户端忽略。
+          sessionFormats: preview.analysis.sessionFormats ?? null,
         })
       } catch (error) {
         writeSyncRouteError(res, error)
@@ -573,6 +694,14 @@ export function syncRoutes(env: RoutesEnv): WebRoute[] {
         const session = syncSessions.get(syncSessionId)
         if (session === undefined) {
           writeJson(res, 400, { error: '同步会话不存在或已过期，请重新拉取预览' })
+          return
+        }
+        // T1：abort 处置在**应用前**再判一次（客户端可能绕过 preview 直接 apply，或预览后改了处置）。
+        // 此刻仍在 mutation gate 内但**尚未写任何东西**，提前 return 保证 abort 的零写入语义。
+        const applyDisposition = await resolveSessionFormatDisposition(syncDir, body['sessionFormatDisposition'])
+        const applyBlocked = sessionFormatAbortResponse(session.plan, applyDisposition, msg)
+        if (applyBlocked !== null) {
+          writeJson(res, 409, applyBlocked)
           return
         }
         const adoptions = Array.isArray(body['adoptions']) ? body['adoptions'] : []
@@ -635,8 +764,12 @@ export function syncRoutes(env: RoutesEnv): WebRoute[] {
           operationId: journalCtx?.operationId,
           snapshotId: report.restoreId ?? undefined,
           source: 'api',
-          summary: `一键同步应用：${(Array.isArray(report.applied) ? report.applied.length : subItems.length)} 项${report.rolledBack === true ? '（已回滚）' : ''}`,
-          error: report.ok ? undefined : '同步应用未完全成功',
+          // issue #56：历史如实区分「全部成功 / 部分成功（N 项未生效）」——
+          // 此前 ok:true 一律写「N 项」+ 无 error，用户在历史里看到的就是一次干净的成功。
+          summary: `一键同步应用：${(Array.isArray(report.applied) ? report.applied.length : subItems.length)} 项${report.rolledBack === true ? '（已回滚）' : ''}${report.ineffective.length > 0 ? `（${report.ineffective.length} 项未生效）` : ''}`,
+          error: report.ok
+            ? (report.ineffective.length > 0 ? '同步应用部分成功：有项未生效（见告警明细）' : undefined)
+            : '同步应用未完全成功',
         })
         writeJson(res, 200, historyError === undefined ? {
           ok: report.ok,
@@ -647,6 +780,8 @@ export function syncRoutes(env: RoutesEnv): WebRoute[] {
           restoreId: report.restoreId,
           rolledBack: report.rolledBack,
           failed: report.failed,
+          // issue #56：未生效项（warning）单独回传，界面据此把「成功」降级为「部分成功」
+          ineffective: report.ineffective,
           result: report.result,
         } : {
           ok: report.ok,
@@ -657,6 +792,7 @@ export function syncRoutes(env: RoutesEnv): WebRoute[] {
           restoreId: report.restoreId,
           rolledBack: report.rolledBack,
           failed: report.failed,
+          ineffective: report.ineffective,
           result: report.result,
           historyWriteError: historyError,
         })

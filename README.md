@@ -103,6 +103,9 @@ Several DSH plugins live in this space and they solve different problems — pic
 | 🗂️ | **Profiles (DSH profiles)** | Manage `$DSH_HOME/profiles/<name>` directly: list / create from a shipped template / rename / hard delete / **launch this profile (independent instance)** / **stop the instance** (the row button flips between Launch and Stop with the running state) |
 | 🌐 | **Bilingual UI** | Interface, reports and error details follow the DSH app language (中文 / English) |
 | 🤖 | **Agent tools** | Backup / snapshot / restore / sync right from an agent session |
+| 💾 | **Disk usage report** | The backups page shows how much space the plugin's own artifacts take (backups / snapshots / sync copies / caches / staging) with a three-tier cleanup policy; **one-click cleanup only touches regenerable caches and expired backups** — snapshots and sync data are never removed there |
+| ⬆️ | **Update check** | The About page reads the latest version from npm and, when there is a newer one, hands you a copyable upgrade command (never auto-installs); offline failures are reported honestly and affect nothing else |
+| 🧭 | **Compatibility explained** | Before importing you see "source DSH version / platform → local" plus **structured reasons** for the score (cross-platform / missing sections / newer source …) instead of a bare "partial" |
 
 ---
 
@@ -210,6 +213,27 @@ dsh plugin --profile web add dsh-config-manager@latest
 > ```
 >
 > Then retry the install. As long as that global copy exists and is incompatible with your DSH, every profile (`web` / `desktop` / custom) is rejected the same way.
+
+### Installing from the GitHub source (`git+https://...`)
+
+When installed from a git source, pnpm first runs this package's `prepare` script (= `npm run build`) inside that clone to produce `lib/` — **npm ships a prebuilt `lib/`, a git install builds it on the spot**. pnpm 11 blocks that script by default, so the install fails with `dsh: plugin command failed` and this in the log:
+
+```
+ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED  Failed to prepare git-hosted package ...
+The git-hosted package "dsh-config-manager@x.y.z" needs to execute build scripts
+but is not in the "allowBuilds" allowlist.
+```
+
+**Fix**: copy the exact line pnpm prints (it includes the full git URL and commit sha) into the profile's `pnpm-workspace.yaml`:
+
+```yaml
+# ~/.dsh/profiles/web/pnpm-workspace.yaml
+allowBuilds:
+  dsh-config-manager@git+https://github.com/xiajiajun516/dsh-config-manager.git#<sha printed by pnpm>: true
+```
+
+> The key must be copied **verbatim** — the bare package name `dsh-config-manager` does not work (the allowlist matches on source + version).
+> The simpler path is the prebuilt npm release above (`dsh-config-manager@latest`), which needs no allowlist at all.
 
 ---
 
@@ -366,6 +390,19 @@ Every import creates a **safety snapshot** first. If something feels off afterwa
 - List every export ZIP (manual + scheduled) with source badge, size, time and your custom **note**
 - **Search** by file name or note
 - **Inspect / Compare** — read-only preview of what the backup contains (sections + per-section counts) and the diff against your current config (zero writes) before deciding to import
+
+---
+
+
+**Backup files & disk usage**: the **"Backup Files"** sub-tab (Backups → snapshot tab) manages everything in
+`exports/` (manual exports + scheduled backups): download, import straight back, inspect, delete, search by
+name or note. The **"Disk Usage"** card on the same page lists what this plugin itself occupies (exports,
+pre-import snapshots, sync config and Git working copies, marketplace cache, temp staging, logs, transaction
+log, …) and labels each item's cleanup policy: **regenerated on demand** (caches/staging), **retained**
+(exports for 7 days, scheduled backups keep the latest N), or **your data / safety net** (snapshots and sync —
+never auto-cleaned). **"Clean now"** clears only regenerable caches by default; reclaiming expired backups is
+an explicit opt-in with a confirmation. Snapshots and sync data are never touched, and unreadable directories
+are reported as "not measured" instead of a misleading 0 bytes.
 
 ---
 
@@ -530,6 +567,17 @@ How it behaves:
 
 Alternative (host-wide): set `NODE_USE_ENV_PROXY=1` **before starting DSH** (Node 24+); note this also routes the host's own outbound traffic, not just this plugin's.
 
+**`web` — the offline rescue console (for when you would rather click than type).** It starts a small web page bound to **127.0.0.1 only** and lays out the same diagnostics and rescue actions in a browser:
+
+```bash
+dsh-config-manager web            # starts it and opens your browser (the terminal prints a one-time token URL)
+```
+
+- **Read-only:** running instances / SAFE MODE / leftover lock / snapshots / exported backups (with one-click verification) / disk usage / session health / profiles and their instances.
+- **Write actions (each needs an explicit confirmation in the page, and every one calls the same implementation as the CLI):** ① relocate misplaced sessions ② clear rebuildable caches and expired exports ③ reclaim a stale environment lock ④ start/stop a profile's standalone instance ⑤ **unlock an encrypted backup** (decrypted in memory, lists entries only — never written to disk) ⑥ **restore a snapshot** (see the per-item plan first, zero writes; restoring copies current files to `<snapshot>/pre-restore/` first) ⑦ **offline export** (file-based sections, self-checked right after writing) ⑧ **reinstall DSH** (uninstall + reinstall the global CLI; **requires a 6-character code printed only in the terminal**).
+- **Safety:** loopback-only binding; a one-time token printed to your terminal is exchanged for an HttpOnly + SameSite=Strict session cookie; the page has no scripts and no external resources. `Ctrl+C` or the idle timeout (30 minutes by default) shuts it down.
+- **Preconditions:** session relocation and restore need DSH stopped; with an unresolved SAFE MODE transaction or a leftover environment lock every write action is refused (the page says why). **Import** (writing a bundle back into this machine) stays on the GUI/CLI — structural sections need live DSH services.
+
 ### 🤖 Agent tools (for AI assistants)
 
 The plugin also registers **5 model tools** that an AI agent (a DSH assistant session) can call directly — the same backup / snapshot / sync engines, no GUI needed:
@@ -629,6 +677,11 @@ Found a bug, a misaligned panel, a button that does nothing — or just have an 
   contribution, commit `1248200` was landed on `main` through a **"keep the commit, take the mainline tree"** merge
   (`122317b`) — that merge takes **none** of its code (the resulting tree is byte-identical to the mainline) and exists purely
   to record authorship, so GitHub now counts this contribution instead of leaving it invisible behind a closed PR.
+- **OMSociety** — [PR #66](https://github.com/xiajiajun516/dsh-config-manager/pull/66), merged as `4170af4`: proposed and
+  implemented the 36×36 frame-less `icon.svg` (issue #61, aligning the plugin with the official bundle convention).
+  The report came with upstream evidence (host artwork frames of 48/36 px and 40/30 px, the official published bundle
+  icons, the fixture SVG) and the PR shipped a 16/30/36/48 × dark/light acceptance sheet plus a written argument for
+  keeping the proposal's palette over the plugin's brand blue.
 - **Bug reports**: `zhyx1996` (#38 sync "Export secrets" did nothing), `IPF-Sinon` (#39 the `.credentials.yaml` `refs:` block
   was not recognized — they also implemented and machine-tested a fix in their own fork), `zerginlaw` (#43 "Back up now"
   silently no-oped while toasting success). Each report drove one fix.

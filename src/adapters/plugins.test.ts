@@ -287,7 +287,9 @@ test('plugins: 安装失败 → 非致命 warning（§34.17，不触发整体回
   const exported = await adapter.export(src, { includeSecrets: false });
   const sections = new Map([['plugins', exported.data]]);
 
-  const dst = makeContext('linux', '/home/bob');
+  // 显式指定 profile：缺省会回退到 `resolveProcessProfileName()`（读 DSH_PROFILE），
+  // 在桌面端会话里那是 'desktop' → 断言随运行环境漂移（实测踩过）。
+  const dst = makeContext('linux', '/home/bob', 'web');
   dst.plugins.failInstall = true; // 模拟 npm ERESOLVE / 网络不可达
   const items = await adapter.analyzeImport(exported.data, makeImportContext(dst, sections));
   const installItem = items.find((i) => i.id === 'plugin:broken-pkg');

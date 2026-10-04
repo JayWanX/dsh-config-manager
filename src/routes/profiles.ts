@@ -73,6 +73,8 @@ export function profileRoutes(env: RoutesEnv): WebRoute[] {
           current: host.profile ?? 'web',
           running: runningView(),
           templates: [...DSH_PROFILE_TEMPLATES],
+          // 会话格式体检的基准：UI 用它提示「这个档案产生的对话在本实例里看不到」（解析不到 = null）。
+          currentSessionFormatVersion: host.sessionFormatVersion ?? null,
         } satisfies DshProfilesSnapshot & { ok: true })
       } catch (error) {
         writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })

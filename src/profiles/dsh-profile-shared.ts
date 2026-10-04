@@ -38,6 +38,20 @@ export interface DshProfileMeta {
   issues: DshProfileIssue[]
   /** package.json 的 mtime（毫秒）；不可读 = null */
   updatedAtMs: number | null
+  /**
+   * 该档案依赖树里的 DSH 版本（`node_modules/@deepseek-ai/dsh/package.json`；读不到 = null）。
+   *
+   * 桌面端档案由 Electron 独占管理、运行时在 `app.asar` 内 —— 读磁盘只会拿到 hoisted 副本，
+   * 所以它如实为 null（宁可不显示，也不报一个错的版本号）。
+   */
+  dshVersion?: string | null
+  /**
+   * 该档案 DSH 支持的**会话日志格式版本**（`SESSION_FORMAT_VERSION`；读不到 = null）。
+   *
+   * 用途：档案页展示 + 「切过去之后对话还看得见吗」。DSH 读不出（更高）的格式会**静默跳过**
+   * 那些会话（不报错、不在工作区列表里），所以版本错配必须让用户看见。
+   */
+  sessionFormatVersion?: number | null
 }
 
 /** 详情：列表字段 + 原始文本（详情弹窗展示；过大时截断为 null）。 */
@@ -133,6 +147,11 @@ export interface DshProfilesSnapshot {
   running: DshProfileRunningView[]
   /** 可选的起步模板（新建档案时用） */
   templates: DshProfileTemplate[]
+  /**
+   * 当前实例（本宿主）支持的会话格式版本；解析不到 = null，旧宿主不回传 = undefined。
+   * UI 用它比较各档案，提示「这个档案产生的对话在本实例里看不到」。
+   */
+  currentSessionFormatVersion?: number | null
 }
 
 /** 新建 profile 可选的官方模板（与 dsh-app-boot PROFILE_TEMPLATES 对齐，dsh 0.1.5-rc.1）。 */

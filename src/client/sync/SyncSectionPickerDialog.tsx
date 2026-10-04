@@ -1,8 +1,8 @@
 /**
- * t42 物理拆分（从 SyncSettingsView.tsx 拆出的渲染段，同领域目录平铺）。
+ * t42 物理拆分（从 SyncSettingsView.tsx 拆出的渲染段，同领域目录平铺；v2 第 5 步主文件改名 SyncPanel.tsx）。
  *
  * 约定：只接收「渲染所需的数据 + 回调」；React 状态、副作用与网络调用仍由
- * SyncSettingsView 持有（单一状态源）；可测纯逻辑在 src/ui/sync-settings-view.ts。
+ * SyncPanel 持有（单一状态源）；可测纯逻辑在 src/ui/sync-settings-view.ts。
  *
  * P0-3：新增「逐会话勾选」视图 —— 同一个 Modal 内切换（**不嵌套第二个 Modal**：
  * 双 overlay 会与宿主遮罩互相打架，且关闭语义会变得含糊）。会话单元清单来自
@@ -15,6 +15,7 @@ import type { SectionId } from '../../schema/types.ts'
 import { Badge, Banner, Button, Card, Checkbox } from '../common/ui.tsx'
 import { Modal } from '../common/Modal.tsx'
 import { ContentPicker } from '../common/ContentPicker.tsx'
+import { InfoHint } from '../common/InfoHint.tsx'
 import type { SelectionSection } from '../../ui/selection-model.ts'
 import {
   initialSessionPicks, pickedSessionIds, sessionPickerSelection,
@@ -65,9 +66,14 @@ export function SyncSectionPickerDialog({ open, t, cmT, sectionName, catalog, se
   if (view === 'sessions') {
     return (
       <Modal open={open} onClose={onClose} title={t('mode.sessionsPickTitle')} wide>
-        <Modal.Header title={t('mode.sessionsPickTitle')} closeLabel={t('common.close')} onClose={onClose} />
+        <Modal.Header
+          title={t('mode.sessionsPickTitle')}
+          closeLabel={t('common.close')}
+          onClose={onClose}
+          // 视图级说明：贴在标题右边（Modal.Header trailing），不单独成行
+          trailing={<InfoHint text={t('mode.sessionsPickHint')} label={t('common.infoHint')} />}
+        />
         <Modal.Body scroll style={{ maxHeight: '66vh' }}>
-          <span className={css.hint}>{t('mode.sessionsPickHint')}</span>
           {/* 会话要在目标机的 DSH 工作区里可见，包内必须有指向它 cwd 的工作区记录。
               同步通道的「工作区」是分区级开关，所以这里只能提示用户一并勾上。 */}
           {sections.includes('sessions') && !sections.includes('workspaces') && (
@@ -99,9 +105,14 @@ export function SyncSectionPickerDialog({ open, t, cmT, sectionName, catalog, se
 
   return (
     <Modal open={open} onClose={onClose} title={t('mode.pickerTitle')} wide>
-      <Modal.Header title={t('mode.pickerTitle')} closeLabel={t('common.close')} onClose={onClose} />
+      <Modal.Header
+        title={t('mode.pickerTitle')}
+        closeLabel={t('common.close')}
+        onClose={onClose}
+        // 弹窗级说明（哪些分区会被带走）：贴在标题右边，不单独成行
+        trailing={<InfoHint text={t('mode.sectionsHint')} label={t('common.infoHint')} />}
+      />
       <Modal.Body scroll style={{ maxHeight: '66vh' }}>
-        <span className={css.hint}>{t('mode.pickerHint')}</span>
         {catalog.length === 0 ? (
           <span className={css.hint}>{t('common.loading')}</span>
         ) : (
@@ -138,7 +149,7 @@ export function SyncSectionPickerDialog({ open, t, cmT, sectionName, catalog, se
                       {s.id === 'sessions' && sections.includes('sessions') && (
                         <div className={css.field}>
                           <label className={css.field}>
-                            <span className={css.fieldLabel}>{t('mode.sessionsLimit')}</span>
+                            <span className={css.fieldLabel}>{t('mode.sessionsLimit')} <InfoHint text={t('mode.sessionsLimitHint')} label={t('common.infoHint')} /></span>
                             <input
                               type="number"
                               min={0}
@@ -149,7 +160,6 @@ export function SyncSectionPickerDialog({ open, t, cmT, sectionName, catalog, se
                                 onSessionsLimit(e.target.value === '' ? DEFAULT_SYNC_SESSIONS_LIMIT : Number(e.target.value))
                               }}
                             />
-                            <span className={css.hint}>{t('mode.sessionsLimitHint')}</span>
                           </label>
                           <div className={css.actionRowTop}>
                             <Button size="sm" onClick={() => { setView('sessions') }}>{t('mode.sessionsPick')}</Button>
@@ -171,10 +181,11 @@ export function SyncSectionPickerDialog({ open, t, cmT, sectionName, catalog, se
             ))}
           </div>
         )}
-        <span className={css.hint}>{t('mode.sectionsHint')}</span>
         {sections.length === 0 && <Banner kind="warn">{t('mode.atLeastOne')}</Banner>}
       </Modal.Body>
       <Modal.Footer>
+        {/* 「改动即时生效并保存」是**这个按钮**的说明：贴在「完成」右边同一行 */}
+        <InfoHint text={t('mode.pickerHint')} label={t('common.infoHint')} />
         <Button variant="primary" onClick={onClose}>{t('mode.pickerDone')}</Button>
       </Modal.Footer>
     </Modal>

@@ -43,3 +43,8 @@ phase8-e2e/
 
 # Vision-router crop artifacts (local tooling output from browser visual QA)
 .dsh-vision-router/
+
+# Local scratch (temp build dirs, tool dumps, pre-edit backups) — never commit
+.tmp/
+undefined/
+.tmp-*

@@ -9,7 +9,7 @@ import type { PullChange, SyncPullReport, SyncPushReport } from '../../sync/sync
 import type { SectionId } from '../../schema/types.ts'
 import type { GithubPollResponse, SyncSectionInfo, SyncStatusResponse } from './sync-api.ts'
 import {
-  autosyncIntervalMs, channelTabModels, computeAutosyncCountdown, computeGithubLoginView, computeRemoteReady, computeSyncButtons, computeSyncStatus,
+  autosyncIntervalMs, computeAutosyncCountdown, computeGithubLoginView, computeRemoteReady, computeSyncButtons, computeSyncStatus,
   DEFAULT_SYNC_SESSIONS_LIMIT, defaultChannelSyncState, formatDateTime, formatIntervalDuration, formatLastSync,
   githubPollMessage, initialSyncSections, kindLabel, normalizeSessionsLimit, privateRepoHint,
   pullReportView, pushReportView, presetById, presetIdForUrl, readStoredChannel, recommendedSyncSections,
@@ -488,19 +488,6 @@ test('sync-view: writeStoredChannel 写回 localStorage,可被 readStoredChannel
   assert.equal(readStoredChannel(s), 'webdav')
   writeStoredChannel('git', s)
   assert.equal(readStoredChannel(s), 'git')
-})
-
-/* ---------------------------------------------------------------- 通道子 tab（每通道独立） */
-
-test('sync-view: channelTabModels git 激活 → git active / webdav 未激活；busy 全禁用', () => {
-  const tabs = channelTabModels('git', false)
-  assert.equal(tabs.length, 2)
-  assert.deepEqual(tabs[0], { channel: 'git', active: true, disabled: false })
-  assert.deepEqual(tabs[1], { channel: 'webdav', active: false, disabled: false })
-  const busy = channelTabModels('webdav', true)
-  assert.equal(busy[0]?.active, false)
-  assert.equal(busy[1]?.active, true)
-  assert.ok(busy.every((b) => b.disabled), 'busy 时两个子 tab 都禁用（防并发操作切换）')
 })
 
 test('sync-view: defaultChannelSyncState 每通道独立缺省值', () => {

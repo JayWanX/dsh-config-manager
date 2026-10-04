@@ -57,6 +57,16 @@ const PREFIX_ROUTED = new Set<string>([
 
   RECOVERY_API.status,
   RECOVERY_API.lockRecover,
+  // T5：会话体检（只读）—— 同样由 recovery prefix 路由内部按 path 分发（`segments[0] === 'sessions'`）。
+  // 终端用户可见的后果：这条路径**不会**新增宿主注册路由条目，因此 route-parity 的 71 条快照不变。
+  RECOVERY_API.sessions,
+  // issue #56：显式解除 SAFE MODE —— 同样由 recovery prefix 路由内部按 path 分发
+  // （`segments[0] === 'safe-mode'`），不新增宿主注册路由条目。
+  RECOVERY_API.safeModeClear,
+  // T8：应用内会话修复（写路径）—— 由 recovery prefix 路由内部按 path 分发
+  // （`segments[0] === 'sessions'` 下的 `repair` / `rollback` 子路径），不新增宿主注册路由条目。
+  RECOVERY_API.sessionsRepair,
+  RECOVERY_API.sessionsRollback,
 ]);
 
 const ROUTE_LITERAL = /'(\/api\/dsh-config-manager[^']*)'/g;

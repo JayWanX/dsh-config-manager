@@ -257,7 +257,11 @@ export function classifyNetworkErrorText(text: string): { kind: SyncTransportErr
     return { kind: 'server', retryable: true };
   }
   if (status(401) || status(403) || has('authentication failed', 'permission denied', 'access denied',
-    'unauthorized', 'invalid credentials', 'could not read username', 'invalid username or password')) {
+    'unauthorized', 'invalid credentials', 'could not read username', 'invalid username or password',
+    // git/GitHub：口令不是有效令牌 —— 含「本机没配令牌、git 却提交了空口令」这条最常见的真机形态。
+    // 远端文案分不清「令牌缺失」与「令牌失效」，两者都必须归 auth，上层才能给出可操作提示。
+    'invalid username or token', 'password authentication is not supported',
+    'support for password authentication was removed')) {
     return { kind: 'auth', retryable: false };
   }
   if (status(404) || has('not found', 'does not exist', 'no such file')) {

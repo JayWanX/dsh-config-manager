@@ -84,9 +84,22 @@ export function timeoutMessage(t: UiT, timeoutMs: number, key: TimeoutMessageKey
 
 /** 携带路由 JSON error 消息的错误类型（客户端所有请求错误的唯一类型）。 */
 export class ConfigManagerApiError extends Error {
-  constructor(message: string) {
+  /**
+   * HTTP 状态码（有响应时）。
+   *
+   * 为什么需要：有些拒绝不是「出错」而是**必须由界面接管的流程状态** —— 典型是
+   * T1 的会话格式处置：`/plan` 在 `abort` 处置下返回 **409 + code=sessionFormatUnsupported**，
+   * 界面要据此渲染「三选一」的阻断态，而不是弹一条无可操作性的错误横幅。
+   */
+  readonly status?: number
+  /** 路由 error 体里的机器可读错误码（如 `sessionFormatUnsupported`；缺省 = 路由没给）。 */
+  readonly code?: string
+
+  constructor(message: string, status?: number, code?: string) {
     super(message);
     this.name = 'ConfigManagerApiError';
+    if (status !== undefined) this.status = status;
+    if (code !== undefined) this.code = code;
   }
 }
 
@@ -107,7 +120,9 @@ export async function readJson<T>(response: Response, t: UiT): Promise<T> {
     throw new ConfigManagerApiError(t('error.httpInvalidJson', { status: String(response.status) }));
   }
   if (!response.ok) {
-    const record = typeof body === 'object' && body !== null ? (body as { message?: unknown; error?: unknown }) : null;
+    const record = typeof body === 'object' && body !== null
+      ? (body as { message?: unknown; error?: unknown; code?: unknown })
+      : null;
     const message =
       typeof record?.message === 'string'
         ? record.message
@@ -116,7 +131,8 @@ export async function readJson<T>(response: Response, t: UiT): Promise<T> {
           : response.status === 404
             ? notMountedMessage
             : `HTTP ${response.status}`;
-    throw new ConfigManagerApiError(message);
+    // code 只在**是字符串**时透传（畸形/缺失 → undefined，界面按普通错误处理）
+    throw new ConfigManagerApiError(message, response.status, typeof record?.code === 'string' ? record.code : undefined);
   }
   return body as T;
 }

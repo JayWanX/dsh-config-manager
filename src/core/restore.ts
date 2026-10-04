@@ -777,12 +777,25 @@ async function sweepRestoredSessions(snapshotDir: string, homeDir: string, msg: 
 /**
  * 扫描快照根目录下每个子目录的 snapshot.json，返回按 createdAt 倒序的元信息。
  * 目录缺失/条目损坏自动跳过（不阻断其他快照）。
+ *
+ * **「读不到」与「没有」必须分清**（验收 F2）：目录不存在（ENOENT）→ 空列表是正确结论；
+ * EACCES / EPERM / ENOTDIR（路径被普通文件占住）等一律不算「没有快照」，
+ * 经可选 out.unreadable 回传由调用方如实展示（默认不传 → 与改造前返回值一致）。
  */
-export async function listSnapshots(dir: string): Promise<SnapshotMeta[]> {
+export async function listSnapshots(
+  dir: string,
+  out?: { unreadable?: string },
+): Promise<SnapshotMeta[]> {
   let entries;
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
+  } catch (error) {
+    // 「读不到」≠「没有」（验收 F2）：只有 ENOENT 才叫「目录确实不存在」；
+    // 其余（EACCES / EPERM / ENOTDIR…）经 out.unreadable 回传，由调用方如实展示。
+    const code = (error as { code?: string }).code;
+    if (code !== 'ENOENT' && out !== undefined) {
+      out.unreadable = '快照目录读不出来（' + String(code ?? 'unknown') + '）：' + dir;
+    }
     return [];
   }
   const metas: SnapshotMeta[] = [];

@@ -104,6 +104,40 @@ test('listBackupFiles：只列 .zip、时间倒序、来源判定正确、缺失
   }
 });
 
+/* --------- issue #55：列表要能告诉界面「这是不是整包加密的备份」 --------- */
+
+test('listBackupFiles：默认不探测容器形态（保留策略 / 磁盘体检的快速路径零额外 I/O）', async () => {
+  const { dir, cleanup } = await makeExportsDir();
+  try {
+    await fs.writeFile(path.join(dir, 'a.zip'), 'x');
+    const metas = await listBackupFiles(dir);
+    assert.equal(metas[0]!.containerType, undefined, '默认不探测：字段缺省即「按明文处理」');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('listBackupFiles({ withContainerKind })：DCA1 → encrypted，普通 ZIP → zip', async () => {
+  const { dir, cleanup } = await makeExportsDir();
+  try {
+    const enc = Buffer.alloc(64, 0xab);
+    enc.write('DCA1', 0, 'ascii');
+    const plain = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.alloc(60)]);
+    await fs.writeFile(path.join(dir, 'dsh-config-enc.zip'), enc);
+    await fs.writeFile(path.join(dir, 'dsh-config-plain.zip'), plain);
+    // 空文件（读不出 magic）→ 不得让整个列表失败，也不得被误判成加密容器
+    await fs.writeFile(path.join(dir, 'dsh-config-empty.zip'), Buffer.alloc(0));
+
+    const metas = await listBackupFiles(dir, { withContainerKind: true });
+    const byName = new Map(metas.map((m) => [m.name, m.containerType]));
+    assert.equal(byName.get('dsh-config-enc.zip'), 'encrypted', 'DCA1 magic → 加密容器');
+    assert.equal(byName.get('dsh-config-plain.zip'), 'zip', '真实 ZIP → 明文');
+    assert.equal(byName.get('dsh-config-empty.zip'), 'zip', '读不出 magic 时回落明文，不猜成加密、不抛错');
+  } finally {
+    await cleanup();
+  }
+});
+
 test('deleteBackupFile：成功删除 / 不存在幂等 / 非法名抛错 / 目录穿越拒绝', async () => {
   const { dir, cleanup } = await makeExportsDir();
   try {

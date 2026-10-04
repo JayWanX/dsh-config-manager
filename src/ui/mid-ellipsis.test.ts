@@ -4,7 +4,7 @@
  * 收敛前的三份定义点（算法逐字相同，仅默认参数/语句风格不同）：
  *  1. `src/ui/snapshots-view.ts`（`max = 26`）
  *  2. `src/client/sync/history-model.ts`（`max = 26`）
- *  3. `src/client/overview/OverviewPanel.tsx`（私有，`max` 必填，调用点传 52）
+ *  3. `src/client/home/HomePanel.tsx`（私有，`max` 必填，调用点传 52）
  *
  * 本文件钉住四件事：
  *  - 边界：上限附近（max-1 / max / max+1）、单字符、多字节中文、默认上限 26；
@@ -13,7 +13,7 @@
  *    注释里的同名串假绿——本仓库踩过这个坑）；
  *  - 行为等价：`max <= 2` 的退化区沿用历史行为（逐字保留，未顺手改语义）。
  *
- * OverviewPanel.tsx 无法在本测试里 import（`.tsx` 的 JSX 不能被 node 类型剥离加载），
+ * HomePanel.tsx 无法在本测试里 import（`.tsx` 的 JSX 不能被 node 类型剥离加载），
  * 故该调用点用「剥注释后的源码形状 + 下方 `npm run typecheck` 解析 import」双重覆盖。
  */
 import test from 'node:test'
@@ -150,11 +150,13 @@ test('收敛守卫：三处原定义点改为引用（前两处再导出、第�
     /export\s*\{\s*midEllipsis\s*\}\s*from\s*'\.\.\/\.\.\/ui\/mid-ellipsis\.ts'/,
     'history-model.ts 应以再导出引用唯一实现',
   )
-  const overview = read('client/overview/OverviewPanel.tsx')
+  // UI v2：OverviewPanel 已改名并搬到 client/home/HomePanel.tsx（第 4 步）。
+  // 守卫要钉的是「第三处定义点仍是引用」，所以跟着真实路径走。
+  const home = read('client/home/HomePanel.tsx')
   assert.match(
-    overview,
+    home,
     /import\s*\{\s*midEllipsis\s*\}\s*from\s*'\.\.\/\.\.\/ui\/mid-ellipsis\.ts'/,
-    'OverviewPanel.tsx 应 import 唯一实现',
+    'HomePanel.tsx 应 import 唯一实现',
   )
-  assert.match(overview, /midEllipsis\(backupDir,\s*52\)/, 'OverviewPanel.tsx 的调用点应保留（显式 52，行为不变）')
+  assert.match(home, /midEllipsis\(backupDir,\s*52\)/, 'HomePanel.tsx 的调用点应保留（显式 52，行为不变）')
 })

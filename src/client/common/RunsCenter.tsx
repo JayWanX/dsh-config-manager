@@ -1,17 +1,17 @@
 /**
- * 运行中心（Run Center）—— 活动抽屉的「进行中」段。
+ * 运行中心（Run Center）—— task 面板的「进行中」视图（原活动抽屉第三段）。
  *
- * 为什么放在抽屉里而不是新页面：
- *  - 运行任务是**跨页面**的（用户可能在「市场」页时导入还在跑），而 564×720 画布下 7 个英文页签
- *    已经溢出（仓库专门写了 nav-overflow 兜底），第 8 个页签的代价大于收益；
- *  - 「活动」按钮在 navActions 里**任何页面都在**，状态栏那句「N 个任务进行中」现在也是它的入口；
- *  - 抽屉正文已经 `overflow-y:auto; min-height:0`，长卡片列表直接可用。
+ * 为什么放在面板里而不是新页面：
+ *  - 运行任务是**跨页面**的（用户可能在「市场」页时导入还在跑），而导航条容量是稀缺资源
+ *    （放不下的项自动进「更多 ▾」，判定见 ui/nav-model.ts），再塞一个页签的代价大于收益；
+ *  - 「活动」图标按钮在 navActions 里**任何页面都在**，状态栏那句「N 个任务进行中」也是它的入口；
+ *  - 面板正文已经 `overflow-y:auto; min-height:0`，长卡片列表直接可用。
  *
  * 与「迁移历史」的边界（不合并成一个视图）：
  *  - 本视图 = 宿主 /runs 的**内存瞬时态**（终态 30 分钟后被 prune）；
  *  - 迁移历史 = 已完成操作的**持久审计**。混一页会出现「刷新后历史里少了一半」的认知撕裂。
  *
- * 数据：一次 GET /runs?scope=recent（含 running 与刚结束的），1.5s 轮询；抽屉关闭即卸载即停表。
+ * 数据：一次 GET /runs?scope=recent（含 running 与刚结束的），1.5s 轮询；面板关闭即卸载即停表。
  */
 import { useCallback, useEffect, useState } from 'react'
 import type { RunState } from '../../core/run-registry.ts'
@@ -23,6 +23,7 @@ import { cancelDialogModel, runCards, runSummary } from '../../ui/runs-view.ts'
 import type { CancelDecision, CancelDialogModel, RunCardModel } from '../../ui/runs-view.ts'
 import { runStateProgress } from '../run-store.ts'
 import { Badge, Banner, Button, Card, Empty } from './ui.tsx'
+import { InfoHint } from './InfoHint.tsx'
 import { SkeletonList } from './Skeleton.tsx'
 import { Modal } from './Modal.tsx'
 import { ProgressBar } from './ProgressBar.tsx'
@@ -169,9 +170,12 @@ export function RunsCenter({ api, recoveryApi, t, defaultRollbackOnError }: Runs
   return (
     <div className={css.runsCenter}>
       <div className={css.runsSummary}>
-        <span className={css.runsSummaryTitle}>{t('shell.drawer.runs')}</span>
+        <span className={css.runsSummaryTitle}>{t('shell.runs.title')}</span>
         {summary.running > 0 && <Badge kind="info">{t('runs.runningBadge', { count: String(summary.running) })}</Badge>}
         {summary.awaiting > 0 && <Badge kind="warn">{t('runs.awaitingBadge', { count: String(summary.awaiting) })}</Badge>}
+        {/* 保留期说明属「机制怎么工作 + 省事提示」（MOVE 类）：收进 ⓘ，不再常驻占一行。
+            空列表「为什么什么都没有」的常驻解释仍由下面的 <Empty>（runs.empty）承担。 */}
+        <InfoHint text={t('runs.retentionHint')} t={t} />
       </div>
       {lockError !== null && <Banner kind="warn">{t('runs.lock.readFailed', { message: redact(lockError) })}</Banner>}
       {/* 环境锁卡片：FREE 不显示（绝大多数时候是空闲，别占地方）；
@@ -258,8 +262,6 @@ export function RunsCenter({ api, recoveryApi, t, defaultRollbackOnError }: Runs
           </Card>
         )
       })}
-      {/* 保留期说明始终显示：空列表时它解释「为什么这里什么都没有」，有列表时它解释「为什么只有这些」 */}
-      <div className={css.hint}>{t('runs.retentionHint')}</div>
       {dialogModel !== null && (
         <RunCancelDialog
           model={dialogModel}

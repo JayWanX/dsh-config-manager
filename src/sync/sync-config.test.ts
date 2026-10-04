@@ -24,7 +24,7 @@ import {
   readSyncConfig, readFullSyncConfig, writeSyncConfig, isGitConfig, isWebDavConfig,
   SYNC_CONFIG_FILE, SYNC_CONFIG_SCHEMA_VERSION, SYNC_CONFIG_SUPPORTED_VERSIONS,
   validateWebDavUrl, type SyncConfig,
-  SYNC_CHANNELS, channelOf, channelMap, isSyncTransportType, parseSyncChannel,
+  SYNC_CHANNELS, channelOf, channelMap, isSyncTransportType, parseSyncChannel, clearSyncChannel,
 } from './sync-config.ts';
 
 test('writeSyncConfig + readSyncConfig（git 通道）：写入 v3 双命名空间形态（无另一通道时不写空命名空间）', async () => {
@@ -440,3 +440,70 @@ test('t33/B7 源码守卫：src/index.ts 不再手写通道数组/裸通道三�
   )
 })
 
+/* ------------------------------- clearSyncChannel：断开通道配置（用户要求：配置过必须能删掉） */
+
+test('clearSyncChannel：删掉活动通道 → 另一条保留，活动通道自动切过去', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-sync-cfg-clear-active-'));
+  try {
+    await writeSyncConfig(dir, { schemaVersion: 2, transport: 'git', git: { repoUrl: 'https://github.com/u/r.git' } });
+    await writeSyncConfig(dir, { schemaVersion: 2, transport: 'webdav', webdav: { url: 'https://dav.example.com/dav/' } });
+    assert.equal((await readFullSyncConfig(dir))?.transport, 'webdav', '前置：第二次写入后活动通道应为 webdav');
+    const res = await clearSyncChannel(dir, 'webdav');
+    assert.deepEqual(res, { removed: true, hasRemaining: true, transport: 'git' });
+    const full = await readFullSyncConfig(dir);
+    // 不自动切过去的话，readSyncConfig 会因 transport=webdav 而返回 null —— 一条**配置过**的通道
+    // 反而被 UI 显示成「未配置」，用户会以为配置丢了。
+    assert.equal(full?.transport, 'git', '活动通道必须自动切到剩下的那条');
+    assert.equal(full?.webdav, undefined, '被断开通道的命名空间必须消失');
+    assert.equal(full?.git?.repoUrl, 'https://github.com/u/r.git', '另一条通道的地址必须原样保留');
+    const raw = JSON.parse(await fs.readFile(path.join(dir, SYNC_CONFIG_FILE), 'utf8'));
+    assert.equal(raw.transport, 'git');
+    assert.equal(raw.webdav, undefined);
+    assert.equal(raw.schemaVersion, SYNC_CONFIG_SCHEMA_VERSION);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('clearSyncChannel：删掉非活动通道 → 活动通道保持不变', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-sync-cfg-clear-idle-'));
+  try {
+    await writeSyncConfig(dir, { schemaVersion: 2, transport: 'git', git: { repoUrl: 'https://github.com/u/r.git' } });
+    await writeSyncConfig(dir, { schemaVersion: 2, transport: 'webdav', webdav: { url: 'https://dav.example.com/dav/' } });
+    const res = await clearSyncChannel(dir, 'git');
+    assert.deepEqual(res, { removed: true, hasRemaining: true, transport: 'webdav' });
+    const full = await readFullSyncConfig(dir);
+    assert.equal(full?.transport, 'webdav', '被删的不是活动通道 → 活动通道不动');
+    assert.equal(full?.git, undefined);
+    assert.equal(full?.webdav?.url, 'https://dav.example.com/dav/');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('clearSyncChannel：删掉唯一一条 → 整个文件被删除（如实回落「未配置」）', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-sync-cfg-clear-only-'));
+  try {
+    await writeSyncConfig(dir, { schemaVersion: 2, transport: 'webdav', webdav: { url: 'https://dav.example.com/dav/' } });
+    const res = await clearSyncChannel(dir, 'webdav');
+    assert.deepEqual(res, { removed: true, hasRemaining: false, transport: 'webdav' });
+    assert.equal(await readFullSyncConfig(dir), null, '一条不剩必须回落成「未配置」，不得留空配置');
+    await assert.rejects(fs.stat(path.join(dir, SYNC_CONFIG_FILE)), '文件必须真的不存在');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('clearSyncChannel：该通道本来没配置 → 幂等成功（removed=false）且不动另一条', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-sync-cfg-clear-idem-'));
+  try {
+    await writeSyncConfig(dir, { schemaVersion: 2, transport: 'git', git: { repoUrl: 'https://github.com/u/r.git' } });
+    const before = await fs.readFile(path.join(dir, SYNC_CONFIG_FILE), 'utf8');
+    const res = await clearSyncChannel(dir, 'webdav');
+    assert.deepEqual(res, { removed: false, hasRemaining: true, transport: 'git' });
+    assert.equal(await fs.readFile(path.join(dir, SYNC_CONFIG_FILE), 'utf8'), before, '逻辑删除没发生 → 文件不得被改写');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('clearSyncChannel：文件不存在 → 幂等成功且不创建文件', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-sync-cfg-clear-none-'));
+  try {
+    const res = await clearSyncChannel(dir, 'git');
+    assert.deepEqual(res, { removed: false, hasRemaining: false, transport: 'git' });
+    await assert.rejects(fs.stat(path.join(dir, SYNC_CONFIG_FILE)), '不得因幂等清空而凭空创建配置文件');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});

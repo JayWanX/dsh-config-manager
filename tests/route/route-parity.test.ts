@@ -3,7 +3,16 @@
  *
  * 快照来源：2026-09-23 W1 动结构**之前**的 \`src/index.ts\` 的 \`routesList\`（67 条声明 /
  * 68 个 (method,path) 组合；其中 recovery 为 prefix 路由）。
+ * 后续增量：m-disk-usage 新增 `GET /disk-usage` 与 `POST /disk-usage/cleanup` → 70；
+ * m-update-check 新增 `GET /update-check` → **71**。
+ * 「拉取即导入」新增 `POST /sync/download` → **72**（宿主把远端快照落地成本机 ZIP）。
+ * 产物库「远端快照 → 删除」新增 `POST /sync/snapshot-delete` → **73**（只删远端那一份）。
  * 快照是本次重构唯一的行为契约：kit 化 + 按域拆组文件之后，声明集合必须逐条不变。
+ *
+ * **T4（会话体检）为什么没有让这里变成 72**：它挂在**既有**的 `recovery` prefix 路由下
+ * （`GET /api/dsh-config-manager/recovery/sessions`），与 `/recovery/status`、`/recovery/lock/recover`
+ * 同族 —— prefix 路由内部的子路径分发不算新条目（快照的语义单位是「注册到 webServer 的路由声明」，
+ * 而不是「逻辑端点」）。这条不是笔误，是刻意选择：本族已经是 prefix，新子路径不新增围栏面。
  *
  * 为什么快照里没有「顺序」：DSH webServer 的契约是「命名路由必须互不相同，注册顺序不影响请求」
  * （node_modules/@deepseek-ai/dsh-host-webserver/lib/types/index.d.ts:44-49 的类文档），
@@ -29,7 +38,8 @@ const root = path.resolve(import.meta.dirname, '../..');
 const METHOD_ORDER = ['GET', 'POST', 'PUT', 'DELETE'] as const;
 
 /**
- * 路由清单快照（68 条；见文件头「迁移记录」；68 = W1 快照 67 + 档案启动 `/profiles/launch` + 档案复制 `/profiles/copy` − 已下线的 `/lifecycle`）。
+ * 路由清单快照（71 条；见文件头「迁移记录」；68 = W1 快照 67 + 档案启动 `/profiles/launch` + 档案复制 `/profiles/copy` − 已下线的 `/lifecycle`；
+ * m-disk-usage 新增 `GET /disk-usage` 与 `POST /disk-usage/cleanup` → 70；m-update-check 新增 `GET /update-check` → 71）。
  *
  * ⚠️ **成本提示（P-3）**：这是**硬编码清单**，不是从源码派生的期望值 —— 新增一条路由
  * **必须同步更新这里**，否则本测试必然变红（T14 复现：临时加一条 `endpoint({ path: '/api/dsh-config-manager/__p3_probe',
@@ -47,6 +57,8 @@ const ROUTE_SNAPSHOT = [
   ['exact', 'POST', '/api/dsh-config-manager/consult'],
   ['exact', 'GET', '/api/dsh-config-manager/crash'],
   ['exact', 'POST', '/api/dsh-config-manager/decrypt-archive'],
+  ['exact', 'GET', '/api/dsh-config-manager/disk-usage'],
+  ['exact', 'POST', '/api/dsh-config-manager/disk-usage/cleanup'],
   ['exact', 'GET', '/api/dsh-config-manager/download'],
   ['exact', 'POST', '/api/dsh-config-manager/execute'],
   ['exact', 'POST', '/api/dsh-config-manager/execute/skip'],
@@ -100,13 +112,16 @@ const ROUTE_SNAPSHOT = [
   ['exact', 'POST', '/api/dsh-config-manager/sync/github/validate'],
   ['exact', 'GET', '/api/dsh-config-manager/sync/history'],
   ['exact', 'POST', '/api/dsh-config-manager/sync/pull'],
+  ['exact', 'POST', '/api/dsh-config-manager/sync/download'],
   ['exact', 'POST', '/api/dsh-config-manager/sync/push'],
   ['exact', 'POST', '/api/dsh-config-manager/sync/rollback'],
   ['exact', 'POST', '/api/dsh-config-manager/sync/selection'],
+  ['exact', 'POST', '/api/dsh-config-manager/sync/snapshot-delete'],
   ['exact', 'POST', '/api/dsh-config-manager/sync/snapshots-list'],
   ['exact', 'GET', '/api/dsh-config-manager/sync/status'],
   ['exact', 'POST', '/api/dsh-config-manager/sync/sync'],
   ['exact', 'POST', '/api/dsh-config-manager/sync/ui-prefs'],
+  ['exact', 'GET', '/api/dsh-config-manager/update-check'],
   ['exact', 'POST', '/api/dsh-config-manager/upload'],
 ];
 
@@ -181,10 +196,10 @@ function declaredRoutes(): string[] {
   return rows.sort();
 }
 
-test('W1 parity：路由清单与预期快照逐条一致（68 条）', () => {
+test('W1 parity：路由清单与预期快照逐条一致（73 条）', () => {
   const expected = ROUTE_SNAPSHOT.map(([kind, methods, routePath]) => row(kind as string, (methods as string).split('+'), routePath as string)).sort();
   const actual = declaredRoutes();
-  assert.equal(expected.length, 68, '快照自身应为 68 条');
+  assert.equal(expected.length, 73, '快照自身应为 73 条');
   assert.deepEqual(actual, expected, 'kit 化/拆组后路由声明集合必须逐条不变');
 });
 
@@ -196,6 +211,6 @@ test('W1 parity 解析器自检：少一条 / 改一条 / 改方法都会被检�
   assert.notDeepEqual(dropped, expected, '少一条路由必须被判为不一致');
   const renamed = [...actual.slice(1), actual[0]!.replace(/\/[^/]+$/, '/__drifted__')];
   assert.notDeepEqual(renamed, expected, '路径漂移必须被判为不一致');
-  // 解析器必须真的解析到 68 条（否则上面的 deepEqual 可能是「两边都空」的假绿）
-  assert.equal(actual.length, 68, `解析到的路由数应为 68，实际 ${actual.length}`);
+  // 解析器必须真的解析到 73 条（否则上面的 deepEqual 可能是「两边都空」的假绿）
+  assert.equal(actual.length, 73, `解析到的路由数应为 73，实际 ${actual.length}`);
 });

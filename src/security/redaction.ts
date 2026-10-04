@@ -59,9 +59,28 @@ export function maskHighEntropy(text: string): string {
 
 /* ---------------- redact ---------------- */
 
+/**
+ * 字段名 → 是否敏感（**含「嵌在更长字段名里」的形态**）。
+ *
+ * 为什么需要（验收 F7）：`leak-apiKey` 这类字段名整体判定不是敏感名，于是值原样出现。
+ * 做法是按分隔符与驼峰边界切段（`leak` + `api` + `Key`），再判定「单段」与「相邻两段拼接」
+ * （`api`+`Key` = `apiKey` 命中）—— 宁可多掩一个（只是显示损失），也不放行一个真密钥（那是泄漏）。
+ */
+function fieldLooksSensitive(field: string, blacklist: readonly string[]): boolean {
+  if (isSensitiveFieldName(field, blacklist)) return true
+  // 驼峰切分：apiKey → ['api', 'Key']，单段都不敏感，所以还要看**相邻段的组合**（api+Key → apiKey 命中）。
+  const parts = field.replace(/([a-z0-9])([A-Z])/g, '$1 $2').split(' ')
+  const segments = parts.flatMap((part) => part.split(/[^A-Za-z0-9]+/)).filter((segment) => segment !== '')
+  if (segments.some((segment) => isSensitiveFieldName(segment, blacklist))) return true
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    if (isSensitiveFieldName(segments[i]! + segments[i + 1]!, blacklist)) return true
+  }
+  return false
+}
+
 function replaceSensitiveField(text: string, re: RegExp, blacklist: readonly string[]): string {
   return text.replace(re, (match: string, field: string, value: string) => {
-    if (!isSensitiveFieldName(field, blacklist)) return match;
+    if (!fieldLooksSensitive(field, blacklist)) return match;
     if (value === '') return match;
     // 只替换值部分，保留原分隔符与引号形态（JSON `"f": "v"` / kv `f=v` / colon `f: v`）
     const idx = match.lastIndexOf(value);

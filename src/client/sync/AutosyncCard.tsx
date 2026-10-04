@@ -1,14 +1,15 @@
 /**
- * t42 物理拆分（从 SyncSettingsView.tsx 拆出的渲染段，同领域目录平铺）。
+ * t42 物理拆分（从 SyncSettingsView.tsx 拆出的渲染段，同领域目录平铺；v2 第 5 步主文件改名 SyncPanel.tsx）。
  *
  * 约定：只接收「渲染所需的数据 + 回调」；React 状态、副作用与网络调用仍由
- * SyncSettingsView 持有（单一状态源）；可测纯逻辑在 src/ui/sync-settings-view.ts。
+ * SyncPanel 持有（单一状态源）；可测纯逻辑在 src/ui/sync-settings-view.ts。
  */
 import type { ChangeEvent } from 'react'
 import type { TranslateNS } from '../client-types.ts'
 import type { UiT } from '../../ui/i18n.ts'
 import { Badge, Card } from '../common/ui.tsx'
 import { Select } from '../common/Select.tsx'
+import { InfoHint } from '../common/InfoHint.tsx'
 import {
   autosyncIntervalMs, autosyncStatusText, computeAutosyncCountdown, formatIntervalDuration,
 } from './sync-view.ts'
@@ -45,8 +46,7 @@ export function AutosyncCard({ t, uiT, settings, busy, onToggleAutosync, onUpdat
     : null
   return (
     <Card>
-      <span className={css.groupLabel}>{t('autosync.title')}</span>
-      <span className={css.hint}>{t('autosync.description')}</span>
+      <span className={css.groupLabel}>{t('autosync.title')} <InfoHint text={t('autosync.description')} label={t('common.infoHint')} /></span>
       <label className={css.checkboxRow}>
         <input
           type="checkbox"
@@ -57,7 +57,7 @@ export function AutosyncCard({ t, uiT, settings, busy, onToggleAutosync, onUpdat
         <span>{t('autosync.enable')}</span>
       </label>
       <label className={css.field}>
-        <span className={css.fieldLabel}>{t('autosync.interval')}</span>
+        <span className={css.fieldLabel}>{t('autosync.interval')} <InfoHint text={t('autosync.intervalHint')} label={t('common.infoHint')} /></span>
         <Select
           value={settings.autosyncInterval}
           disabled={busy}
@@ -65,7 +65,6 @@ export function AutosyncCard({ t, uiT, settings, busy, onToggleAutosync, onUpdat
           onChange={(next) => { onUpdateInterval(next as AutosyncInterval) }}
           options={AUTOSYNC_INTERVAL_OPTIONS.map((iv) => ({ value: iv, label: intervalLabel(iv, t) }))}
         />
-        <span className={css.hint}>{t('autosync.intervalHint')}</span>
       </label>
       <div className={css.statRow}>
         <Badge kind={settings.autosync?.lastRunStatus === 'failed' ? 'error' : settings.autosync?.lastRunStatus === 'skipped' ? 'warn' : 'info'}>

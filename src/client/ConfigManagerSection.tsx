@@ -2,14 +2,16 @@
  * Config Manager 设置页（settings.section 入口）—— Workbench Shell（2026-09 Full UI Rebuild）。
  *
  * 结构（画布 ≈ 564 × 720，800px 设置弹窗内）：
- *   ┌ navStrip：总览 / 备份 / 导出 / 导入 / 同步 / 市场 / 档案 + 右侧图标动作（活动/关于）
+ *   ├ shellNav：图标 + 短标签页签（放不下的自动进「更多 ▾」，判定见 ui/nav-model.ts）
+ *   │          + 右侧三个图标动作（⌘K / 活动 / 关于）
  *   ├ (SAFE MODE 横幅：仅恢复待处理时出现)
- *   ├ shellMain：当前页面（pagePad 内边距，独立滚动）
+ *   ├ shellContent：页面（shellMain）与流程面板（taskPanel）共用这一块
  *   └ statusBar：运行状态点 + 进行中任务数 + 版本信息
- * 另有「活动与关于」右侧抽屉（活动记录 / 关于 两个子视图，moreSub 持久化）。
  *
- * IA（Workbench Rebuild）：export/import 升为一级页面；旧「更多」面板由抽屉取代
- * （run-store parsePersistedState 将旧 panel 值迁移，moreSub 保留）。
+ * 流程任务层（UI v2 §5.8 / §5.9）：导出/导入/逛市场/发布市场是**多阶段流程**，
+ * 活动/历史/关于是**只读视图**，它们统一由内容区上的全宽侧滑面板承载（runStore.task，不持久化）。
+ * 面板只在 `panel === task.origin` 时渲染 —— 切走收起、切回续做。
+ * **右侧抽屉已整体删除**（它带遮罩却只占画布 71%，三个表格都拿不到全宽）。
  *
  * 业务面（api/syncApi/marketApi）由注册时的 inject face 注入；t 由 locale seat 注入。
  * 关闭按钮由 settings shell 自带，本页不再渲染。
@@ -18,29 +20,34 @@
  * （sessionStorage 持久化 + 切页/关面板不重建控制器实例）；挂载时
  * 经 GET /runs + 轮询 /progress 恢复进行中的 run（刷新/重开面板后）。
  */
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConfigManagerSectionInjected, TranslateNS } from './client-types.ts'
 import type { ServiceStatus } from './api.ts'
-import { runStore, type PanelId } from './run-store.ts'
-import { OverviewPanel } from './overview/OverviewPanel.tsx'
+import { runStore, type LibraryStoreSlice, type PanelId, type TaskState } from './run-store.ts'
+import { navLayout } from '../ui/nav-model.ts'
+import { COMMANDS, type CommandContext } from '../ui/commands.ts'
+import { MoreMenu } from './common/MoreMenu.tsx'
+import { CommandPalette } from './common/CommandPalette.tsx'
+import { TaskShell } from './task/TaskShell.tsx'
+import { LibraryPanel } from './library/LibraryPanel.tsx'
+import { LibraryActions } from './library/LibraryActions.tsx'
+import type { ArtifactCapability, ArtifactRow } from '../ui/artifact-view.ts'
+import { HomePanel } from './home/HomePanel.tsx'
 import { ExportView } from './export/ExportView.tsx'
 import { ImportWizardView } from './import/ImportWizardView.tsx'
-import { SnapshotsPanel } from './snapshots/SnapshotsPanel.tsx'
-import { SyncSettingsView } from './sync/SyncSettingsView.tsx'
+import { SyncPanel } from './sync/SyncPanel.tsx'
 import { MarketPanel } from './market/MarketPanel.tsx'
 import { AboutPanel } from './about/AboutPanel.tsx'
-import { ProfilesPanel } from './profiles/ProfilesPanel.tsx'
+import { EnvironmentPanel } from './environment/EnvironmentPanel.tsx'
 import { HistoryPanel } from './history/HistoryPanel.tsx'
 import { RunsCenter } from './common/RunsCenter.tsx'
 import { toRecoveryView } from './recovery/recovery-view.ts'
 import { ConfirmDialog } from './common/ConfirmDialog.tsx'
 import { MODAL_ROOT_ID } from './common/Modal.tsx'
-import { ViewSwitch } from './common/Motion.tsx'
-import { Banner, IconButton, Segmented, StatusDot } from './common/ui.tsx'
-import { ActivityIcon, AboutIcon, CloseIcon } from './common/Icon.tsx'
-import { navOverflowAttr, navOverflowState } from '../ui/nav-overflow.ts'
+import { Banner, IconButton, StatusDot } from './common/ui.tsx'
+import { ActivityIcon, AboutIcon, ChevronDownIcon, Icon } from './common/Icon.tsx'
 import { evaluateStarPrompt } from '../ui/star-prompt.ts'
 import { evaluateReleaseNotesPrompt } from '../ui/release-notes-prompt.ts'
 import { ReleaseNotesDialog } from './about/ReleaseNotesDialog.tsx'
@@ -61,52 +68,85 @@ interface NavItem {
 /** 一级导航（Workbench IA：7 页签；export/import 为独立页面）。 */
 const NAV_ITEMS: NavItem[] = [
   { id: 'overview', label: 'nav.overview' },
-  { id: 'snapshots', label: 'nav.backups' },
-  { id: 'export', label: 'nav.export' },
-  { id: 'import', label: 'nav.import' },
+  // UI v2：一级页面收敛为「首页 / 产物库 / …」。snapshots 是**过渡页** ——
+  // 它只剩「定时备份」「事故恢复」两个子视图，第 3/4 步分别归入环境页与首页后即删。
+  { id: 'library', label: 'library.title' },
+  // v2：导出与导入都**不再是页签** —— 它们是 Task Mode 的侧滑面板
+  // （入口：首页快捷动作 / 产物库行内「导入」/ ⌘K）。少两个页签，564px 下更不容易溢出。
   { id: 'sync', label: 'nav.sync' },
   { id: 'market', label: 'nav.market' },
-  { id: 'profiles', label: 'nav.profiles' },
+  // v2：档案页升级为「环境」（档案 + 维护与诊断）
+  { id: 'profiles', label: 'environment.title' },
 ]
 
+/** 与 CSS `.navStrip { gap: 2px }` 必须一致（导航布局判定要用真实间距）。 */
+const NAV_GAP = 2
+
 /**
- * Workbench Shell：导航条 + 页面内容 + 状态栏 + 活动抽屉。
+ * Workbench Shell：导航条 + 内容区（页面 / 流程面板）+ 状态栏。
  */
-export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigsApi, marketT, recoveryApi, recoveryT, historyApi, historyT, incidentApi, t }: ConfigManagerSectionProps) {
+export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigsApi, marketT, recoveryApi, recoveryT, historyApi, historyT, incidentApi, uiT, t }: ConfigManagerSectionProps) {
   const state = useSyncExternalStore(runStore.subscribe, runStore.getSnapshot)
   const panel: PanelId = state.panel
+  const task = state.task
 
-  /* ---------------- 活动与关于抽屉（drawerOpen 本地瞬态；子视图 moreSub 持久化） ---------------- */
-  const [drawerOpen, setDrawerOpen] = useState(false)
-  const openDrawer = (sub: 'runs' | 'history' | 'about'): void => {
-    runStore.patch({ more: { moreSub: sub } })
-    setDrawerOpen(true)
-  }
-  const closeDrawer = (): void => { setDrawerOpen(false) }
-  /* ---------------- 顶部页签条溢出可发现性（UI-19） ---------------- */
+  /* ---------------- 活动 / 历史 / 关于：三种只读 task（§5.9） -------------
+     它们原是右侧 400px 抽屉（带遮罩、占画布 71%、表格挤在 400px 里）。
+     并入侧滑面板后，全站只剩「页面 / 面板」两个容器概念，两张表也拿到内容区全宽。 */
+  /* ---------------- 顶部页签条自适应布局（UI v2 §5.2） ---------------- */
   /**
-   * 页签条滚动条被隐藏（scrollbar-width: none）：英文界面（7 个英文页签 + 2 个文字动作按钮）
-   * 在 564px 画布下会溢出，而界面上没有任何「右边还有内容」的提示。
-   * 这里把溢出状态写进 `data-overflow`，由 CSS 在对应一侧画渐隐遮罩（判定见 src/ui/nav-overflow.ts）。
+   * v1 把「放不下」当成可发现性问题（隐藏滚动条 + 两侧渐隐遮罩），用户得按住 shift 才滚得动。
+   * v2 承认它是**容量问题**：放不下就从末项开始移进「更多 ▾」，绝不把页签藏在视口外。
+   *
+   * 判定在 `ui/nav-model.ts`（纯函数 + 单测）；这里只负责**实测**宽度 —— 标签文案随语言变化，
+   * 按字数估算必然失准（中英混排、字号、系统缩放都会影响）。
    */
   const navRef = useRef<HTMLDivElement | null>(null)
-  const [navOverflow, setNavOverflow] = useState<'none' | 'start' | 'end' | 'both'>('none')
-  useEffect(() => {
-    const el = navRef.current
-    if (el === null) return
-    const sync = (): void => { setNavOverflow(navOverflowAttr(navOverflowState(el))) }
-    sync()
-    el.addEventListener('scroll', sync, { passive: true })
-    window.addEventListener('resize', sync)
-    // 字号/语言（页签文案长度）变化同样会改变是否溢出：容器尺寸观察作双保险
-    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(sync) : null
-    observer?.observe(el)
-    return () => {
-      el.removeEventListener('scroll', sync)
-      window.removeEventListener('resize', sync)
-      observer?.disconnect()
+  const navMeasureRef = useRef<HTMLDivElement | null>(null)
+  const [navWidths, setNavWidths] = useState<{ avail: number; items: number[]; more: number } | null>(null)
+  useLayoutEffect(() => {
+    const strip = navRef.current
+    const box = navMeasureRef.current
+    if (strip === null || box === null) return
+    const measure = (): void => {
+      const cs = getComputedStyle(strip)
+      const avail = strip.clientWidth - Number.parseFloat(cs.paddingLeft) - Number.parseFloat(cs.paddingRight)
+      const kids = Array.from(box.children)
+      const moreEl = kids[0]
+      const more = moreEl instanceof HTMLElement ? moreEl.getBoundingClientRect().width : 0
+      const items = kids.slice(1).map((el) => el.getBoundingClientRect().width)
+      // 只在数值真的变了才 setState，避免 ResizeObserver 自激
+      setNavWidths((prev) => (
+        prev !== null && prev.avail === avail && prev.more === more
+        && prev.items.length === items.length && prev.items.every((w, i) => w === items[i])
+      ) ? prev : { avail, items, more })
     }
+    measure()
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null
+    observer?.observe(strip)
+    // 字体就绪后字宽会变（首帧可能用的还是回退字体）
+    void document.fonts?.ready.then(measure, () => {})
+    return () => { observer?.disconnect() }
   }, [t])
+
+  const navLayoutResult = navWidths === null
+    // 未测量 = **全部可见**：宁可横向溢出（视觉瑕疵），也不能因为量不出来而藏页签（功能丢失）
+    ? { visible: NAV_ITEMS.map((_, i) => i), overflow: [] as number[] }
+    : navLayout(navWidths.items, navWidths.avail, navWidths.more, NAV_GAP)
+  const visibleNav = navLayoutResult.visible.flatMap((i) => (NAV_ITEMS[i] === undefined ? [] : [NAV_ITEMS[i]!]))
+  const overflowNav = navLayoutResult.overflow.flatMap((i) => (NAV_ITEMS[i] === undefined ? [] : [NAV_ITEMS[i]!]))
+
+  /* ---------------- 命令面板（⌘K，§5.3） ---------------- */
+  const [paletteOpen, setPaletteOpen] = useState(false)
+
+  /**
+   * 产物库的行内动作：交给**面板之外**的 LibraryActions 渲染（§6.5）。
+   * 必须放在壳层而不是 LibraryPanel 内部 —— 动作要开的 Modal 若渲染在 task 面板里，
+   * 定位基准会变成那块侧滑区域而不是插件根节点。
+   */
+  const [libraryAction, setLibraryAction] = useState<{ capability: ArtifactCapability; row: ArtifactRow } | null>(null)
+  /** 产物列表刷新信号：恢复 / 删除 / 置顶完成后递增，让面板重拉四份清单 */
+  const [libraryTick, setLibraryTick] = useState(0)
 
   /* ---------------- 状态栏版本（挂载时取一次；失败隐藏） ---------------- */
   const [version, setVersion] = useState<ServiceStatus | null>(null)
@@ -247,11 +287,57 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
     : false
 
   /* ---------------- 导航 ---------------- */
-  /** 切页（export/import 时同步 view 镜像字段，保持旧持久化语义）。 */
+  /**
+   * 切页。
+   *
+   * **导入不再是页面**（问题 3/8 的定案）：它是多阶段流程，只由 Task 面板承载。
+   * 任何把它当页面打开的入口都要**落到产物库并开面板** —— 否则会出现
+   * 「导航进导入页 + 侧拉面板里也是导入」两处渲染同一个向导。
+   */
   const goto = (id: PanelId): void => {
-    if (id === 'export') runStore.patch({ view: 'export', panel: 'export' })
-    else if (id === 'import') runStore.patch({ view: 'import', panel: 'import' })
-    else runStore.patch({ panel: id })
+    if (id === 'import') {
+      runStore.patch({ panel: 'library', view: 'import' })
+      openTaskFrom('library', 'import')
+      return
+    }
+    runStore.patch({ panel: id })
+  }
+
+  /** 从**指定页**发起流程面板（goto 在切页的同时开面板，origin 必须是切换后的那一页） */
+  const openTaskFrom = (origin: PanelId, kind: TaskState['kind'], payload?: unknown): void => {
+    runStore.patch({ task: { kind, origin, ...(payload === undefined ? {} : { payload }) } })
+  }
+
+  /**
+   * 打开流程面板（Task Mode，§5.8）。origin 记发起页：面板只在 `panel === origin` 时渲染，
+   * 于是「切走收起、切回续做」不需要额外的状态。
+   */
+  const openTask = (kind: TaskState['kind'], payload?: unknown): void => {
+    // origin 必须是**真实存在的页面**：否则 activeTask（task.origin === panel）恒不成立、
+    // 面板永远不出来 —— 真机「点导入闪一下但不出面板」的成因之一就是 origin 被记成了
+    // 一个已不存在的 page（'import'）。这里兜底把它归到产物库。
+    const origin: PanelId = panel === 'import' ? 'library' : panel
+    runStore.patch({ panel: origin, task: { kind, origin, ...(payload === undefined ? {} : { payload }) } })
+  }
+
+  const closeTask = (): void => { runStore.patch({ task: null }) }
+
+  /**
+   * 命令面板专用：切到产物库并**落定来源筛选**。
+   * 筛选状态只有一个事实源（`runStore.library.sourceFilter`，列表本体读它），
+   * 所以命令不复制一份筛选判定，只写同一个字段。
+   */
+  const openLibrarySource = (sourceFilter: LibraryStoreSlice['sourceFilter']): void => {
+    runStore.patch({ panel: 'library', library: { sourceFilter } })
+  }
+
+  /**
+   * 维护与诊断（事故恢复也在其中）在环境页里是**全屏子视图**，不是独立页面。
+   * 子视图状态住在 runStore 的 profiles 切片里 —— 正因为命令面板与 SAFE MODE 横幅都要能直达它
+   * （§4.4：急救入口不是「把用户送到某个页面」），只 patch `panel` 会落在「档案」列表上，等于没送到。
+   */
+  const openMaintenance = (): void => {
+    runStore.patch({ panel: 'profiles', profiles: { subView: 'maintenance' } })
   }
 
   /** tablist 方向键导航（ARIA tabs，manual activation）：←/→ 移动焦点，Enter/Space 原生激活。 */
@@ -284,32 +370,121 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
     ? t('shell.status.recovery')
     : runningCount > 0 ? t('shell.status.running', { count: String(runningCount) }) : t('shell.status.idle')
 
-  /** 当前页面内容（pagePad 统一内边距）。 */
+  /* ---------------- 命令面板：快捷键与命令分发 ---------------- */
+  /**
+   * ⌘/Ctrl+K 唤起。挂 window 是为了焦点在任何位置都能打开；但**不抢输入框里的这个组合**
+   * —— 宿主别处也可能用它，抢掉会让用户在文本框里打不出字。
+   * 面板本身是 Radix 弹窗，focus trap / Esc / 遮罩都由它管，这里不管。
+   */
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'k') return
+      const target = event.target
+      if (target instanceof HTMLElement
+        && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return
+      event.preventDefault()
+      setPaletteOpen((prev) => !prev)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => { window.removeEventListener('keydown', onKeyDown) }
+  }, [])
+
+  /** 命令面板的可用性上下文（每次渲染现算；判定全在 ui/commands.ts）。 */
+  const commandCtx: CommandContext = { recoveryRequired, runningCount }
+
+  /**
+   * 命令分发：命令表是纯数据（ui/commands.ts），执行落在这里 —— 只有壳层认识 store 与 api。
+   * **命令表里的每个 id 这里都必须有一条**（认不出的 id 会静默什么都不做），反之亦然。
+   */
+  const runCommand = (id: string): void => {
+    switch (id) {
+      case 'go.overview': goto('overview'); return
+      case 'go.library': goto('library'); return
+      case 'go.sync': goto('sync'); return
+      case 'go.market': goto('market'); return
+      case 'go.profiles': goto('profiles'); return
+      // 产物库来源筛选：切页 + 落定筛选（列表本体读 runStore.library.sourceFilter）
+      case 'library.source.all': openLibrarySource(null); return
+      case 'library.source.snapshot': openLibrarySource('snapshot'); return
+      case 'library.source.backupFile': openLibrarySource('backup-file'); return
+      case 'library.source.remote': openLibrarySource('remote-snapshot'); return
+      case 'library.source.market': openLibrarySource('market'); return
+      case 'export.open': openTask('export'); return
+      // 导入不是页面：goto('import') 会落到产物库并把导入面板打开
+      case 'import.open': goto('import'); return
+      // 维护与诊断是全屏子视图：命令直达它，而不是只把用户送到环境页
+      case 'maintenance.open': openMaintenance(); return
+      case 'activity.open': openTask('runs'); return
+      case 'history.open': openTask('history'); return
+      case 'about.open': openTask('about'); return
+      // 急救入口直达**环境 → 维护与诊断**（§4.4 第三条：不是只把用户送到某个页面）
+      case 'recovery.open': openMaintenance(); return
+      default: return
+    }
+  }
+
+    /** 当前页面内容（pagePad 统一内边距）。 */
   let page: ReactNode
   switch (panel) {
     case 'overview':
-      page = <OverviewPanel api={api} syncApi={syncApi} historyApi={historyApi} t={t} openActivity={() => { openDrawer('history') }} />
-      break
-    case 'export':
-      page = <ExportView api={api} t={t} />
+      page = <HomePanel api={api} syncApi={syncApi} historyApi={historyApi} t={t} openActivity={() => { openTask('history') }} />
       break
     case 'import':
-      page = <ImportWizardView api={api} t={t} />
+      // 导航已无此项（导入只走侧拉面板）。仅当旧持久化/深链把 panel 定到 import 时走到这里：
+      // 渲染产物库（而不是向导），并靠上面的 goto 语义把用户带回面板路径。
+      page = <LibraryPanel
+        api={api}
+        syncApi={syncApi}
+        marketApi={marketApi}
+        t={t}
+        uiT={uiT}
+        onAction={(capability, row) => { setLibraryAction({ capability, row }) }}
+        onOpenTask={(kind, marketId) => { openTask(kind, marketId === undefined ? undefined : { marketId }) }}
+        onOpenExport={() => { openTask('export') }}
+        refreshTick={libraryTick}
+      />
       break
-    case 'snapshots':
-      page = <SnapshotsPanel api={api} t={t} recoveryApi={recoveryApi} recoveryT={recoveryT} incidentApi={incidentApi} />
+    case 'library':
+      page = (
+        <LibraryPanel
+          api={api}
+          syncApi={syncApi}
+          marketApi={marketApi}
+          t={t}
+          uiT={uiT}
+          onAction={(capability, row) => { setLibraryAction({ capability, row }) }}
+          onOpenTask={(kind, marketId) => { openTask(kind, marketId === undefined ? undefined : { marketId }) }}
+          onOpenExport={() => { openTask('export') }}
+          refreshTick={libraryTick}
+        />
+      )
       break
     case 'sync':
-      page = <SyncSettingsView api={syncApi} t={syncT} cmT={t} />
+      page = <SyncPanel api={syncApi} t={syncT} cmT={t} />
       break
     case 'market':
       page = <MarketPanel api={marketApi} myConfigsApi={myConfigsApi} syncApi={syncApi} importApi={api} t={marketT} cmT={t} />
       break
     case 'profiles':
-      page = <ProfilesPanel api={api} t={t} />
+      page = (
+        <EnvironmentPanel
+          api={api}
+          t={t}
+          recoveryApi={recoveryApi}
+          recoveryT={recoveryT}
+          incidentApi={incidentApi}
+        />
+      )
       break
       break
   }
+
+  /** 当前生效的流程面板：**只在发起它的页面上渲染** —— 切走收起、切回续做（§5.8）。 */
+  const activeTask = task !== null && task.origin === panel ? task : null
+  const taskOriginNav = activeTask === null ? undefined : NAV_ITEMS.find((item) => item.id === activeTask.origin)
+  const taskOriginLabel = taskOriginNav === undefined
+    ? t('section.label')
+    : t(taskOriginNav.label as Parameters<TranslateNS<'config-manager'>>[0])
 
   return (
     // id 同时作为 Radix Modal 的 Portal 容器（见 common/Modal.tsx 的 MODAL_ROOT_ID 说明）：
@@ -317,14 +492,8 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
     <div className={css.section} id={MODAL_ROOT_ID}>
       {/* 顶部导航条：页签 + 图标动作 */}
       <nav className={css.shellNav} aria-label={t('section.label')}>
-        <div
-          className={css.navStrip}
-          role="tablist"
-          ref={navRef}
-          data-overflow={navOverflow}
-          onKeyDown={onTablistKeyDown}
-        >
-          {NAV_ITEMS.map((item) => (
+        <div className={css.navStrip} role="tablist" ref={navRef} onKeyDown={onTablistKeyDown}>
+          {visibleNav.map((item) => (
             <button
               key={item.id}
               type="button"
@@ -334,30 +503,42 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
               className={css.navTab}
               onClick={() => { goto(item.id) }}
             >
-              {item.id === 'snapshots' && recoveryRequired && <span className={css.navDot} aria-hidden="true" />}
+              {item.id === 'profiles' && recoveryRequired && <span className={css.navDot} aria-hidden="true" />}
               {t(item.label as Parameters<TranslateNS<'config-manager'>>[0])}
             </button>
           ))}
+          {/* 放不下的项进「更多 ▾」—— 判定在 ui/nav-model.ts；放得下时这里什么都不渲染 */}
+          {overflowNav.length > 0 && (
+            <MoreMenu
+              items={overflowNav.map((item) => ({
+                id: item.id,
+                label: t(item.label as Parameters<TranslateNS<'config-manager'>>[0]),
+              }))}
+              activeId={panel}
+              onSelect={(id) => { goto(id as PanelId) }}
+              label={t('nav.more')}
+            />
+          )}
         </div>
         <div className={css.navActions}>
-          <button
-            type="button"
-            className={css.ghostButton}
-            data-size="sm"
-            data-active={drawerOpen && state.more.moreSub === 'history' ? '' : undefined}
-            onClick={() => { openDrawer('history') }}
-          >
-            <ActivityIcon size={13} /> {t('overview.nav.activity')}
-          </button>
-          <button
-            type="button"
-            className={css.ghostButton}
-            data-size="sm"
-            data-active={drawerOpen && state.more.moreSub === 'about' ? '' : undefined}
-            onClick={() => { openDrawer('about') }}
-          >
-            <AboutIcon size={13} /> {t('overview.nav.about')}
-          </button>
+          <IconButton
+            icon={<Icon name="inspect" size={14} />}
+            label={t('palette.label')}
+            title={t('palette.hint')}
+            onClick={() => { setPaletteOpen(true) }}
+          />
+          <IconButton
+            icon={<ActivityIcon size={14} />}
+            label={t('overview.nav.activity')}
+            active={activeTask?.kind === 'runs'}
+            onClick={() => { openTask('runs') }}
+          />
+          <IconButton
+            icon={<AboutIcon size={14} />}
+            label={t('overview.nav.about')}
+            active={activeTask?.kind === 'about'}
+            onClick={() => { openTask('about') }}
+          />
         </div>
       </nav>
 
@@ -370,9 +551,7 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
               type="button"
               className={css.ghostButton}
               data-size="sm"
-              onClick={() => {
-                runStore.patch({ panel: 'snapshots', snapshots: { subTab: 'recovery' } })
-              }}
+              onClick={openMaintenance}
             >
               {recoveryT('recovery.bannerAction')}
             </button>
@@ -380,13 +559,70 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
         </div>
       )}
 
-      {/* 页面主体（独立滚动）。
-          key={panel}：换页时重建本节点，让 §2 的 pageEnter 动画重放一次（CSS 动画只在
-          元素创建时播放）。页面本就按 panel 渲染不同组件类型、切换即卸载重挂，所以这里
-          不改变任何既有的生命周期语义，只是把这次切换做成可见的过渡。 */}
-      <main className={css.shellMain}>
-        <div className={css.pagePad} key={panel}>{page}</div>
-      </main>
+      {/* 内容区（页面与流程面板共用这一块）。
+          面板是 absolute 覆盖层（§5.8），所以底下的页面**保持挂载** —— 关闭是瞬时的，
+          滚动位置、展开的那一行、已拉到的数据都还在。
+          key={panel}：换页时重建本节点，让 pageEnter 动画重放一次（CSS 动画只在元素创建时播放）。 */}
+      <div className={css.shellContent}>
+        <main className={css.shellMain}>
+          <div className={css.pagePad} key={panel}>{page}</div>
+        </main>
+        {/** 产物库的行内动作：**在 task 面板之外**渲染（它的 Modal 不能被面板的定位上下文吃掉） */}
+        <LibraryActions
+          api={api}
+          syncApi={syncApi}
+          t={t}
+          target={libraryAction}
+          onDone={() => { setLibraryAction(null) }}
+          onChanged={() => { setLibraryTick((n) => n + 1) }}
+          onOpenTask={(kind, marketId) => { openTask(kind, marketId === undefined ? undefined : { marketId }) }}
+        />
+        {activeTask !== null && (
+          <TaskShell
+            title={t(`task.title.${activeTask.kind}`)}
+            backLabel={t('task.back', { page: taskOriginLabel })}
+            onBack={closeTask}
+            // Esc 关闭只给只读视图：多阶段流程里可能有未保存的计划或已输入的密码
+            escToClose={activeTask.kind === 'runs' || activeTask.kind === 'history' || activeTask.kind === 'about'}
+            // 外壳不重挂，所以滚动归零交给它（否则两个长列表之间切换会从中段开始）
+            resetKey={activeTask.kind}
+          >
+            {activeTask.kind === 'export' && <ExportView api={api} t={t} />}
+            {/* 导入与逛市场都是多阶段流程（§1），同样由本面板承载。
+                此前只渲染了 export / runs / history / about —— 从产物库点「导入」会开到**一个空面板**，
+                而导入其实在页面那条路径里跑（返回后正好看到它），两处状态分叉。 */}
+            {activeTask.kind === 'import' && <ImportWizardView api={api} t={t} />}
+            {activeTask.kind === 'market' && (
+              <MarketPanel
+                api={marketApi}
+                myConfigsApi={myConfigsApi}
+                syncApi={syncApi}
+                importApi={api}
+                t={marketT}
+                cmT={t}
+                /* 产物库「安装」把要装的条目 id 经 Task 入参带进来 → 面板直开该条目 */
+                openItemId={marketTaskItemId(activeTask.payload)}
+              />
+            )}
+            {/* 三种只读视图（原抽屉内容，§5.9）。三者各有独立入口、面板内不再放切换控件：
+                导航「活动」图标 = 活动记录（运行）、「关于」图标 = 关于、首页的「迁移历史」按钮 = 本视图。
+                **外壳不随 kind 重挂**：按 kind 重挂 = 旧面板卸载 + 新面板从 opacity:0 入场，
+                中间会露出一帧底下的页面（用户报告的「切换侧拉页面时闪烁」）；现在换视图 = 原地换内容。 */}
+            {activeTask.kind === 'runs' && (
+              <RunsCenter
+                api={api}
+                // 事故恢复端口：运行中心用它显示/回收环境锁（残留锁的可见入口）
+                recoveryApi={recoveryApi}
+                t={t}
+                // 决策框默认选项跟随用户既有的「失败不回滚」偏好（不推翻他的心智）
+                defaultRollbackOnError={state.import.rollbackOnError}
+              />
+            )}
+            {activeTask.kind === 'history' && <HistoryPanel historyApi={historyApi} t={historyT} />}
+            {activeTask.kind === 'about' && <AboutPanel api={api} t={t} />}
+          </TaskShell>
+        )}
+      </div>
 
       {/* 底部状态栏：运行状态 + 版本 */}
       <footer className={css.statusBar}>
@@ -399,7 +635,7 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
             className={`${css.statusText} ${css.statusAction}`}
             title={t('shell.status.runningAction')}
             aria-label={t('shell.status.runningAction')}
-            onClick={() => { openDrawer('runs') }}
+            onClick={() => { openTask('runs') }}
           >
             {statusText}
           </button>
@@ -414,66 +650,30 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
         )}
       </footer>
 
-      {/* 活动与关于抽屉（右侧滑出；活动记录 / 关于 两个子视图） */}
-      {drawerOpen && (
-        <>
-          <div className={css.drawerMask} onClick={closeDrawer} aria-hidden="true" />
-          <aside
-            className={css.drawerPanel}
-            role="dialog"
-            aria-modal="true"
-            aria-label={t('shell.drawer.title')}
-            onKeyDown={(e) => {
-              // Esc 仅在抽屉内消费（阻止冒泡，避免关闭宿主设置弹窗）
-              if (e.key === 'Escape') {
-                e.stopPropagation()
-                closeDrawer()
-              }
-            }}
-          >
-            <div className={css.drawerHeader}>
-              <span className={css.drawerTitle}>{t('shell.drawer.title')}</span>
-              <IconButton icon={<CloseIcon size={14} />} label={t('common.close')} onClick={closeDrawer} />
-            </div>
-            <div style={{ padding: '10px 14px 0' }}>
-              <Segmented
-                items={[
-                  // 语义排序：进行中（瞬时） → 迁移历史（持久审计） → 关于
-                  { id: 'runs', label: t('shell.drawer.runs') },
-                  { id: 'history', label: historyT('view.history') },
-                  { id: 'about', label: t('view.about') },
-                ]}
-                active={state.more.moreSub}
-                onChange={(id) => {
-                  runStore.patch({
-                    more: { moreSub: id === 'about' ? 'about' : id === 'runs' ? 'runs' : 'history' },
-                  })
-                }}
-                ariaLabel={t('shell.drawer.title')}
-              />
-            </div>
-            <div className={css.drawerBody}>
-              {/* 三段（进行中 / 历史 / 关于）是不同组件、切换即重挂：包一层让切换有入场过渡 */}
-              <ViewSwitch viewKey={state.more.moreSub}>
-              {state.more.moreSub === 'runs'
-                ? (
-                  <RunsCenter
-                    api={api}
-                    // 事故恢复端口：运行中心用它显示/回收环境锁（残留锁的可见入口）
-                    recoveryApi={recoveryApi}
-                    t={t}
-                    // 决策框默认选项跟随用户既有的「失败不回滚」偏好（不推翻他的心智）
-                    defaultRollbackOnError={state.import.rollbackOnError}
-                  />
-                )
-                : state.more.moreSub === 'history'
-                  ? <HistoryPanel historyApi={historyApi} t={historyT} />
-                  : <AboutPanel api={api} t={t} />}
-              </ViewSwitch>
-            </div>
-          </aside>
-        </>
-      )}
+      {/* 宽度实测容器：结构与真实页签**逐字节同构**（同一批 class、同一段文案、同样的告警点），
+          否则量出来的宽度不是真实宽度 —— 布局判定就建立在假数据上。
+          absolute + 移出视口，完全不参与布局。 */}
+      <div ref={navMeasureRef} className={css.navMeasure} aria-hidden="true">
+        <button type="button" className={css.navMore} tabIndex={-1}>
+          {t('nav.more')}
+          <ChevronDownIcon size={12} className={css.selectChevron} />
+        </button>
+        {NAV_ITEMS.map((item) => (
+          <button key={item.id} type="button" className={css.navTab} tabIndex={-1}>
+            {item.id === 'profiles' && recoveryRequired && <span className={css.navDot} aria-hidden="true" />}
+            {t(item.label as Parameters<TranslateNS<'config-manager'>>[0])}
+          </button>
+        ))}
+      </div>
+
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => { setPaletteOpen(false) }}
+        commands={COMMANDS}
+        ctx={commandCtx}
+        onRun={runCommand}
+        t={t}
+      />
 
       {/* 全局通知视口（右下角堆叠；绝对定位贴合本根节点，见 §6 Overlays） */}
       <ToastViewport t={t} />
@@ -499,4 +699,15 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
       />
     </div>
   )
+}
+
+/**
+ * Task 入参里取「市场条目 id」（产物库的「安装」用；Task 面板只渲染在来源页上）。
+ * 入参是 unknown（可扩展、可序列化），此处只认形如 `{ marketId: string }` 的载荷，
+ * 缺字段 / 类型不对一律 undefined（= 打开市场列表，绝不猜）。
+ */
+function marketTaskItemId(payload: unknown): string | undefined {
+  if (typeof payload !== 'object' || payload === null) return undefined
+  const id: unknown = (payload as { marketId?: unknown }).marketId
+  return typeof id === 'string' && id !== '' ? id : undefined
 }

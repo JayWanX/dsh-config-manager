@@ -74,9 +74,18 @@ POST /api/dsh-config-manager/upload?name   body: 原始字节 → UploadResponse
 POST /api/dsh-config-manager/analyze       body: { zipPath } → ImportAnalysis
 POST /api/dsh-config-manager/plan          body: { zipPath, decisions } → ImportPlan
 POST /api/dsh-config-manager/execute       body: { zipPath, plan, opts: { confirm, secretInputs, rollbackOnError } } → ImportResult
-GET  /api/dsh-config-manager/backup-files  → { ok, files: BackupFileMeta[] }（exports 目录备份文件，时间倒序）
+GET  /api/dsh-config-manager/backup-files  → { ok, files: BackupFileMeta[] }（exports 目录备份文件，时间倒序；
+                                            每项带 containerType: 'zip' | 'encrypted'，加密容器必须先经
+                                            decrypt-archive 解锁再分析 —— issue #55）
 POST /api/dsh-config-manager/backup-files/delete  body: { name } → { ok, removed }（仅 exports 内 .zip）
+POST /api/dsh-config-manager/decrypt-archive body: { zipPath, password } → { zipPath, refs }（整体加密容器解锁）
+POST /api/dsh-config-manager/recovery/safe-mode/clear body: { userConfirmed } → { ok, cleared, reason? }
+                                            （显式解除仍生效的 SAFE MODE；还有未解决事项时 ok=false —— issue #56）
 ```
+
+- 未解锁的整体加密容器（DCA1）：`/analyze`、`/plan`、`/execute` 一律返回
+  `400 { code: 'encrypted-container' }`（与 mutation gate 的 `mutation-locked` 同一约定）；
+  客户端据该码进入「解锁加密备份」阶段，而不是把容器当 ZIP 报「备份损坏」。
 
 - `password` 为加密的独立开关：传入即注入 EncryptionProvider（Host 侧 `security/encryption.ts`
   scrypt+AES-256-GCM），备份标记 encrypted（导入需密码）；`includeSecrets=false`（不导出密钥）时

@@ -115,14 +115,14 @@ const RENDER_POINTS: RenderPoint[] = [
   /* ---------------- 档案（DSH profile）原文 ---------------- */
   {
     id: 'profile-manifest-text',
-    file: 'src/client/profiles/ProfilesPanel.tsx',
+    file: 'src/client/environment/EnvironmentPanel.tsx',
     redacted: R("{redact(detail.manifest ?? '')}"),
     bare: R("{detail.manifest ?? ''}"),
     why: 'package.json 原文（依赖 spec 可能内联私有源地址/令牌）',
   },
   {
     id: 'profile-patch-text',
-    file: 'src/client/profiles/ProfilesPanel.tsx',
+    file: 'src/client/environment/EnvironmentPanel.tsx',
     redacted: R("{detail.patch !== null ? redact(detail.patch) :"),
     bare: R("{detail.patch !== null ? detail.patch :"),
     why: 'cordis.patch.yml 原文（!!js 表达式旁可能内联字面量密钥）',
@@ -166,7 +166,8 @@ const RENDER_POINTS: RenderPoint[] = [
   },
   {
     id: 'snapshot-inspect-description',
-    file: 'src/client/snapshots/SnapshotsPanel.tsx',
+    // UI v2：该视图搬到 library/ 供产物库与备份页共用（同一次提交里改登记表，绝不漏）
+    file: 'src/client/library/BackupInspectView.tsx',
     redacted: R("{' '}{item.adapter}: {redact(item.description)}"),
     bare: R("{' '}{item.adapter}: {item.description}"),
     why: '备份差异查看的计划项描述',
@@ -175,9 +176,9 @@ const RENDER_POINTS: RenderPoint[] = [
   {
     id: 'sync-confirm-description',
     file: 'src/client/sync/SyncConfirmView.tsx',
-    redacted: R('<span>{redact(it.description)}</span>'),
-    bare: R('<span>{it.description}</span>'),
-    why: '同步差异项描述（引擎/宿主拼装）',
+    redacted: R('<span className={css.confirmItemDesc}>{redact(it.description)}</span>'),
+    bare: R('<span className={css.confirmItemDesc}>{it.description}</span>'),
+    why: '同步差异项描述（引擎/宿主拼装；2026-10-04 收紧为确认列表的 .confirmItemDesc 描述列）',
   },
   {
     id: 'sync-confirm-detail',

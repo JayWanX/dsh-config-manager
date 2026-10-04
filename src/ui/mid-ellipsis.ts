@@ -4,14 +4,15 @@
  * 收敛前的三份定义点（本次由本文件取代全部三处）：
  *  1. `src/ui/snapshots-view.ts`（t43 从 SnapshotsPanel.tsx 下沉，`max = 26`）
  *  2. `src/client/sync/history-model.ts`（`max = 26`）
- *  3. `src/client/overview/OverviewPanel.tsx`（组件内私有函数，`max` 必填，调用点传 52）
+ *  3. `src/client/home/HomePanel.tsx`（组件内私有函数，`max` 必填，调用点传 52；
+ *     UI v2 第 4 步由 `client/overview/OverviewPanel.tsx` 原样搬移而来）
  *
  * 三份差异与取值（逐项，未悄悄选一版）：
  *  - 默认参数：第 1、2 处 `max = 26`，第 3 处无默认（调用点显式传 52）
  *    → **保留 `max = 26`**：两处带默认且既有单测断言默认 26；显式传参的调用点行为不变。
  *  - 函数体：三处逐字相同（`keep = max - 1`，头 `ceil(keep / 2)`、尾 `keep - head`），无算法分歧。
  *  - 语句风格（分号有无）：非语义差异，本文件跟随 src/ui 风格（无分号）。
- *  结论：本次是**纯搬移**，对任何调用点都是零行为变更（OverviewPanel 传 52 亦然）。
+ *  结论：本次是**纯搬移**，对任何调用点都是零行为变更（HomePanel 传 52 亦然）。
  *
  * 语义：保留头尾、中段以 `…` 替代；`max >= 3` 时结果恰为 `max` 个码元。
  * 尾部是唯一区分信息（时间戳 / id 尾段 / 扩展名），尾部截断会让两条记录看起来一模一样

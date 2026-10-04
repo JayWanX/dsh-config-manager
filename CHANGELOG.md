@@ -9,6 +9,430 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 > **Release workflow**: on tag push, CI extracts the current version's section as the release notes highlights;
 > the build fails fast if the section is missing, so you cannot forget to update it.
 
+## [0.1.69] - 2026-10-04
+
+> **本版已发布**：覆盖此前数轮并行落地的工作（会话跨机迁移与体检、UI v2 信息架构、磁盘占用体检、
+> 版本更新检查、加密备份恢复入口、SAFE MODE 出口），以及本轮集中修复的六个上报 issue（#55–#60）。
+> **Released**: this version ships several rounds of parallel work plus the six reported issues fixed here (#55–#60).
+>
+> 本轮修的是**「对话消失」的第二类根因**：DSH 的会话日志按 `header.version` 分版本，读不出的（更高的）
+> 格式会被 DSH **静默跳过** —— 不报错、不在工作区列表里。高版本能读低版本（V0→V4 迁移链），**反向不可读**，
+> 而本插件的导出/导入/同步是逐字节搬运，于是「导入全部成功、对话一个不显示」。现在导入/同步会在**分析阶段**
+> 就体检并告警，档案页也会显示每个档案的运行 DSH 版本与会话格式版本、对错配给出提示；**任一侧读不到版本
+> 一律不提示**（不猜、不给假结论），也不会替 DSH 做格式迁移。
+>
+> **Theme**: the second root cause behind "my conversations disappeared" is now visible before it hurts.
+> DSH stamps every session log with a `header.version` and **silently skips** logs it cannot read (no error,
+> not in the workspace list), while higher builds can read lower ones but not the reverse. Since this plugin
+> copies session logs byte-for-byte, imports and syncs now probe the bundle's session format versions during
+> **analysis** and warn when the local DSH build cannot read them; the profiles page shows each profile's DSH
+> version and session format version plus a mismatch hint. Unknown on either side stays quiet — no guessing,
+> and no format migration inside the plugin.
+>
+> 同一轮还补上了**磁盘占用体检**：备份页现在能回答「我的备份占了多少盘、哪些能清」，并提供只作用于
+> 可重建缓存的「立即清理」（快照与同步数据永不在此删除）。
+>
+> The same round adds a **disk-usage report** on the backups page — how much space the plugin's own
+> artifacts take, what is reclaimable, and a one-click cleanup that never touches snapshots or sync data.
+>
+> 再加上两件「让用户看得懂」的事：**「关于」页可以检查插件更新**（只读探测 npm，给一条可复制的升级命令，
+> 绝不自动安装）；**导入前的兼容性评分有了结构化原因**（来源 DSH 版本 / 平台 → 本机 + 逐条判定依据），
+> 同步确认页也不再显示 `partial` 这种机器 token。
+>
+> Plus two things that make the plugin self-explanatory: the **About page can check for updates** (read-only
+> npm probe that hands you a copyable upgrade command, never auto-installs), and the **import compatibility
+> score now comes with structured reasons** (source DSH version/platform vs local, item by item).
+>
+> 而**最大的改动是界面本身**：一级信息架构从 7 个功能页签重建为 **4 个对象页 + ⌘K 命令面板**
+> （首页 / 产物库 / 同步 / 环境），并在此后的真机自查里逐条修掉了它带出来的问题 ——
+> 详见下面两节（`UI v2` 与 `UI v2 落地后的真机修复`）。
+>
+> **The biggest change is the UI itself**: the top-level IA is rebuilt from seven feature tabs into
+> **four object-centric pages plus a ⌘K palette**, with the follow-up real-machine fixes listed in the
+> two sections below.
+
+### ✅ 本轮修复的上报 issue（按编号）· Reported issues fixed in this release
+
+> 六条都在真机上复现并定位过，共同点是**失败都不显眼**：其中四个都是「操作报成功、但结果不完整 / 读不回来」，
+> 用户只看得到症状（插件丢了、列表空的、密码输不进去），看不到原因。所以修复除了纠正行为，还都**把失败变可见**。
+> 均已在 issue 上回帖确认（`confirmed` 标签），修复随本次发版交付。
+>
+> All six were reproduced and root-caused on a real machine. They share one trait: the failure was never loud —
+> four of them reported success while leaving the result incomplete or unreadable. Each fix also makes the failure **visible**.
+
+### 🔓 #55 加密备份的恢复入口 / Restoring encrypted backups
+
+- 🐛 **从「备份文件」列表恢复加密备份不再报「不是合法的 ZIP 文件」**：勾了加密的备份落盘是
+  DCA1 整包容器（文件名仍是 `.zip`），而**浏览器选文件**那条入口一直有形态探测 + 解锁阶段，
+  **备份列表的一键导入**却把宿主路径直接送去分析 —— 容器被当 ZIP 解析，用户看到的是
+  「缺少中央目录结束记录」，像是备份损坏，实际只差一步「解锁」。
+  **Restoring an encrypted backup from the backup list no longer fails with "not a valid ZIP"**; the
+  one-click import path skipped the unlock stage that the file-picker path already had.
+- 🧩 **容器形态探测收敛为单一事实源**（`src/security/container-kind.ts`）：`containerKindOfBytes` /
+  `readContainerKind`。文件形态**只读前 4 字节**（上传接口此前为看这 4 个字节把整份备份读进内存），
+  读不到一律回落「明文」，绝不猜成加密。备份文件列表新增可选探测（`listBackupFiles(dir, { withContainerKind: true })`
+  → `BackupFileMeta.containerType`，默认关闭，保留策略/磁盘体检保持零额外 I/O）。
+- 🛡️ **三道防护纵深**：`/analyze`、`/plan`、`/execute` 收到未解锁的容器一律返回
+  `code: 'encrypted-container'` + 可行动文案（不再让 ZIP 解析器的话术把用户引向「备份坏了」）；
+  客户端据此**自动进入解锁阶段**（旧宿主 / 脚本直调也能兜住）。查看/对比入口对加密备份给出
+  「先导入解锁」的说明，列表行加「已加密」徽章。
+- ⚠️ **常量与实现分离**：`ENCRYPTED_CONTAINER_CODE` 放在**零依赖**的 `src/utils/shared-constants.ts` ——
+  client 半若 import `security/container-kind.ts`，会把 security 桶 → `encryption.ts`（node:crypto/node:util）
+  打进 `lib/client.js`，DSH 的 client loader 直接报 missed the module table，**整个插件不加载**（本轮实测
+  并已由 `bundle-selfcontained` 护栏复核：bundle 的 require 只剩 react/react-dom/jsx-runtime）。
+
+### 🛟 #56 SAFE MODE 不再是死结 / Safe mode is no longer a dead end
+
+- 🐛 **「放弃恢复」现在会一并解除保护**：dismiss 此前只把事务移进 quarantine，而唯一的清除点挂在
+  `verify(ROLLED_BACK)` 上 —— 事务已不在 `active/`，那条分支永远走不到。于是**界面显示「暂无需要
+  处理的恢复事项」、写操作却持续 423、重启也无效**，用户只能去磁盘删 `transactions/safe-mode`。
+  **Dismiss now clears safe mode** when no other unresolved incident remains (同一份判据，别的
+  incident 还在时照旧保守保留保护)。
+- 🧭 **状态如实可见**：`GET /recovery/status` 新增 `safeMode: { blocked, clearable }`；投影进渲染模型为
+  `safeModeStuck`/ `safeModeBlocked`，「结案但保护仍开着」时计入 `recoveryRequired` 并渲染**显式解除入口**
+  （危险按钮 + 二次确认），不再是空面板。
+- 🚪 **补显式出口**：`POST /recovery/safe-mode/clear`（recovery prefix 路由下的子路径，不新增注册路由条目）
+  + `RecoveryPort.clearSafeMode`。与 `lock/recover` 同处置：**故意不过 withMutationGate**（要解开的正是
+  挡住写操作的保护，走 gate 必然 423），但**绝不无条件清标记** —— 还有 NEEDS_ATTENTION / 非终态事务时拒绝
+  （`reason: 'unresolved-incidents'`），幂等返回 `not-blocked`。
+- 🧪 测试：`tests/core/recovery-api.test.ts` 新增 4 例（dismiss 清标记 / 仍有未解决 incident 时保留 /
+  status 的 blocked+clearable / 显式清除的确认与拒绝路径）、`src/client/recovery/recovery-view.test.ts` +3 例、
+  `src/security/container-kind.test.ts` 5 例（含「只读 4 字节」的实测断言）、`src/sync/backup-files.test.ts` +2 例、
+  `src/client/import/import-file-select.test.ts` +3 例。
+
+### 🟡 #56 同步「部分成功」不再被说成成功 / "Partly successful" is no longer reported as success
+
+- 🐛 **一条真机反馈揭出的第二条线**：webdav 同步时**插件安装失败**（pnpm 的成熟度等待期拦下），
+  而插件安装在执行顺序上**排在凭据写入之前**，于是**密钥根本没导进来**；用户只看到「同步完成」，
+  是靠事后翻日志才发现。根因不是顺序（顺序本身合理），而是**结果被低估**：插件安装失败是刻意的
+  非致命 `warning`（§34.17：一个装不上的插件不该拖垮已成功的其余配置），而 `ok` 与 `warning` 无关，
+  界面成功分支还直接弹绿 Toast —— 一串 warnings 被当成噪声。
+  **The second root cause behind the same report**: the plugin install step (which fails first and sits
+  *before* credentials in apply order) is deliberately non-fatal, so the sync still reported success while
+  secrets were never written.
+- 🧱 **「未生效项」成为结果的一部分**：`ImportResult.ineffective`（core）+ `ApplyItemsReport.ineffective`
+  （sync）把 `status='warning'` 的计划项结构化回传（itemId / 分类 / 可读原因），**不改 ok 语义、不触发回滚**
+  （字段只增不改；空数组时不出现 ⇒ 既有调用方逐字节不变）。同步路由透传并把历史记账改成
+  「N 项（M 项未生效）」+ 非空 error 摘要，历史里不再是一条干净的成功。
+- 🔔 **界面据实降级**：渲染模型新增 `partial` 类型（有未生效项时**不再**是 `ok`），成功 Toast 降级为
+  warn 并给出条数，结果卡置顶渲染「部分成功：N 项未生效」+ 逐条列出未生效项（含各 adapter 自带的手动
+  修复命令）。措辞与事实同强度：既不说是失败（没有回滚），也不说是成功（确实缺了东西）。
+- 🧪 测试：`src/core/smoke.test.ts` 在既有「插件安装失败 → 非致命 warning」用例上补三条断言
+  （进 ineffective / 带原因 / 不改变 ok 与 rollback）、`src/client/sync/sync-view-v2.test.ts` +2 例
+  （partial 判定与「空/缺字段 → ok」的边界）。
+
+### 📦 #57 `file:*.tgz` 的本地插件不再静默进不了备份 / Local plugins declared as `file:*.tgz`
+
+- 🐛 `link:` / `file:` 的 spec 有两种**合法形态** —— 目录与**已打包的 tarball**。打包路径此前一律当目录
+  spawn `npm pack`，真机上 9 个 `file:/abs/x.tgz` 插件**全部** `spawn ENOTDIR` 被跳过，而备份仍报
+  `ok:true`（按设计只记 warning）—— 用户以为「备份成功 = 备份完整」，恢复时装不回这批插件。
+  **A `file:` spec can point at a directory *or* at a prebuilt tarball**; the pack step only handled the former,
+  so every `.tgz`-declared plugin failed with `spawn ENOTDIR` while the backup still reported success.
+- 🔧 现在先 `stat` 判形态：**文件即 tarball → 直读收编、跳过 `npm pack`**（保留源文件名，只做文件名净化）；
+  目录走原路径；**判不出形态一律回落目录流程**并给出可读告警（绝不猜成文件）。归档名仍恒为
+  `local-plugins/<文件名>`、**不含任何路径分隔符**，与目录形态产出同一形态，导入端重写逻辑无需改动。
+- 🧭 顺带修正 profile 目录来源：改用 `HostContext.profileDir`，不再按 `<home>/profiles/<name>` 硬拼
+  （DSH 的档案目录不保证是默认布局，拼错会让相对 spec 解析到错误位置）。
+- 🧪 `src/core/local-plugin-pack.test.ts` 新增 5 例（`.tgz` 直读且 `npm pack` 零调用 / 判不出形态回落 /
+  超上限告警 / 目录与 `.tgz` 混合各走各的 / `safeTarballFileNameFor` 的穿越与回退）。
+
+### 🧱 #58 从 git 源安装不再必然失败 / Installing from the GitHub source
+
+- 🐛 本包以 `files: ["lib", ...]` 发布**预构建产物**，npm 安装不需要任何构建步骤；而
+  `dsh plugin add git+https://...` 拿到的是**源码树** —— pnpm 需要在 clone 里跑一个构建入口才能得到 `lib/`。
+  `scripts` 里此前**没有任何 pnpm 认的构建入口**（`prepare` 只在 `npm publish` 前校验、不参与安装），
+  于是 git 安装 100% 失败于 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`，用户只看到 `dsh: plugin command failed`。
+  **The npm release ships a prebuilt `lib/`, but a git install gets the source tree** and needs a build entry
+  point that the package did not declare.
+- 🔧 补 `prepare: npm run build`；README（中英）新增「从 GitHub 源码安装」段，写明 pnpm 11 的 `allowBuilds`
+  白名单必须**逐字照抄 pnpm 打印的那一行**（含完整 git URL + commit sha；**只写包名不生效**），并给出更省事的
+  替代路径（装 npm 预构建版）。真机复核：首轮按预期报错并打印可粘贴的键，加白名单后第二轮 exit 0，
+  `lib/index.js` 与 `lib/client.js` **均产出**。
+- 🧪 `tests/packaging-contract.test.ts` 新增三条 `G-21` 门禁：`prepare` 存在且真的调 `build`/`bundle`、
+  `files` 含 `lib`、`lib` 仍被 `.gitignore`（缺任何一条，git 安装会静默拿到一个没有 `lib/` 的包）。
+- ⚠️ **剩余边界（如实登记）**：pnpm 11 默认拦截 git 依赖的构建脚本，**这一步无法由包作者免除** ——
+  安装者必须在 profile 的 `pnpm-workspace.yaml` 里授权一次。这是 pnpm 的供应链策略，不是本包的缺陷。
+
+### 💾 #59 加密快照 >64 MiB 时远端列表不再恒为空 / Encrypted snapshots above 64 MiB list correctly again
+
+- 🐛 **读写两侧体积口径不一致**：加密单文件布局把整份快照塞进一个 JSON（写入侧**没有体积守卫**），
+  而读取侧走 `parseJsonSafe` 的**缺省** 64 MiB 上限 —— 那是防**不可信输入**的闸门。加密载荷经
+  「JSON → base64 → 加密 → 再 base64」约 ×1.78 膨胀，勾上 `sessions` 后单文件轻松越界（真机 4 个快照均 ≈66 MiB）。
+  越界的后果**全是静默的**：`list()` 逐条跳过 → 远端列表为空（而同一响应里 `currentSnapshotId` 却指着那条快照）、
+  `download()` 报「快照损坏」→ 拉取/一键同步彻底不可用、`hasNewRemoteSnapshot()` 恒 false → 自动同步永远
+  `skipReason: upToDate`。**Read and write disagreed about the size limit**, and every consequence was silent.
+- 🔧 读取侧改用 `MAX_OWN_PAYLOAD_JSON_BYTES`（512 MiB，**自产载荷**专用），与写出能力对齐 —— git 与 WebDAV
+  的密文单文件共用同一份解码器，一处修复两处生效。
+- 👁️ **把失败变可见**：读不出来的快照随列表回传（`POST /sync/snapshots-list` 的 `unreadable[]`），
+  同步页常驻警告横幅列出**具体文件名**，列表到货时另给一次即时回执 —— 跳过是必要防御，但**绝不静默**。
+- 🔒 **不变量（未放宽）**：`DEFAULT_MAX_JSON_BYTES`（64 MiB）仍是不可信输入的闸门，未被抬高；
+  快照读取仍受 `maxDepth` 与形状校验约束；读失败诊断属远端**当下**状态，**不落 sessionStorage**。
+- 🧪 `src/sync/snapshot-json.test.ts` 新增 2 例（自产上限 > 缺省上限；>64 MiB 载荷可反序列化且缺省上限仍拒它）。
+
+### ⌨️ #60 WebDAV 密码框不再被无关状态更新清空 / The WebDAV password field no longer gets wiped
+
+- 🐛 `runStore.patch()` 每次调用都会跑持久化白名单，而白名单**把密码字段写成空串**（安全不变量）。
+  于是任何一次 patch —— 包括与密码**完全无关**的（远端快照列表到货、GitHub 授权轮询结束、自动同步状态刷新）——
+  都会把 `state.sync.webdavPassword` 清空，下一次镜像回来时输入框就空了。真机表现：**输入几个字符就被自动清空**、
+  **粘贴同样被清空**、输入过程中「保存配置」按钮闪一下（防抖自动保存被反复取消），且**没有任何保存成功提示**。
+  **The persistence allowlist blanks password fields on every patch**, so unrelated state updates wiped what the user was typing.
+- 🔧 新增 `RunStore.patchSyncPasswords({ token?, webdavPassword? })`：只写**内存**切片（不触发 `save()`）；
+  `SyncPanel` 的 `commit()` 在 `runStore.patch(...)` 之后立即用它把**在途输入**写回。
+- 🔒 **不变量（未放宽）**：密码仍**绝不**进 sessionStorage / 磁盘 / 日志（`toPersistedState` 白名单一行未改），
+  刷新后仍清空（`applyPersisted` 的硬性归零也没动）。
+- 🧪 `src/client/run-store.test.ts` 新增回归：在途密码经「无关 patch」后仍在内存、落盘文本不含密码、
+  未给出字段保持部分更新语义；既有的「同步凭据绝不写入 sessionStorage」用例继续绿。
+
+### 🔌 同步通道配置可断开（用户上报）· Disconnecting a sync channel
+
+- 🚪 **配置过的通道现在能删掉了**：此前同步通道一旦配置就**没有出口** —— 一条打不通的 WebDAV 通道（如口令失效返回
+  401）会永久占位，产物库的远端源与自动同步只能一直报「读取失败」，用户无从自救。
+  现在通道入口卡多一个 **danger「断开配置」**（二次确认），宿主 `POST /sync/config { clear:true }` 一处清三项：
+  ① `sync-config.json` 里该通道的命名空间（**活动通道自动切到剩下的那条** —— 不切的话，那条**配置过**的通道反而会
+  被显示成「未配置」）；② 该通道在 DSH credentials 里的全部凭据（token / WebDAV 口令 / 加密·解密密码）；
+  ③ 该通道的自动同步开关，并立即 `scheduler.reload()` 丢掉已排期的定时器。
+  **只解除本机绑定**：远端快照、本机备份、同步分区选择一律不动，之后可重新配置。
+  **Configured sync channels can now be disconnected** — the channel entry card gains a danger "Disconnect" action
+  with confirmation, and the host clears the channel's config namespace, every credential slot and its auto-sync
+  switch in one place. Remote snapshots and local backups are untouched.
+
+### 🗂️ 会话迁移 / Session migration
+
+- 🕳️ **「导入成功但对话没显示」现在会在导入前被指出**：新增宿主探针 `src/utils/session-format.ts`（`parseSessionFormatVersion` /
+  `readSessionFormatVersionAt` / `resolveSessionFormatVersion` / `probeSessionFormats`）——只解会话日志的**首帧**取版本，
+  每个会话只看一条日志，上限 200 条，读不出的如实计入 `unreadable`、未检查的计入 `skipped`。常量从
+  `installAnchor`（桌面端在 `app.asar` 内）同树的 `@deepseek-ai/dsh-session` 读，**绝不拿 DSH 的 semver 猜格式版本**。
+  **Imports now flag conversations the target DSH cannot read** before anything is written.
+- ⚠️ **分析阶段告警**（core 只消费数字，不碰 DSH 存储格式）：`HostContext.sessionFormatVersion` +
+  `AnalyzerOptions.sessionFormatProbe`（`ImporterOptions` 同名透传）→ `Analyzer.sessionFormatWarnings` 在
+  「包内版本 > 本机支持版本」时产出 `import.sessionsFormatUnsupported`（中英双语），抽查有截断时追加
+  `import.sessionsFormatSampled`；本机版本解析不到时**不告警也不谎报兼容**（宿主启动时 `log.warn` 一行）。
+  同步的差异报告（`pull()`）把 `analysis.warnings` 并进 message —— 那条链路只有一个 message 通道，不并入就是静默。
+- 🧾 **档案页显示版本**：每个档案展示 DSH 版本与会话格式版本（读不到 = 不显示），并对「本实例 VS 该档案」的
+  错配给出徽章（`profileVersionFacts` / `sessionFormatRisk`；任一侧读不到一律不提示）。
+  **Profiles page** now shows both versions and a mismatch badge per profile.
+- 🧪 **测试**：`src/utils/session-format.test.ts`、`src/utils/session-log.test.ts`（`version` 解析 + 非法值不猜）、
+  `src/core/import-sessions-visibility.test.ts`（v4→v3 必告警 / v3→v4 不告警 / 无法判定不猜）、
+  `src/ui/dsh-profiles-view.test.ts`、`src/profiles/dsh-profile-manager.test.ts`。缺口登记为
+  `docs/spec/known-gaps.md` **G-23**，兼容矩阵补一行（`docs/spec/compat-matrix.md` §3.5）。
+- 🎛️ **导入/同步的处置开关落地（中止 / 跳过 / 仅提示，缺省中止）**：发现「本机读不了的会话」之后，用户现在能**自己决定**
+  怎么办 —— `abort`（**缺省**：计划阶段就拒绝，**零写入**，附升级/离线体检指引）/ `skip`（这些会话单元默认不勾选，
+  其余分区照常导入；手动勾回即照常导入）/ `guide`（不改行为，只给指引）。判定与展示**共用一份纯函数**
+  （`src/ui/session-format-disposition.ts`），宿主接入 `/plan`、`/execute`、`/sync/sync`、`/sync/apply-items`
+  （解析顺序 = 请求体 > 插件配置项 > 缺省 abort；`abort` 回 **409 + code=`sessionFormatUnsupported`**）。
+  **只读查看（备份内容查看）与市场/「我的配置」复核页显式走 `guide`** —— 它们没有决策界面，沿用缺省会让用户连
+  「看看包里有什么」都被拒。**Disposition switch** (abort / skip / guide) with a zero-write abort at the planning stage.
+- 🐛 **修掉一个会让上面所有告警静默失效的键空间缺陷**：探针的会话单元键是 `projectKey/会话目录`（来自分区内相对路径），
+  而计划项的 `unitId` 带适配器前缀（`sessions:`）—— 两边直接比较**一条都匹配不上**，于是
+  `PlanItem.formatUnsupported` 永远为空、界面永远不提示「这些对话导入了也看不见」。现在两种形态都试
+  （`sessionUnitVersion()`），并且**测试桩改用真实的前缀形态**（此前桩不带前缀，掩盖了这个缺陷）。
+- 🔁 **导入会话后明确提示「重启 DSH 才会显示」**：DSH 的会话列表与工作区投影都在**启动期**建立，导入的会话不重启就是看不见
+  （生态同类插件同结论，桌面端需退出重开）。提示只在**本次真的写入了会话文件**时出现（判定挂在导入上下文上，
+  避免适配器实例跨导入累积导致「没勾会话也让你重启」）。**Restart hint** after importing sessions.
+- 🩺 **会话体检（只读）**：事故恢复子 tab 新增「会话体检」——一键扫描本机存量会话，按严重级列出问题
+  （**会让 DSH 起不来 > 会话不可加载 > 下次请求会失败 > 不可见**）：重放重复行、撕裂尾帧、非法帧、header 不可读、
+  seq 空洞、合成 closer 块、格式版本超前、未登记工作区、子代理缺父、位置与 `projectKey(cwd)` 不一致、重复 id。
+  **「未检查 N 条」全程可见**（把没检查说成没问题是最严重的谎报）；**应用内零写入**，每行只给可复制的离线命令。
+  **Session health check** (read-only) in the incident-recovery tab, with the same severity ladder DSH itself would suffer.
+- 🛠️ **离线安全修复（唯一允许写会话字节的通道）**：`dsh-config-manager sessions list / doctor`（只读）与
+  `sessions repair [--apply]`。强制序列：**写前重跑「连续性 + 引用完整性」校验（不过即拒绝，绝不修得更狠）→
+  时间戳备份（绝不覆盖已有备份）→ 临时文件 + `rename` 原子换入 → 写后复验（不过就用备份还原）**；
+  写操作前**强制检测 DSH 是否在跑**（读心跳），在跑就拒绝并提示先关 DSH。本轮只做**能从字节证明的零/低损失修复**
+  （重放族的字节相同重复行），需要 DSH codec 才能判定的类（缺 message id / 悬空 tool-call / settlement 非法）
+  **一律不产出结论**（检测 ≠ 发明）。缺口登记为 **G-24**，未做的部分（codec 深度解码、header 重建、转写导出）
+  如实写在该条目的「后续」。**Offline-safe repair** behind a verify-then-write sequence, only when DSH is stopped.
+- 🧪 **测试**：`src/ui/session-format-disposition.test.ts`、`src/routes/session-format.test.ts`、
+  `src/ui/import-wizard.test.ts`（三种处置各一条）、`src/core/import-sessions-visibility.test.ts`（abort/skip/guide）、
+  `src/core/session-health.test.ts`（13）、`src/utils/session-health-scan.test.ts`（10，含「扫描前后字节与 mtime 不变」）、
+  `src/ui/session-inventory-view.test.ts`（7）、`src/utils/session-log-repair.test.ts`（7，含拒绝路径零写入）、
+  `src/ui/next-steps.test.ts` / `src/adapters/sessions.test.ts`（重启提示与跨导入隔离）、
+  `src/client/common/http.test.ts`（错误透传 status/code）。
+- 🧱 **处置开关的地基**：探针升级为**单元级**（`SessionFormatProbeResult.units`），
+  `Analyzer.resolveSessionFormats` **每份归档只算一次**并供三方共用（分析告警 / `PlanItem.formatUnsupported` /
+  `ImportAnalysis.sessionFormats`）——「本机读不了的会话」现在是**具体计划项上的标记**，向导据此提供三选一；
+  纯附加字段，不拦执行、不改 kind/conflict，读不到版本一律不判。
+  **Disposition groundwork**: unit-level probe results plus one per-archive resolution shared by warnings,
+  plan-item flags and the structured analysis summary.
+- 🔧 顺带修一条**环境相关的测试假红**：`src/adapters/plugins.test.ts` 的「安装失败 → 非致命 warning」用例依赖
+  `resolveProcessProfileName()`（读 `DSH_PROFILE`），在桌面端会话里会解析成 `desktop` 而断言写的是 `web`；
+  改为显式传入 profile，测试不再随运行环境漂移。
+
+### 💾 磁盘占用 / Disk usage
+
+- 🧭 **备份页新增「磁盘占用」卡**：本插件的产物（`exports/` 导出备份、`snapshots/` 导入前快照、`sync/` 同步
+  配置与 Git 工作副本、`market/` 缓存与工作副本、`tmp/` 暂存、`logs/`、`boot-state/`、`migration-history/`、
+  `transactions/`、`locks/`、`vault/`）此前在界面上**没有任何数字** —— 用户无法回答「我的备份到底占了多少盘、
+  哪些能清」。现在逐区列出体积/文件数/回收策略，并区分三档语义：**可随时重建**（缓存与暂存）、
+  **有保留期**（导出产物 7 天、定时备份保留最近 N 个）、**用户数据/安全网**（快照与同步，永不在此清）。
+- 🧹 **一键释放空间**：缺省只清**可重建**的缓存与暂存（忽略保留期整块清）；回收**过期**备份文件必须显式勾选，
+  并走 danger 二次确认。请求里的分区白名单是硬边界 —— 用户没勾 `expired-exports` 时**一个导出文件都不碰**
+  （回归测试：`tests/route/disk-usage-routes.test.ts` 的「只清可重建区，备份/快照原样保留」）。
+- 🔒 **两条不变量**：① 快照与同步数据**永不在候选集内**（`snapshots` / `sync` 连路由参数都进不去）；
+  ② 体检是**只读**且不跟随符号链接/junction（不重复计数、不成环），目录读不到时如实标「未统计」而不是显示 0 字节。
+- ⚙️ 与既有自动清理**同一套口径**：`core/cache-cleaner.ts` 抽出 `sections` 白名单与 `includeRecent`（手动），
+  保留期仍只有一份实现；新增 `core/disk-usage.ts`（只读扫描 + 超期判定）与 `src/ui/disk-usage-view.ts`
+  （纯函数视图模型，界面数字由渲染出的行现算，杜绝「按钮说能释放 600 B、实际释放 0」的漂移）。
+- 🧪 **测试**：`src/core/disk-usage.test.ts`（6 例：聚合 / 导出豁免前缀 / 未统计 / 符号链接 / 保留期 / 容错）、
+  `src/ui/disk-usage-view.test.ts`（6 例：空报告 / 未统计 / 可回收清单 / 过期提示 / 保留期文案 / en 字典）、
+  `src/core/cache-cleaner.test.ts`（+2 例：`includeRecent` 语义、缺省仍只清超期）、
+  `tests/route/disk-usage-routes.test.ts`（4 例：只读 GET / 非法请求 400 / 只清缓存 / 只回收过期导出）。
+  路由快照 68 → **70**（`GET /disk-usage`、`POST /disk-usage/cleanup`）。
+
+### 🐢 预览性能回退修复 / Preview performance regression
+
+> 真机报告：「总览页与导出页加载变长了」。定位到的根因是 **v0.1.68 引入的 `preview()` 在单文件分区上走错路径**。
+
+- 🐛 **`agentInstructions` 的预览把整个 `$DSH_HOME` 递归了一遍**：`AGENTS.md` 在 home 根（`baseDir = ''`），
+  基类 `preview() → collect() → listFilesDetailed(baseDir)` 于是遍历整个 home —— 实测 **4.8 s / 4016 个文件 /
+  242 MB**，选择器还把 `profiles/`、`sessions/`、`attachments/` 等无关目录当成该分区的 **21 个假单元**
+  （而真实导出只读 `AGENTS.md` 一个文件 = 预览与导出分叉）。总览页调 `/export-preview`（默认分区集合含
+  `agentInstructions`）→ 单这一项就占 **5.0 s 中的 4.8 s**；导出页的选择器同理。
+- ✅ **修复**：`FileCollectionAdapter` 新增可覆写的清单钩子 `listRelPaths()`（`export`/`preview` 共用一份清单），
+  `AgentInstructionsAdapter` 覆写为**单文件白名单**（存在性判定走 `statSize`，旧门面退回读一次文件），
+  并删掉冗余的 `export()` 覆写 —— 现在预览与导出经同一个 `collect()` 内核，**逐项一致由构造保证**。
+  实测同一台机器：该分区预览 **4.8 s → 1.4 ms**，1 个文件 / 8131 B / 1 个真实单元。
+- 🧪 回归护栏 `src/adapters/agent-instructions.test.ts`（5 例）：用「一被调用就抛哨兵」的门面证明**不再递归**、
+  预览与导出逐项一致（条目/体积/计数/告警）、home 里的无关文件一个都不进该分区、文件缺失 → 空分区 + dirEmpty 告警。
+- ⚡ **后续两项优化（同一轮）**：
+  ① **父子关系短 TTL 缓存**：`parentRelations()` 走 DSH `sessionPersistence.list()`（真机 ≈ **0.7 s**），
+  而 `/export-preview` 每次都要它（选择器联动用）。新增 `src/utils/ttl-cache.ts`（通用短 TTL 异步缓存：
+  **同 key 并发合并成一次执行**、**失败不缓存**、时钟可注入），`DshSessionStoreFacade` 以 **5 s** TTL 缓存
+  该 Map —— 连续打开/刷新选择器只付一次；新子代理会话最多 5 s 后即可被联动识别（对选择器无影响）。
+  ② **体积与时间合并成一次 stat**：新增 `FileSystemFacade.statInfo`（宿主一次 `fs.stat` 同时给 `{ size, mtimeMs }`），
+  预览把顺带取到的时间放进 `SectionPreview.statTimes`，`unitActivityTimes(ctx, section, statTimes)` 直接复用、
+  **不再逐文件 stat**。真机实测同一棵会话树：**1361 次 stat（983 size + 378 mtime）→ 983 次**，结果逐项相同；
+  两个旧门面（`statSize` / `mtimeMs`）保留为回退路径 —— 旧宿主只慢不坏。
+- 🧪 新增测试：`src/utils/ttl-cache.test.ts`（6 例：命中/过期/关闭/并发去重/失败不缓存/容量与 clear）、
+  `src/adapters/file-collection.test.ts`（+2：`statInfo` 优先且旧门面一次都不调；`statInfo` 返回 null 时退回 `statSize`）、
+  `src/adapters/sessions.test.ts`（+2：给定预览时间时**绝不**发起第二趟 stat 且结果与逐文件路径一致；缺项不进 Map 不猜 0）。
+- 📉 顺带记录**剩余**成本（不是本次回归，未改）：`sessions` 预览实测 **1.14 s** = 真实遍历 324 ms（983 文件 / 517 MB）
+  + 体积 stat 64 ms + mtime 通道 9 ms + **DSH `parentRelations()` 与元数据 ≈ 0.7 s**（每次预览都重新取）。
+  它在 `sessions` 显式放行时才发生（该分区 `defaultIncluded = false`），因此不影响总览页默认加载。
+### ⬆️ 版本更新检查 / Update check
+
+- 🔍 **「关于」页新增插件更新检查**：`GET /update-check` 只读探测 npm 的 latest（`core/update-check.ts`），
+  命中时显示「已是最新 / 有新版本 vX」并给出**可复制的一条升级命令**（精确版本
+  `dsh plugin --profile <档案> add dsh-config-manager@<latest>` —— 用精确版本而不是 `@latest`，
+  因为 pnpm 的 `minimumReleaseAge` 会让 `@latest` 解析到旧版）。
+- 🔒 **四条硬边界**：① **绝不自动安装/升级**（只探测 + 给命令）；② 进程内缓存 10 分钟（`?force=1` 由
+  「重新检查」触发），不把 registry 当轮询端点；③ 网络/超时/非 2xx/响应畸形/体积超限**一律如实报错**
+  （绝不「失败当最新」），HTTP 仍回 200（离线不是插件故障，界面给可重试提示而非错误横幅）；
+  ④ 版本比较复用 `validator.ts` 的同一份 semver 规则，不另写一套。
+- 🖥️ **桌面端档案不误导**：`desktop` 由 Electron 独占管理、未知档案也不猜 —— 这两种情况不给终端命令，
+  改为提示去 DSH 插件页更新（不给注定失败的命令）。
+- 🧪 测试：`src/core/update-check.test.ts`（9 例：解析 / 失败四态 / 超时 / 严格更新判定 / 缓存与 force /
+  失败不缓存 / `force=1` 判定）、`src/client/about/about-view.test.ts`（+5 例）。
+
+### 🧭 兼容性讲清楚 / Compatibility explained
+
+- 📋 **评分有了结构化原因**：`core/validator.ts` 新增 `compatibilityReasons()`，`computeCompatibility()`
+  改为**由原因派生**（单一事实源：界面解释与评分不可能漂移）；`ImportAnalysis` 回传
+  `compatibilityReasons` + `source` / `target`（来源与本机的 DSH 版本 / 平台 / schema 版本）。
+  **评分口径逐条冻结**：`sourceOlder` 仍覆盖跨平台的 `partial`（历史行为，改它需单独决策），已由
+  `src/core/compatibility-reasons.test.ts` 显式写下。
+- 🪟 **导入向导新增「来源与兼容性」块**：「DSH 版本：源 → 本机」「平台：源 → 本机（跨平台标黄）」
+  「备份格式 vX」+ 逐条判定依据（跨平台 / 分区缺失 / 来源更新或更旧 / schema 超范围）。原因里的
+  版本与平台字符串来自**包内**，渲染前一律过 `redact()`（B1 教训）。
+- 🔧 **同步确认页不再显示机器 token**：此前直接渲染裸枚举（中文界面里出现 `partial`）且 Badge 恒中性色，
+  现在走 `src/ui` 的等级/语义色纯函数 + sync 字典文案（`unsupported` 是 error 色）；导入向导与同步页共用
+  `client/common/compat-label.ts` 的键映射（源码级守卫禁止再写第二份）。
+- 🧪 测试：`src/core/compatibility-reasons.test.ts`（8 例）、`src/ui/import-wizard.test.ts`（+3 例）、
+  `src/client/common/compat-label.test.ts`（3 例，含两条源码级防回归）。路由快照 70 → **71**
+  （新增 `GET /update-check`）。
+
+### 🖥️ UI v2：一级信息架构重建 / UI v2: rebuilt top-level IA
+
+> 这一轮把「备份与迁移」从 7 个功能页签重做成 **4 个对象页 + ⌘K 命令面板**：首页 / 产物库 / 同步 / 环境。
+> 起因是旧界面的三处结构性问题：备份页有 4 个子 tab（其中「磁盘占用」与页面主题无关）、
+> 英文下页签溢出要按住 Shift 才能滚、以及「对象」与「日志」混在同一张表里。
+> 落地的四条原则：**对象与日志分离**、**每页 ≤3 子视图**、**未知值不显示 0**、
+> **两个同步通道卡恒显示**（`autosync` 与 `sync-selection` 本就按通道独立）。
+>
+> This round rebuilds "Backup & migration" into **four object-centric pages plus a ⌘K command palette**
+> (Home / Artifact library / Sync / Environment), replacing seven feature tabs.
+
+- 🧭 **一级导航收敛为 4 页 + 命令面板**（`src/ui/nav-model.ts` 的 `navLayout` 负责溢出判定，
+  放不下的项进「更多 ▾」）。导出与导入**不再是页签** —— 它们是 Task Mode 侧滑面板
+  （多阶段向导 → 面板；单次决策 + 报告 → Modal，这是选容器的唯一依据）。
+  `⌘/Ctrl+K` 打开命令面板（`src/ui/commands.ts`），**增一个功能 = 注册一条命令**，
+  不必再往 564px 的导航条里挤一个页签。导航从 7 项降到 5 项，英文下不再溢出。
+- 📦 **产物库取代备份页**（`src/client/library/`）：本机快照 / 备份文件 / 远端快照 / 市场产物
+  **四源合一扁平列表**，来源只是筛选维度而非分组 —— 用户找「我上周那份」时不该先想它在哪个源里。
+  行的动作由 `src/ui/artifact-view.ts` 的能力集合
+  （`restore|import|pull|install|inspect|download|consult|pin|unpin|delete`）分派，四种来源共用一份模型。
+  同步页的远端快照行搬到这里，那边只留**操作日志**（新增 `SyncLogList.tsx`，去掉「类型」列）。
+- 🏠 **首页取代总览页**：状态行 + 动作网格 + 最近产物（3 行）。指标段改为**精确跳转**
+  （备份文件 / 安全快照 → 产物库并预置来源筛选；定时备份 → 本页开设置弹窗，因为它是设置不是对象）。
+  「立即备份」放在工具栏最左（导出 ZIP 的左边）—— 它与导出是同一件事的两种强度。
+- 🗄️ **环境页取代档案页**：档案（含本机概况卡）+ 维护与诊断（恢复面板 + 磁盘占用）两个子视图。
+  事故恢复与磁盘占用从备份页移到这里，备份页的 4 个子 tab 随之解散。
+- 🔀 **同步页两张通道卡恒显示**：为此把 14 个 handler 从「隐式读当前通道」改为**显式收 channel 参数**
+  （`channelStateOf` / `patchChannelOf` / `saveSelection` / `toggleSyncSection` / `setSessionsLimit` /
+  `setSessionsInclude` / `setEncrypt` / `setIncludeSecrets` / `persistEncryptPassword` /
+  `persistDecryptPassword` / `clearSavedDecryptPassword` / `toggleAutosync` / `updateAutosyncInterval` /
+  `remoteReadyOf`）；参数缺省仍取激活通道（弹窗路径沿用），卡内一律显式传自己的。
+  同步分区从**页面级一段**移进通道卡 —— 它本就是该通道的设置，做成全局一节会让用户以为两通道共用一份选择。
+- 🗑️ **删除 10 个 v1 文件**（全仓零活引用）：`SnapshotsPanel` / `OverviewPanel` / `ProfilesPanel` /
+  `SyncSettingsView` / `SyncHistoryView` / `nav-overflow` 及各自专属测试。
+- 🧪 测试：`src/ui/nav-model.test.ts`、`src/ui/commands.test.ts`、`src/ui/artifact-view.test.ts`（+18 例）、
+  `src/client/library/task-panel-visibility.test.ts`、`src/client/common/floating-units.test.ts`
+  （浮层内联 `top/left` 必须带 px 单位）。`DESIGN.md` §1 重写并新增 §1.1（四页构成 + 三条不得回退的结构原则）。
+
+### 🐛 UI v2 落地后的真机修复 / Real-machine fixes after UI v2
+
+- 📏 **Select 弹层不再改变页面高度**：真机反馈「展开下拉页面会变高」。用 Chrome headless 实测确认
+  机制是 **CSS 的 scrollable overflow area** —— `position: absolute` 虽不撑高父级，但它的溢出会扩展
+  **最近滚动祖先 `.shellMain`** 的可滚动区域（实测 `scrollHeight` 400 → 556）。修法：弹层 portal 到
+  插件根容器（`.section`，`position: relative` 且**不在**滚动容器内）+ **根相对坐标**（触发器 rect 减根 rect，
+  纯减法），于是既脱离滚动区域、又不必用 `fixed`（`fixed` 会踩 `.dialogContentCenter` 常驻 `transform`
+  的包含块，此前几轮反复出错的根源）。
+- 🖱️ **产物库的四个真实缺陷**：① 远端快照源恒失败（请求漏了 `transport` + 地址，宿主 `prepareSync`
+  需要它）；② 展开某行会重复派发上一次的动作（去重键里混了 `Date.now()`，改用 target 的引用身份）；
+  ③ 删除后整页刷新且滚动跳回开头（刷新时把源置回 loading 并清空 items ⇒ 列表被卸载，
+  改为 stale-while-revalidate）；④ 底部「N 个加密」统计的是全部来源而非当前筛选。
+- 📥 **导入不再残留上一次的数据**：`importBackup` 的消费者只清了 decrypt 那几个字段，
+  上一次的 `step` / `analysis` / `plan` / `result` 全部残留 ⇒ **加密备份的密码输入框不出现**。
+  改为复用既有的完整 `resetWizard`（不再维护第二份「部分重置」清单 —— 那种清单必然漏字段）。
+- 🎞️ **产物库行展开/收回有动画**：外层 `grid-template-rows: 0fr → 1fr`（内容高度未知也能过渡），
+  内层 `min-height:0 + overflow:hidden`；组件从条件渲染改为**始终挂载**（条件渲染让收回一侧没有收尾帧）。
+  收回时闪一下的根因是 `transition-delay` 只写在展开态，已补齐对称延时。
+- 🐛 **「迁移前咨询」对远端快照报 `repoUrl is required`**：宿主 `routes/consult.ts` 的远端分支写的是
+  `prepareSync({})` —— 传空对象，而 `prepareSync` 解析的是**请求体**。改为透传 body
+  （实测：即使客户端传完整 payload，旧宿主仍报同样的错，因为它根本不看 body）。
+- ⬇️ **远端快照「拉取」= 拉取即导入**（用户定案）：新增 `POST /sync/download` +
+  `SyncEngine.downloadSnapshot()` 把远端快照**落地成本机 ZIP** 并返回路径 —— `POST /sync/pull` 只回
+  只读差异预览（临时 ZIP 用完即删），拿不到可导入的文件。客户端点「拉取」进入**阻塞式 Modal**
+  （遮罩 + focus trap 天然禁用页面其余部分）+ 加载态，成功后自动进入导入侧拉面板。
+  **走导入向导而不是直接写配置**：向导已有解锁加密备份、选内容、冲突决策、执行前快照与回滚，
+  另造写入通道等于把这五件事重做一遍且更难回滚。
+- 🌐 路由数 **71 → 72**（新增 `/sync/download`）；`tests/route/` 的三条计数守卫与快照同步更新。
+
+### 会话修复可以**在应用内直接做**了（只做零损失的那一类）
+
+- 🧾 **会话体检的列表更好读了**（T11，用户反馈「文字挤成一团」）：会话名独占一行（长名不再把后面挤没），下面的元信息行按「状态徽章 | 问题码 | 版本·体积·时间」分列——徽章定宽、问题码可伸缩、元信息右对齐等宽数字；动作按钮固定右对齐。
+- ⚡ **一键修复全部**（T11/T12）：对当前列表里可修的会话逐条走完整安全序列（预览 → 应用）。**逐条独立**（一条被拒不牵连其余）、**有损不批量**（需要截断的计划一律跳过并计入被拒）；结果**逐条留痕**（已修复 N / 未修复 M + 每条的丢弃行数或被拒原因），修好的行**就地移出列表**——不再整屏重扫让用户白等一次全量体检（要看最新全貌时自己点「开始体检」）。
+- 🙈 **默认只显示有问题的对话**（T11）：正常会话不再占据列表（它们在摘要里照常计入总数），被隐藏的条数在卡片上明说（`另有 N 条会话正常`），可修的行即使当前判为正常也仍然显示。
+- 🩺 **环境 → 会话体检里直接修**（T8，2026-10 扩展为 T9）：结果与动作整体搬进**独立弹窗**（卡片只留入口与一行摘要）；对「重放重复行」「可证明的合成收尾块」（零损失）与「seq 空洞 / 不可解析行」（**有损截断**，必须显式确认）新增 **dry-run 预览 → 显式确认 → 自动时间戳备份 → 原子换入 → 写后复验**的应用内通道，并在「修复记录」里提供**一键回滚**。
+- 🔒 **五道门，一道都不放宽**：① `unitId` 只能解析到 `<home>/sessions` 之内的真实会话目录（路径穿越 / 符号链接逃逸一律 unknown-unit）；② 目录内有 `session.lock` 不修；③ 日志最近 30 秒被写过（可能在活跃使用中）不修；④ 预览与应用之间的**大小 + mtime 指纹**必须一致（TOCTOU：预览后文件被改过就拒绝）；⑤ 写操作过 `withMutationLock` + SAFE MODE 闸门，写入本身照抄离线 CLI 的「写前自校验 → 备份 → 原子换入 → 写后复验」，校验不过绝不「修得更狠」。
+- ↩️ **回滚只认台账 repairId**：客户端**拿不到也传不了路径**；目标在修复后又被改过（指纹不一致）时回滚被拒绝，绝不覆盖更新的内容。台账损坏时先留档 `.corrupt-*` 再写新账（不静默丢证据）。
+- 🧭 真正**证明不了怎么修**的类别（容器非法 / header 不可读 / 格式超前 / 撕裂尾帧自愈 / 缺工作区与缺父对话）**仍在应用内零写入**，继续只给可复制的离线命令 —— 不猜、不发明、不「修得更狠」。
+- 🩺 **修掉会话体检弹窗把整个面板打白**（真机 + 浏览器实测定位）：`SessionHealthDialog` 的 state 声明写在使用点之后，触发 TDZ `ReferenceError: Cannot access 'repairedUnits' before initialization`；DSH 把插槽异常当成 `slot entry crashed in 'settings.section'`，于是「备份与迁移」整页空白。修复 = 把声明提到使用之前；另加源码级守卫（声明必须早于使用、不得重复声明）防回归。**同时**：弹窗改为**只在打开时挂载**、长列表限高内滚。
+- 🩺 **又一次体检误报（第二轮，真机 + 浏览器实测）**：`turn/end` 之后紧跟 `workspace/changes`（同属该回合的收尾元数据）曾被判成「合成收尾块撞上真实续写」，导致 4 条**健康**会话既被标红、又在点「修复」时以 `写前校验未通过` 被拒。现在只有**续写事件**（消息 / 流式块 / 工具调用 / 回合与步骤开始）才算续写，元数据行不算；真机复核：可修条数 4 → 0，弹窗不再出现假的修复按钮。
+- 🩺 **修掉体检的误报**（本轮真机发现）：`synthetic-closer`（合成收尾块）此前只按**形状**判定（≤8 行收尾类型 + 含 `turn/end`），而每一次正常的「回合结束 → 下个回合开始」都满足这个形状 —— 同一台机器上 **86 条健康会话被误报为「下次请求会失败」**。现在必须**证明**「收尾块之后、下一个 `turn/start` 之前同一个 `turn` 还在继续」才报（回合已结束却还在续写）；证明不了就不报（绝不猜：宁可漏报，也不把健康会话标红）。
+
+> **Theme — session repair now happens in-app, but only for the provably lossless class.**
+> The Environments tab's session health check can now fix "replayed duplicate rows" (byte-identical, same-seq duplicates left by a crash, a hard kill or a second writer) in place: dry-run preview, explicit confirmation, a timestamped backup, an atomic swap and a post-write re-check, plus one-click rollback from the repair ledger. Five gates stay in force — the unit must resolve inside `<home>/sessions`, no `session.lock`, the log must be quiet for 30 s, the preview's size+mtime fingerprint must still match, and the write goes through the mutation lock and SAFE MODE gate. Rollback accepts a ledger `repairId` only (the client can never supply a path). Every other corruption class stays read-only in-app and keeps pointing at the offline CLI.
+
+### 🎨 插件图标对齐官方约定（issue #61 / PR #66）· Plugin icon
+
+- 🖼️ **`icon.svg` 换成 36×36 无底框**：宿主图位自带容器（卡片 48px 框内放 36px 图、列表行 40px 框内放 30px 图），
+  而旧图标是 512×512 画板 + 自带 `rx="112"` 圆角底框 —— 放进宿主就是**框中套框**，视觉也比官方插件重。
+  现在与官方约定一致（已发布官方组合包 `@deepseek-ai/dsh-experimental-schedule-bundle@0.2.0-rc.1` 随包的
+  `icon.svg` 实测同为 `width/height=36`、`viewBox="0 0 36 36"`、`fill="none"`）：主体外接框 4→32
+  （28/36 ≈ 77.8%，与官方 fixture 的 `r=14` 同口径），纯矢量 1009 B，无 `<script>` / 外部 `href` / `<image>` /
+  内嵌位图，保留原有 `role="img" aria-label`；16 / 30 / 36 / 48 四档 × 深浅双主题实况图校验通过。
+  **The plugin icon is now a 36×36 frame-less SVG matching the official bundle convention** — contributed by
+  @OMSociety in PR #66 (issue #61) and credited in both READMEs.
 ## [0.1.68] - 2026-09-30
 
 > 本轮把**性能、发版门禁、卫生**三件事一起收口：只读预览不再为了显示几个数字读完整棵会话树

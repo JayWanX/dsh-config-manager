@@ -73,6 +73,13 @@ export interface RecoveryView {
   running: { runId: string; status: string }[];
   /** 需用户显式处理的残留锁（attention=true 时才非 null）。 */
   lock: RecoveryLockView | null;
+  /**
+   * SAFE MODE 阻断中但**已无待处理事项**（issue #56）：durable 标记还在、active/ 已空。
+   * 正是「面板显示暂无事项、写操作却持续 423」的那一态 —— 界面必须给出可执行的解除入口。
+   */
+  safeModeStuck: boolean;
+  /** SAFE MODE 是否正在阻断（含仍有 incident 的正常情形；用于文案区分）。 */
+  safeModeBlocked: boolean;
 }
 
 /** 把 GET /recovery/status 映射为渲染模型。 */
@@ -92,7 +99,12 @@ export function toRecoveryView(status: RecoveryStatus): RecoveryView {
   const lock: RecoveryLockView | null = status.lock !== undefined && status.lock.attention
     ? { state: status.lock.state }
     : null;
-  const recoveryRequired = incidents.length > 0 || lock !== null;
+  // issue #56：旧宿主不返回 safeMode → blocked=false（按未阻断处理，绝不误报保护中）
+  const safeModeBlocked = status.safeMode?.blocked === true;
+  const safeModeStuck = safeModeBlocked && (status.safeMode?.clearable === true);
+  // SAFE MODE 同样阻断一切写操作 → 与残留锁并列算「需要处理」。
+  // 少了这一条，「结案但保护仍开」的面板会显示「暂无需要处理的恢复事项」（issue #56 的界面症状）。
+  const recoveryRequired = incidents.length > 0 || lock !== null || safeModeStuck;
   let state: RecoveryUiState = 'NORMAL';
   if (recoveryRequired) {
     if (incidents.some((i) => i.state === 'RECOVERING')) state = 'RECOVERING';
@@ -100,7 +112,7 @@ export function toRecoveryView(status: RecoveryStatus): RecoveryView {
     else if (incidents.some((i) => i.decision === 'rollback-recommended')) state = 'ROLLBACK_RECOMMENDED';
     else state = 'NEEDS_ATTENTION';
   }
-  return { state, recoveryRequired, incidents, running: status.running, lock };
+  return { state, recoveryRequired, incidents, running: status.running, lock, safeModeStuck, safeModeBlocked };
 }
 
 /** 单个 preview 的渲染模型。 */

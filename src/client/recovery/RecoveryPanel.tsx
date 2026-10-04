@@ -22,9 +22,27 @@ import type { RecoveryPort } from '../../ui/types.ts'
 import type { RecoveryPreview, RecoveryStatus, RecoveryVerifyResult } from '../../ui/types.ts'
 import type { TranslateNS } from '../client-types.ts'
 import { Badge, Banner, Button, Card, Empty, SectionTitle, Spinner } from '../common/ui.tsx'
+import { DiskUsageCard } from '../snapshots/DiskUsageCard.tsx'
 import { SkeletonList } from '../common/Skeleton.tsx'
 import { ConfirmDialog } from '../common/ConfirmDialog.tsx'
+import { Modal } from '../common/Modal.tsx'
 import { toast } from '../common/toast-store.ts'
+import { CopyButton } from '../common/CopyButton.tsx'
+import { InfoHint } from '../common/InfoHint.tsx'
+import {
+  formatSessionBytes,
+  sessionHealthEmpty,
+  sessionHealthPhase,
+  sessionHealthRows,
+  sessionHealthSummaryView,
+  sessionHealthTruncated,
+  sessionRepairCommands,
+  sessionRepairEntries,
+  sessionRepairReasonKey,
+  type SessionHealthResponse,
+  type SessionRepairEntryView,
+  type SessionRepairResult,
+} from '../../ui/session-inventory-view.ts'
 import { runStore, type RecoveryStoreSlice } from '../run-store.ts'
 import type { CrashReport, IncidentApi, RescueStatus } from './incident-api.ts'
 import {
@@ -42,6 +60,24 @@ export interface RecoveryPanelProps {
   incidentApi: IncidentApi
   recoveryApi: RecoveryPort
   t: TranslateNS<'config-manager-recovery'>
+  /**
+   * **主字典**（config-manager）翻译器 —— 仅供 CopyButton 这类「共用原语」使用：
+   * 它们的内置文案（剪贴板 Toast）住在主字典里，而本面板的 `t` 是 recovery 命名空间。
+   * 两个字典的键集不通用，因此显式分开传，不做类型强转。
+   */
+  copyT?: TranslateNS<'config-manager'>
+  /**
+   * 磁盘体检卡的 ⓘ 可访问名（第 2 块「磁盘占用与清理」）。
+   * 与 copyT 同一条理由：DiskUsageCard 的文案走 **UiT** 字典，它的 ⓘ 可访问名却住在主字典里
+   * （`common.infoHint`），本面板手上只有 recovery 字典 —— 所以由调用方显式传。
+   */
+  infoHintLabel?: string
+  /**
+   * 磁盘体检端口（第 2 块）。
+   * 直接传 ConfigManagerApi 而不是收窄成两个方法：DiskUsageCard 的 props 就是 `api`，
+   * 收窄反而要在中间加一层适配（且下游一改就要跟着改）。类型收窄的收益在这里是假的。
+   */
+  diskApi: import('../api.ts').ConfigManagerApi
 }
 
 interface PanelState {
@@ -164,7 +200,515 @@ function incidentStateLabel(t: TranslateNS<'config-manager-recovery'>, state: st
   }
 }
 
-export function RecoveryPanel({ recoveryApi, incidentApi, t }: RecoveryPanelProps) {
+/**
+ * 「会话体检」区块（T5）—— 事故恢复子 tab 的只读扫描。
+ *
+ * 数据流：`recoveryApi.sessions()`（只读路由）→ `ui/session-inventory-view.ts` 的展示模型 → 渲染。
+ * **本组件不做任何业务判断**（严重级/摘要/空态/截断全在纯函数里），只装配 + 交互状态。
+ *
+ * 硬约束（known-gaps G-24 / T8 / T9）：应用内只做**能从字节证明**的修复 —— 零损失（重放重复行 /
+ * 可证明的合成收尾块）与**有损截断**（seq 空洞 / 不可解析行，必须用户显式确认）；
+ * 每一条都过服务层的写入门与预览-应用指纹，另有备份可一键回滚。其余类别只提供「复制离线命令」。
+ */
+/**
+ * 缺省剪贴板翻译器：本区块只用到「复制成功/失败」两条通用反馈，且**绝不**编造主字典之外的键。
+ * 返回键名本身（与字典缺键时的回退语义一致），保证缺省路径也不会抛错或渲染出空文案。
+ */
+const EMPTY_COPY_T: TranslateNS<'config-manager'> = ((key: string) => key) as TranslateNS<'config-manager'>
+
+function SessionHealthCard({ recoveryApi, t, copyT }: Pick<RecoveryPanelProps, 'recoveryApi' | 't' | 'copyT'>) {
+  /** 剪贴板反馈的翻译器（config-manager 命名空间；缺省退到 zhUiT 兜底）。 */
+  const clipboardT = copyT ?? EMPTY_COPY_T
+  /** 体检结果住**卡片**里：弹窗每次打开重新扫一遍（scanVersion 变化即重扫），关掉不留一屏陈旧数据。 */
+  const [response, setResponse] = useState<SessionHealthResponse | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
+  const [scanVersion, setScanVersion] = useState(0)
+  const scan = (): void => { setScanVersion((v) => v + 1) }
+
+  useEffect(() => {
+    if (!open) return
+    let alive = true
+    setLoading(true)
+    setError(null)
+    recoveryApi.sessions()
+      .then((next) => { if (alive) { setResponse(next); setLoading(false) } })
+      .catch((err) => { if (alive) { setError(err instanceof Error ? err.message : String(err)); setLoading(false) } })
+    return () => { alive = false }
+  }, [open, scanVersion, recoveryApi])
+
+  const summary = sessionHealthSummaryView(response)
+  const repairEntries = sessionRepairEntries(response)
+
+  return (
+    <Card className={css.card}>
+      <div className={css.statRow}>
+        <strong>{t('sessions.title')}</strong>
+        {/* 徽章语义：扫描只读；修复是显式动作（预览 → 确认 → 自动备份 → 可回滚） */}
+        <Badge kind="info">{t('sessions.readOnly')}</Badge>
+        <InfoHint text={t('sessions.desc')} label={t('common.infoHint')} />
+      </div>
+      {/* T10：结果全部搬进独立弹窗 —— 卡片只留入口与一行摘要，绝不把上千行塞进设置页 */}
+      <div className={css.hint}>
+        {summary !== null && response !== null
+          ? t('sessions.dialog.lastScan', {
+              total: String(summary.total),
+              issues: String(summary.needsAttention),
+              repairs: String(repairEntries.length),
+            })
+          : t('sessions.dialog.hint')}
+      </div>
+      <div className={css.actionRow}>
+        <Button variant="ghost" loading={loading} onClick={() => { setOpen(true) }}>
+          {loading ? t('sessions.scanning') : t('sessions.dialog.open')}
+        </Button>
+      </div>
+      {/*
+        弹窗**只在打开时挂载**：它是整屏内容的组件，常驻会让卡片每次重渲染都带着它一起走
+        （真机反馈：弹窗加载一会儿后整个设置页变空白）。关闭即卸载，状态随之释放。
+      */}
+      {open && (
+        <SessionHealthDialog
+          open={open}
+          onClose={() => { setOpen(false) }}
+          recoveryApi={recoveryApi}
+          t={t}
+          clipboardT={clipboardT}
+          response={response}
+          loading={loading}
+          error={error}
+          onScan={scan}
+        />
+      )}
+    </Card>
+  )
+}
+
+/**
+ * 「会话体检」弹窗（T10）—— 结果与全部动作都在这里：摘要在顶、列表在中（限高内滚）、
+ * 修复计划与台账在底部。**本组件不做任何业务判断**（严重级/摘要/可修判定/原因映射全在 ui/ 纯函数里）。
+ *
+ * 交互约定：打开即扫（scanVersion 变化重扫）；修复一律先 dry-run 预览（零写入），有损计划必须再点
+ * 「截断并修复」才执行；回滚走 ConfirmDialog（danger）。
+ */
+/** 批量修复里的一条结果（成功或被拒；原因是机器可读码，界面映射成文案）。 */
+interface BatchRepairResult {
+  unitId: string
+  sessionId: string
+  ok: boolean
+  /** 被拒原因（机器可读；未知一律走 unknown 文案，绝不渲染裸枚举） */
+  reason?: string
+  /** 被拒是「需要逐个确认的有损修复」 */
+  lossy?: boolean
+  /** 成功时丢弃的行数 */
+  droppedRows?: number
+  /** 传输层失败（HTTP/网络）时的原文（已由 ErrorBanner/http 层脱敏） */
+  transportError?: string
+}
+
+interface SessionHealthDialogProps {
+  open: boolean
+  onClose: () => void
+  recoveryApi: RecoveryPort
+  t: TranslateNS<'config-manager-recovery'>
+  clipboardT: TranslateNS<'config-manager'>
+  response: SessionHealthResponse | null
+  loading: boolean
+  error: string | null
+  onScan: () => void
+}
+
+function SessionHealthDialog(props: SessionHealthDialogProps) {
+  const { open, onClose, recoveryApi, t, clipboardT, response, loading, error, onScan } = props
+  const phase = sessionHealthPhase({ loading, error, response })
+  /**
+   * 本地的「已修复」行集合：批量/单条修复成功后**就地更新界面**，不再整屏重扫。
+   *
+   * 为什么：重扫要重新遍历整个会话库（真机 1024 条、行档 200 条），用户点完「一键修复」
+   * 会被迫再等一次全量扫描、列表还会整屏重排。这里只把受影响的行标成「已修复并移出列表」，
+   * 需要最新全貌时用户自己点「开始体检」。
+   *
+   * **声明必须在使用它的 `rows` 之前** —— 后置声明会触发 TDZ 的
+   * `ReferenceError: Cannot access 'repairedUnits' before initialization`，
+   * 而插槽异常会把整个插件面板（settings.section）整块打掉（真机白屏）。
+   */
+  const [repairedUnits, setRepairedUnits] = useState<ReadonlySet<string>>(new Set())
+  // 已修复的行就地移出列表（不需要重扫：宿主那边确实改了文件，这里只是不再显示）
+  const rows = sessionHealthRows(response).filter((row) => !repairedUnits.has(row.unitId))
+  const summary = sessionHealthSummaryView(response)
+  const truncated = sessionHealthTruncated(response)
+  const repairEntries = sessionRepairEntries(response)
+  /** 正在预览 / 应用 / 回滚的 unitId（进行中态住组件内；弹窗不跨页签） */
+  const [busy, setBusy] = useState<string | null>(null)
+  /** 预览得到的修复计划（应用前必须显式确认；ok=false 时也在这里显示拒绝原因） */
+  const [plan, setPlan] = useState<{ unitId: string; result: SessionRepairResult } | null>(null)
+  /** 待确认的回滚目标（ConfirmDialog，danger） */
+  const [rollbackTarget, setRollbackTarget] = useState<SessionRepairEntryView | null>(null)
+  /**
+   * 一键修复全部：进行中 + 本轮结果。
+   *
+   * `results` 逐条留痕（单位 id / 备份名 / 成功或被拒的**机器可读原因**）——用户点完必须看得见
+   * 「哪几条成了、哪几条为什么没成」，绝不只给一个计数。
+   */
+  const [batchBusy, setBatchBusy] = useState(false)
+  const [batch, setBatch] = useState<{ ok: number; failed: number; results: BatchRepairResult[] } | null>(null)
+
+  const startRepair = (unitId: string): void => {
+    setBusy(unitId)
+    setPlan(null)
+    recoveryApi.repairSession(unitId, false)
+      .then((result) => { setPlan({ unitId, result }); setBusy(null) })
+      .catch((err) => { toast.error(err instanceof Error ? err.message : String(err)); setBusy(null) })
+  }
+
+  /**
+   * 一键修复全部：对**当前列表里可修的行**逐条走完整安全序列（预览 → 应用）。
+   *
+   * 三条纪律：① **逐条独立** —— 一条被拒（指纹变化 / 校验不过 / 有损未确认）不影响其余；
+   * ② **有损不批量** —— 需要截断（lossy）的计划跳过并计入 failed，绝不代替用户做有损决定；
+   * ③ 结果如实计数（成功/被拒），做完重新扫描（台账与列表随之刷新）。
+   */
+  const repairAll = async (): Promise<void> => {
+    const targets = rows.filter((row) => row.repairable).map((row) => row.unitId)
+    if (targets.length === 0) return
+    setBatchBusy(true)
+    setBatch(null)
+    let ok = 0
+    let failed = 0
+    const results: BatchRepairResult[] = []
+    const done: string[] = []
+    for (const unitId of targets) {
+      setBusy(unitId)
+      try {
+        const plan = await recoveryApi.repairSession(unitId, false)
+        if (!plan.ok) {
+          failed += 1
+          results.push({ unitId, sessionId: plan.sessionId ?? unitId, ok: false, reason: plan.reason })
+          continue
+        }
+        if (plan.lossy === true) {
+          // 有损（截断）绝不批量代做 —— 逐条确认是硬约束，这里如实说明「需要你逐条确认」
+          failed += 1
+          results.push({ unitId, sessionId: plan.sessionId ?? unitId, ok: false, reason: 'lossy-required', lossy: true })
+          continue
+        }
+        const applied = await recoveryApi.repairSession(unitId, true, plan.expect)
+        if (applied.ok) {
+          ok += 1
+          done.push(unitId)
+          results.push({ unitId, sessionId: applied.sessionId ?? unitId, ok: true, droppedRows: applied.droppedRows ?? 0 })
+        } else {
+          failed += 1
+          results.push({ unitId, sessionId: applied.sessionId ?? unitId, ok: false, reason: applied.reason })
+        }
+      } catch (err) {
+        failed += 1
+        results.push({ unitId, sessionId: unitId, ok: false, transportError: err instanceof Error ? err.message : String(err) })
+      }
+    }
+    setBusy(null)
+    setBatchBusy(false)
+    setBatch({ ok, failed, results })
+    // **就地更新**：把修好的行标成「已修复」并从列表移除，不再整屏重扫（用户要最新全貌时自己点体检）
+    if (done.length > 0) setRepairedUnits((prev) => new Set([...prev, ...done]))
+    if (ok > 0) toast.ok(t('sessions.repair.applied', { rows: String(results.filter((r) => r.ok).reduce((n, r) => n + (r.droppedRows ?? 0), 0)) }))
+  }
+
+  /** 确认应用：带上预览指纹（TOCTOU）；有损计划必须显式放行（applyLossy）。 */
+  const applyRepair = (): void => {
+    if (plan === null) return
+    const { unitId, result } = plan
+    setBusy(unitId)
+    recoveryApi.repairSession(unitId, true, result.expect, result.lossy === true)
+      .then((next) => {
+        if (next.ok) {
+          toast.ok(t('sessions.repair.applied', { rows: String(next.droppedRows ?? 0) }))
+          setPlan(null)
+          setRepairedUnits((prev) => new Set([...prev, unitId]))
+        } else {
+          // 应用期被拒（指纹变化 / 校验不过 / 写失败）：**就地给出真实原因**，不假装成功
+          setPlan({ unitId, result: next })
+        }
+        setBusy(null)
+      })
+      .catch((err) => { toast.error(err instanceof Error ? err.message : String(err)); setBusy(null) })
+  }
+
+  const doRollback = async (): Promise<void> => {
+    const target = rollbackTarget
+    if (target === null) return
+    setBusy(target.unitId)
+    try {
+      const result = await recoveryApi.rollbackSessionRepair(target.repairId)
+      if (result.ok) {
+        toast.ok(t('sessions.repair.rolledBack'))
+        setRollbackTarget(null)
+        onScan()
+      } else {
+        toast.error(t(sessionRepairReasonKey(result.reason)))
+        setRollbackTarget(null)
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err))
+      setRollbackTarget(null)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <>
+      <Modal open={open} onClose={onClose} title={t('sessions.title')} wide busy={busy !== null}>
+        <Modal.Header title={t('sessions.title')} onClose={onClose} closeLabel={t('common.close')} />
+        <Modal.Body scroll>
+          <div className={css.actionRow}>
+            <Button variant="ghost" loading={loading} disabled={loading} onClick={onScan}>
+              {loading ? t('sessions.scanning') : t('sessions.scan')}
+            </Button>
+          </div>
+
+          {phase === 'error' && <Banner kind="error">{error ?? t('common.unknownError')}</Banner>}
+
+          {phase === 'ready' && response !== null && (
+            <>
+              {!response.sessionsDirExists && <Banner kind="warn">{t('sessions.noRoot')}</Banner>}
+              {response.sessionsDirExists && sessionHealthEmpty(response) && <Empty>{t('sessions.empty')}</Empty>}
+              {summary !== null && summary.total > 0 && (
+                <>
+                  <div className={css.statRow}>
+                    <Badge kind={summary.needsAttention > 0 ? 'warn' : 'ok'}>
+                      {t('sessions.summary.total', { count: String(summary.total) })}
+                    </Badge>
+                    {summary.bySeverity.blocksStartup > 0 && (
+                      <Badge kind="error">{t('sessions.count.blocksStartup', { count: String(summary.bySeverity.blocksStartup) })}</Badge>
+                    )}
+                    {summary.bySeverity.unloadable > 0 && (
+                      <Badge kind="error">{t('sessions.count.unloadable', { count: String(summary.bySeverity.unloadable) })}</Badge>
+                    )}
+                    {summary.bySeverity.nextRequestFails > 0 && (
+                      <Badge kind="warn">{t('sessions.count.nextRequestFails', { count: String(summary.bySeverity.nextRequestFails) })}</Badge>
+                    )}
+                    {summary.bySeverity.invisible > 0 && (
+                      <Badge kind="warn">{t('sessions.count.invisible', { count: String(summary.bySeverity.invisible) })}</Badge>
+                    )}
+                    {summary.targetFormatVersion !== null && (
+                      <Badge kind="info">{t('sessions.targetFormat', { version: String(summary.targetFormatVersion) })}</Badge>
+                    )}
+                  </div>
+                  <div className={css.hint}>
+                    {summary.repairable > 0
+                      ? t('sessions.repair.available', { count: String(summary.repairable) })
+                      : t('sessions.repair.none')}
+                  </div>
+                  {/* 「只显示有问题的对话」隐藏了多少正常会话 —— 绝不静默少显示 */}
+                  {summary.hiddenHealthy > 0 && (
+                    <div className={css.hint}>{t('sessions.hidden.healthy', { count: String(summary.hiddenHealthy) })}</div>
+                  )}
+                  {summary.repairable > 0 && (
+                    <div className={css.actionRow}>
+                      <Button
+                        variant="primary"
+                        loading={batchBusy}
+                        disabled={busy !== null || batchBusy}
+                        onClick={repairAll}
+                      >
+                        {t('sessions.repair.repairAll', { count: String(summary.repairable) })}
+                      </Button>
+                    </div>
+                  )}
+                  {batch !== null && (
+                    <div className={css.snapshotRow}>
+                      <div className={css.snapshotRowText}>
+                        <span className={css.snapshotRowName}>
+                          {t('sessions.repair.allDone', { ok: String(batch.ok), failed: String(batch.failed) })}
+                        </span>
+                        {/* 逐条留痕：修好了几条、剩下几条为什么没修成 —— 绝不只给一个计数 */}
+                        {batch.results.map((item) => (
+                          <div key={item.unitId} className={css.snapshotRowMeta}>
+                            <span className={css.snapshotRowBadges}>
+                              <Badge kind={item.ok ? 'ok' : 'warn'}>
+                                {item.ok ? t('sessions.repair.batch.ok') : t('sessions.repair.batch.failed')}
+                              </Badge>
+                            </span>
+                            <span className={css.snapshotRowIssues} title={item.unitId}>{item.sessionId}</span>
+                            <span className={css.snapshotRowFacts}>
+                              {item.ok
+                                ? t('sessions.repair.batch.dropped', { rows: String(item.droppedRows ?? 0) })
+                                : item.transportError !== undefined
+                                  ? t('sessions.repair.batch.transportError', { message: item.transportError })
+                                  : item.lossy === true
+                                    ? t('sessions.repair.reason.lossyRequired')
+                                    : t(sessionRepairReasonKey(item.reason))}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {summary.deepUnverified > 0 && (
+                    <div className={css.hint}>
+                      {t('sessions.unverified', { count: String(summary.deepUnverified), verified: String(summary.deepVerified) })}
+                    </div>
+                  )}
+                  {summary.untested > 0 && <div className={css.hint}>{t('sessions.untested', { count: String(summary.untested) })}</div>}
+                  {summary.unreadableEntries > 0 && (
+                    <div className={css.hint}>{t('sessions.unreadableEntries', { count: String(summary.unreadableEntries) })}</div>
+                  )}
+                  {/* 长列表限高内滚（DESIGN §8 硬性规则）：上千行不再撑满弹窗滚动容器 */}
+                  <div className={`${css.snapshotList} ${css.reportScroll}`}>
+                    {rows.map((row) => (
+                      <div key={row.unitId} className={css.snapshotRow}>
+                        <div className={css.snapshotRowText}>
+                          {/* 会话目录名独占一行（非敏感：只是一条本地会话的标识，不含内容）；
+                              其余字段各占固定位置，长名不再把徽章/问题挤到不可读 */}
+                          <span className={css.snapshotRowName} title={row.unitId}>{row.sessionId}</span>
+                          <div className={css.snapshotRowMeta}>
+                            <span className={css.snapshotRowBadges}>
+                              <Badge kind={row.badgeKind}>{t(row.severityKey)}</Badge>
+                              {row.subagent && <Badge kind="info">{t('sessions.subagent')}</Badge>}
+                            </span>
+                            <span className={css.snapshotRowIssues}>{row.issueCodes.join(' · ')}</span>
+                            <span className={css.snapshotRowFacts}>
+                              {[
+                                row.versionText,
+                                row.sizeText,
+                                row.mtimeMs !== null ? formatRecoveryTime(String(row.mtimeMs)) : null,
+                              ].filter((v): v is string => v !== null).join(' · ')}
+                            </span>
+                          </div>
+                        </div>
+                        {/* 可应用内修复的类别（与体检的 repairable 同源判定）；点开先 dry-run，绝不直接写 */}
+                        {row.repairable && (
+                          <div className={css.actionRow}>
+                            <Button
+                              variant="ghost"
+                              loading={busy === row.unitId}
+                              disabled={busy !== null && busy !== row.unitId}
+                              onClick={() => { startRepair(row.unitId) }}
+                            >
+                              {t('sessions.repair.action')}
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  {truncated > 0 && <div className={css.hint}>{t('sessions.truncated', { count: String(truncated) })}</div>}
+                  {/* 修复计划（dry-run 结果）。ok=false 时显示**真实拒绝原因**，不给假成功 */}
+                  {plan !== null && (
+                    <div className={css.snapshotRow}>
+                      <div className={css.snapshotRowMain}>
+                        {t('sessions.repair.plan.title', { session: plan.result.sessionId ?? plan.unitId })}
+                      </div>
+                      {plan.result.ok ? (
+                        <>
+                          <div className={css.hint}>
+                            {t('sessions.repair.plan.summary', {
+                              rows: String(plan.result.droppedRows ?? 0),
+                              before: formatSessionBytes(plan.result.bytesBefore ?? 0),
+                              after: formatSessionBytes(plan.result.bytesAfter ?? 0),
+                            })}
+                          </div>
+                          {(plan.result.actions ?? []).map((action) => (
+                            <div key={action.code} className={css.hint}>
+                              <Badge kind={action.lossy ? 'warn' : 'ok'}>
+                                {action.lossy ? t('sessions.repair.actionLossy') : t('sessions.repair.actionLossless')}
+                              </Badge>
+                              {' '}{action.detail}
+                            </div>
+                          ))}
+                          <div className={css.hint}>{t('sessions.repair.plan.backup')}</div>
+                          {plan.result.lossy === true && (
+                            <div className={css.hint}>{t('sessions.repair.plan.lossy')}</div>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <div className={css.hint}>{t(sessionRepairReasonKey(plan.result.reason))}</div>
+                          {/* 被拒不是「没反应」：告诉用户下一步能做什么（重扫 / 稍后再试 / 用离线命令） */}
+                          <div className={css.hint}>{t('sessions.repair.rejectedNext')}</div>
+                        </>
+                      )}
+                      <div className={css.actionRow}>
+                        {plan.result.ok && (
+                          <Button variant="primary" loading={busy !== null} onClick={applyRepair}>
+                            {plan.result.lossy === true ? t('sessions.repair.applyLossy') : t('sessions.repair.apply')}
+                          </Button>
+                        )}
+                        <Button variant="ghost" disabled={busy !== null} onClick={() => { setPlan(null) }}>
+                          {t('common.cancel')}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                  {/* 应用内不动的问题类别：离线出路 */}
+                  <div className={css.groupLabel}>{t('sessions.repair.title')}</div>
+                  <div className={css.hint}>{t('sessions.repair.desc')}</div>
+                  <ul className={css.reportList}>
+                    {sessionRepairCommands().map((entry) => (
+                      <li key={entry.command}>
+                        <code>{entry.command}</code>
+                        <CopyButton text={entry.command} label={t('sessions.repair.copy')} t={clipboardT} />
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {/* 本机修复台账（可回滚）。回滚只认 repairId —— 界面拿不到也传不了路径 */}
+              {repairEntries.length > 0 && (
+                <>
+                  <div className={css.groupLabel}>{t('sessions.repair.history.title')}</div>
+                  <div className={css.snapshotList}>
+                    {repairEntries.map((entry) => (
+                      <div key={entry.repairId} className={css.snapshotRow}>
+                        <div className={css.snapshotRowMain}>
+                          <span title={entry.unitId}>{entry.sessionId}</span>
+                          <Badge kind={entry.rolledBack ? 'info' : 'ok'}>
+                            {entry.rolledBack ? t('sessions.repair.history.rolledBack') : t('sessions.repair.history.applied')}
+                          </Badge>
+                          <span>{t('sessions.repair.history.dropped', { rows: String(entry.droppedRows) })}</span>
+                          <span>{entry.at !== null ? formatRecoveryTime(String(entry.at)) : ''}</span>
+                        </div>
+                        {!entry.rolledBack && (
+                          <div className={css.actionRow}>
+                            <Button variant="ghost" disabled={busy !== null} onClick={() => { setRollbackTarget(entry) }}>
+                              {t('sessions.repair.rollback')}
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+              {response.repairsError !== undefined && (
+                <div className={css.hint}>{t('sessions.repair.history.unreadable')}</div>
+              )}
+            </>
+          )}
+        </Modal.Body>
+      </Modal>
+      {/*
+        回滚确认（danger）：会把日志换回修复前的备份内容 —— 与其它危险动作同规，
+        必须走显式确认弹窗（Radix Dialog 承载 a11y），绝不内联一键回滚。
+      */}
+      <ConfirmDialog
+        open={rollbackTarget !== null}
+        title={t('sessions.repair.rollbackConfirmTitle')}
+        message={t('sessions.repair.rollbackConfirmMessage', { session: rollbackTarget?.sessionId ?? '' })}
+        confirmLabel={t('sessions.repair.rollbackConfirm')}
+        cancelLabel={t('common.cancel')}
+        danger
+        onConfirm={doRollback}
+        onCancel={() => { setRollbackTarget(null) }}
+      />
+    </>
+  )
+}
+
+export function RecoveryPanel(props: RecoveryPanelProps) {
+  const { recoveryApi, incidentApi, t } = props
   const [state, setState] = useState<PanelState>(initFromStore)
   const stateRef = useRef<PanelState>(state)
   const mountedRef = useRef(true)
@@ -179,6 +723,9 @@ export function RecoveryPanel({ recoveryApi, incidentApi, t }: RecoveryPanelProp
   /** issue #31：残留锁回收确认弹窗开关 + 进行中标志（与 incident 流程独立的瞬态） */
   const [lockConfirmOpen, setLockConfirmOpen] = useState(false)
   const [lockBusy, setLockBusy] = useState(false)
+  /** issue #56：解除 SAFE MODE 的进行中态与确认弹窗（与残留锁同规：危险动作要显式确认） */
+  const [safeModeConfirmOpen, setSafeModeConfirmOpen] = useState(false)
+  const [safeModeBusy, setSafeModeBusy] = useState(false)
   /**
    * 事故处置（crash / rescue）：查询结果 + 救援写盘动作的进行中态。
    *
@@ -377,6 +924,29 @@ export function RecoveryPanel({ recoveryApi, incidentApi, t }: RecoveryPanelProp
     )
   }
 
+  /**
+   * issue #56：显式解除仍然生效的 SAFE MODE（确认弹窗后）。
+   * 成功/被拒都靠 status 重拉刷新（绝不乐观地点掉横幅）：宿主仍有未解决事项时会拒绝，
+   * 此时界面给出「先处理下面的恢复事项」而不是假装成功（`cleared=false` 也算成功响应）。
+   */
+  const clearSafeMode = (): void => {
+    if (safeModeBusy) return
+    setSafeModeConfirmOpen(false)
+    setSafeModeBusy(true)
+    recoveryApi.clearSafeMode(true).then(
+      (res) => {
+        setSafeModeBusy(false)
+        if (res.cleared) toast.ok(t('recovery.safeMode.done'))
+        else toast.error(t('recovery.safeMode.refused'))
+        load()
+      },
+      (err) => {
+        setSafeModeBusy(false)
+        toast.error(err instanceof Error ? err.message : String(err))
+      },
+    )
+  }
+
   const view = state.recovery !== null ? toRecoveryView(state.recovery) : null
   const selected = state.selectedOperationId !== null && state.recovery !== null
     ? state.recovery.incidents.find((i) => i.operationId === state.selectedOperationId)
@@ -428,6 +998,14 @@ export function RecoveryPanel({ recoveryApi, incidentApi, t }: RecoveryPanelProp
         </Card>
       )}
 
+      {/* 磁盘占用与清理（m-disk-usage）：§9 固定的第 2 块。
+           三条硬边界一字不动（候选集只有可重建区 + 显式勾选的过期导出；snapshots/sync 永不在候选集；
+           界面数字由渲染行现算）—— 实现全在 DiskUsageCard 与 ui/disk-usage-view.ts 里。 */}
+      <DiskUsageCard api={props.diskApi} infoHintLabel={props.infoHintLabel ?? props.t('common.infoHint')} />
+
+      {/* T5：会话体检（只读）—— 与「我的对话去哪了」是同一件事，故与事故恢复同屏 */}
+      <SessionHealthCard recoveryApi={recoveryApi} t={t} copyT={props.copyT} />
+
       {/* SAFE MODE / recovery-required 状态提示（正常态不渲染任何横幅——无事项即静默） */}
       {view?.recoveryRequired === true && (
         <Banner kind="error">{t('recovery.currentState.safeMode')}</Banner>
@@ -442,7 +1020,21 @@ export function RecoveryPanel({ recoveryApi, incidentApi, t }: RecoveryPanelProp
         </Banner>
       )}
 
-      {state.status === 'ready' && (view?.incidents.length ?? 0) === 0 && view?.lock == null && (
+      {/* issue #56：「保护开着但已无待处理事项」——这正是 423 与空面板同时出现的死结态。
+          必须给出**可执行**的解除入口，否则用户只能去磁盘上删 transactions/safe-mode。 */}
+      {state.status === 'ready' && view?.safeModeStuck === true && (
+        <Card className={css.card}>
+          <div className={css.groupLabel}>{t('recovery.safeMode.title')}</div>
+          <div className={css.hint}>{t('recovery.safeMode.detail')}</div>
+          <div className={css.actionRow}>
+            <Button variant="danger" disabled={safeModeBusy} loading={safeModeBusy} onClick={() => { setSafeModeConfirmOpen(true) }}>
+              {safeModeBusy ? t('recovery.safeMode.busy') : t('recovery.safeMode.action')}
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {state.status === 'ready' && (view?.incidents.length ?? 0) === 0 && view?.lock == null && view?.safeModeStuck !== true && (
         <Empty>{t('recovery.empty')}</Empty>
       )}
 
@@ -538,8 +1130,12 @@ export function RecoveryPanel({ recoveryApi, incidentApi, t }: RecoveryPanelProp
               {/* 预览内容 */}
               {previewView !== null && (
                 <>
-                  <div className={css.groupLabel}>{t('recovery.preview.title')}</div>
-                  <div className={css.hint}>{t('recovery.preview.hint')}</div>
+                  <div className={css.statRow}>
+                    <span className={css.groupLabel}>{t('recovery.preview.title')}</span>
+                    {/* recovery.preview.hint 属「预览为什么只读 / 什么时候才真执行」（MOVE 类）：收进 ⓘ。
+                        危险动作的完整说明仍在确认弹窗（ConfirmDialog）里常驻。 */}
+                    <InfoHint text={t('recovery.preview.hint')} label={t('common.infoHint')} />
+                  </div>
                   {previewView.snapshotVerdict !== null && (
                     <div className={css.statRow}>
                       <span className={css.hint}>{t('recovery.snapshot.verdict')}</span>
@@ -688,6 +1284,18 @@ export function RecoveryPanel({ recoveryApi, incidentApi, t }: RecoveryPanelProp
         busy={rescueBusy}
         onConfirm={enterRescue}
         onCancel={() => { setRescueConfirmOpen(false) }}
+      />
+      {/* issue #56：解除 SAFE MODE 的二次确认（危险：解除后写操作立即恢复） */}
+      <ConfirmDialog
+        open={safeModeConfirmOpen}
+        title={t('recovery.safeMode.confirmTitle')}
+        message={t('recovery.safeMode.confirmMessage')}
+        confirmLabel={t('recovery.safeMode.action')}
+        cancelLabel={t('common.cancel')}
+        danger
+        busy={safeModeBusy}
+        onConfirm={clearSafeMode}
+        onCancel={() => { setSafeModeConfirmOpen(false) }}
       />
       <ConfirmDialog
         open={lockConfirmOpen}

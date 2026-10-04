@@ -106,6 +106,9 @@ DSH 生态里这个方向有几个插件，它们解决的问题并不相同—�
 | 🧩 | **本地插件随备份迁移** | `link:` / `file:` 安装的本地开发插件会被打包进备份，换机不再丢失 |
 | 🗄️ | **保留策略可配（GFS 分层）** | 「最近 N 份 + 每月留 1 份 + 每年留 1 份」，默认值等价旧行为 |
 | 🤖 | **Agent 工具** | Agent 会话内直接备份 / 快照 / 恢复 / 同步 |
+| 💾 | **磁盘占用体检** | 备份页逐项列出本插件自身占了多少盘（备份 / 快照 / 同步副本 / 缓存 / 暂存），三档回收策略一目了然；**一键清理只碰可重建缓存与过期备份**，快照与同步数据永不在此删除 |
+| ⬆️ | **版本更新检查** | 「关于」页只读探测 npm 上的最新版本，有新版本时给一条可复制的升级命令（绝不自动安装）；离线失败如实显示，不影响其它功能 |
+| 🧭 | **兼容性讲清楚** | 导入前显示「来源 DSH 版本 / 平台 → 本机」，并用**结构化原因**解释评分（跨平台 / 分区缺失 / 版本超前…），而不是只丢一句「部分兼容」 |
 
 ---
 
@@ -188,6 +191,27 @@ dsh plugin --profile web add dsh-config-manager@latest
 > ```
 >
 > 重启 DSH 后，可在 **设置 → 备份与迁移 → 关于** 看到实际运行的版本（版本变化时也会自动弹出更新内容）。
+
+### 从 GitHub 源码安装（`git+https://...`）
+
+用 git 源安装时，pnpm 会先在该 clone 里跑本包的 `prepare` 脚本（= `npm run build`）把 `lib/` 构建出来 —— **产物在 npm 上已预构建，从 git 安装则是现构建**。pnpm 11 默认**拦截**这个脚本，直接报 `dsh: plugin command failed`，日志里是：
+
+```
+ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED  Failed to prepare git-hosted package ...
+The git-hosted package "dsh-config-manager@x.y.z" needs to execute build scripts
+but is not in the "allowBuilds" allowlist.
+```
+
+**解决**：把它提示的那一行（**含完整 git URL 与 commit sha**，逐字复制）加进 profile 的 `pnpm-workspace.yaml`：
+
+```yaml
+# ~/.dsh/profiles/web/pnpm-workspace.yaml
+allowBuilds:
+  dsh-config-manager@git+https://github.com/xiajiajun516/dsh-config-manager.git#<pnpm 打印的 sha>: true
+```
+
+> 键必须**逐字**照抄 pnpm 打印的那一行 —— 只写包名 `dsh-config-manager` 不生效（该白名单按「来源 + 版本」匹配）。
+> 更省事的路径是直接装 npm 预构建版（上面的 `dsh-config-manager@latest`），无需任何白名单。
 >
 > - 或一行命令彻底关闭年龄门槛（在 profile 的 `pnpm-workspace.yaml` 顶部加 `minimumReleaseAge: 0`）：
 >   ```powershell
@@ -351,6 +375,14 @@ dsh plugin --profile web add dsh-config-manager@latest
 
 **GUI**：设置 → 「备份与迁移」→「快照恢复」tab → 选择快照 → 预览恢复计划（dry-run，零写入）→ 确认执行。
 
+**备份文件与磁盘占用**：「备份与迁移」→「快照恢复」tab 下的**「备份文件」**子页统一管理 `exports/` 里的导出产物
+（手动导出 + 定时备份）——可下载、直接导入恢复、查看内容、删除，并按文件名/备注搜索。
+同页的**「磁盘占用」卡**会逐项列出本插件自己占用的空间（导出备份 / 导入前快照 / 同步配置与 Git 工作副本 /
+市场缓存 / 临时暂存 / 日志 / 事务日志 …），标注每项的回收策略：**可随时重建**（缓存与暂存）、
+**有保留期**（导出产物 7 天、定时备份保留最近 N 个）、**用户数据 / 安全网**（快照与同步，永不自动清理）。
+需要腾空间时点**「立即清理」**：默认只清可重建的缓存与暂存；要回收过期备份文件需显式勾选（并二次确认）。
+**快照与同步数据永远不会被这个按钮删掉**；目录读不到时如实显示「未统计」，不会伪报 0 字节。
+
 ---
 
 ### 🚨 CLI —— DSH 挂了时的第一救急手段
@@ -446,6 +478,21 @@ dsh-config-manager backup --sections skills,self          # 收窄范围
 
 
 **典型救急流程**（DSH 起不来时）：① `dsh-config-manager reinstall` 先把启动器重装回来（必要时顺带清理），② `dsh web` 重新启动 DSH，③ 从仓库装回插件，④ 从远程仓库拉取快照（或执行 `dsh-config-manager restore`）把配置恢复回来。整个流程中 CLI 全程可用，与 DSH 是否健康无关。
+
+**`web` —— 离线救急台（不想在终端里敲命令时用这个）。** 它在本机起一个**只绑 127.0.0.1** 的小网页，
+把上面的诊断信息与救急动作都摊在浏览器里：
+
+```bash
+dsh-config-manager web            # 启动并自动打开浏览器（终端里会打印带一次性 token 的链接）
+```
+
+- **只读部分**：实例心跳 / SAFE MODE / 残留锁 / 快照 / 导出产物（可一键自检）/ 磁盘占用 / 会话体检 / 档案与实例状态。
+- **写动作（都要在网页里显式确认）**：会话布局归位、清理可重建缓存与过期导出产物、回收残留环境锁、
+启动/停止某个档案的独立实例。它们调用的是与命令行**同一套实现**，结果页逐条如实回执。
+- **安全**：只绑回环地址；启动时生成一次性 token（只打印在终端），换成一个 HttpOnly + SameSite=Strict 的
+会话 cookie，用过即废；页面零脚本、零外链。`Ctrl+C` 或空闲超时（缺省 30 分钟）即退出。
+- **门槛**：会话归位需要 DSH 已停止；有 SAFE MODE 未结案时写动作一律被拒（页面会写明原因）。
+  恢复快照（`restore`）与重装（`reinstall`）**不在网页里** —— 它们需要更强的确认，留在命令行/GUI。
 
 ### 🤖 Agent 可调用的模型工具
 
@@ -545,6 +592,10 @@ dsh-config-manager backup --sections skills,self          # 收窄范围
   摆到用户面前。此外，为了让 GitHub 的 Contributors 列表如实计入这次贡献，其提交 `1248200` 已通过一次
   **「保留其提交、树取主线」**的合并（`122317b`）成为 `main` 的祖先 —— 该合并**不取其代码**（合并后的树与主线
   逐字节一致），只用于记录署名；因此按 GitHub 的口径这次贡献已被计入（而非 closed 后无痕）。
+- **OMSociety** —— [PR #66](https://github.com/xiajiajun516/dsh-config-manager/pull/66)（合并提交 `4170af4`）：提出并实现了
+  36×36 无底框的 `icon.svg`（issue #61，对齐官方插件图标约定）。反馈自带上游取证（宿主图位 48/36 与 40/30、
+  官方随包发布的图标形态与官方 fixture），PR 里附 16/30/36/48 × 深浅双主题实况图，并对「不换成品牌蓝」写了
+  可复核的理由（后片若同色，深色模式下两层会融成一块、16px 读不出前后关系）。
 - **问题报告**：`zhyx1996`（#38 同步「导出密钥」未生效）、`IPF-Sinon`（#39 凭据 `refs:` 块未被识别，并在自己的 fork
   上完成实现与真机验证）、`zerginlaw`（#43「立即备份」空转却提示成功）—— 这三条报告各自驱动了一个修复。
 

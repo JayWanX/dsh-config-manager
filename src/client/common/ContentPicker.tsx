@@ -24,6 +24,7 @@ import {
 import { formatBytes } from '../../ui/report.ts'
 import { redact } from '../../security/redaction.ts'
 import { Badge, Button, Checkbox, Spinner } from './ui.tsx'
+import { InfoHint } from './InfoHint.tsx'
 import { Skeleton } from './Skeleton.tsx'
 import { Collapse } from './Motion.tsx'
 import { ExpandChevron } from './Icon.tsx'
@@ -146,11 +147,13 @@ export function ContentPicker({
         />
         <Button size="sm" onClick={() => { commit(selectAll(nodes, true)) }}>{t('picker.selectAll')}</Button>
         <Button size="sm" onClick={() => { commit(selectAll(nodes, false)) }}>{t('picker.selectNone')}</Button>
+        {/* 会话 ↔ 工作区联动属「机制怎么工作」（MOVE 类）：只在这种配对确实存在时给出 ⓘ，
+            不再用一整行常驻说明占掉选择器首屏。 */}
+        {hasLinkedPairs && <InfoHint text={t('picker.sessionWorkspaceLinked')} t={t} />}
       </div>
 
       {loading && <Skeleton count={3} label={t('picker.loading')} />}
       {failedSections.length > 0 && <span className={css.hint}>{t('picker.unitsUnavailable')}</span>}
-      {hasLinkedPairs && <span className={css.hint}>{t('picker.sessionWorkspaceLinked')}</span>}
 
       {!loading && visible.length === 0 && <span className={css.hint}>{t('picker.empty')}</span>}
 

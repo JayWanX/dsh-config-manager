@@ -13,6 +13,8 @@
  * POST /api/dsh-config-manager/recovery/:operationId/verify  → RecoveryVerifyResult
  * POST /api/dsh-config-manager/recovery/:operationId/retry   → RecoveryExecuteResult
  * POST /api/dsh-config-manager/recovery/:operationId/dismiss → RecoveryDismissResult
+ * POST /api/dsh-config-manager/recovery/lock/recover            → RecoveryLockRecoverResult
+ * POST /api/dsh-config-manager/recovery/safe-mode/clear         → RecoverySafeModeClearResult
  * ```
  *
  * 安全约束（§9.4 / §11）：
@@ -24,8 +26,14 @@
  */
 import type {
   RecoveryConfirmResult, RecoveryDismissResult, RecoveryExecuteResult,
-  RecoveryLockRecoverResult, RecoveryPort, RecoveryPreview, RecoveryStatus, RecoveryVerifyResult,
+  RecoveryLockRecoverResult, RecoveryPort, RecoveryPreview, RecoverySafeModeClearResult,
+  RecoveryStatus, RecoveryVerifyResult,
 } from '../../ui/types.ts';
+import type {
+  SessionHealthResponse,
+  SessionRepairResult,
+  SessionRepairRollbackResult,
+} from '../../ui/session-inventory-view.ts';
 import { ConfigManagerApiError, getJson, LONG_REQUEST_TIMEOUT_MS, postJson, type RequestOptions } from '../common/http.ts';
 import { zhUiT, type UiT } from '../../ui/i18n.ts';
 import { RECOVERY_API } from '../common/routes.ts';
@@ -58,6 +66,38 @@ export class RecoveryApi implements RecoveryPort {
   /** GET /recovery/status：列出未解决 operation + reconcile decision。 */
   async status(): Promise<RecoveryStatus> {
     return getJson<RecoveryStatus>(RECOVERY_API.status, this.t, RECOVERY_OPTS);
+  }
+
+  /**
+   * GET /recovery/sessions：**只读**会话体检（本机存量会话的损坏/可见性分类）。
+   *
+   * 为什么走 recovery 族：它与「我的对话去哪了」是同一件事，且本族已是 prefix 路由 ——
+   * 加一条子路径不新增围栏面（见 tests/route/route-parity.test.ts 的说明）。
+   * `limit` 只影响返回给浏览器的行数（宿主仍会扫全量，摘要里的 total 因此是全量口径）。
+   */
+  async sessions(limit?: number): Promise<SessionHealthResponse> {
+    const query = limit !== undefined && Number.isFinite(limit) && limit > 0 ? '?limit=' + String(limit) : '';
+    return getJson<SessionHealthResponse>(RECOVERY_API.sessions + query, this.t, RECOVERY_OPTS);
+  }
+
+  /**
+   * POST /recovery/sessions/repair（T8）：应用内修复一份会话日志。
+   *
+   * apply=false = 只读预览（宿主会回传 expect 指纹与动作清单）；apply=true 必须带上该指纹 ——
+   * 宿主据此拒绝「预览之后文件已被改过」的写入（TOCTOU）。任何拒绝都以 ok:false + reason 表达，
+   * 不是 HTTP 错误，界面必须按 reason 显式说明原因。
+   */
+  async repairSession(unitId: string, apply: boolean, expect?: { size: number; mtimeMs: number }, allowLossy?: boolean): Promise<SessionRepairResult> {
+    const body: Record<string, unknown> = { unitId, apply }
+    if (expect !== undefined) body['expect'] = expect
+    // 有损动作（截断）必须显式放行；宿主也会再判一次（缺省拒绝）
+    if (allowLossy === true) body['allowLossy'] = true
+    return postJson<SessionRepairResult>(RECOVERY_API.sessionsRepair, body, this.t, RECOVERY_OPTS)
+  }
+
+  /** POST /recovery/sessions/rollback（T8）：按台账 repairId 回滚（客户端不传路径）。 */
+  async rollbackSessionRepair(repairId: string): Promise<SessionRepairRollbackResult> {
+    return postJson<SessionRepairRollbackResult>(RECOVERY_API.sessionsRollback, { repairId }, this.t, RECOVERY_OPTS)
   }
 
   /** GET /recovery/:operationId/preview：只读恢复预览（restore plan + verification plan）。 */
@@ -97,5 +137,15 @@ export class RecoveryApi implements RecoveryPort {
    */
   async recoverStaleLock(userConfirmed: boolean): Promise<RecoveryLockRecoverResult> {
     return postJson<RecoveryLockRecoverResult>(RECOVERY_API.lockRecover, { userConfirmed }, this.t, RECOVERY_OPTS);
+  }
+
+  /**
+   * POST /recovery/safe-mode/clear（issue #56）：显式解除仍然生效的 SAFE MODE。
+   * 无 operationId（该状态下 active/ 通常已空，没有可操作对象）；userConfirmed 与其它
+   * 危险动作同规，调用方必须先经过显式确认弹窗。宿主侧仍有未解决 incident 时拒绝
+   * （ok=false + reason='unresolved-incidents'），界面据此如实提示而不是假装成功。
+   */
+  async clearSafeMode(userConfirmed: boolean): Promise<RecoverySafeModeClearResult> {
+    return postJson<RecoverySafeModeClearResult>(RECOVERY_API.safeModeClear, { userConfirmed }, this.t, RECOVERY_OPTS);
   }
 }

@@ -24,6 +24,15 @@ import { zhUiT, type UiT } from '../../ui/i18n.ts';
  * 安全约束：同步内容为可移植配置，public 仓库会公开配置 → 必须私有；
  * token 仅用于认证，绝不写入同步文件/提交内容/日志。
  */
+/**
+ * http(s) 的 git 远端**必须有访问令牌才能推送**（拉取公开仓库可以匿名完成 —— 这正是
+ * 「拉取成功、推送失败」这条用户报告的不对称来源）。用于在通道卡上提示「未配置令牌」；
+ * 本地路径 / ssh 远端走 git 原生认证，不该提示。
+ */
+export function needsGitToken(repoUrl: string): boolean {
+  return /^https?:\/\//i.test(repoUrl.trim());
+}
+
 export function privateRepoHint(t: UiT = zhUiT): string {
   return t('sync.privateRepoHint');
 }
@@ -246,6 +255,11 @@ export interface ChannelSyncState {
   selectedSnapshotId: string
   /** 该通道远端历史快照列表（「选择历史快照」下拉数据源） */
   snapshots: SyncSnapshotLite[]
+  /**
+   * 远端**存在但读不出来**的快照（issue #59；列表跳过是必要防御，但必须可见）。
+   * 非空即代表「这个列表不完整」—— 与 `snapshots` 同一次 list 请求的结果。
+   */
+  unreadableSnapshots: { file: string; reason: string }[]
   /** 该通道是否正在拉取远端快照列表 */
   loadingSnapshots?: boolean
   /** 该通道自动同步状态 */
@@ -273,27 +287,12 @@ export function defaultChannelSyncState(): ChannelSyncState {
     decryptPasswordSaved: false,
     selectedSnapshotId: '',
     snapshots: [],
+    unreadableSnapshots: [],
     loadingSnapshots: false,
     autosync: null,
     autosyncEnabled: false,
     autosyncInterval: '30m',
   }
-}
-
-/** 通道子 tab 的渲染模型（active/disabled 由组件据此装配 modeTabs）。 */
-export interface ChannelTabModel {
-  channel: SyncChannel
-  active: boolean
-  disabled: boolean
-}
-
-/** 通道子 tab 列表：git/webdav 两个 tab；busy 时全部禁用（防并发操作切换）。 */
-export function channelTabModels(active: SyncChannel, busy: boolean): ChannelTabModel[] {
-  return CLIENT_SYNC_CHANNELS.map((channel) => ({
-    channel,
-    active: channel === active,
-    disabled: busy,
-  }))
 }
 
 /* ---------------------------------------------------------------- 通道选择持久化 */
@@ -676,12 +675,38 @@ export function isToolchainChangeItem(item: { itemId: string; detail?: string | 
 }
 
 /**
- * 仅保留需人工决策的项（差异确认列表只渲染这些）。
+ * 「这一项是否需要人工决策（是否进确认列表）」的唯一判定 —— reviewItems / isBulkDecidable /
+ * confirmListSummary 共用同一份，避免三处各写一遍 kind 规则而漂移。
  * 统计（summarizeConfirmItems）仍基于全量 items，不受影响。
  * issue #35：除 kind 命中外，**改变工具链行为**的项（pnpm-workspace 剔除声明）也进列表。
  */
+function isListedItem(it: Pick<SyncConfirmItem, 'itemId' | 'kind' | 'detail'>): boolean {
+  return CONFIRM_REVIEW_KINDS.has(it.kind) || isToolchainChangeItem(it);
+}
+
+/** 仅保留需人工决策的项（差异确认列表只渲染这些）。 */
 export function reviewItems(items: readonly SyncConfirmItem[]): SyncConfirmItem[] {
-  return items.filter((it) => CONFIRM_REVIEW_KINDS.has(it.kind) || isToolchainChangeItem(it));
+  return items.filter((it) => isListedItem(it));
+}
+
+/**
+ * 确认列表的可见性摘要：需要人工决策（逐项列出）的项数 vs 按默认方式自动采用的项数。
+ *
+ * 为什么必须单独给这两个数字（用户报告）：摘要徽章统计的是**全量**差异（如「共 57 项差异」），
+ * 而列表只渲染需人工决策的项（常常只有 1 行）—— 中间那些项去哪了完全看不见。
+ * 界面据此补一句「列表逐项确认 N 项；其余 M 项按默认方式自动采用」。
+ */
+export interface ConfirmListSummary {
+  /** 逐项列出、由用户确认的项数（= reviewItems 的长度）。 */
+  reviewCount: number;
+  /** 不在列表里、按默认方式自动采用的项数。 */
+  autoCount: number;
+}
+
+export function confirmListSummary(items: readonly SyncConfirmItem[]): ConfirmListSummary {
+  let reviewCount = 0;
+  for (const it of items) if (isListedItem(it)) reviewCount += 1;
+  return { reviewCount, autoCount: items.length - reviewCount };
 }
 
 /** 冲突解决方式：与导入恢复向导（ConflictList）完全一致的两项（保留当前 / 使用导入）。
@@ -710,7 +735,7 @@ export type ConflictDecision = BulkDecision;
  */
 export function isBulkDecidable(item: Pick<SyncConfirmItem, 'itemId' | 'kind' | 'detail'>): boolean {
   if (item.kind === 'Error') return false;
-  return CONFIRM_REVIEW_KINDS.has(item.kind) || isToolchainChangeItem(item);
+  return isListedItem(item);
 }
 
 /** 是否存在可批量决策项 —— 批量按钮禁用判据与触发条件同源（避免两处规则漂移）。 */
@@ -797,13 +822,22 @@ export function buildAdoptions(
   return out;
 }
 
-export type ApplyItemsViewKind = 'ok' | 'failed' | 'rolledBack';
+/**
+ * 'partial' = 整体**没有回滚**、也没有硬失败，但有项未生效（warning）。
+ *
+ * 为什么必须与 'ok' 分开（issue #56）：插件安装失败是刻意的非致命 warning，
+ * `ok` 因此仍为 true；用户看到「已导入 N 个分区」就以为全部成功，
+ * 而排在插件之后的步骤（凭据写入）根本没执行 —— 真机表现就是「模型列表同步过来了、密钥没进来」。
+ */
+export type ApplyItemsViewKind = 'ok' | 'partial' | 'failed' | 'rolledBack';
 
 export interface ApplyItemsView {
   kind: ApplyItemsViewKind;
   headline: string;
   sections: string[];
   warnings: string[];
+  /** 未生效项（kind='partial' 时非空）：逐条展示「哪一步没写进去」 */
+  ineffective: { itemId: string; adapter: string; message?: string }[];
   restoreId: string;
   needsRestart: boolean;
 }
@@ -815,17 +849,27 @@ export function applyItemsReportView(
 ): ApplyItemsView | null {
   if (report === null) return null;
   const failedOnly = report.failed.length > 0 && !report.ok;
-  const kind: ApplyItemsViewKind = !report.ok && report.rolledBack ? 'rolledBack' : failedOnly ? 'failed' : 'ok';
+  // 旧宿主不返回 ineffective → 空数组（按「无未生效项」处理，绝不据此误报部分成功）
+  const ineffective = report.ineffective ?? [];
+  const kind: ApplyItemsViewKind = !report.ok && report.rolledBack
+    ? 'rolledBack'
+    : failedOnly
+      ? 'failed'
+      : ineffective.length > 0
+        ? 'partial'
+        : 'ok';
   const headline = kind === 'ok'
     ? t('sync.importDone', { n: String(report.applied.length) })
-    : kind === 'rolledBack'
-      ? t('sync.importFailed')
+    : kind === 'partial'
+      // 不用「失败」措辞：这次同步**大部分成功**，只是有 N 项没生效 —— 措辞必须与事实同强度
+      ? t('sync.importPartial', { n: String(ineffective.length) })
       : t('sync.importFailed');
   return {
     kind,
     headline,
     sections: report.applied,
     warnings: report.warnings,
+    ineffective,
     restoreId: report.restoreId,
     needsRestart: report.needsRestart,
   };

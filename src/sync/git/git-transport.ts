@@ -158,6 +158,13 @@ export class GitTransport implements SyncTransport {
   };
   private repoReady = false;
   private privateHint: boolean | null = null;
+  /**
+   * 最近一次 list() 里**读不出/解析失败**的密文快照文件与原因（issue #59）。
+   *
+   * 为什么不能只 console 或只吞掉：这份「跳过」正是用户看到的「推送成功但远端列表为空」
+   * 的唯一线索。列表接口把它如实回传，让状态自洽（绝不静默失败）。
+   */
+  private readErrors: { file: string; reason: string }[] = [];
   private readonly msg: MsgFunc;
 
   constructor(options: GitTransportOptions) {
@@ -190,6 +197,11 @@ export class GitTransport implements SyncTransport {
     return this.privateHint;
   }
 
+  /** 最近一次列表里读不出来的远端快照（含原因）；供上层如实呈现，绝不静默 */
+  get unreadableSnapshots(): readonly { file: string; reason: string }[] {
+    return this.readErrors;
+  }
+
   /** 列出远端已有快照（按 createdAt 升序）。读取工作副本 snapshots/（明文散文件）
    *  与 snapshots-encrypted/（密文单文件）两个目录（先 pull 同步远端）。 */
   async list(): Promise<SyncSnapshotMeta[]> {
@@ -197,6 +209,7 @@ export class GitTransport implements SyncTransport {
     // 幂等读：网络故障（连接重置/超时/DNS）允许一次有限重试；工作副本无写副作用
     await this.pullFromRemote({ retryable: true });
     const fsx = createSnapshotFs();
+    this.readErrors = [];
     const metas: SyncSnapshotMeta[] = [];
     // 明文散文件目录
     const snapsAbs = this.snapshotsDir();
@@ -282,7 +295,7 @@ export class GitTransport implements SyncTransport {
     if (diff.code !== 0) {
       const verb = existed ? 'update' : 'add';
       await this.runGit(['commit', '-m', `sync: ${verb} snapshot ${snapshot.id}`]);
-      await this.runGit(['push', '-u', 'origin', 'HEAD'], { withCredential: true });
+      await this.runGit(['push', '-u', 'origin', 'HEAD'], { withCredential: true, requirePushToken: true });
     }
     return computeSnapshotMeta(snapshot);
   }
@@ -341,7 +354,7 @@ export class GitTransport implements SyncTransport {
     const diff = await this.runGit(['diff', '--cached', '--quiet'], { allowNonZero: true });
     if (diff.code !== 0) {
       await this.runGit(['commit', '-m', `sync: delete snapshot ${id}`]);
-      await this.runGit(['push', '-u', 'origin', 'HEAD'], { withCredential: true });
+      await this.runGit(['push', '-u', 'origin', 'HEAD'], { withCredential: true, requirePushToken: true });
     }
     // P1-4：快照被裁掉后回收无人引用的 blob（best-effort，失败不影响删除结果）
     await this.gcBlobStore(fsx).catch(() => undefined);
@@ -418,29 +431,43 @@ export class GitTransport implements SyncTransport {
     else await attempt();
   }
 
-  /** 执行 git 命令；withCredential=true 时注入 credential helper（token 不进 argv），失败时错误消息脱敏 */
+  /**
+   * 执行 git 命令；withCredential=true 时注入 credential helper（token 不进 argv），失败时错误消息脱敏。
+   *
+   * opts.requirePushToken：这条命令是**推送**，http(s) 远端必须有令牌 —— 在发起 git 之前就给出可操作错误。
+   * 为什么必须预检（真机）：公开仓库的 fetch 可以匿名完成（**拉取成功**），而 push 必须认证 —— 没配令牌时
+   * 用户拿到的是 git 的 exit 128「Invalid username or token」，既分不清「没配令牌」还是「令牌失效」，
+   * 还会在本地留下一个已提交却推不上去的快照。
+   */
   private async runGit(
     args: string[],
-    opts: { cwd?: string; withCredential?: boolean; allowNonZero?: boolean } = {},
+    opts: { cwd?: string; withCredential?: boolean; allowNonZero?: boolean; requirePushToken?: boolean } = {},
   ): Promise<GitExecResult> {
     const cwd = opts.cwd === undefined ? this.o.workDir : opts.cwd;
     let extra: string[] = [];
     let token: string | null = null;
     let cleanup: (() => Promise<void>) | null = null;
-    if (opts.withCredential) {
+    if (opts.withCredential === true || opts.requirePushToken === true) {
       const cred = await this.buildCredentialArgs();
       extra = cred.extraArgs;
       token = cred.token;
       cleanup = cred.cleanup;
     }
+    // 推送预检：http(s) 远端 + 空令牌 = 注定失败的 push（拉取仍可匿名进行）
+    if (opts.requirePushToken === true && /^https?:\/\//i.test(this.o.repoUrl) && (token ?? '') === '') {
+      if (cleanup) await cleanup();
+      throw new GitTransportError(this.msg('sync.git.pushTokenRequired'), { kind: 'auth', retryable: false });
+    }
     try {
       const result = await this.o.exec(this.o.gitBin, [...extra, ...args], { cwd, timeoutMs: this.o.timeoutMs });
       if (result.code !== 0 && !opts.allowNonZero) {
         // 统一分类（超时 / 网络 / 鉴权 / 5xx…）：上层可据 kind / retryable 分流，不必解析 message
-        throw new GitTransportError(
-          this.msg('sync.git.cmdFailed', { args: args.join(' '), code: String(result.code), err: this.mask(result.stderr, token) }),
-          classifyNetworkErrorText(result.stderr + ' ' + result.stdout),
-        );
+        const classified = classifyNetworkErrorText(result.stderr + ' ' + result.stdout);
+        // 推送 + 鉴权失败：git 原文只说「认证失败」——换成能照做的说明（令牌失效 / 无写权限 / 远端禁用了密码推送）
+        const message = opts.requirePushToken === true && classified.kind === 'auth'
+          ? this.msg('sync.git.pushAuthFailed', { err: this.mask(result.stderr, token) })
+          : this.msg('sync.git.cmdFailed', { args: args.join(' '), code: String(result.code), err: this.mask(result.stderr, token) });
+        throw new GitTransportError(message, classified);
       }
       return result;
     } catch (err) {
@@ -466,6 +493,10 @@ export class GitTransport implements SyncTransport {
       return { extraArgs: [], token: '', cleanup: async () => {} };
     }
     const token = await this.o.credentials.getToken();
+    // 空令牌绝不写进 credential 文件（真机形态）：`https://oauth2:@host` 会被 git 当作「有凭据、口令为空」
+    // 提交，远端回的是「Invalid username or token / Password authentication is not supported」——
+    // 这条消息指向「令牌不对」，而真实原因是「本机根本没配令牌」。空令牌一律退回匿名（公开仓库照常可读）。
+    if (token === '') return { extraArgs: [], token, cleanup: async () => {} };
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-git-cred-'));
     const credFile = path.join(tmpDir, 'credential');
     const host = this.repoHost();
@@ -603,12 +634,19 @@ export class GitTransport implements SyncTransport {
     return joinFs(this.encryptedSnapshotsDir(), `${id}.json`);
   }
 
-  /** 读密文单文件快照（解析失败 → null，调用方跳过，不静默失败整体 list）。 */
+  /**
+   * 读密文单文件快照（解析失败 → null，调用方跳过，不静默失败整体 list）。
+   *
+   * issue #59：解析失败**必须留下原因**。此前 catch 把一切吞掉，`list()` 再静默 `continue`，
+   * 于是「push 报成功 + 远端列表为空 + download 报损坏」这种自相矛盾状态用户无从自查。
+   * 现在把原因记进 `readErrors`，由路由层回传（列表里同时给出 currentSnapshotId 的语境）。
+   */
   private async readEncryptedSnapshotFile(file: string): Promise<SyncSnapshot | null> {
     try {
       const raw = Buffer.from(await createSnapshotFs().readFile(file)).toString('utf8');
       return deserializeSnapshot(raw);
-    } catch {
+    } catch (err) {
+      this.readErrors.push({ file, reason: this.mask(String((err as Error)?.message ?? err), null) });
       return null;
     }
   }

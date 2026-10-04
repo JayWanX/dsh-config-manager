@@ -16,12 +16,23 @@ import { applyPathMapping } from '../core/path-mapping.ts';
 import { toNativePath } from '../utils/paths.ts';
 import { sha256Hex } from '../utils/hashing.ts';
 import { readLogHeaderFromBytes, type SessionLogHeader } from '../utils/session-log.ts';
-import type { ApplyResult, ExportOptions, ExportSection, HostContext, ImportContext } from '../core/types.ts';
+import type { ApplyResult, ExportOptions, ExportSection, HostContext, ImportContext, PlanItem } from '../core/types.ts';
 import type { FilesSection } from '../schema/types.ts';
 import { toPosixRel } from './units.ts';
 
 /** 逐批并发 stat 的批大小：会话树可能有上千个日志文件，一次性开满 Promise 会打爆 libuv 线程池 */
 const MTIME_BATCH = 16;
+
+/**
+ * 「本次导入真正写入了几个会话文件」的计数（T2）。
+ *
+ * 为什么用 WeakMap<ImportContext, number> 而不是适配器实例字段：宿主**每个插件进程只
+ * createAdapters 一次**（makeImporter() 复用同一批适配器实例），实例字段会跨导入累积 ——
+ * 第二次导入即使一个会话都没勾，也会因为「上次写过」而提示「需重启 DSH」。
+ * ImportContext 是**每次导入新建**的，用它当键天然按导入隔离；WeakMap 不阻止回收，
+ * 请求结束后计数随之消失（不会把会话内容或路径长期留在内存里）。
+ */
+const writtenSessionFiles = new WeakMap<ImportContext, number>();
 
 export class SessionsAdapter extends FileCollectionAdapter {
   readonly id = 'sessions' as const;
@@ -148,8 +159,16 @@ export class SessionsAdapter extends FileCollectionAdapter {
    * 返回键 = `sessionIdKey(目录名)`（`session-<uuid>` 与裸 `<uuid>` 归一化成同一个会话，取较大者）；
    * 时间读不到的会话**不进 Map**（调用方按「时间未知」处理，绝不把未知当成 0 —— 那会把它排到最旧）。
    * 宿主不提供 `mtimeMs` 门面 → 返回空 Map（调用方退回元数据缓存时间，行为与改造前一致）。
+   *
+   * @param precomputed 预览**顺带**取到的时间（`SectionPreview.statTimes`：homeDir 相对路径 → mtime）。
+   *   给了就**不再逐文件 stat**（这正是「合并成一次 stat」的落点）；只认那些确实是会话日志的路径。
+   *   缺省（旧宿主 / 未实现 `statInfo`）→ 走原来的逐文件 `mtimeMs`。
    */
-  async unitActivityTimes(ctx: HostContext, section: ExportSection<FilesSection>): Promise<Map<string, number>> {
+  async unitActivityTimes(
+    ctx: HostContext,
+    section: ExportSection<FilesSection>,
+    precomputed?: ReadonlyMap<string, number>,
+  ): Promise<Map<string, number>> {
     const out = new Map<string, number>();
     const logRels: string[] = [];
     const homeRelOf = new Map<string, string>();
@@ -164,7 +183,15 @@ export class SessionsAdapter extends FileCollectionAdapter {
       homeRelOf.set(relPath, toPosixRel(this.baseDir + '/' + relPath));
       keyOfRel.set(relPath, sessionIdKey(dir));
     }
-    const mtimes = await this.logMtimes(ctx, logRels, homeRelOf);
+    // 预览已 stat 过 → 直接按 homeRel 取时间（过滤掉非日志路径），不再发起第二趟 I/O。
+    const mtimes = precomputed !== undefined
+      ? new Map<string, number | null>(
+          logRels.map((rel) => {
+            const at = precomputed.get(homeRelOf.get(rel) ?? rel);
+            return [rel, at === undefined ? null : at];
+          }),
+        )
+      : await this.logMtimes(ctx, logRels, homeRelOf);
     for (const [rel, at] of mtimes) {
       if (at === null) continue;
       const key = keyOfRel.get(rel);
@@ -411,9 +438,27 @@ export class SessionsAdapter extends FileCollectionAdapter {
     }];
   }
 
+  override async applyItem(item: PlanItem, ctx: ImportContext): Promise<ApplyResult> {
+    const result = await super.applyItem(item, ctx);
+    // 只累计「本次导入（同一 ImportContext）」写成功的数量 —— 见 writtenSessionFiles 的说明。
+    if (result.ok) writtenSessionFiles.set(ctx, (writtenSessionFiles.get(ctx) ?? 0) + 1);
+    return result;
+  }
+
   async finalizeApply(ctx: ImportContext): Promise<ApplyResult[]> {
     const data = ctx.sections.get('sessions') as FilesSection | undefined;
     if (data === undefined || !Array.isArray(data.files)) return [];
+    // T2：DSH 的会话列表在**启动期**读取（会话注册表 + 工作区投影都在进程启动时建立），
+    // 所以写入会话后必须显式提示「重启 DSH 才会出现」。生态同类插件（dsh-chatsync）同结论。
+    // 位置放在收尾结果的最前：它是本次会话导入的**唯一必读提示**，不该被逐会话明细淹没。
+    const writtenCount = writtenSessionFiles.get(ctx) ?? 0;
+    const restartNotice: ApplyResult[] = writtenCount > 0
+      ? [{
+          ok: true,
+          needsRestart: true,
+          message: ctx.msg('import.sessionsNeedRestart', { count: String(writtenCount) }),
+        }]
+      : [];
     const byUnit = new Map<string, FilesSection['files']>();
     for (const file of data.files) {
       const unit = toPosixRel(this.unitIdOf(file.relativePath));
@@ -422,7 +467,7 @@ export class SessionsAdapter extends FileCollectionAdapter {
       byUnit.set(unit, list);
     }
     // 父对话缺席的子代理会话：先如实告警（这是数据层面的结论，与本机有没有归位能力无关）
-    const results: ApplyResult[] = await this.orphanSubagentWarnings(ctx, byUnit);
+    const results: ApplyResult[] = [...restartNotice, ...await this.orphanSubagentWarnings(ctx, byUnit)];
     const store = ctx.target.sessions;
     if (store?.readLogCwd === undefined || store.relocateDir === undefined) return results;
     const mappings = ctx.pathMappings ?? [];

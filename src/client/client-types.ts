@@ -38,4 +38,9 @@ export interface ConfigManagerSectionInjected {
   incidentApi: import('./recovery/incident-api.ts').IncidentApi
   /** Migration History locale（config-manager-history 命名空间，主 section 注册时注入） */
   historyT: import('@deepseek-ai/dsh-client-ui-slots').TranslateNS<'config-manager-history'>
+  /**
+   * 客户端展示层翻译器（`src/ui/i18n.ts` 的 UiT）：行内/报告类文案用它，设置页文案用 t。
+   * **两本字典键域不同**，同名键（如 library.title）在两边各写一次不算重复。
+   */
+  uiT: import('../ui/i18n.ts').UiT
 }

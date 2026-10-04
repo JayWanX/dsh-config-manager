@@ -91,3 +91,51 @@ test('createAdapters: selfDir 缺省挂载 dsh-config-manager；空串不挂载'
   assert.ok(self !== undefined);
   assert.equal(self.baseDir, 'my-config-data', '自定义相对目录透传');
 });
+
+/* ---------------- 只读预览：与导出同口径（2026-10 真机「插件自身配置 11.5 MB」修复） ---------------- */
+
+test('self: 预览只列白名单 —— 快照/同步工作副本等内部数据不得进入选择器（与导出逐项相等）', async () => {
+  const src = makeContext('win32', 'C:\\Users\\alice');
+  const syncConfig = Buffer.from('{"transport":"git"}', 'utf8');
+  const uiPrefs = Buffer.from('{"schemaVersion":1}', 'utf8');
+  await src.fs.writeFile('dsh-config-manager/sync/sync-config.json', syncConfig);
+  await src.fs.writeFile('dsh-config-manager/sync/ui-prefs.json', uiPrefs);
+  // 插件自身的数据：此前基类的目录递归把它们全当成该分区的「可勾选单元」
+  await src.fs.writeFile('dsh-config-manager/snapshots/eec/snapshot.json', Buffer.from('x'.repeat(4096), 'utf8'));
+  await src.fs.writeFile('dsh-config-manager/config-snapshots/2026/config-snapshot.json', Buffer.from('x'.repeat(4096), 'utf8'));
+  await src.fs.writeFile('dsh-config-manager/sync/work/snapshots/s1/self/sync/sync-config.json', Buffer.from('{}', 'utf8'));
+  await src.fs.writeFile('dsh-config-manager/transactions/completed/t.json', Buffer.from('{}', 'utf8'));
+  await src.fs.writeFile('dsh-config-manager/exports/dsh-config-2026.zip', Buffer.from('PK', 'utf8'));
+  await src.fs.writeFile('dsh-config-manager/profiles/work/profile.json', Buffer.from('{}', 'utf8'));
+
+  const adapter = new SelfAdapter();
+  const exported = await adapter.export(src, { includeSecrets: false });
+  const previewed = await adapter.preview(src, { includeSecrets: false });
+
+  assert.deepEqual(
+    previewed.items.map((u) => u.id),
+    ['self:sync/sync-config.json', 'self:sync/ui-prefs.json'],
+    '预览只列白名单里的配置（回归：只覆写 export() 时会列出上述全部 8 个文件）',
+  );
+  assert.equal(previewed.sizeBytes, syncConfig.byteLength + uiPrefs.byteLength, '体积只算白名单文件');
+  assert.deepEqual(previewed.items, adapter.listUnits(exported), '预览的单元清单必须与导出逐项相同');
+  assert.deepEqual(previewed.section.counts, exported.counts);
+  assert.deepEqual(previewed.section.warnings, exported.warnings);
+  assert.deepEqual(
+    previewed.section.data.files.map((x) => x.relativePath),
+    exported.data.files.map((x) => x.relativePath),
+    '预览的条目与顺序必须与导出相同',
+  );
+});
+
+test('self: 宿主未实现 statSize（旧版门面）时，白名单判定仍只收配置、不误列内部数据', async () => {
+  const src = makeContext('win32', 'C:\\Users\\alice');
+  await src.fs.writeFile('dsh-config-manager/sync/sync-config.json', Buffer.from('{}', 'utf8'));
+  await src.fs.writeFile('dsh-config-manager/snapshots/x/snapshot.json', Buffer.from('{}', 'utf8'));
+  Object.defineProperty(src.fs, 'statSize', { value: undefined, configurable: true });
+
+  const adapter = new SelfAdapter();
+  const previewed = await adapter.preview(src, { includeSecrets: false });
+  assert.deepEqual(previewed.items.map((u) => u.id), ['self:sync/sync-config.json']);
+  assert.equal(previewed.sizeBytes, 2, '退回 readFile 时体积 = 文件字节数');
+});

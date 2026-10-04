@@ -140,6 +140,37 @@ test('push: 收集 portable 分区 → 上传快照 → 更新 sync-state → �
   }
 });
 
+test('deleteSnapshot：只删远端那一份（用户点名），不写 sync-state、不碰本机配置', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-sync-engine-delete-'));
+  try {
+    const ctx = makeContext('win32', 'C:\\Users\\alice');
+    seedSource(ctx);
+    const transport = new MemSyncTransport();
+    const engine = makeEngine({ ctx, transport, stateDir: tmp });
+    await engine.push({ snapshotId: 'sync-keep' });
+    await engine.push({ snapshotId: 'sync-drop' });
+    const stateBefore = await fs.readFile(path.join(tmp, SYNC_STATE_FILE), 'utf8');
+    transport.calls.length = 0;
+
+    await engine.deleteSnapshot('sync-drop');
+
+    assert.deepEqual(transport.calls, ['delete'], '只调用 transport.delete（不 list / upload / download）');
+    assert.equal(transport.snapshots.has('sync-drop'), false, '目标快照已从远端消失');
+    assert.equal(transport.snapshots.has('sync-keep'), true, '其它快照不受影响');
+    assert.equal(
+      await fs.readFile(path.join(tmp, SYNC_STATE_FILE), 'utf8'),
+      stateBefore,
+      'sync-state 逐字节不变 —— 删远端快照不动本机基线',
+    );
+
+    // 不存在视为成功（SyncTransport 契约）：重复点删除 / 已被保留策略裁掉都不该报错
+    await engine.deleteSnapshot('sync-missing');
+    assert.deepEqual(transport.calls, ['delete', 'delete']);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
 test('push: secret 断言——敏感字段值被剥离、凭据分区绝不参与、快照序列化不含秘密值', async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-sync-engine-secret-'));
   try {

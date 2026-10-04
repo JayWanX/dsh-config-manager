@@ -18,7 +18,7 @@
  *   §10 Page: Sync            —— 远程同步
  *   §11 Page: Market          —— 配置市场 / 我的配置
  *   §12 Page: Profiles        —— 配置档案
- *   §13 Page: History / About —— 活动抽屉 / 关于
+ *   §13 Page: History / About —— 活动 / 历史 / 关于（task 面板）
  *   §14 Responsive            —— 窄弹窗降级
  *   §15 Motion                —— 减弱动效（prefers-reduced-motion）
  */
@@ -47,6 +47,13 @@
   --cm-motion-slow: 300ms;
   --cm-motion-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --cm-motion-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  /* 磁盘占用卡的固定高度：
+     取「标题 + 统计行 + 定位行 + 分区表 + 清理操作区」的高度。插件画布 564×720。
+     **2026-10-03 由 300px 提到 420px**：真机反馈「列表高度太少，要滑很久」——
+     分区行本身不长，但因为卡矮，一屏只看得到 5 行左右，而「维护与诊断」页在它上面
+     只有本机概况卡，纵向余量足够。420px 下可视行数约 9 行，且清理按钮仍在卡内。
+     见 §9c 的 .diskUsageCard（为什么用固定高度而不是自适应）。 */
+  --cm-disk-card-h: 420px;
 }
 
 /* 交互过渡统一参数（hover/focus 颜色过渡；仅颜色属性，克制） */
@@ -100,32 +107,19 @@
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 8px;
   background: var(--dsw-alias-bg-layer-2);
-  overflow-x: auto;
-  scrollbar-width: none;
+  /* 不横向滚动：放不下的项由 ui/nav-model.ts 移进「更多 ▾」，不会藏在视口外。
+     overflow: hidden 只是防极端情况（量测失败）撑破宿主布局，正常路径下从不触发。 */
+  overflow: hidden;
 }
 
-.navStrip::-webkit-scrollbar {
-  display: none;
-}
+/* v1 的 [data-overflow] 三条渐隐遮罩已随 nav-overflow.ts 一起删除 ——
+   v2 不再用滚动承载溢出，而是把放不下的项移进「更多 ▾」（见 ui/nav-model.ts）。 */
 
-/* 溢出可发现性（UI-19）：滚动条被隐藏，所以在**真正溢出的那一侧**画渐隐遮罩，
-   让用户看得出「这边还有页签」。用 mask-image（作用在元素自身绘制盒，不随内容滚动），
-   而不是 ::after 覆盖层（覆盖层在滚动容器内会跟着内容跑）。
-   注：mask 的 black 只提供 alpha 通道，不是主题色，因此不走 --dsw-* token。 */
-.navStrip[data-overflow='end'] {
-  mask-image: linear-gradient(to right, black calc(100% - 22px), transparent 100%);
-}
-
-.navStrip[data-overflow='start'] {
-  mask-image: linear-gradient(to right, transparent 0, black 22px);
-}
-
-.navStrip[data-overflow='both'] {
-  mask-image: linear-gradient(to right, transparent 0, black 22px, black calc(100% - 22px), transparent 100%);
-}
-
-/* 页签：分段条内的圆角药丸，激活态 = 主色淡底 + 主色描边 */
-.navTab {
+/* 页签：分段条内的圆角药丸，激活态 = 主色淡底 + 主色描边。
+   `.navMore`（「更多 ▾」）与它**共用下面全部四条规则** —— 它们同处一个分段条，必须长得一模一样；
+   分成两套写必然会漂移。 */
+.navTab,
+.navMore {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -144,18 +138,21 @@
   white-space: nowrap;
 }
 
-.navTab:hover {
+.navTab:hover,
+.navMore:hover {
   color: var(--dsw-alias-label-primary);
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
-.navTab:focus-visible {
+.navTab:focus-visible,
+.navMore:focus-visible {
   outline: 2px solid var(--dsw-alias-state-business-primary);
   outline-offset: 1px;
   border-radius: 6px;
 }
 
-.navTab[data-active] {
+.navTab[data-active],
+.navMore[data-active] {
   background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 16%, transparent);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--dsw-alias-state-business-primary) 45%, transparent);
   color: var(--dsw-alias-label-primary);
@@ -171,6 +168,28 @@
   flex: none;
 }
 
+/* 宽度实测容器（`src/ui/nav-model.ts` 的输入就来自它）：
+   absolute + 移出视口，完全不参与布局，也不可点。
+   里面必须放**与真实页签逐字节同构**的副本（同一批 class、同一段文案），
+   否则量出来的宽度不是真实宽度 —— 布局判定就建立在假数据上。 */
+/* 导航条里的「更多 ▾」根节点：.selectRoot 缺省 `flex: 0 1 auto`（可收缩），
+   在 flex 条里空间一紧就会被压扁 —— 而 navLayout 已经算准了它能放下，被压扁就白算了。 */
+.navMoreRoot {
+  flex: none;
+}
+
+.navMeasure {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  visibility: hidden;
+  pointer-events: none;
+}
+
 /* 导航条右侧图标动作 */
 .navActions {
   display: flex;
@@ -180,7 +199,7 @@
   margin-left: 4px;
 }
 
-/* 导航条动作按钮激活态（抽屉打开时对应按钮高亮） */
+/* 导航条动作按钮激活态（面板打开时对应按钮高亮） */
 .navActions .ghostButton[data-active] {
   border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 55%, transparent);
   color: var(--dsw-alias-state-business-primary);
@@ -313,11 +332,15 @@
 .viewEnter {
   animation: itemEnter var(--cm-motion-base) var(--cm-motion-ease-out);
   /* 透传纵向 flex 填充链：包装层不自带 flex 的话，会把子视图的 `flex: 1 1 auto`
-     （DESIGN.md「消灭底部空洞」的约定）挡在外面。抽屉里父容器不是 flex，故无副作用。 */
+     （DESIGN.md「消灭底部空洞」的约定）挡在外面。面板里父容器不是 flex，故无副作用。 */
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
+  /* 包装层也是**纵向 flex 容器**，所以它同样要提供区块间距 —— 否则「同一子视图里的多个区块」
+     （备份页 files：磁盘占用卡 → 备份文件卡）会紧贴在一起：这两张卡是不同的组件、各自有自己的
+     .viewBody，兄弟关系发生在**这一层**，只有这里能给出间距（用户实测：两卡之间没有间距）。 */
+  gap: 10px;
 }
 
 /* —— 折叠容器（common/Motion.tsx 的 Collapse）——
@@ -345,6 +368,68 @@
 .collapseInner {
   overflow: hidden;
   min-height: 0;
+}
+
+/* —— 流程任务层的侧滑面板（UI v2 §5.8）——
+   覆盖 .shellContent（不是整个画布）：导航条 / 全局横幅 / 状态栏保持可见可点。
+   定位必须用 absolute —— .shellContent 是 position: relative，inset: 0 自动贴合内容区；
+   用 fixed 会相对**视口**解析（v1 抽屉的 100vw 补丁就是那么来的）。 */
+.shellContent {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.taskPanel {
+  position: absolute;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--dsw-alias-bg-layer-1);
+  animation: taskPanelIn var(--cm-motion-base) var(--cm-motion-ease-out);
+}
+
+/* 入场只做 24px 轻位移：面板本身是满宽的，「整幅滑入」要在 180ms 内扫过 564px，看着像闪一下。
+   与动画无关的信息一个字都不加（reduced-motion 下只关动画，布局不变）。 */
+@keyframes taskPanelIn {
+  from { transform: translateX(24px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+.taskHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  height: 44px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+
+.taskTitle {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--dsw-alias-label-primary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.taskBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px 16px 16px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .taskPanel { animation: none; }
 }
 
 /* —— 底部状态栏：与顶部页签条同款（圆角分段条 + 四周留白，不再通栏贴边） —— */
@@ -511,6 +596,8 @@
 .field > .input,
 .field > .selectRoot {
   width: 100%;
+  /* 弹层的定位上下文：弹层 absolute 相对本节点 ⇒ 脱离文档流、不撑高父容器 */
+  position: relative;
 }
 
 .input::placeholder {
@@ -611,13 +698,18 @@
 }
 
 /* 弹层：留白 4px 的紧凑面板（与触发器同宽起步，标签长时最宽 260px）。
-   定位方向由组件在展开瞬间量测后写入 data-align（贴右边界时左对齐会溢出画布被裁）。 */
+   两种挂载（**都是 absolute**，差别只在「谁提供定位上下文」）：
+     · 留在原地（相对 .selectRoot）—— 导航条的 MoreMenu 用（贴顶展开，没有下方裁剪风险）；
+     · portal 进弹层容器（相对容器绝对定位）—— Select 用（见 .selectMenuPortal）：
+       弹窗内进弹窗卡片、否则进插件根容器；坐标由组件按「触发器 − 容器」的差值写入内联样式，
+       容器自带 overflow 的场合（插件画布 .section）靠 placement 夹紧保证不越界 ⇒ 不裁剪也不飘。
+   top / left / min-width / max-height 一律由组件量测后写入内联样式（动态坐标无法用静态类表达）。 */
 .selectMenu {
   position: absolute;
-  z-index: 20;
-  top: calc(100% + 4px);
-  left: 0;
-  min-width: 100%;
+  z-index: 110;
+  /* 不要写 min-width:100% —— portal 后它相对 **.section** 解析（实测弹层宽 521px），
+     而组件的内联 minWidth 已是「触发器宽度」，那才是想要的。
+     z-index 取 110：高于弹窗卡片(101)与遮罩(100)，低于通知层(120)。 */
   max-width: 260px;
   max-height: 220px;
   box-sizing: border-box;
@@ -637,8 +729,35 @@
   right: 0;
 }
 
+/* —— Select 的 portal 变体（相对弹层容器绝对定位） ——
+   挂载点 = 弹窗内：弹窗卡片（Modal.tsx 的 data-cm-dialog）；否则：插件根容器 #dsh-config-manager-root。
+   为什么弹窗内**必须**进卡片（2026-10-04 用户反馈「位置偏移 / 选项点不动」，radix 源码实证）：
+   ① @radix-ui/react-dismissable-layer 在弹窗打开时执行 `body.style.pointerEvents = "none"`，
+      只给自己那一层（Dialog.Content）写回 `auto` —— 挂在卡片外的菜单会继承 none，
+      **整个弹层收不到任何指针事件**（点不动、也没有 hover 高亮）；
+   ② 卡片外的元素在 radix 眼里就是「点到了弹窗外」，点击会顺手把弹窗关掉；
+   ③ radix 的 RemoveScroll 只放行弹窗内容子树（shards=[contentRef]）→ 卡片外的长菜单滚不动；
+   ④ 坐标基准：卡片是 fixed 且相对**窗口**居中，插件画布（.section）在宿主设置弹窗里靠右 ——
+      拿画布当夹紧基准会把卡片左半边的菜单整块推进画布（用户截图：触发器 x≈18、菜单被推到 x≈185）。
+   进卡片后菜单的包含块就是卡片（包含块链不经过 .section ⇒ 不被画布的 overflow 裁剪），
+   夹紧基准改用**视口**。 */
+.selectMenuPortal {
+  /* 兜底：即使将来被挂到弹窗内容子树之外，也把指针事件拿回来（①）。 */
+  pointer-events: auto;
+  /* 量测完成前不绘制（与 .infoHintBubble 的 [data-ready] 同一条纪律）：
+     保证任何情况下都不会把「还没定位」的那一帧画出来。 */
+  visibility: hidden;
+}
+
+.selectMenuPortal[data-ready] {
+  visibility: visible;
+}
+
 @keyframes selectMenuIn {
-  from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+  /* **只淡入 + 4px 轻位移，不缩放**：scale 会在动画期间改变弹层的可见尺寸，
+     视觉上就是「一打开大小在缩放」（与 .dialogContentCenter 入场同一条教训，真机反馈）。
+     与动画无关的信息一个字都不变（reduced-motion 下按下面的规则整体关掉动画）。 */
+  from { opacity: 0; transform: translateY(-4px); }
   to { opacity: 1; transform: none; }
 }
 
@@ -657,8 +776,10 @@
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
-/* 选中项：主色文字 + 左侧主色竖条（此前用右侧对勾，用户要求移除该图标） */
-.selectOption[aria-selected='true'] {
+/* 选中项：主色文字 + 左侧主色竖条（此前用右侧对勾，用户要求移除该图标）。
+   `aria-checked` 是 MoreMenu 的 menuitemradio 用的选中态（listbox 才用 aria-selected）。 */
+.selectOption[aria-selected='true'],
+.selectOption[aria-checked='true'] {
   color: var(--dsw-alias-state-business-primary);
   font-weight: 600;
   background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent);
@@ -676,6 +797,352 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 来源筛选条：与 .navStrip 同款分段条语言，但它是**筛选**不是导航，故不带 role=tablist */
+.libraryFilters {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  margin-top: 8px;
+  padding: 2px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+  overflow: hidden;
+}
+
+.libraryFilter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  height: 24px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.libraryFilter:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.libraryFilter[data-active] {
+  color: var(--dsw-alias-state-business-primary);
+  font-weight: 600;
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--dsw-alias-state-business-primary) 45%, transparent);
+}
+
+/* 计数：只在对应来源加载成功后渲染（加载中/失败时整个不出现，绝不显示 0） */
+.libraryFilterCount {
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.libraryFilter[data-active] .libraryFilterCount {
+  color: inherit;
+}
+
+.librarySearch {
+  flex: none;
+  width: 100%;
+  box-sizing: border-box;
+  height: 28px;
+  margin-top: 8px;
+  padding: 0 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: var(--dsw-specific-input-major);
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.librarySearch:focus-visible {
+  outline: none;
+  border-color: var(--dsw-alias-state-business-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent);
+}
+
+/* 底栏：计数 + 三个「新增产物」入口。**不显示合计体积**（四源里只有备份文件有体积） */
+.libraryFooter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--dsw-alias-border-l1);
+}
+
+.libraryCount {
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* —— 产物库（UI v2 §6）——
+   一张混合平铺列表：四源共用一个行结构，动作由 capabilities 分派。
+   三层必须分离（DESIGN.md「可点列表行 + 行内按钮」通则）：
+   整行只响应鼠标点击展开、**不加 role/tabIndex**；展开按钮是键盘与读屏的唯一入口；
+   行内动作全部 stopPropagation，否则会出现「想展开却删了」。 */
+.artifactList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  /* 吃掉剩余高度：列表**永远占满**可用空间（哪怕只有一两行），底栏因此恒贴底；
+     否则行数少时底栏吊在半空，下面留一大片空洞（用户实测）。
+     上面那条「工具栏/底栏 flex:none」的约定与本条是成对的：只有列表参与伸展。
+     内容超出时由它自己滚动（overflow-y:auto + min-height:0），页面不整页滚。 */
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  min-height: 0;
+}
+
+/* 空态 / 加载态：与 .artifactList 同一条契约 —— 同样吃掉剩余高度，
+   这样「没有数据」时底栏也贴底，不会退化成半空页面。内容在剩余空间里居中。 */
+.libraryListState {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.artifactRow {
+  border-bottom: 1px solid color-mix(in srgb, var(--dsw-alias-border-l1) 60%, transparent);
+}
+
+.artifactRow:last-child {
+  border-bottom: none;
+}
+
+.artifactRow[data-expanded] {
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 5%, transparent);
+}
+
+/* 行高 52px = 标题 19 + 元数据 17 + 上下 padding 8（§6.2 的页面预算按它算） */
+.artifactRowHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 52px;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.artifactRowHead:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* 展开按钮：20×20，去掉按钮默认外观 —— 它在行首，是一个「控件」而不是一个动作 */
+.artifactExpand {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.artifactExpand:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 1px;
+}
+
+.artifactMain {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.artifactTitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.artifactName {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifactMeta {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 徽章与动作 flex:none：标题先被压缩（ellipsis），不允许把按钮挤成两行 */
+.artifactBadges,
+.artifactActions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 展开态：完整元数据。缩进对齐标题（20px 展开按钮 + 8px gap + 10px padding）。
+   展开/收回动画：外层 grid-template-rows 0fr→1fr（内容高度未知也能过渡），
+   内层 min-height:0 + overflow:hidden 才能被压扁。
+   **始终挂载**（组件里不再条件渲染）：条件渲染会让收回一侧没有收尾帧，动画播不出来。 */
+.artifactDetailWrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--cm-motion-base) var(--cm-motion-ease-out);
+}
+
+.artifactRow[data-expanded] .artifactDetailWrap {
+  grid-template-rows: 1fr;
+}
+
+.artifactDetailInner {
+  min-height: 0;
+  overflow: hidden;
+  /* 内边距跟着展开态给：常驻会让未展开行多出 12px 空白 */
+  padding: 0 10px 0 38px;
+  transition: padding var(--cm-motion-base) var(--cm-motion-ease-out);
+}
+
+.artifactRow[data-expanded] .artifactDetailInner {
+  padding: 2px 10px 10px 38px;
+}
+
+/* 内容淡入/淡出。透明度不影响布局，但两侧的**延时必须对称**：
+   此前只在展开态写了 transition-delay（收回态没有），于是收回时内容还亮着、
+   高度却在缩 —— 缩到 0 的瞬间内容"啪"地消失，看起来就是**闪一下**。
+   现在：展开 → 内容延后 60ms 淡入（等高度先张开）；收回 → 内容**立刻**淡出（先于高度收合结束）。 */
+.artifactDetailInner > * {
+  opacity: 0;
+  transition: opacity var(--cm-motion-fast) var(--cm-motion-ease-out);
+}
+
+.artifactRow[data-expanded] .artifactDetailInner > * {
+  opacity: 1;
+  transition-delay: 60ms;
+}
+
+/* 收回态：内容立即开始淡出（不设 delay），在高度收合到 0 之前就已不可见 */
+.artifactRow:not([data-expanded]) .artifactDetailInner > * {
+  transition-delay: 0ms;
+}
+
+/* —— 命令面板（⌘K，UI v2 §5.3）——
+   它挂在 Modal（Radix Dialog）里，所以遮罩/focus trap/Esc 都是现成的；这里只管内容排版。 */
+.paletteInput {
+  width: 100%;
+  box-sizing: border-box;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: var(--dsw-specific-input-major);
+  font: inherit;
+  font-size: 13px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.paletteInput:focus-visible {
+  outline: none;
+  border-color: var(--dsw-alias-state-business-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent);
+}
+
+/* 限高内滚：与 planScroll / reportScroll / pickerList 同一条长列表纪律 */
+.paletteList {
+  margin-top: 8px;
+  max-height: 280px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* 分组标题：**只在空查询时出现**（按组浏览）；有查询时是相关度排序的平铺结果，
+   再插分组标题会打乱排序语义。
+   **它必须一眼看出不是可选项**（历史反馈：用户把这些灰标题当成「灰掉了点不动的选项」）：
+   所以比条目更小、更淡、不可选中，且每个非首组先起一条分隔线 —— 标题与条目不再同节奏排列。 */
+.paletteGroup {
+  padding: 8px 8px 4px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--dsw-alias-label-tertiary);
+  user-select: none;
+}
+
+.paletteGroup:not([data-first]) {
+  margin-top: 4px;
+  border-top: 1px solid var(--dsw-alias-border-l1);
+}
+
+.paletteItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+
+.paletteItem[data-active] {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* 不可用的命令仍然列出（灰显）：让用户知道它存在，只是当前上下文用不了 */
+.paletteItem[data-disabled] {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.paletteItemLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.paletteItemGroup {
+  flex: none;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.paletteEmpty {
+  padding: 10px 8px;
+  font-size: 12.5px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.paletteHint {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--dsw-alias-border-l1);
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
 }
 
 /* —— 复选 / 单选行 —— */
@@ -1023,9 +1490,122 @@
   color: var(--dsw-alias-state-error-primary);
 }
 
+/* —— ⓘ 说明原语（common/InfoHint.tsx，2026-10）——
+   分层规则见 DESIGN.md §7「说明性文案分层」：常驻可见的只有校验错误/失败原因、
+   安全与不可逆告警、状态与等待文本、禁用原因 title、空态解释、SectionTitle 副标题；
+   机制 / 边界 / 示例 / 省事提示一律收进这里。
+   气泡**经 createPortal 渲进插件根容器**（= 宿主画布，MODAL_ROOT_ID；
+   **绝不用 document.body** —— 会被宿主 overlay z-index:1000 盖住并连带 body pointer-events 失效），
+   因此不会被 Modal 卡片的常驻 transform 包含块（.dialogContentCenter 的 translate(-50%,-50%)）
+   与 .dialogBody 的 overflow 裁剪；气泡自身仍是 position: fixed（坐标 = 视口坐标，插件根容器无 transform），
+   但夹紧基准是**插件根容器的可见矩形 ∩ 窗口**（不是浏览器视口）：下方空间不足且上方更宽裕时向上翻转。
+   刻意不用原生 title：不可换行、不可定制、无法做边界处理。 */
+.infoHint {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+}
+
+.infoHintBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  font: inherit;
+  line-height: 1;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+  flex: none;
+}
+
+/* hover 必须给出可见 affordance（否则 ⓘ 看起来只是装饰文字） */
+.infoHintBtn:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* 键盘聚焦的焦点环 —— **只在气泡真的打开时**给（2026-10-04 用户反馈：一进弹窗 ⓘ 自己就亮起
+   蓝框，看起来像「图标被选中了」）。为什么要这个条件：Radix 弹窗挂载会把初始焦点派给容器内第一个
+   可聚焦元素（常常正是标题行的 ⓘ），而 Chrome 对这种**程序化**聚焦同样命中 :focus-visible；
+   那条路径下气泡不会打开（见 InfoHint.tsx 的 onFocus）—— 于是焦点环与 data-open 同进同出：
+   键盘用户 Tab 到 ⓘ 时气泡必然同时打开，焦点环照常可见，可访问性不受影响。 */
+.infoHintBtn[data-open]:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 1px;
+}
+
+/* 气泡打开期间按钮保持「激活」观感（悬停 / 聚焦 / 固定三通道统一） */
+.infoHintBtn[data-open] {
+  color: var(--dsw-alias-label-primary);
+}
+
+/* 点击固定后的锁定态（与 .iconBtn[data-active] 同一视觉语言） */
+.infoHintBtn[data-pinned] {
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 14%, transparent);
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.infoHintBubble {
+  position: fixed;
+  /* 高于 Dialog 内容层（.dialogMask 100 / .dialogContentCenter 101），低于通知层（120） */
+  z-index: 110;
+  box-sizing: border-box;
+  max-width: min(260px, calc(100vw - 24px));
+  /* 高度的结构性上限：保证气泡在宿主 564×720 画布内**永远**放得下（480 + 上下 8px 边距 < 720；
+     宿主窗口更小时按 100vh 收缩）。分层规则里的说明文案是 1–3 行短文本，远达不到这个上限，
+     因此不会出现静默截断；它只是把「不出界」变成结构性性质而不是概率性质。 */
+  max-height: min(480px, calc(100vh - 16px));
+  overflow-y: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+  box-shadow: 0 10px 26px color-mix(in srgb, var(--dsw-alias-bg-base) 45%, transparent);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  line-height: 1.5;
+  /* 多行换行：长文本折行、显式换行符保留，绝不省略号截断 */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* 不拦截指针：鼠标移出按钮即触发 mouseleave，气泡不会「粘住」 */
+  pointer-events: none;
+  /* 量测完成前不绘制（避免首帧落在未定位处） */
+  visibility: hidden;
+}
+
+.infoHintBubble[data-ready] {
+  visibility: visible;
+  animation: infoHintIn var(--cm-motion-fast) var(--cm-motion-ease-out);
+  transform-origin: center top;
+}
+
+.infoHintBubble[data-ready][data-side='top'] {
+  transform-origin: center bottom;
+}
+
+@keyframes infoHintIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* 控件 + ⓘ 同一行（弹窗表单：下拉/输入框旁的说明）。
+   ⓘ 一律贴**相关控件**右边，不单独成行；控件按自身收缩宽度（默认 flex: 0 1 auto，长内容可缩），
+   间隙与其它区块行统一 10px。首个使用点：通道配置弹窗的 WebDAV 预设下拉。 */
+.controlRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+
 /* 区块标题（页面内二级标题）。
    下外边距 = DESIGN §5「区块间距统一 10px」：标题块与紧随其后的面板/横幅在**嵌套容器**
-   （卡片、抽屉小节）里此前是 0 间距（面板贴着标题吃进去）；页面主体内该外边距由
+   （卡片、面板小节）里此前是 0 间距（面板贴着标题吃进去）；页面主体内该外边距由
    .viewBody 的 gap 统一接管（见文末「页面主体区块间距」块，那里会把直接子元素的下外边距归零）。 */
 .sectionTitleBlock {
   min-width: 0;
@@ -1612,15 +2192,18 @@
   left: 50%;
   transform: translate(-50%, -50%);
   z-index: 101;
-  /* 弹窗卡片入场（淡入 + 0.97→1 微缩放）。
-     关键：本类的基础样式靠 translate(-50%,-50%) 自居中，动画里**必须把该位移一起写进
-     keyframes** —— 只写 scale 会在动画期间覆盖 transform，弹窗会瞬间跳到左上角。 */
+  /* 弹窗卡片入场：**只淡入，不缩放**。
+     为什么去掉 scale：本类靠 translate(-50%,-50%) 自居中，而 scale 会同时改变内容盒的
+     可见尺寸 → 卡片高度在动画期间变化 → 视觉上「先在偏下的位置出现，再闪到中心」
+     （真机反馈的 20~30px 下移闪烁）。淡入不触碰布局，位置从第一帧就是最终的。
+     注：keyframes 里仍须把 translate 一起写全 —— 只写 opacity 也安全，但保持显式更不容易被误改。 */
   animation: dialogIn var(--cm-motion-base) var(--cm-motion-ease-out);
 }
 
 @keyframes dialogIn {
-  from { opacity: 0; transform: translate(-50%, -50%) scale(0.97); }
-  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  /* 只淡入：任何 transform 变化都会让卡片在动画期间改变可见尺寸与位置（见上条注释） */
+  from { opacity: 0; transform: translate(-50%, -50%); }
+  to { opacity: 1; transform: translate(-50%, -50%); }
 }
 
 /* 关闭退场：Radix Dialog 的 Presence 在 present=false 时**保持节点挂载**并等动画结束
@@ -1807,62 +2390,17 @@
   margin-left: 2px;
 }
 
-/* —— 右侧抽屉（活动/历史） —— */
-.drawerMask {
-  position: fixed;
-  inset: 0;
-  z-index: 90;
-  background: color-mix(in srgb, var(--dsw-alias-bg-base) 35%, transparent);
-}
-
-.drawerPanel {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 91;
-  width: 400px;
-  max-width: calc(100vw - 64px);
-  display: flex;
-  flex-direction: column;
-  border-left: 1px solid var(--dsw-alias-border-l1);
-  background: var(--dsw-alias-bg-layer-2);
-  box-shadow: -12px 0 32px color-mix(in srgb, var(--dsw-alias-bg-base) 35%, transparent);
-  animation: drawerIn var(--cm-motion-base) var(--cm-motion-ease-out);
-}
-
-@keyframes drawerIn {
-  from { transform: translateX(24px); opacity: 0; }
-  to { transform: translateX(0); opacity: 1; }
-}
-
-.drawerHeader {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: none;
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--dsw-alias-border-l1);
-}
-
-.drawerTitle {
-  flex: 1 1 auto;
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--dsw-alias-label-primary);
-}
-
-.drawerBody {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 12px 14px;
-}
+/* v1 的右侧抽屉（.drawerMask/.drawerPanel/.drawerHeader/.drawerTitle/.drawerBody + drawerIn 关键帧）
+   已随 §5.9 整体删除：活动 / 历史 / 关于改由内容区上的 .taskPanel 承载。
+   删它的直接理由是三条 —— ① 它带遮罩却只占画布 71%（564px 里的 400px），
+   遮罩之下那 164px 没有实际价值；② 宽度绑的是**视口**（fixed + 媒体查询 100vw），
+   而插件画布恒为 564px，同一个插件在不同窗口尺寸下是两副样子；
+   ③ 运行中心与迁移历史都是数据表，400px 一直在挤。 */
 /* ------------------------------------------------------------------
-   运行中心（活动抽屉「进行中」段，2026-09）
+   运行中心（task 面板的「进行中」视图，2026-09）
    为什么在这里：运行任务是**跨页面**的 —— 状态栏那句「N 个任务进行中」现在可点
-   （.statusAction），抽屉第三段是面板本体。二者共用同一入口语义，样式也共用一套。
-   长列表纪律：日志尾部限高内滚（runsLogTail），禁止把抽屉撑成整页长条。
+   （.statusAction），task 面板的「进行中」是正文。二者共用同一入口语义，样式也共用一套。
+   长列表纪律：日志尾部限高内滚（runsLogTail），禁止把面板撑成整页长条。
    ------------------------------------------------------------------ */
 .statusAction {
   border: none;
@@ -2325,6 +2863,33 @@
   min-height: 0;
 }
 
+/* —— 磁盘占用卡（固定高度；内部滚动） ——
+ *
+ * 需求（用户实测）：磁盘占用卡必须**高度固定**，且与下方的备份文件卡之间有间距。
+ * 为什么用固定高度而不是「内容自适应」：这张卡的行数是**变量**（分区数量随使用变化），
+ * 自适应会让下方的备份文件列表在每次体检后上下跳动 —— 用户正在看的列表被推走；
+ * 而且卡内已经有「清理与回收」操作区，内容一多就把它挤到折叠线以下（要点两次才看得到按钮）。
+ *
+ * 实现要点：
+ *  ① 卡片本身固定高（--cm-disk-card-h），内部纵向 flex；
+ *  ② **只有明细表滚动**（.planScroll 已有 overflow:auto），头部统计/说明/清理操作区恒在视野内 ——
+ *     滚动区不吞掉操作按钮，这是「固定高度」能成立的前提；
+ *  ③ height / min-height / max-height 三者同值：flex 父容器的默认 `min-height:auto`
+ *     会让固定高度被子元素撑破，只有显式锁死才真正固定；
+ *  ④ 与备份文件卡的间距由 .viewEnter 的 gap 提供（两张卡是兄弟节点）。 */
+.diskUsageCard {
+  height: var(--cm-disk-card-h);
+  min-height: var(--cm-disk-card-h);
+  max-height: var(--cm-disk-card-h);
+}
+
+/* 卡内明细表：占满卡片剩余高度并内部滚动（头部与清理操作区不被挤出视野） */
+.diskUsageScroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+}
+
 .activityHeader {
   display: flex;
   align-items: center;
@@ -2517,15 +3082,21 @@
 .snapshotList {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-bottom: 10px;
+  /* T15：行与行、行与容器之间都要有呼吸感 */
+  gap: 10px;
+  margin-bottom: 12px;
 }
 
 .snapshotRow {
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 8px;
   background: var(--dsw-alias-bg-layer-2);
-  padding: 9px 12px;
+  /* T15：卡片内边距加大 —— 原先 9px 12px 让文字贴着圆角边框（用户反馈「挤在一起」） */
+  padding: 12px 14px;
+  /* T11：名称一行、元信息一行，动作按钮右对齐 —— 长会话名不再挤掉徽章/问题 */
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .snapshotRow[data-selected] {
@@ -2547,6 +3118,68 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* T11：会话体检行的**文字布局**（用户反馈「文字挤成一团」）。
+   名称独占一行（长名可换行、不截断关键信息）；徽章 / 问题码 / 元信息各占固定位置：
+   徽章定宽不挤压、问题码可伸缩（长列表不撑破）、元信息右对齐等宽稳定。 */
+.snapshotRowText {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.snapshotRowName {
+  font-weight: 500;
+  font-size: 12.5px;
+  word-break: break-all;
+  line-height: 1.4;
+}
+
+.snapshotRowMeta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--dsw-alias-text-secondary);
+}
+
+.snapshotRowBadges {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.snapshotRowIssues {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.snapshotRowFacts {
+  flex: 0 0 auto;
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * T15：套了「限高内滚」的会话体检列表。
+ * 该容器自带 1px 描边 + 8px 圆角，若列表直接贴边，第一行/最后一行的卡片会与容器边线粘住
+ * （用户反馈「顶部、左右和底部挤在一起」）。这里给容器补上下 10px、左右 10px 的内边距，
+ * 并去掉列表自身的 margin-bottom（留白由容器负责，避免底部出现双份空白）。
+ * padding-right 额外留 2px 给滚动条，卡片不会压在滚动条上。
+ */
+.snapshotList.reportScroll {
+  padding: 10px 12px 10px 10px;
+  margin-bottom: 0;
+  background: var(--dsw-alias-bg-layer-2);
 }
 
 /* 咨询卡「建议依据」：去重后每条独占一行。
@@ -3137,6 +3770,13 @@
   margin-top: 10px;
 }
 
+/* 下外边距归组件管理：空态提示存在时由它承担，否则由本行承担 —— 但**两者都承担时只有一份**。
+   真机反馈「选择历史快照与自动同步面板之间没有间距」：本行此前只有 margin-top，
+   下方紧贴下一张卡。现在给一个最小底部间距（与页面区块间距 10px 同档）。 */
+.snapshotPickerRow {
+  margin-bottom: 10px;
+}
+
 /* 该行内的字段标签归零底部外边距：.field 自带 margin-bottom:10px，
    会让标签的 margin-box 比 select 低 10px，flex-end 对齐时按钮
    被一并推低 10px（实测 select 底 1042 vs 按钮底 1052）→ 视觉上「不在一条线上」。 */
@@ -3274,6 +3914,40 @@
 .reportList {
   display: flex;
   flex-direction: column;
+}
+
+/* —— 一键同步差异确认：单条待确认项（2026-10）——
+   首行 = 勾选 + 类型 + 级别 + 描述，冲突的解决方式另起一行：此前整条挤在一个 flex 行里，
+   描述被压成窄列、勾选框被撑高的冲突块顶到垂直居中（真机截图）。行间用分隔线替代间距，
+   列表本身已有 .confirmScroll 的边框，避免盒中盒。 */
+.confirmItem {
+  padding: 8px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--dsw-alias-border-l1) 50%, transparent);
+}
+
+.confirmItem:last-child {
+  border-bottom: none;
+}
+
+.confirmItemHead {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* 描述占满剩余宽度并允许换行（长路径 / 长 JSON 不再横向溢出） */
+.confirmItemDesc {
+  flex: 1 1 200px;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--dsw-alias-label-primary);
+  overflow-wrap: anywhere;
+}
+
+/* 紧跟首行的冲突块（.conflictItem 自带边框与内边距）与首行之间的呼吸 */
+.confirmItemHead + .conflictItem {
+  margin-top: 8px;
 }
 
 /* 报告内的结构化分块（总览 / 需要你关注 / 分区明细 / 注意事项）之间的呼吸 */
@@ -3783,7 +4457,7 @@
   min-width: 0;
 }
 
-/* 迁移历史行：元信息（时间 · 结果 · 分区）一行 + 摘要独占一行（窄抽屉里摘要不再与元信息抢宽） */
+/* 迁移历史行：元信息（时间 · 结果 · 分区）一行 + 摘要独占一行（窄面板里摘要不再与元信息抢宽） */
 .historyMeta {
   display: flex;
   align-items: center;
@@ -4021,11 +4695,6 @@ button.profileRowMain:hover {
   .pagePad {
     padding: 10px 12px 12px;
   }
-
-  .drawerPanel {
-    width: 100vw;
-    max-width: 100vw;
-  }
 }
 
 /* ------------------------------------------------------------------
@@ -4044,7 +4713,11 @@ button.profileRowMain:hover {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  flex: 1 1 auto;
+  /* **只许长大、不许被压扁**（flex: 1 0 auto）。为什么 shrink 必须是 0：本页内容超出可用高度时，
+     shrink:1 会让它被压到比内容矮，内容于是**视觉溢出**自己的盒子 —— 溢出的最后一行按钮正好盖住
+     .viewBody 末尾那个 8px 呼吸区（::after），滚动到底时按钮就贴着底部状态栏（用户实测：市场页
+     「上一步 / 下一步」与状态栏零间距）。shrink:0 时盒子始终包住内容，末尾呼吸区照常生效。 */
+  flex: 1 0 auto;
   min-height: 200px;
 }
 
@@ -4083,7 +4756,6 @@ button.profileRowMain:hover {
  * morphicons 的 reducedMotion="user" 处理（在组件上显式指定），CSS 选择器管不到。
  */
 @media (prefers-reduced-motion: reduce) {
-  .drawerPanel,
   .toast,
   .statusDot[data-pulse] {
     animation: none;
@@ -4115,12 +4787,23 @@ button.profileRowMain:hover {
     animation: none;
     transition: none;
   }
+  /* 产物库行的展开/收回：高度过渡 + 内容淡入都是装饰性动效，关掉后仍是瞬时展开，
+      信息（详情内容、是否展开）完全不丢。注意 `grid-template-rows` 也必须一起归位 ——
+      只关 transition 会让「瞬间从 0fr 跳到 1fr」，视觉上仍是瞬时展开，符合预期。 */
+  .artifactDetailWrap,
+  .artifactDetailWrap > * {
+    transition: none;
+  }
   /* 这两条的基础类规则关不掉它们（[data-state='closed'] 特异性更高），必须点名 */
   .dialogMask[data-state='closed'],
   .dialogContentCenter[data-state='closed'] {
     animation: none;
   }
   .restorePlan {
+    animation: none;
+  }
+  /* ⓘ 气泡入场同为装饰性动效：关掉后瞬时出现，说明文本与交互全部不变 */
+  .infoHintBubble {
     animation: none;
   }
   /* 折叠容器：关掉高度过渡（瞬时展开/收起，功能不变）与 visibility 的延迟

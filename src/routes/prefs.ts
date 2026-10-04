@@ -1,5 +1,6 @@
 /**
- * 路由组：插件 UI 提示状态（Star 引导 / 版本更新内容弹窗；复用 ui-prefs.json）。
+ * 路由组：插件自身信息（Star 引导 / 版本更新内容弹窗状态；复用 ui-prefs.json）
+ * 与**版本更新检查**（只读探测 npm registry；见 `core/update-check.ts` 的四条硬边界）。
  *
  * W1（host-entry#F-02/#F-03）：路由只在这里声明一次 —— endpoint({ path, methods }, handler) 的
  * path/methods 就是唯一声明处；围栏、方法判定与顶层异常处理由 src/routes/kit.ts 在注册点统一提供。
@@ -10,11 +11,15 @@ import type { WebRoute } from './kit.ts'
 import type { RoutesEnv } from './context.ts'
 import { PLUGIN_VERSION, STAR_PROMPT_REPO_URL } from '../index.ts'
 import { readUiPrefs, updateUiPrefs } from '../sync/ui-prefs.ts'
+import { UpdateChecker, wantsForcedUpdateCheck } from '../core/update-check.ts'
 
 export function prefsRoutes(env: RoutesEnv): WebRoute[] {
   const {
     syncDir,
   } = env
+  // 版本更新检查器：每进程一个（进程内缓存 10 分钟；用户点「重新检查」走 ?force=1）。
+  // 网络失败/超时/响应畸形一律结构化回传（ok:false + 原因），绝不「失败当最新」。
+  const updateChecker = new UpdateChecker(PLUGIN_VERSION)
   return [
     // ------------------------------------------------------ star-prompt
     // m-star-prompt：Star 引导弹窗状态（复用 ui-prefs.json；随 self 分区进备份）。
@@ -97,6 +102,31 @@ export function prefsRoutes(env: RoutesEnv): WebRoute[] {
           dismissed: next.releaseNotesDismissed === true,
         })
       } catch (error) {
+        writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+      }
+    }),
+    // ------------------------------------------------------ update-check
+    // 只读探测 npm 上的 latest（GET；无写操作、无凭据、不自动安装）。
+    // 响应：成功 { ok:true, current, latest, updateAvailable, checkedAt, cached }；
+    //       失败 { ok:false, current, error }（HTTP 仍为 200 —— 离线/registry 不可达不是插件故障，
+    //       界面据 error 显示可重试的提示，不弹「插件出错」）。
+    // ?force=1 绕过进程内缓存（用户显式点「重新检查」）。
+    endpoint({ path: '/api/dsh-config-manager/update-check', methods: ['GET'] }, async (req, res) => {
+      const force = wantsForcedUpdateCheck(req.url)
+      try {
+        const result = await updateChecker.check({ force })
+        writeJson(res, 200, result.ok
+          ? {
+              ok: true,
+              current: result.info.current,
+              latest: result.info.latest,
+              updateAvailable: result.info.updateAvailable,
+              checkedAt: result.info.checkedAt,
+              cached: result.cached,
+            }
+          : result)
+      } catch (error) {
+        // update-check 内部已把全部异常收成结构化结果；这里只是最后一道兜底（与全仓路由同形）。
         writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
       }
     }),

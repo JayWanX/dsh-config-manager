@@ -1,8 +1,3 @@
-# AGENTS.md — DSH Config Manager 仓库协作指南
-
-> 完整架构/测试矩阵/限制见 `DEVELOPERS.md`；用户文档见 `README.md`；UI 唯一权威见 `DESIGN.md`。
-> 本文只写改动前必知的隐性约定与坑。
-
 ## 🌐 语言
 与用户交流一律中文；代码注释/commit/文档以中文为主，技术术语可保留英文。
 
@@ -13,6 +8,9 @@
 
 ## 🗂️ 结构与分层
 ```
+src/cli/       离线 CLI（bin: `dsh-config-manager` / **`dcm`**）：snapshots/restore/reinstall/verify/backup/sessions/**web**
+               actions.ts = **动作层**（只读判定 + 写动作；CLI 与救急台网页共用同一实现，返回结构不打印）
+               web/ = 离线救急台（node:http + 复用 routes/kit.ts 的围栏/方法白名单/错误映射；页面服务端直出）
 src/index.ts   host 入口(name='config-manager'，apply() 装配 + 保留的 8 条路由)；路由表与 kit 见下行
 src/routes/    路由 kit(单入口 endpoint()：loopback 围栏 + 方法白名单 + readJsonBody/requireJsonObject + 统一错误映射
                + 顶层 try/catch) 与按域拆分的组文件(import/snapshots/profiles/backup/consult/sync/prefs/market/me/
@@ -59,6 +57,12 @@ tests/ 集成测试(node --test)；docs/README.md 文档索引；docs/design/ �
   - 回归护栏：`src/security/security.test.ts`「归档携带的凭据必须全部进计划并写回」（6 类分支：未被引用的 ref / 本机已有仍写回 / 无值未配置要补录 / 无值已配置 → Skip）、`src/adapters/roundtrip.test.ts`（普通备份 + 本机已配置 → Skip）、`src/sync/sync-credentials.test.ts`（有值一律进计划且写回 + 无载荷快照不含 credentialsStatus 的说明）、`src/ui/import-wizard.test.ts`（计划期同样带解密密码）；`tests/core/rollback.test.ts` 的 E-02（凭据不可回滚 → 部分回滚）改为在**计划生成之后**才让目标机拥有旧凭据。
 - **一键同步差异确认的批量按钮覆盖「全部确认项」**（`sync-view.isBulkDecidable`）：`keepLocalAll`/`useRemoteAll` 作用于确认列表里的每一项（Conflict 项连带给 resolution），**只排除 Error**（硬失败项被采用后必记 failed，不能由批量按钮代裁）。此前批量只认 Conflict → 含 N 条凭据迁移项（`缺密钥`）时按钮恒灰、只能逐条勾（用户报告）。
 - **日志全程脱敏**：`redactValue` 掩码敏感值；UI 渲染前所有错误/报告再过 `redact()`（`ErrorBanner.tsx`/`ReportView.tsx`）。
+- **磁盘占用体检与手动清理的硬边界**（m-disk-usage，2026-09）：备份页的「磁盘占用」卡走 `GET /disk-usage`（**只读**：`src/core/disk-usage.ts` 递归统计、不跟随符号链接/junction、读不到的子区标 `unreadable` 而不是 0）
+  与 `POST /disk-usage/cleanup`（写操作，过 mutation gate）。四条不得放宽：① **候选集只有可重建区**（`tmp` / `market/cache` / `market/work`）**与显式勾选的过期导出产物**；
+  `snapshots`（导入前快照）与 `sync`（同步配置/历史/Git 工作副本）**永远进不了候选集**；② 请求里的 `categories` 是**分区白名单**（`cleanupCaches` 的 `sections`）——
+  用户没勾 `expired-exports` 时**一个导出文件都不碰**（即使有过期项；此前 `includeRecent` 只影响可重建区，但导出区仍按保留期回收 = 界面说「只清缓存」却删了备份，已由 `tests/route/disk-usage-routes.test.ts` 钉住）；
+  ③ 手动清理对可重建区忽略保留期（`includeRecent: true`，与自动清理的保留期语义并存但分开），导出产物**永远只按保留期**，绝不「立即清空」；
+  ④ 界面数字（合计/可回收/按钮）一律由**渲染出的行现算**（`src/ui/disk-usage-view.ts`），不用接口聚合字段 —— 避免「按钮说能释放 600 B、实际 0」。
 - **ZIP 视为不可信**：条目数上限、checksum、Zip Slip 拒绝（`src/security/zip-security.ts`）。
 - **导入前强制快照**（可回滚）、Dry Run 零写入、冲突不默认覆盖。
 - **加密备份 / 导出**：密码仅内存传入，不落盘/不落日志；解密明文 ZIP 为临时文件用完即清。
@@ -75,9 +79,9 @@ tests/ 集成测试(node --test)；docs/README.md 文档索引；docs/design/ �
 
 ## 🏗️ 架构心智
 - 双面插件：host `src/index.ts`（Cordis `name='config-manager'`，`/api/dsh-config-manager/*`）+ web `src/client/`（React，settings.section，经 api 调 host）。
-- **宿主路由只经 `src/routes/kit.ts` 的 `endpoint()` 声明**（W1，host-entry#F-02/F-03/F-05）：围栏（loopback + 同源）与方法白名单由 kit 在**注册点**统一包装（`registerRoutes()` 兜底断言「未经 kit 的路由直接抛错」），**禁止**再写逐路由的 `guard`/裸 `isLoopbackRequest` 样板；新增一条 API 只改一处（组文件里那一条 `endpoint({ path, methods }, handler)`）。路由源 = `src/index.ts`（被源码级窗口守卫钉住的 8 条）+ `src/routes/*.ts`（61 条）——**源码级守卫必须扫全部路由源**（见 `tests/route/route-fence.test.ts`、`route-parity.test.ts`、`route-channel-guard.test.ts`），只扫 index.ts 会静默失去覆盖。
+- **宿主路由只经 `src/routes/kit.ts` 的 `endpoint()` 声明**（W1，host-entry#F-02/F-03/F-05）：围栏（loopback + 同源）与方法白名单由 kit 在**注册点**统一包装（`registerRoutes()` 兜底断言「未经 kit 的路由直接抛错」），**禁止**再写逐路由的 `guard`/裸 `isLoopbackRequest` 样板；新增一条 API 只改一处（组文件里那一条 `endpoint({ path, methods }, handler)`）。路由源 = `src/index.ts`（被源码级窗口守卫钉住的 8 条）+ `src/routes/*.ts`（其余，合计 **73** 条，见 parity 快照）——**源码级守卫必须扫全部路由源**（见 `tests/route/route-fence.test.ts`、`route-parity.test.ts`、`route-channel-guard.test.ts`），只扫 index.ts 会静默失去覆盖。
 - **宿主路由只能经 `src/routes/kit.ts` 的 `registerRoutes()` 注册**（W1，约定级防线）：全仓唯一调用点是 `src/index.ts`（也是唯一 webServer 消费点），它逐条断言路由出自 `endpoint()`；**绕过它直接 `webServer.register(...)` 的旁路当前不存在，但未来新增第二个注册点会静默失去围栏覆盖**（route-fence 只覆盖现有注册路径）。新增注册路径时必须同时接上 `registerRoutes`，或补一条同等的结构守卫。
-- **插件 HTTP API 的真实认证边界 = kit 的围栏，不是 DSH 的 cookie**（W2 真机 E2E 实测 + DSH 源码读码确证；线上证据 `outputs/e2e-w2/`）：DSH 的 browser-session cookie 拒绝只挂在 **`kind:'prefix'`、`path:'/api'` 的 RPC 承载路由**上（`@deepseek-ai/dsh-client-connection/lib/index.js` 的 `requestRejection()` L553-556 = Host/Origin 403 + browserAuth 401，只被 `register()` L605-618 的 prefix 路由调用），而 host-webserver 的派发顺序是 **exact 表先命中**（`@deepseek-ai/dsh-host-webserver/lib/index.js` 的 `match()` L321-331：先查 exact 表，未命中才按 prefix 最长匹配）。本插件 68 条路由（口径 = `tests/route/route-parity.test.ts` 的快照清单；其中 `recovery` 为插件私有前缀）都命中 exact 或更长的私有 prefix，**永不进入** DSH 的 `/api` 认证路由——实测**无 cookie** 的 `GET /api/dsh-config-manager/status` 返回 **200 + 完整 JSON**，而 DSH 自己的 `GET /api/<未认领路径>` 与 `GET /` 无 cookie 均 **401**（认证确实存在，只是不覆盖插件 exact 路由）。**影响面**：本机任意非浏览器进程（含本机其它本地用户）**无 token/cookie 即可调用全部 68 条路由**，含破坏性路由（`/profiles/delete`、`/execute`、`/sync/rollback`、`/snapshots/delete`、`/recovery/**` 等）；**远程/LAN 来源**被 kit 的 `remoteAddress ∈ {127.0.0.1, ::1, ::ffff:127.0.0.1}` 判定挡掉，**浏览器跨站 CSRF** 被同源/Host 围栏挡掉（实测跨站 Origin 403、同源对照 200）——**围栏确实在生效，不得把这条写成「插件 API 无认证」**。两个不得误解的推论：① **不得把 DSH 会话认证当作插件 API 的兜底**——认证挂在通用 prefix 路由 `/api` 上 + exact 优先的派发顺序是**平台级性质**，任何在 `/api` 下注册 exact 路由的 DSH 插件同理；插件 API 的边界只能是 kit 的 `endpoint()` 围栏。② 若将来要在**共享机器**或**经本机代理/隧道转发**（非回环来源、`trustedHosts`/LAN 绑定）的场景暴露插件 API，**必须**在 kit 里自行对接认证（方向：在 `endpoint()` 注册点统一加一道校验，勿逐路由散写），届时应重新评级本条的残余风险。**复核路径**：读上述两处 DSH 源码（安装位置 `.../node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/{dsh-host-webserver,dsh-client-connection}/lib/index.js`）；线上复核 `powershell -NoProfile -File outputs/e2e-w2/run-e2e.ps1 -Strict`（本机无 pwsh 7，脚本支持 5.1；探针 `outputs/e2e-w2/probe.mjs`，原始打点与结论见 `outputs/e2e-w2/FINDINGS.md` §4 / §6 D1）。
+- **插件 HTTP API 的真实认证边界 = kit 的围栏，不是 DSH 的 cookie**（W2 真机 E2E 实测 + DSH 源码读码确证；线上证据 `outputs/e2e-w2/`）：DSH 的 browser-session cookie 拒绝只挂在 **`kind:'prefix'`、`path:'/api'` 的 RPC 承载路由**上（`@deepseek-ai/dsh-client-connection/lib/index.js` 的 `requestRejection()` L553-556 = Host/Origin 403 + browserAuth 401，只被 `register()` L605-618 的 prefix 路由调用），而 host-webserver 的派发顺序是 **exact 表先命中**（`@deepseek-ai/dsh-host-webserver/lib/index.js` 的 `match()` L321-331：先查 exact 表，未命中才按 prefix 最长匹配）。本插件 73 条路由（口径 = `tests/route/route-parity.test.ts` 的快照清单；其中 `recovery` 为插件私有前缀）都命中 exact 或更长的私有 prefix，**永不进入** DSH 的 `/api` 认证路由——实测**无 cookie** 的 `GET /api/dsh-config-manager/status` 返回 **200 + 完整 JSON**，而 DSH 自己的 `GET /api/<未认领路径>` 与 `GET /` 无 cookie 均 **401**（认证确实存在，只是不覆盖插件 exact 路由）。**影响面**：本机任意非浏览器进程（含本机其它本地用户）**无 token/cookie 即可调用全部 73 条路由**，含破坏性路由（`/profiles/delete`、`/execute`、`/sync/rollback`、`/snapshots/delete`、`/recovery/**` 等）；**远程/LAN 来源**被 kit 的 `remoteAddress ∈ {127.0.0.1, ::1, ::ffff:127.0.0.1}` 判定挡掉，**浏览器跨站 CSRF** 被同源/Host 围栏挡掉（实测跨站 Origin 403、同源对照 200）——**围栏确实在生效，不得把这条写成「插件 API 无认证」**。两个不得误解的推论：① **不得把 DSH 会话认证当作插件 API 的兜底**——认证挂在通用 prefix 路由 `/api` 上 + exact 优先的派发顺序是**平台级性质**，任何在 `/api` 下注册 exact 路由的 DSH 插件同理；插件 API 的边界只能是 kit 的 `endpoint()` 围栏。② 若将来要在**共享机器**或**经本机代理/隧道转发**（非回环来源、`trustedHosts`/LAN 绑定）的场景暴露插件 API，**必须**在 kit 里自行对接认证（方向：在 `endpoint()` 注册点统一加一道校验，勿逐路由散写），届时应重新评级本条的残余风险。**复核路径**：读上述两处 DSH 源码（安装位置 `.../node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/{dsh-host-webserver,dsh-client-connection}/lib/index.js`）；线上复核 `powershell -NoProfile -File outputs/e2e-w2/run-e2e.ps1 -Strict`（本机无 pwsh 7，脚本支持 5.1；探针 `outputs/e2e-w2/probe.mjs`，原始打点与结论见 `outputs/e2e-w2/FINDINGS.md` §4 / §6 D1）。
 - `src/core/` 与 DSH 解耦：`ConfigAdapter`/`HostContext`+内存 mock；**新功能优先加 core，适配器/UI 薄壳**。
 - 13 adapter 见结构；`self`=插件自身配置（`$DSH_HOME/dsh-config-manager/` 下 `sync-*.json`/`market-config.json`/`ui-prefs.json` 白名单收，portable 默认包含；`dataDir` 在 `~/.dsh` 外不挂载）。
 - 同步：`SyncEngine`+`Git/WebDavTransport`+`AutoSyncScheduler`(事件驱动,远端新快照才拉/本地改动才推)+`sync-selection`；**autosync 与 sync-selection 按通道(git/webdav)独立**(schema v2，v1→git)，调度器双通道各自排期。
@@ -85,9 +89,17 @@ tests/ 集成测试(node --test)；docs/README.md 文档索引；docs/design/ �
 - 设计决策看 `docs/design/`（上游依据，实现规格在下游）。
 - **对外契约看 `docs/spec/`**：与 `docs/design/` 性质不同——`design/` 是**上游设计依据**（写给本仓库），`spec/` 是**对外契约**（写给第三方实现者，应能在不读 `src/` 的前提下据此实现兼容的 exporter/importer）。含：`bundle-format-v1.md`（格式规格）、`bundle-manifest.schema.json`（机器可校验）、`compat-matrix.md`（DSH 兼容区间与升级风险）、`headless-consumption.md`（无 UI 栈消费引擎）、`sync-channel-v1.md`（**同步通道**快照格式：远端布局 / 内容寻址外置 / 删除墓碑）、`known-gaps.md`（已知缺口登记）。**改格式行为必须同步 `spec/`，并重跑 `tests/conformance/`。**
 - **client bundle 自包含护栏**：`src/utils/bundle-scan.ts`（零依赖扫描内核，**多趟并集**避免注释内反引号导致的状态失衡假阴性）+ `src/client/bundle-selfcontained.test.ts`（产物护栏，白名单仅 react/react-dom/react-dom/client/react/jsx-runtime）。**必须 Build 之后单独跑**——`npm test` 在 Build 前执行，此时 `lib/client.js` 不存在，测试会跳过；故 `ci.yml`/`publish.yml` 各有一独立步骤。注释里的同名字符串会造成假阳性（本仓库实测过）。
-- **只读预览与导出必须同口径**（2026-09）：`/export-preview` 走 `ConfigAdapter.preview?()`（文件类分区由 `FileCollectionAdapter` 实现），它只把「读文件内容 + SHA-256」换成 `ctx.fs.statSize`，**单元分组 / 条目白名单 / 单分区字节闸门 / 告警生成逐字共用**同一个内核（`file-collection.ts` 的 `collect(ctx, options, mode)`）。为什么必须共用：预览是用户勾选的唯一依据，一旦与真实导出分叉，用户会按预览勾选却拿到别的包（`file-collection.test.ts` 断言两者逐项相等）。**`preview()` 产出的 `FilesSection` 是无内容形态**（`data` 长度 0 / `contentHash` 空串），只在内存里流转，**不得**交给 exporter/importer/快照。实测收益：本机会话树 941 个文件 / 528 MB，预览从 2271 ms / RSS +306 MiB 降到 ~0.4 s / 近零常驻。
+- **只读预览与导出必须同口径**（2026-09）：`/export-preview` 走 `ConfigAdapter.preview?()`（文件类分区由 `FileCollectionAdapter` 实现），它只把「读文件内容 + SHA-256」换成 `ctx.fs.statSize`，**单元分组 / 条目白名单 / 单分区字节闸门 / 告警生成逐字共用**同一个内核（`file-collection.ts` 的 `collect(ctx, options, mode)`）。为什么必须共用：预览是用户勾选的唯一依据，一旦与真实导出分叉，用户会按预览勾选却拿到别的包（`file-collection.test.ts` 断言两者逐项相等）。**`preview()` 产出的 `FilesSection` 是无内容形态**（`data` 长度 0 / `contentHash` 空串），只在内存里流转，**不得**交给 exporter/importer/快照；**收集面靠覆写 `export()` 收窄的分区必须改成覆写 `listRelPaths()`**（覆写 `export()` 不参与预览，否则预览落到基类目录递归：真机 agentInstructions 4.8 s／4016 文件；self 2460 文件／11.44 MB，而真实导出 1936 B）。实测收益：本机会话树 941 个文件 / 528 MB，预览从 2271 ms / RSS +306 MiB 降到 ~0.4 s / 近零常驻。
 - **已验证归档跨请求缓存**（`src/core/analyzer.ts` 的 `verifiedBundles`，2026-09）：宿主 `makeImporter()` **每请求新建** Importer/Analyzer，实例级 `bundleCache` 跨请求恒不命中，于是 analyze→plan→execute（每改一次决策还会再 plan）会把同一个 ZIP 读入 + 全量解压 + 逐条 SHA-256 校验 3~4 次。三条硬边界：① 缓存键 = **路径 + 文件大小 + mtimeMs**（stat 失败即不缓存）；② **只有只读入口**（`analyzeImport` / `createImportPlan`）读它，`executeImportPlan` 一律 `refresh` —— 每次都重新读盘 + 重新校验，关掉「校验后、写盘前被换掉」的 TOCTOU 窗口（`src/core/analyzer-cache.test.ts` 用「plan 后篡改归档 → execute 必须被完整性校验拦下」钉住）；③ 只缓存 ≤ 64 MiB 的归档，条目上限 2 + TTL 120 s。配套：逐条完整性校验改走 `ZipArchive.readEntryAsync`（`inflateRaw` 走 libuv 线程池），不再用 `inflateRawSync` 阻塞事件循环（实测 29 MiB 归档全量同步解压阻塞 108 ms）。
 - **`readSessionMeta` 有 mtime 失效的进程内缓存**（1.57 MB 的 `storages/session_projcache.json` 每次预览/每次 `/plan` 都要解析，实测 7.3 ms）：键 = homeDir + 两个 storage 文件的 mtime，**任一读不到 mtime 就不缓存**（宁可多读，不可拿陈旧索引猜会话归属）；测试用 `clearSessionMetaCache()` 隔离。
+- **插件版本更新检查（m-update-check，2026-09）**：`GET /api/dsh-config-manager/update-check`（`src/routes/prefs.ts`）→
+  `core/update-check.ts` 的 `UpdateChecker` **只读**探测 npm latest：**绝不自动安装**；进程内缓存 10 分钟
+  （`?force=1` 才绕过）；失败（网络/超时/非 2xx/畸形/超限）一律 `ok:false` + 原因且 **HTTP 仍 200**（离线不是插件故障）；
+  `desktop`/未知档案不给终端命令。详见 `DEVELOPERS.md`。
+- **兼容性评分必须能解释自己（2026-09）**：`validator.compatibilityReasons()` 是**单一事实源**（`computeCompatibility` 由它派生），
+  `ImportAnalysis` 回传 `compatibilityReasons` + `source`/`target`（可选字段）。两条不得放宽：**评分口径已冻结**
+  （`sourceOlder` 仍覆盖跨平台 `partial`，改它要单独决策）；界面只做「原因 → 字典键」映射，**禁止渲染裸枚举**。
+  详见 `DEVELOPERS.md`。
 - DI 走 Cordis fiber：client 经 `ctx.slots.inject('settings.section')`+`inject:()=>({api,syncApi,...})`；host 可选服务 `ctx.get()` 惰取。
 
 ## 🛠️ 开发规范
@@ -125,6 +137,10 @@ npm run smoke                    # 仅 core 冒烟
 npm run bundle                   # 仅重建 client bundle
 ```
 - 无 lint/format 脚本，只以 typecheck 兜底（历史 `eslint-disable` 是遗留）。
+- **CI 是平台矩阵**（2026-09）：`.github/workflows/ci.yml` 的 `verify` 在 **ubuntu + windows + macOS** 跑同一套阶梯
+  （`fail-fast: false`；pack 步骤显式 `shell: bash` —— PowerShell 的 `mkdir` 没有 `-p`）——全仓 32 处
+  非测试 `process.platform` 分支此前只被 ubuntu 覆盖。**macOS 是观察期**（`experimental: true` +
+  job 级 `continue-on-error`）：连续 1~2 次绿灯后删掉那一行即变硬门禁（不做长期「允许失败」）。详见 `DEVELOPERS.md`。
 - **`tests/**` 的类型检查是独立一条命令**（`tsconfig.tests.json`）：根 config 只 include `src/**`，历史上 228 个测试文件长期在类型检查之外（实测曾积压 43 条错误，已修完并接进 CI）。改动测试后请跑 `npm run typecheck:tests`。
 - CSS Modules 由 tsdown+lightningcss 编译为内联注入，单文件 `lib/client.js` 自带样式；**新增样式只能在 `config-manager.module.css`**。
 
@@ -227,6 +243,32 @@ UI 自查：DESIGN.md 一致(token/组件/spacing/radius/状态语义)、响应�
   真机复核脚本：`outputs/profile-copy-verify/verify.mjs`（拷 cmtest → 数链接重指向 → 删探针副本）。
 - **pnpm 发布年龄**：`@latest` 装旧版是 pnpm 11 `minimumReleaseAge`（<30天被排除）；解决：精确版本装一次白名单，或 `pnpm-workspace.yaml` 设 `minimumReleaseAge: 0`。
 - **MemFs 测试**：内存 fs key 与宿主 path 解耦（win32 home 注入 cwd）。
+- **通配删除源文件之前，必须先确认目标里没有「未跟踪但在用」的文件**（2026-10-03 实测事故：
+  `Remove-Item src/client/snapshots/*.tsx` 一次删掉了三个仍在使用的组件，其中
+  `DiskUsageCard.tsx` / `BackupScheduleCard.tsx` 在 git 里**从未被跟踪**（一直是 `??`）
+  —— 它们在更早的会话里创建后就没提交过，所以**没有可 `git show` 的版本**，只能从
+  `lib/client.js` 的**编译产物**逐段翻译还原（JSX→jsx()、CSS Modules→对象、类型全丢）。
+  铁律：① 删任何源文件前先跑 `git status --porcelain <路径>`，**看到 `??` 就必须停下**，
+  逐个确认它是不是活代码；② 存活时间长的组件应尽早提交，别让「工作区里有、git 里没有」
+  变成常态；③ 真要整目录清理，先 `git add -A <目录>` 把它纳管，再删——至少留得住。
+  **为什么编译产物救得回来**：`lib/client.js` 是自包含单文件，每个组件连同文件头注释都在里面，
+  按 `function <Name>(` 定位、前后取 `/**` 与 `//#endregion` 就能切出完整实现；
+  还原后必须逐项核对**文案键与 CSS 类**（脚本比对 `t("...")" 与 `css.xxx`）才算数。
+  **绝对不要**用「看起来对」的重写冒充原文件——还原版要在文件头注明是还原的。
+- **绝不要用 `git checkout -- <文件>` 回滚这个仓库的工作区文件**（2026-10-03 实测事故，比通配删除更隐蔽）：
+  为了撤销一次过度剪枝，我对四本字典跑了 `git checkout --`，它们的**工作区版本比 HEAD 新得多**
+  —— 本仓库长期有大量**未提交**改动，回滚一个文件 = 抹掉此前所有会话的在途工作。
+  `npm run typecheck` 从 0 个错误变成 **170 个**，其中 130 个是「字典键凭空消失」。
+  铁律：① 回滚任何文件前，先 `git diff --stat HEAD -- <文件>` 看清**差异是不是自己造成的**；
+  ② 要撤销自己的改动，用**针对性的 edit 反向操作**，不要用 git 的整文件回滚；
+  ③ 真要整文件回滚，先把当前版本 `cp` 到 `.tmp/` 备份。
+  **怎么救回来（可复用）**：`lib/client.js` 是**回滚前构建产物的快照**，字典整本内联在其中
+  （`"key": "值"`）。写脚本按「tsc 报错点名的键 → 正则回捞 zh/en 值 → 注入字典」逐轮迭代，
+  直到 tsc 不再报新键为止——130 个键两轮补完，且**值逐字与回滚前一致**（抽样比对通过）。
+  三个必须注意的坑：① 编译产物里的转义是 `\\"` 形态，注入时要还原；② 值里含单引号
+  （如 "DSH's plugin page"）必须转义，否则整行语法崩；③ `PaletteTitleKey` /
+  `CompatibilityNoteKey` 这类**联合类型**的键不会被 tsc 的报错文本点名（只报类型名），
+  必须**去类型定义处逐个抄**——只靠报错文本会永远修不完。
 - **Windows LF→CRLF 警告**：无害噪音。
 - 根目录勿提交：`lib/dist/node_modules/outputs/my-video/.vibeskills/.agent-teams` 均已 gitignore。
 - `dist/` 需先创建再 `npm pack --pack-destination ./dist`（fresh checkout 否则 ENOENT）。
@@ -235,7 +277,7 @@ UI 自查：DESIGN.md 一致(token/组件/spacing/radius/状态语义)、响应�
 - **style 属性只允许极小修补**（如 MarketPanel `paddingTop:4`），常规布局用 CSS 类。
 - **文件类分区收集一律走 `utils/recursive-walk.ts`**：`readdir` 对目录 junction/符号链接返回 `isSymbolicLink()===true`（`isDirectory()` 为 false），自己写 `if (isDirectory())` 分支会**静默丢掉整块内容**且备份仍报成功（issue #37 实测丢 12 MB）。新文件类 adapter 用 `adapters/link-report.ts` 的 `listFilesDetailed` + `linkWarnings`，别直接调 `ctx.fs.listRecursive`。
 - **`pnpmWorkspace` 与 `plugins.patchFiles` 必须同进同出**（issue #35）：只搬 `pnpm-workspace.yaml` 文本会让目标机 pnpm 拒绝**一切** `add`（`Failed to read patch file`）。导入端写入前必须剔除目标机无法满足的 `patchedDependencies` 条目（`adapters/pnpm-workspace.ts`），并让剔除在计划里可见；市场通道对 `patchFiles` 与 `localTarballs` 同级双端拒收。
-- **会话日志的字节改写只允许在宿主侧**（issue #45）：DSH 会话日志（`session*.jsonl.zstd`）是**拼接的多帧 zstd 容器**，改写 cwd 必须只换第 1 帧 + 尾部**流式**拷贝 + 发布前自检（长度 / 首帧 cwd / 尾部抽查），且 **Windows 上 rename 覆盖前必须关闭读句柄**（否则 EPERM，实测踩过）。`src/utils/zstd-frame.ts` 是纯字节帧工具；`src/utils/session-log.ts`（首帧 cwd 读取 / 多 generation 改写 / 发布前自检 / 失败回滚）是**宿主适配器与 CLI 的唯一实现**——core 禁止 import（不得把 DSH 存储格式带进引擎）。改写后尽力刷新注册表索引（`reindexSessionHeader`，d.ts 标 private、已能力探测；不要用会清空 sessionPaths 的 replaceHeaderIndex），刷新不了就如实汇报、绝不谎报。**头等硬约束（实测）**：DSH 启动时校验「日志位置 == `projectKey(header.cwd)/id`」，位置与 header 不一致会让 `dsh web` 直接报 `corrupt session log ... header id ... and cwd identify ...`（同一 id 出现在两个 projectKey 目录则报 `duplicate JSONL session id ... in multiple project directories`）——所以**改写 header 必须连目录一起归位**，搬不动就回滚改写，绝不留半套。
+- **会话日志的字节改写只允许在宿主侧**（issue #45）：DSH 会话日志（`session*.jsonl.zstd`）是**拼接的多帧 zstd 容器**，改写 cwd 必须只换第 1 帧 + 尾部**流式**拷贝 + 发布前自检（长度 / 首帧 cwd / 尾部抽查），且 **Windows 上 rename 覆盖前必须关闭读句柄**（否则 EPERM，实测踩过）。`src/utils/zstd-frame.ts` 是纯字节帧工具；`src/utils/session-log.ts`（首帧 cwd 读取 / 多 generation 改写 / 发布前自检 / 失败回滚）是**宿主适配器与 CLI 的唯一实现**——core 禁止 import（不得把 DSH 存储格式带进引擎）。改写后尽力刷新注册表索引（`reindexSessionHeader`，d.ts 标 private、已能力探测；不要用会清空 sessionPaths 的 replaceHeaderIndex），刷新不了就如实汇报、绝不谎报。**头等硬约束（实测）**：DSH 启动时校验「日志位置 == `projectKey(header.cwd)/id`」，位置与 header 不一致会让 `dsh web` 直接报 `corrupt session log ... header id ... and cwd identify ...`（同一 id 出现在两个 projectKey 目录则报 `duplicate JSONL session id ... in multiple project directories`）——所以**改写 header 必须连目录一起归位**，搬不动就回滚改写，绝不留半套。**应用内修复（T8，2026-10）**：`utils/session-repair-service.ts` + `POST /recovery/sessions/{repair,rollback}`（recovery prefix 内子路径，**不新增注册路由条目**）只做**能从字节证明的修复**（重放重复行 / 可证明的合成收尾块 = 零损失；seq 空洞 / 不可解析行的截断 = **有损，需显式 allowLossy**）：三道写入门（unitId 只能解析到会话根内 / 无 `session.lock` / 文件不在 30s 静止期内）+ 预览-应用指纹一致（TOCTOU）+ SAFE MODE 与 mutation lock + 写前自校验 / 时间戳备份 / 原子换入 / 写后复验；**回滚只认台账 `repairId`**（`<dataDir>/session-repairs.json`，客户端不传路径）。其余损坏类别仍只给离线命令。**一键修复全部（T11）**必须逐条独立（一条被拒不牵连其余）、**有损不批量**（lossy 计划跳过并计入被拒）、结果如实计数；列表默认只显示「需要处理」的行，被隐藏的正常会话数必须在界面上说明（绝不静默少显示）。不要因为「有了按钮」就放宽这几道门。
 - **本插件是 bundle 包，隔离实例里挂载必须进 `dsh.profile.bundles`**（E2E 实测）：包的 `package.json` 有 `dsh.bundle.patch`，DSH 只会把它作为 bundle 组合进 profile 树；只往 profile 的 `cordis.patch.yml` 写 `{id, name}` 激活行是**非 bundle 包**的做法，插件不会挂载（表现为宿主路由 404、启动日志无报错）。隔离 E2E 配方：`$env:DSH_HOME=<临时 home>` → `dsh --profile cmtest --from-default-profile web --dump-config` → `profiles/cmtest/node_modules/dsh-config-manager` 用 **Junction** 指向本仓库（免 pnpm 联网）→ 把 `dsh-config-manager` 加进 `dsh.profile.bundles` → `dsh --profile cmtest --port 3099 --no-open`。**抓 cookie 只对 DSH 自身路由有意义**（`/` 与 DSH 的 `/api` 承载路由；插件 exact 路由无 cookie 同样可达，见「安全不变量 / 架构心智」的认证边界条）：先 `curl.exe -c jar "http://127.0.0.1:3099/?token=<token>"`（token 取自启动输出），再 `-b jar` 调那些路由；POST 体用 `--data-binary @<file>`（PowerShell 传 `-d '{"x":1}'` 会丢引号 → 路由报 `invalid JSON body`）。脚本留存于 `outputs/e2e-45/`。
 - **文件集合分区永不参与导入期前缀映射**（issue #45）：`ConfigAdapter.fileCollection`（`FileCollectionAdapter` 置 true）标记的分区（sessions / pluginFiles / skills …）里，`relativePath` 是**身份**不是配置 —— 前缀映射一旦命中它的首段（`--projectKey--`），文件就会落到 `projectKeyOf(首帧 cwd)` 之外，目标机**下次启动直接失败**；`analyzer.applyMappingsToSections` 已按该标记整段跳过（`src/core/analyzer-mapping.test.ts` 钉住）。会话侧走**专用通道**：`SessionsAdapter.finalizeApply` 在整个分区写完后逐会话把 `ctx.pathMappings` 应用到**首帧 cwd**（`rewriteLogDir` 只换第 1 帧）再归位到 `projectKeyOf(映射后 cwd)`，搬不动就回滚首帧；没命中映射只做原有位置护栏。**导出会话时自动连带其所属工作区**（`exporter.coupleSessionWorkspaces`），因为会话要在目标机显示就必须有工作区指向它的 cwd；**这条不变量必须硬保证**（真机事故：用户只勾「历史会话」时导出过一个 `sections.sessions=true / workspaces=false` 的包，目标机上会话看不见 = 「对话丢了」）：① 归属匹配不上时**整分区带上全部工作区记录**，② 本机一条记录都没有 / 注册表读不到时如实告警，③ 连带白名单与分区选定**共用同一份 includeItems**（否则用户「全部取消勾选工作区」下发的 `includeItems.workspaces = []` 会在第二道过滤里把刚强制选中的分区再挡掉），④ 四种结果各有一条报告文案（`export.sessionsWorkspacesCoupled` / `export.sessionsWorkspacesCarriedAll` / `export.sessionsWithoutWorkspaces` / `export.sessionsWorkspacesUnreadable`）绝不静默，⑤ 导入侧对「有会话但没有任何工作区数据」的包（旧构建导出的历史包就是这种）在**分析阶段**告警 `import.sessionsWithoutWorkspaces`（`analyzer.analyzeBundle` 共享给分析与执行两条路径）；宿主半在 DSH 启动时加载、**没有热重载**——改了导出/导入逻辑后必须重启 DSH 才生效；工作区记录里的 `sessionIds` 由 `WorkspacesAdapter.finalizeImport` 在**全部分区收尾之后**（APPLY_ORDER 里 workspaces 在 sessions 之前）逐个 `attachSession` 登记，未登记成功记 warning。DSH 起不来时的唯一通道仍是离线 CLI（`dsh-config-manager sessions repair`）；隔离实例里复位 `storages/workspace.json` **必须先停宿主再改文件**（插件运行时 DSH registry 的内存是权威域）。**选择器层的联动**：勾了会话自动勾上拥有它的工作区、取消工作区自动取消它的会话（`src/ui/selection-model.ts` 的 `applySessionWorkspaceCoupling`；导出页与导入向导共用 `ContentPicker`，所以只写一份）。**方向必须显式传入**（`focus: 'sessions' | 'workspaces' | 'both'`）：这两条规则在「会话勾着、它的工作区被取消」时会互相抵消，按本次动作方向定夺才确定。工作区单元与会话单元配对用**两套判据**（`WorkspacesAdapter.listUnits` / `analyzeImport` 带上 `sessionIds` 与 `projectKey`）：
 ① 注册表 `sessionIds`（经 `sessionIdKey` 去掉 `session-` 前缀后比较 —— 会话目录名有 `session-<uuid>` / 裸 `<uuid>` 两种形态并存）；
@@ -248,6 +290,40 @@ UI 自查：DESIGN.md 一致(token/组件/spacing/radius/状态语义)、响应�
 - **导出选择器里「历史对话」的排序时间有两个来源**（用户报告「没有按最新到最旧排」）：第一口径 = `storages/session_projcache.json` 的 `lastPromptAt`（缺则 `identity.createdAt`），第二口径 = `SessionsAdapter.unitActivityTimes()` 现算的**会话日志 mtime**（`/export-preview` 注入 `applySessionMeta`）。为什么必须有第二口径：那份缓存只覆盖一部分会话（真机实测同一项目 **731 个目录里 347 个不在缓存内**），缺时间的会话会退化成组尾的 uuid 字典序。**索引键必须用 `sessionIdKey()` 归一化后再查**（缓存键是裸 `<uuid>`，单元 id 末段是目录名，`session-<uuid>` / 裸 `<uuid>` 两种形态并存 —— 不归一化会同时丢掉标题与时间）。
 - **journal step 的 `skipped` 只能表示「用户主动跳过」**：`warning`（非致命失败，§34.17）与 `failed` 都必须记 `attention`，否则事后审计会把「安装失败」读成「用户跳过了」（issue #35 实测）。
 
+- **备份有两种物理形态，而「形态判定」必须只有一份实现（issue #55，2026-10）**：勾了加密的导出产物是
+  **DCA1 整包容器**（整份 ZIP 被 AES-256-GCM 包住），文件名却仍是 `.zip`、还躺在备份文件列表里。三条硬约束：
+  ① **判定单一事实源 = `src/security/container-kind.ts`**（`containerKindOfBytes` / `readContainerKind`）——
+  凡是「拿到一个备份路径或字节」的入口（上传 / 备份列表 / analyze / plan / execute）都要走它，各写一份必然分叉；
+  ② **文件形态只读前 4 字节**（open+read(4)+close）——上传接口此前为看这 4 个字节把整份备份 `readFile` 进内存，
+  `container-kind.test.ts` 有「只允许读 4 字节」的实测断言；**读不到一律回落 `'zip'`**（判不出形态 ≠ 判定为加密，
+  交给 ZIP 解析器给精确错误，绝不猜）；
+  ③ **未解锁的容器必须得到可判别的错误**：`/analyze`、`/plan`、`/execute` 一律
+  `400 { code: 'encrypted-container' }`（`ENCRYPTED_CONTAINER_CODE`）+ `import.encryptedContainerNeedsUnlock`
+  文案；客户端据码**自动进入解锁阶段**（旧宿主 / 脚本直调也兜得住）。历史事故：备份列表的「一键导入」把宿主
+  路径直送分析 → 用户看到「不是合法的 ZIP 文件（缺少中央目录结束记录）」，以为备份坏了，其实只差解锁一步
+  （浏览器选文件那条入口一直有探测）。**形态字段在列表里是可选探测**（`listBackupFiles(dir, { withContainerKind: true })`
+  → `BackupFileMeta.containerType`），保留策略 / 磁盘体检保持零额外 I/O。
+  **客户端半铁律**：`src/client/**` 只能 import **零依赖**的 `utils/shared-constants.ts` 拿
+  `ENCRYPTED_CONTAINER_CODE` —— 若 import `security/container-kind.ts`，会把 security 桶 → `encryption.ts`
+  （`node:crypto`/`node:util`）打进 `lib/client.js`，DSH 的 client loader 报 missed the module table，
+  **整个插件不加载**（本轮实测踩到，已由 `bundle-selfcontained` 护栏复核）。
+
+- **SAFE MODE 的可见性与出口（issue #56，2026-10；与 issue #31 的残留锁同一类缺陷复发）**：durable标记
+  `<dataDir>/transactions/safe-mode` 一旦落盘就跨重启生效，而**解除它的判据必须只有一份实现**
+  （`recovery-orchestrator` 的 `resolveSafeMode`：active 全部为已解决终态才清，NEEDS_ATTENTION 视为未解决，
+  扫描失败 fail-closed）。四条不得回退：
+  ① **dismiss 之后必须调用它** —— 「放弃恢复」= 该 incident 结案；此前 dismiss 只 quarantine，唯一的清除点挂在
+  `verify(ROLLED_BACK)` 上，而事务已移出 `active/` ⇒ 那条分支永远走不到，用户看到的是「面板显示暂无待处理、
+  写操作持续 423、重启无效」，只能手工删标记；
+  ② **阻断态必须可见**：`GET /recovery/status` 回传 `safeMode: { blocked, clearable }`（`clearable` = 没有未解决
+  incident，即「结案但保护仍开着」），投影为 `safeModeStuck`/ `recoveryRequired`，面板据此渲染**显式解除入口**
+  —— 这正是 issue #31 「423 文案指向空面板」在 SAFE MODE 上的重演；
+  ③ **显式出口** `POST /recovery/safe-mode/clear`（recovery prefix 子路径，不新增注册路由条目）**故意不过
+  withMutationGate**（要解开的正是挡住写操作的保护，走 gate 必然 423），但**绝不无条件清标记**：还有未解决
+  incident 时拒绝并给 `reason: 'unresolved-incidents'`，本来没阻断则幂等回 `not-blocked`；
+  ④ **注入面是动态探测**（`RecoveryOrchestratorDeps.safeModeBlocked` ← 宿主 `phase3Recovery.safeModeActive`）：
+  与 mutation gate 的 `isBlocked` 同源，保证「界面说保护开着 ⟺ 写操作真的被 423 挡着」，绝不能创建期捕获快照。
+
 - **灾备快照线已按产品定位收敛下线（2026-09），只保留崩溃归因 + 救援模式**：定位 = 迁移 / 同步 / 市场 ——
   自动快照（watcher）、撤销/重做、手动快照、快照库与 `/lifecycle` 路由整体删除（`core/{watcher,undo,config-state,config-snapshot,config-lifecycle}.ts`、
   `client/lifecycle/`、`ui/lifecycle-view.ts`、`LIFECYCLE_ENABLED` / `SHOW_LIFECYCLE_NAV` 双开关）。**保留**：`core/crash-report.ts`
@@ -256,8 +332,9 @@ UI 自查：DESIGN.md 一致(token/组件/spacing/radius/状态语义)、响应�
   三条不许回退的接线：① `boot-state.json` 独立在 `<dataDir>/boot-state/`，老位置 `<dataDir>/config-snapshots/` 由 `adoptLegacyBootState` 一次性搬迁（幂等、best-effort）；
   ② `BOOT_CRITICAL_RELS` / `profileCriticalRels` 搬进 `core/boot-paths.ts` —— **导入安全闸门 `boot-safety.ts` 仍在用，删灾备不许连带删**；
   ③ `PanelId` 不再含 `'lifecycle'`，旧持久化值在 `run-store` 迁移到 `snapshots` + `subTab='recovery'`。守卫：`src/core/incident-wiring.test.ts`（源码级接线）
-  + `tests/route/route-parity.test.ts`（68 条路由快照）+ `src/core/crash-report.test.ts`（归因与老位置搬迁）。
-  分区注册表的 `configSnapshot` 字段保留为**语义声明**（配置类 vs 内容数据类），当前无消费者；旧实现与踩坑史见 `docs/handoff/PHASE1_HANDOFF.md`。
+  + `tests/route/route-parity.test.ts`（71 条路由快照）+ `src/core/crash-report.test.ts`（归因与老位置搬迁）。
+  分区注册表的 `configSnapshot` 字段保留为**语义声明**（配置类 vs 内容数据类），当前无消费者；旧实现与踩坑史见 `docs/handoff/PHASE1_HANDOFF.m
+d`。
 
 - **救援模式与 `reconcileBundles` 的硬冲突（2026-09 真机复现「救援完全没用」的根因，两条修法不许拆开）**：
   进入救援会把 `dsh.profile.bundles` 收窄为「DSH 核心 + 本插件」，但插件自己的 `reconcileBundles`
@@ -275,5 +352,40 @@ UI 自查：DESIGN.md 一致(token/组件/spacing/radius/状态语义)、响应�
   （`duplicate loader entry id`）—— 走 patch 层的插件**不要**写进 `dependencies`。
   复核脚本：`outputs/rescue-e2e/`（隔离 `DSH_HOME` + 两个假插件，浏览器实操）。
 
+- **会话日志的格式版本（`header.version` = DSH 的 `SESSION_FORMAT_VERSION`）跨版本是「单向兼容 + 静默跳过」，必须体检而不是等用户发现**（2026-09 源码 + 真机取证，登记为 known-gaps **G-23**）：DSH 读会话时对**非本 build 的版本直接拒绝**（`refuseForeignFormatVersion` → `SessionFormatUnsupportedError`），而会话列表 `listArtifacts()` 对该错误 **`continue`** —— 不报错、不在工作区列表里，用户看到的只是「对话消失」。高版本可读低版本（DSH 自带 V0→V4 迁移链），**反向不可读**；实测桌面端内置 0.2.0-rc.2 = **v4**，磁盘 CLI 档案 0.1.5-rc.1 = **v3**（本机 401 个日志分布 `{v0:200, v3:201}`，多版本共存是常态）。本插件的导出/导入/同步是**逐字节搬运** `.jsonl.zstd`，不体检就会「导入全部成功、对话一个不显示」。接线：宿主探针 `src/utils/session-format.ts`（只解**首帧**、每会话一条、上限 200、读不出如实计数；常量解析优先从 `installAnchor` 同树的 `@deepseek-ai/dsh-session` 读，**绝不拿 semver 猜格式版本**）→ `HostContext.sessionFormatVersion` + `AnalyzerOptions.sessionFormatProbe`（`ImporterOptions` 同名）→ `Analyzer.sessionFormatWarnings` 产出 `import.sessionsFormatUnsupported` / `import.sessionsFormatSampled`；同步 `pull()` 把 `analysis.warnings` 并进差异报告 message（那条链路只有 message 通道）。档案页用 `profileVersionFacts` / `sessionFormatRisk`（`src/ui/dsh-profiles-view.ts`）展示每个档案的 DSH 版本与会话格式版本并提示错配；**任一侧读不到版本一律不提示**（不猜、不给假结论）。**core 侧仍禁止 import 会话日志存储格式**（只消费数字）。
+
+- **离线救急台（`dsh-config-manager web` / `dcm web`，阶段 1，2026-10）**：只读的**本机网页**，
+  给「DSH 已经起不来」的场景用。四条不得回退：
+  ① **服务端复用 `src/routes/kit.ts`**（`endpoint()` 声明 + `registerRoutes` 注册）—— 围栏/方法白名单/统一错误映射
+     与插件那 70 余条宿主路由**同一份实现**，不另写围栏；页面**服务端直出 HTML**（零脚本、零外链，
+     `writeHtml` 里收口的 CSP `default-src 'none'`），因此它没有 client bundle 自包含问题、也不进 `lib/client.js`。
+  ② **token 是这一层的边界，不是可选项**：kit 的 `isLoopbackRequest` 对「无 Origin 头的请求」直接放行
+     （本机任何进程都满足），所以必须 启动时生成 32 字节随机 token → 只打印到当前终端 → `/?token=…` 换
+     HttpOnly + SameSite=Strict 的会话 cookie（**用过即废**）；其余请求一律 403。
+  ③ **只读**：本阶段只暴露 GET（写方法 405），且打开任何页面**不产生任何写入**（`web.test.ts` 的 W-04 断言连目录都不建）。
+     写动作（恢复/清理/会话修复）留到后续阶段，且必须复用 CLI 现有的门（SAFE MODE → 环境锁 → DSH 在跑就拒绝）。
+  ④ **判定不许重写**：网页与 CLI 共用 `src/cli/actions.ts`（只读动作层）—— `verify` 的收集、磁盘体检、会话体检、
+     心跳/锁/SAFE MODE 读取都只有一份实现；CLI 只负责排版。**改判定就改 actions.ts**，不许在页面里再算一遍。
+  附带的两个修正：**心跳候选根**（旧 `runningDshInstances` 把 `--data-dir`（快照目录）当 dataDir 用 → 缺省路径下
+  永远找不到心跳，「DSH 在跑就别写会话字节」那道门形同虚设；现在与 SAFE MODE 同一套 `resolveControlRoots` 候选根）；
+  **退出必须真的退出**（`close()` 之后进程仍持有 stdin/stdout，事件循环不会排空 → 空闲超时 / Ctrl+C 用
+  `close().finally(() => process.exit(0))`，测试注入 `shouldSelfExit: false`）。
+
+- **issue #57–#60 的四条硬约束（2026-10，均为真机复现后修复）**：
+  ⓐ **`file:` spec 有两种形态，打包前必须 `stat` 判形态**（`src/core/local-plugin-pack.ts` 的 `statKind`）：目录走 `npm pack`，
+  **`.tgz` 文件直接读取收编**（它本身就是 `npm pack` 的产物），**判不出来一律回落目录流程**（绝不猜成文件）。此前一律当目录 `cwd`
+  → `file:/abs/x.tgz` 必然 `spawn ENOTDIR`，插件静默不进备份而**备份仍报 `ok:true`**；归档名用 `safeTarballFileNameFor`（保留源文件名，
+  丢目录 + 折叠非法字符）。profile 目录用 `HostContext.profileDir`，**不要**按 `<home>/profiles/<name>` 硬拼。
+  ⓑ **同步快照的 JSON 体积上限必须读写同口径**（issue #59）：`deserializeSnapshot` 走 `MAX_OWN_PAYLOAD_JSON_BYTES`（512 MiB，**自产载荷**），
+  **不是** `parseJsonSafe` 的缺省 64 MiB（那是防不可信输入的闸门）。加密单文件布局经 base64 双膨胀 ~1.78×，勾 sessions 后轻易越界；
+  越界的后果是**静默**（列表恒空 / download 报损坏 / 自动同步恒 upToDate，而 push 报成功）—— 现在读不出来的一律经 `unreadableSnapshots` 回传可见。
+  改这条链路时必须同时想「写侧产出什么、读侧拿什么上限读」两件事。
+  ⓒ **`runStore.patch()` 会清空密码字段**（持久化白名单把 token/webdav 密码写成空串，是**安全不变量**）：任何**无关** patch
+  （远端快照到货、GitHub 轮询结束）都会抹掉用户正在输入的密码 → 「输入几个字符就被清空、粘贴也清空」。修法固定为：`commit()` 在 patch 之后
+  调 `runStore.patchSyncPasswords()` 把**在途输入**写回**内存**（绝不触发落盘）。新增任何 patch 路径都要检查这一条。
+  ⓓ **git 源安装需要 `scripts.prepare`**（npm 上是预构建 `lib/`，git 安装是现构建）：本包已补 `prepare: npm run build`；
+  **pnpm 11 仍会拦截**，用户必须在 profile 的 `pnpm-workspace.yaml` 里加 `allowBuilds`，键要**逐字照抄 pnpm 打印的那一行**（含 URL + sha，
+  只写包名不生效）。三条门禁在 `tests/packaging-contract.test.ts` 的 `G-21`；README 中英各有「从 GitHub 源码安装」段。
+
 ## ⛔ 技术限制（勿突破）
-凭据值无法回滚(DSH 不回读)、插件安装需重启、MCP 无管理 API(组合 patch 行导入)、localStorage UI 状态不迁移、Schema v1→v2 为占位(CURRENT=1)、历史会话默认不迁移、加密备份密码丢失无法解密。完整清单见 DEVELOPERS.md §「完整技术限制」。
+凭据值无法回滚(DSH 不回读)、插件安装需重启、MCP 无管理 API(组合 patch 行导入)、localStorage UI 状态不迁移

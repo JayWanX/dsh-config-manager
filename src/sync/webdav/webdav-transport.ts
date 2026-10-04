@@ -284,8 +284,22 @@ export class WebDavTransport implements SyncTransport {
     if (options.retry !== undefined) this.o.retry = options.retry;
   }
 
+  /**
+   * 最近一次 list() 里读不出来的远端快照（issue #59；index.json 损坏时带上原因）。
+   *
+   * WebDAV 是「index.json 单点描述所有快照」的形态，坏一条就是坏整份索引 —— 这里如实
+   * 暴露原因，让「列表为空/不完整」与「远端确实没有」能被区分开。
+   */
+  private readErrors: { file: string; reason: string }[] = [];
+
+  /** 最近一次列表里读不出来的远端快照（含原因）；供上层如实呈现，绝不静默 */
+  get unreadableSnapshots(): readonly { file: string; reason: string }[] {
+    return this.readErrors;
+  }
+
   /** 列出远端已有快照（按 createdAt 升序）。index.json 缺失视为空。 */
   async list(): Promise<SyncSnapshotMeta[]> {
+    this.readErrors = [];
     // 幂等读：仅 GET index.json，无本地/远端写副作用 → 瞬时网络故障走有限指数退避重试
     return await withSyncRetry(async () => {
       const pwd = await this.passwordOnce();
@@ -295,8 +309,16 @@ export class WebDavTransport implements SyncTransport {
       if (!res.ok) {
         throw new WebDavTransportError(await this.failText('GET', url, res, pwd), classifyHttpStatus(res.status));
       }
-      return this.parseIndex(await res.text(), url, pwd);
-    }, this.o.retry);
+      const raw = await res.text();
+      const parsed = this.parseIndex(raw, url, pwd);
+      // index.json 体积/结构完好但**逐条**不可信时 parseIndex 会抛错；能到这里即整份索引可读
+      return parsed;
+    }, this.o.retry).catch((err: unknown) => {
+      // issue #59：整份索引读不出来（体积超限 / JSON 损坏 / 结构非法）时必须留痕 ——
+      // 此前这里直接上抛成通道错误，而 /sync/snapshots-list 的调用方把它当「列表为空」呈现。
+      this.readErrors.push({ file: INDEX_FILE, reason: String((err as Error)?.message ?? err) });
+      throw err;
+    });
   }
 
   /** 上传快照：幂等 MKCOL → 快照级跳过判定（同 id 且内容全等则免上传）→ PUT <id>.json

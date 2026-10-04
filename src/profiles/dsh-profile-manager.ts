@@ -29,6 +29,7 @@ import { atomicWriteFileSync } from '../utils/atomic-write.ts'
 import { isRecord } from '../utils/guards.ts'
 import { resolveProfileDir, validateProfileName } from '../core/plugin-cli.ts'
 import { readTextSafe } from './dsh-profile-io.ts'
+import { readSessionFormatVersionAt } from '../utils/session-format.ts'
 import {
   DSH_PROFILE_TEMPLATES, checkProfileName, classifyShape, isManagedProfileName,
   type DshProfileCopyWarning, type DshProfileDetail, type DshProfileErrorCode, type DshProfileIssue,
@@ -360,6 +361,19 @@ export class DshProfileManager {
   }
 
   /** 组装列表行数据（损坏项不抛，标 issue 后照常返回）。 */
+  /** 该档案依赖树里的 `@deepseek-ai/dsh` 版本；读不到/不是非空字符串 → null。 */
+  private readProfileDshVersion(modulesDir: string): string | null {
+    const raw = readTextSafe(join(modulesDir, '@deepseek-ai', 'dsh', 'package.json'))
+    if (raw === null) return null
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      const version = isRecord(parsed) ? parsed['version'] : undefined
+      return typeof version === 'string' && version !== '' ? version : null
+    } catch {
+      return null
+    }
+  }
+
   private readMeta(name: string, dir: string): DshProfileMeta {
     const issues: DshProfileIssue[] = []
     const manifest = this.readManifestObject(dir)
@@ -388,11 +402,15 @@ export class DshProfileManager {
     } catch {
       updatedAtMs = null
     }
+    // 版本信息 best-effort：读不到就是 null（桌面端档案的运行时在 app.asar 内，磁盘上没有它）。
+    const modulesDir = join(dir, NODE_MODULES_DIR)
     return {
       name,
       dir,
       bundles,
       dependencies,
+      dshVersion: this.readProfileDshVersion(modulesDir),
+      sessionFormatVersion: readSessionFormatVersionAt(modulesDir) ?? null,
       shape: classifyShape(bundles),
       patchReload,
       hasNodeModules: existsSync(join(dir, 'node_modules')),

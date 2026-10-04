@@ -13,6 +13,8 @@ import {
   resolveLocalPluginPath,
   rewriteLocalSpec,
   isPackedLocalSpec,
+  isTarballLocalSpec,
+  safeTarballFileNameFor,
   parsePackOutput,
   packLocalPlugins,
   isBareLocalPath,
@@ -343,6 +345,105 @@ test('T1 packLocalPlugins: 两种多个本地插件全部打包', async () => {
   assert.equal(Object.keys(res.rewritten).length, 2);
   assert.ok(res.rewritten['one']!.startsWith('file:'), String(res.rewritten['one']));
   assert.ok(res.rewritten['two']!.startsWith('file:'), String(res.rewritten['two']));
+});
+
+/* ------------- issue #57：file: 指向已打包 tarball（直读收编，不再 spawn ENOTDIR） ------------- */
+
+test('issue #57 isTarballLocalSpec: 只有本地源 + .tgz/.tar.gz 才算', () => {
+  assert.equal(isTarballLocalSpec('file:/home/u/.plugin-tarballs/x-0.0.1.tgz'), true);
+  assert.equal(isTarballLocalSpec('file:./x.tar.gz'), true);
+  assert.equal(isTarballLocalSpec('FILE:./X.TGZ'), true);
+  assert.equal(isTarballLocalSpec('link:/dev/plugin'), false, 'link: 是目录形态');
+  assert.equal(isTarballLocalSpec('file:./x'), false, '目录形态');
+  assert.equal(isTarballLocalSpec('^1.0.0'), false);
+  assert.equal(isTarballLocalSpec(undefined), false);
+});
+
+test('issue #57 safeTarballFileNameFor: 保留源文件名但只留文件名部分', () => {
+  assert.equal(safeTarballFileNameFor('@s/n', '/home/u/x/foo-0.0.1.tgz'), 'foo-0.0.1.tgz');
+  assert.equal(safeTarballFileNameFor('@s/n', 'D:\\tarballs\\foo.tgz'), 'foo.tgz');
+  // 路径穿越 / 非法字符一律被折叠，结果绝不含分隔符
+  const evil = safeTarballFileNameFor('@s/n', '/tmp/../../etc/passwd$x.tgz');
+  assert.ok(!evil.includes('/') && !evil.includes('\\'), evil);
+  assert.ok(!evil.includes('$'), evil);
+  // 源文件名不可用 → 回退到按包名推导（仍不含目录；与 tarballNameFor 的 fragment 规则一致）
+  assert.equal(safeTarballFileNameFor('@s/n', '/tmp/'), tarballNameFor('@s/n', '').slice(`${LOCAL_PLUGIN_DIR}/`.length));
+});
+
+test('issue #57 packLocalPlugins: file: 指向 .tgz → 直读收编，跳过 npm pack，形态与目录一致', async () => {
+  const { exec, calls } = makeExec(() => okResult('should-not-be-used.tgz'));
+  const bytes = new Uint8Array([7, 7, 7]);
+  const read: string[] = [];
+  const res = await packLocalPlugins({
+    plugins: [{ name: '@dsh-external/dsh-academic-research', version: '0.0.1', spec: 'file:/home/u/.plugin-tarballs/dsh-external-dsh-academic-research-0.0.1.tgz' }],
+    homeDir: '/home/u',
+    profileDir: '/home/u/.dsh/profiles/web',
+    packDir: '/tmp/pack',
+    exec,
+    statKind: async (abs) => (abs.endsWith('.tgz') ? 'file' : 'dir'),
+    readFile: async (abs) => { read.push(abs); return bytes; },
+    mkdir: async () => undefined,
+  });
+  assert.equal(calls.length, 0, 'file 形态不得调用 npm pack（真机即 spawn ENOTDIR）');
+  assert.equal(res.warnings.length, 0, res.warnings.join('; '));
+  assert.equal(res.packed.length, 1);
+  assert.equal(res.packed[0]!.relativePath, `${LOCAL_PLUGIN_DIR}/dsh-external-dsh-academic-research-0.0.1.tgz`);
+  assert.equal(res.packed[0]!.rewrittenSpec, `file:${LOCAL_PLUGIN_DIR}/dsh-external-dsh-academic-research-0.0.1.tgz`);
+  assert.equal(res.rewritten['@dsh-external/dsh-academic-research'], res.packed[0]!.rewrittenSpec);
+  assert.deepEqual([...res.packed[0]!.data], [...bytes]);
+  // 读的是 spec 指向的原文件（不是 packDir 里的产物）；路径经 path.normalize（跨平台形态）
+  assert.equal(read.length, 1);
+  assert.ok(read[0]!.endsWith('dsh-external-dsh-academic-research-0.0.1.tgz'), String(read[0]));
+  assert.ok(!read[0]!.includes('/tmp/pack'), '不得读 packDir 里的产物');
+});
+
+test('issue #57 packLocalPlugins: 判不出形态（statKind 缺省/unknown）→ 落回 npm pack 目录流程', async () => {
+  const { exec, calls } = makeExec(() => okResult('dir-plugin-1.0.0.tgz'));
+  const res = await packLocalPlugins({
+    plugins: [{ name: 'dir-plugin', version: '1.0.0', spec: 'file:./dir-plugin' }],
+    homeDir: '/h', profileDir: '/p', packDir: '/tmp/pack',
+    exec,
+    readFile: async () => new Uint8Array([1]),
+    mkdir: async () => undefined,
+  });
+  assert.equal(calls.length, 1, '未注入 statKind → 必须维持既有 npm pack 行为');
+  assert.equal(res.packed.length, 1);
+});
+
+test('issue #57 packLocalPlugins: tarball 超上限 → 跳过并告警（不读进备份）', async () => {
+  const { exec, calls } = makeExec(() => okResult('x.tgz'));
+  const res = await packLocalPlugins({
+    plugins: [{ name: 'big-tgz', version: '1.0.0', spec: 'file:/t/big.tgz' }],
+    homeDir: '/h', profileDir: '/p', packDir: '/tmp/pack',
+    exec,
+    statKind: async () => 'file',
+    readFile: async () => new Uint8Array(MAX_LOCAL_TARBALL_BYTES + 1),
+    mkdir: async () => undefined,
+  });
+  assert.equal(calls.length, 0);
+  assert.equal(res.packed.length, 0);
+  assert.equal(res.warnings.length, 1);
+  assert.ok(res.warnings[0]!.includes('上限'), String(res.warnings[0]));
+});
+
+test('issue #57 packLocalPlugins: 目录与 .tgz 混合 → 两条路径各走各的', async () => {
+  const { exec, calls } = makeExec(() => okResult('from-dir-1.0.0.tgz'));
+  const res = await packLocalPlugins({
+    plugins: [
+      { name: 'from-dir', version: '1.0.0', spec: 'link:/dev/from-dir' },
+      { name: 'from-tgz', version: '2.0.0', spec: 'file:/dev/from-tgz-2.0.0.tgz' },
+    ],
+    homeDir: '/h', profileDir: '/p', packDir: '/tmp/pack',
+    exec,
+    statKind: async (abs) => (abs.endsWith('.tgz') ? 'file' : 'dir'),
+    readFile: async (abs) => new Uint8Array(abs.endsWith('.tgz') ? [2] : [1]),
+    mkdir: async () => undefined,
+  });
+  assert.equal(calls.length, 1, '只有目录形态走进 npm pack');
+  assert.equal(res.packed.length, 2);
+  assert.equal(res.rewritten['from-tgz'], `file:${LOCAL_PLUGIN_DIR}/from-tgz-2.0.0.tgz`);
+  assert.equal(res.rewritten['from-dir'], `file:${LOCAL_PLUGIN_DIR}/from-dir-1.0.0.tgz`);
+  assert.equal(res.warnings.length, 0, res.warnings.join('; '));
 });
 
 /* ---------------- isBareLocalPath ---------------- */

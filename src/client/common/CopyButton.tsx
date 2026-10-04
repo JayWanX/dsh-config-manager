@@ -3,7 +3,7 @@
  *
  * 为什么抽成原语
  * -------------
- * 原先 `OverviewPanel` 与 `ProfilesPanel` 各有一份**逐字重复**的 `copyText`（剪贴板 +
+ * 原先 `HomePanel` 与 `EnvironmentPanel`（当时叫 OverviewPanel / ProfilesPanel）各有一份**逐字重复**的 `copyText`（剪贴板 +
  * Toast 反馈），复制图标本身没有任何就地反馈 —— 用户只能看到一条飘过的 Toast，而按钮本身
  * 始终是「复制」图标。统一到这里之后：剪贴板调用、失败分支、计时复位、形变图标各只有一份。
  *
@@ -21,6 +21,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { TranslateNS } from '../client-types.ts'
 import { toast } from './toast-store.ts'
 import { CopyStateIcon } from './Icon.tsx'
+import { copyTextToClipboard } from './clipboard.ts'
 import css from '../config-manager.module.css'
 
 /** 「已复制」对勾的停留时长（毫秒）。够读到一个对勾，又不至于让按钮长期停留在错误语义上。 */
@@ -51,19 +52,15 @@ export function CopyButton({ text, label, t }: CopyButtonProps) {
   }
 
   const onClick = (): void => {
-    try {
-      const pending = navigator.clipboard?.writeText(text)
-      if (pending === undefined) {
+    // 剪贴板调用只在 common/clipboard.ts 里有一份实现（成功才切形变，失败只出 Toast）
+    void copyTextToClipboard(text).then((ok) => {
+      if (ok) {
+        toast.ok(t('toast.copied'))
+        markCopied()
+      } else {
         toast.warn(t('toast.copyFailed'))
-        return
       }
-      void pending.then(
-        () => { toast.ok(t('toast.copied')); markCopied() },
-        () => { toast.warn(t('toast.copyFailed')) },
-      )
-    } catch {
-      toast.warn(t('toast.copyFailed'))
-    }
+    })
   }
 
   return (

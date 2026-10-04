@@ -100,6 +100,44 @@ export function profileRowFacts(profile: DshProfileMeta): ProfileRowFacts {
   }
 }
 
+/** 档案页展示的版本事实（读不到的一律 null；纯展示，不参与任何判定契约）。 */
+export interface ProfileVersionFacts {
+  dshVersion: string | null
+  sessionFormatVersion: number | null
+}
+
+export function profileVersionFacts(
+  profile: Pick<DshProfileMeta, 'dshVersion' | 'sessionFormatVersion'>,
+): ProfileVersionFacts {
+  return {
+    dshVersion: typeof profile.dshVersion === 'string' && profile.dshVersion !== '' ? profile.dshVersion : null,
+    sessionFormatVersion: typeof profile.sessionFormatVersion === 'number' ? profile.sessionFormatVersion : null,
+  }
+}
+
+/**
+ * 会话格式错配风险（相对**本实例**支持的格式版本）。
+ *
+ * 为什么值得在档案页提示：DSH 读会话时对非本 build 的 `header.version` 直接拒绝，而会话列表
+ * （`listArtifacts()`）对这种会话是**静默 continue** —— 不报错、不显示，用户只会看到「对话消失」。
+ *  - `newer`：该档案的 DSH 更新 → 它产生的对话在**本实例**里看不见；
+ *  - `older`：该档案的 DSH 更旧 → 本实例产生的对话在**该档案**里看不见；
+ *  - `none`：相同，或任一侧读不到版本 —— **不猜**，宁可不提示也不给假结论。
+ */
+export type ProfileSessionFormatRisk = 'none' | 'newer' | 'older'
+
+export function sessionFormatRisk(
+  profile: Pick<DshProfileMeta, 'sessionFormatVersion'>,
+  currentFormatVersion: number | null | undefined,
+): ProfileSessionFormatRisk {
+  const mine = typeof profile.sessionFormatVersion === 'number' ? profile.sessionFormatVersion : null
+  const current = typeof currentFormatVersion === 'number' ? currentFormatVersion : null
+  if (mine === null || current === null) return 'none'
+  if (mine > current) return 'newer'
+  if (mine < current) return 'older'
+  return 'none'
+}
+
 /** 详情弹窗：bundle 层（**保持声明顺序** —— 顺序就是 patch 应用顺序，不可排序）。 */
 export function bundleLines(profile: DshProfileMeta): string[] {
   return [...profile.bundles]

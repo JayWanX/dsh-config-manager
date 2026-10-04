@@ -261,3 +261,56 @@ test('import-reselect-works: 取消后重新选择同一文件也生效（input 
   await wizard.execute({ confirm: true })
   assert.deepEqual(executedZip, ['/tmp/a.zip'], '再次提交的是 a.zip')
 })
+
+/* ---------------- issue #55：宿主路径的一键导入必须先解锁加密容器 ---------------- */
+
+/**
+ * 备份文件列表里的「导入」把宿主 exports 路径直接交给向导 —— 这条路径没有上传那一步的
+ * 形态探测，此前会把 DCA1 加密容器当 ZIP 分析，用户看到「不是合法的 ZIP 文件
+ * （缺少中央目录结束记录）」。下面钉住两侧：`containerType` 的传递（瞬态请求字段）
+ * 与「加密 → 进解锁阶段、明文 → 行为不变」的状态语义。
+ */
+test('issue#55：快照面板的一键导入请求携带容器形态，且仍是消费即清空的一次性瞬态', () => {
+  const store = new RunStore({ storage: null })
+  store.patch({
+    snapshots: {
+      importBackup: {
+        zipPath: '/home/.dsh/dsh-config-manager/exports/dsh-config-enc.zip',
+        name: 'dsh-config-enc.zip',
+        containerType: 'encrypted',
+      },
+    },
+  })
+  const req = store.getSnapshot().snapshots.importBackup
+  assert.equal(req?.containerType, 'encrypted', '容器形态随瞬态请求一起交给向导（决定是否先进解锁阶段）')
+  // 旧宿主（列表不回 containerType）→ undefined，必须等同于「明文路径」而不是被当成加密
+  store.patch({ snapshots: { importBackup: { zipPath: '/exports/plain.zip', name: 'plain.zip' } } })
+  assert.equal(store.getSnapshot().snapshots.importBackup?.containerType, undefined, '缺字段 = 明文路径（旧宿主）')
+})
+
+test('issue#55：加密备份的一键导入状态必须是「停在解密阶段、未解锁前不分析」', () => {
+  const store = new RunStore({ storage: null })
+  const wizard = store.importWizard(makeApi())
+  const encryptedPath = '/home/.dsh/dsh-config-manager/exports/dsh-config-enc.zip'
+
+  // 与控制器中的加密分支逐字同源（controller 属 React hook 层，纯逻辑在此可测）
+  wizard.setArchiveEncrypted(true, encryptedPath)
+  store.patch({
+    import: { containerEncrypted: true, archiveUnlocked: false, zipPath: encryptedPath, phase: 'decrypt-archive' },
+  })
+  store.syncWizard()
+
+  const imp = store.getSnapshot().import
+  assert.equal(imp.containerEncrypted, true, '加密容器必须标记为整体加密')
+  assert.equal(imp.archiveUnlocked, false, '未解锁不得分析')
+  assert.equal(imp.phase, 'decrypt-archive', '流程停在解锁阶段（渲染解锁页而不是选择页）')
+  assert.equal(shouldRenderSelect(imp.step, imp.phase), false, '加密阶段让位给解锁页')
+})
+
+test('issue#55：明文备份不得被拖进解密阶段（缺字段一律按明文处理）', () => {
+  const store = new RunStore({ storage: null })
+  store.patch({ import: { containerEncrypted: false, archiveUnlocked: false, zipPath: '/exports/plain.zip' } })
+  const imp = store.getSnapshot().import
+  assert.equal(imp.containerEncrypted, false)
+  assert.notEqual(imp.phase, 'decrypt-archive', '明文备份不进解锁阶段')
+})

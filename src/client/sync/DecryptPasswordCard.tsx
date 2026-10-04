@@ -1,8 +1,8 @@
 /**
- * t42 物理拆分（从 SyncSettingsView.tsx 拆出的渲染段，同领域目录平铺）。
+ * t42 物理拆分（从 SyncSettingsView.tsx 拆出的渲染段，同领域目录平铺；v2 第 5 步主文件改名 SyncPanel.tsx）。
  *
  * 约定：只接收「渲染所需的数据 + 回调」；React 状态、副作用与网络调用仍由
- * SyncSettingsView 持有（单一状态源）；可测纯逻辑在 src/ui/sync-settings-view.ts。
+ * SyncPanel 持有（单一状态源）；可测纯逻辑在 src/ui/sync-settings-view.ts。
  */
 import type { ChangeEvent } from 'react'
 import type { TranslateNS } from '../client-types.ts'

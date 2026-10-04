@@ -27,7 +27,7 @@ import type { HostContext } from './types.ts';
  */
 export type LocalPluginPackHook = (
   plugins: readonly { name: string; version: string; spec?: string }[],
-  ctx: Pick<HostContext, 'profile'>,
+  ctx: Pick<HostContext, 'profile' | 'profileDir'>,
 ) => Promise<PackLocalPluginsResult>;
 
 /** `npm pack` 单次调用的超时上限（慢网络/大插件留足余量，但不得无限挂起） */
@@ -129,16 +129,30 @@ export function createLocalPluginPackHook(opts: LocalPluginPackHookOptions): Loc
     }
 
     try {
-      // profile 目录：profiles/<profile>（profile 缺省 web，与仓库既有约定一致）
+      // profile 目录：**优先用 HostContext.profileDir**（DSH 的档案目录不保证是
+      // `<home>/profiles/<name>` 的默认布局，拼接出来的路径可能根本不存在）；
+      // 宿主没给时回退到按 profile 名拼接，再回退到 web —— 与仓库既有约定一致。
       const profile = ctx.profile !== undefined && ctx.profile !== '' ? ctx.profile : 'web';
+      const profileDir = ctx.profileDir !== undefined && ctx.profileDir !== ''
+        ? ctx.profileDir
+        : path.join(opts.homeDir, 'profiles', profile);
       return await packLocalPlugins({
         plugins: plugins.map((p) => ({ name: p.name, version: p.version, spec: p.spec })),
         homeDir: opts.homeDir,
-        profileDir: path.join(opts.homeDir, 'profiles', profile),
+        profileDir,
         packDir,
         exec,
         readFile: (abs) => fsp.readFile(abs),
         mkdir: async (abs) => { await fsp.mkdir(abs, { recursive: true }); },
+        // issue #57：`file:` 指向 .tgz 时直读收编（跳过 npm pack）；判不出形态一律 unknown
+        statKind: async (abs) => {
+          try {
+            const st = await fsp.stat(abs);
+            return st.isFile() ? 'file' : st.isDirectory() ? 'dir' : 'unknown';
+          } catch {
+            return 'unknown';
+          }
+        },
         timeoutMs: PACK_TIMEOUT_MS,
       });
     } finally {

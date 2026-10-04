@@ -7,56 +7,60 @@
  *
  * 状态自持；草稿镜像 runStore.snapshots.backupDraft（未保存修改切页/刷新保留），
  * 保存成功清草稿（宿主配置为权威）。
+ *
+ * 本文件是**从构建产物（lib/client.js，2026-10-02T23:33Z）还原**的：一次误用的通配删除
+ * 把它删掉了，而 git 里那份是**更早的修订**（还没有 InfoHint 迁移），没有可直接恢复的源。
+ * 逻辑、文案键、CSS 类与调用顺序按编译产物逐段翻译，**排版与注释措辞是重建的**。
+ * 教训见 AGENTS.md「常见坑」。
  */
 import { useEffect, useRef, useState } from 'react'
+import {
+  BACKUP_INTERVAL_OPTIONS, DEFAULT_RETENTION_POLICY, RETENTION_FIELDS, RETENTION_FIELD_LIMITS,
+  backupDraftDirty, backupRunBadgeKind, hasRetentionTiers, normalizeRetentionPolicy,
+  validateBackupScheduleDraft,
+  type BackupScheduleDraft, type BackupScheduleStatus, type RetentionPolicy,
+} from '../../ui/backup-schedule.ts'
+// 展示层映射（字典键 / 时间格式化 / 间隔事实行）住在 snapshots-view.ts —— 与 v1 同源
+import {
+  backupIntervalLabelKey, backupRunStatusLabelKey, formatRunTime,
+  scheduleIntervalFact, weekdayLabelKey,
+} from '../../ui/snapshots-view.ts'
+/**
+ * 跳过原因 → 可读文本。实现住在 `client/sync/history-model.ts`（仓里唯一一份），
+ * 语义是通用的「原因 token → 人话」（running / conflict / locked / network…）——
+ * 备份与同步的跳过原因同域，所以这里直接复用，**不另建第二份**。
+ */
+import { describeSkipReason } from '../sync/history-model.ts'
+import { runStore } from '../run-store.ts'
 import type { ConfigManagerApi } from '../api.ts'
 import type { TranslateNS } from '../client-types.ts'
 import { Badge, Banner, Button, Card, Checkbox, Spinner, StatusDot } from '../common/ui.tsx'
-import { Skeleton } from '../common/Skeleton.tsx'
 import { Select } from '../common/Select.tsx'
+import { Skeleton } from '../common/Skeleton.tsx'
+import { InfoHint } from '../common/InfoHint.tsx'
 import { toast } from '../common/toast-store.ts'
-import { runStore } from '../run-store.ts'
-// issue #31：宿主回传的 skipReason 是机器 token（如 'mutation-locked'），必须经统一映射
-// 再展示——否则备份卡「上次运行」直接显示英文裸 token。
-import { describeSkipReason } from '../sync/history-model.ts'
-import {
-  BACKUP_INTERVAL_OPTIONS,
-  DEFAULT_RETENTION_POLICY,
-  RETENTION_FIELDS,
-  RETENTION_FIELD_LIMITS,
-  WEEKDAY_OPTIONS,
-  backupDraftDirty,
-  backupRunBadgeKind,
-  hasRetentionTiers,
-  normalizeRetentionPolicy,
-  validateBackupScheduleDraft,
-  type BackupInterval,
-  type BackupRunStatus,
-  type BackupScheduleDraft,
-  type BackupScheduleStatus,
-  type RetentionPolicy,
-} from '../../ui/backup-schedule.ts'
-import {
-  backupIntervalLabelKey,
-  backupRunStatusLabelKey,
-  formatRunTime,
-  scheduleIntervalFact,
-  weekdayLabelKey,
-} from '../../ui/snapshots-view.ts'
 import css from '../config-manager.module.css'
-export function BackupScheduleCard({ api, t, onBackupDone }: {
+
+/** 自定义档的星期选项（1=周一 … 7=周日，与 DSH 的 dayOfWeek 值域一致） */
+const WEEKDAY_OPTIONS = [1, 2, 3, 4, 5, 6, 7]
+/** 自定义档的分钟选项（15 分钟粒度足够；再细对「定时备份」没有意义） */
+const MINUTE_OPTIONS = [0, 15, 30, 45]
+
+export interface BackupScheduleCardProps {
   api: ConfigManagerApi
   t: TranslateNS<'config-manager'>
-  /** 「立即备份」成功完成后回调（父组件据此刷新备份文件列表） */
+  /** 「立即备份」完成后通知外层（首页刷新状态行、产物库重拉备份文件列表） */
   onBackupDone?: () => void
-}) {
+}
+
+export function BackupScheduleCard({ api, t, onBackupDone }: BackupScheduleCardProps) {
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
   const [, setError] = useState<string | null>(null)
   const [draft, setDraft] = useState<BackupScheduleDraft>({ enabled: false, interval: '24h' })
   const [saved, setSaved] = useState<BackupScheduleStatus | null>(null)
   const [saving, setSaving] = useState(false)
   const [running, setRunning] = useState(false)
-  const [lastRun, setLastRun] = useState<BackupRunStatus | undefined>(undefined)
+  const [lastRun, setLastRun] = useState<BackupScheduleStatus['lastRunStatus'] | undefined>(undefined)
   const [lastRunDetail, setLastRunDetail] = useState<string | null>(null)
   const [draftError, setDraftError] = useState<string | null>(null)
   /** m-retention：保留策略草稿（三层；与 interval/customSchedule 同属草稿，随保存一起提交） */
@@ -73,17 +77,14 @@ export function BackupScheduleCard({ api, t, onBackupDone }: {
       (schedule) => {
         if (!mountedRef.current) return
         setSaved(schedule)
-        // 有未保存草稿（切页回来）则保留，否则以宿主配置为权威
+        // 草稿优先取 runStore 里的未保存修改（切页回来接着编辑）
         setDraft(runStore.getSnapshot().snapshots.backupDraft ?? {
           enabled: schedule.enabled,
           interval: schedule.interval,
           ...(schedule.customSchedule !== undefined ? { customSchedule: schedule.customSchedule } : {}),
           retention: normalizeRetentionPolicy(schedule.retention),
         })
-        // m-retention：未保存草稿里的策略优先（切页回来不丢），否则取宿主真值（缺省补齐）
-        setRetentionDraft(
-          normalizeRetentionPolicy(runStore.getSnapshot().snapshots.backupDraft?.retention ?? schedule.retention),
-        )
+        setRetentionDraft(normalizeRetentionPolicy(runStore.getSnapshot().snapshots.backupDraft?.retention ?? schedule.retention))
         setLastRun(schedule.lastRunStatus)
         setLastRunDetail(formatRunTime(schedule.lastRunAt))
         setStatus('ready')
@@ -95,11 +96,11 @@ export function BackupScheduleCard({ api, t, onBackupDone }: {
       },
     )
   }
-
   useEffect(load, [api])
 
   const updateDraft = (next: BackupScheduleDraft): void => {
     setDraft(next)
+    // 镜像进 runStore：未保存的修改切页签/刷新后仍在（保存成功会清空）
     runStore.patch({ snapshots: { backupDraft: next } })
   }
 
@@ -111,10 +112,8 @@ export function BackupScheduleCard({ api, t, onBackupDone }: {
 
   const save = (): void => {
     if (saving || running) return
-    // m-retention：策略草稿合并进提交体（单入口校验：非法整数/超范围在此被拦下）
     const parsed = validateBackupScheduleDraft({ ...draft, retention: retentionDraft })
     if (!parsed.ok) {
-      // 表单内联校验：位置有语义（紧邻被校验的控件），保留就地提示而非 Toast
       setDraftError(parsed.error)
       return
     }
@@ -122,7 +121,6 @@ export function BackupScheduleCard({ api, t, onBackupDone }: {
     setDraftError(null)
     api.saveBackupSchedule(parsed.value).then(
       (schedule) => {
-        // 宿主已保存：无论面板是否仍挂载都清 store 草稿（否则切回会显示陈旧未保存态）
         runStore.patch({ snapshots: { backupDraft: null } })
         if (!mountedRef.current) return
         setSaved(schedule)
@@ -132,7 +130,6 @@ export function BackupScheduleCard({ api, t, onBackupDone }: {
           ...(schedule.customSchedule !== undefined ? { customSchedule: schedule.customSchedule } : {}),
           retention: normalizeRetentionPolicy(schedule.retention),
         })
-        // 以宿主回传为权威回填策略草稿（宿主持久化后的真值）
         setRetentionDraft(normalizeRetentionPolicy(schedule.retention))
         setLastRun(schedule.lastRunStatus)
         setLastRunDetail(formatRunTime(schedule.lastRunAt))
@@ -155,14 +152,16 @@ export function BackupScheduleCard({ api, t, onBackupDone }: {
       (res) => {
         if (mountedRef.current) {
           setSaved(res.schedule)
-          // 运行结果不回写策略草稿（用户可能正在编辑；宿主配置已是权威，保存时以草稿为准）
           setLastRun(res.run.status)
-          setLastRunDetail(res.run.zip !== undefined && res.run.zip !== ''
-            ? res.run.zip
-            : (res.run.skipReason !== undefined ? describeSkipReason(res.run.skipReason) : formatRunTime(res.schedule.lastRunAt)))
+          setLastRunDetail(
+            res.run.zip !== undefined && res.run.zip !== ''
+              ? res.run.zip
+              : res.run.skipReason !== undefined
+                ? describeSkipReason(res.run.skipReason)
+                : formatRunTime(res.schedule.lastRunAt),
+          )
           setRunning(false)
         }
-        // 无论面板是否仍挂载都通知父组件刷新备份文件列表（新 ZIP 已落盘）
         onBackupDone?.()
       },
       (err) => {
@@ -173,15 +172,14 @@ export function BackupScheduleCard({ api, t, onBackupDone }: {
     )
   }
 
-  // m-retention：脏判定同时看策略草稿（策略改动也要让「保存设置」可点）
   const dirty = backupDraftDirty({ ...draft, retention: retentionDraft }, saved)
   const busy = saving || running
+
   /**
    * 事实行「备份间隔」文案：整行事实统一取宿主权威值 saved（与事实行语义一致，
-   * 也与 SyncSettingsView 的状态事实行同源——草稿编辑只在下方设置行体现，
+   * 也与 SyncSettingsView 的状态事实行同源 —— 草稿编辑只在下方设置行体现，
    * 未保存前不改写事实行，避免把未生效的档位显示成已生效）。
-   * custom 档在窄格内显示具体时刻（如「周一 03:00」），其余档位用档位文案；
-   * 均由既有 locale 键拼出，不新增文案键（结构化事实来自 ui/snapshots-view.ts）。
+   * custom 档在窄格内显示具体时刻（如「周一 03:00」），其余档位用档位文案。
    */
   const intervalFactText = (): string => {
     const fact = scheduleIntervalFact(saved)
@@ -189,13 +187,15 @@ export function BackupScheduleCard({ api, t, onBackupDone }: {
     if (fact.kind === 'interval') return t(backupIntervalLabelKey(fact.interval))
     const dayKey = weekdayLabelKey(fact.dayOfWeek)
     const day = dayKey === null ? String(fact.dayOfWeek) : t(dayKey)
-    return `${day} ${String(fact.hour).padStart(2, '0')}:${String(fact.minute).padStart(2, '0')}`
+    return day + ' ' + String(fact.hour).padStart(2, '0') + ':' + String(fact.minute).padStart(2, '0')
   }
+
   /** 上次运行状态文案（未知 → '—'）。 */
-  const runStatusText = (value: BackupRunStatus | undefined): string => {
+  const runStatusText = (value: BackupScheduleStatus['lastRunStatus']): string => {
     const key = backupRunStatusLabelKey(value)
     return key === null ? '—' : t(key)
   }
+
   /** 星期文案（值域外回退原始数字，绝不吞掉取值）。 */
   const weekdayText = (day: number): string => {
     const key = weekdayLabelKey(day)
@@ -204,12 +204,10 @@ export function BackupScheduleCard({ api, t, onBackupDone }: {
 
   return (
     <Card>
-      {/* 头部：标题 + 上次运行结果徽章 + 右侧动作（时间已下移到事实行，头部不再重复） */}
       <div className={css.groupHeader}>
         <span className={css.groupLabel}>{t('backupSchedule.title')}</span>
-        {lastRun !== undefined && (
-          <Badge kind={backupRunBadgeKind(lastRun)}>{runStatusText(lastRun)}</Badge>
-        )}
+        {lastRun !== undefined && <Badge kind={backupRunBadgeKind(lastRun)}>{runStatusText(lastRun)}</Badge>}
+        <InfoHint text={t('backupSchedule.hint')} label={t('common.infoHint')} />
         <span className={css.statusSpacer} />
         <Button
           variant="primary"
@@ -236,15 +234,11 @@ export function BackupScheduleCard({ api, t, onBackupDone }: {
 
       {status === 'ready' && (
         <>
-          {/* 事实行：开关状态 / 备份间隔（各占半行）+ 上次运行（独占整行）。
-              整行统一取宿主权威值 saved（未保存的草稿编辑不改写事实行，避免把未生效的
-              档位显示成已生效）；时间已从头部移到这里，头部不再重复展示。
-              .factGrid 是 4 列网格，前两格各 span 2 → 上半行两等分、无空列留白。 */}
+          {/* 事实行：状态 / 间隔 / 上次运行（全部取宿主权威值，不受草稿影响） */}
           <div className={css.factGrid} style={{ marginTop: 8 }}>
             <div className={css.factCell} style={{ gridColumn: 'span 2' }}>
               <span className={css.factLabel}>{t('snapshots.status')}</span>
               <span className={css.factValue}>
-                {/* 复用既有 .infoValue（inline-flex + 居中 + gap，且不覆盖字号/颜色）做图标文字对齐 */}
                 <span className={css.infoValue}>
                   <StatusDot kind={(saved?.enabled ?? false) ? 'ok' : 'idle'} />
                   {(saved?.enabled ?? false) ? t('overview.state.on') : t('overview.state.off')}
@@ -255,13 +249,10 @@ export function BackupScheduleCard({ api, t, onBackupDone }: {
               <span className={css.factLabel}>{t('backupSchedule.interval')}</span>
               <span className={css.factValue}>{intervalFactText()}</span>
             </div>
-            {/* 上次运行独占整行（grid-column:1/-1）：lastRunDetail 在「立即备份」成功后
-                是 ZIP 相对路径（可较长），四列窄格会被 text-overflow 截断成「…」。 */}
             <div className={css.factCell} style={{ gridColumn: '1 / -1' }}>
               <span className={css.factLabel}>{t('backupSchedule.lastRun')}</span>
               <span className={css.factValue}>
                 {lastRun === undefined
-                  /* 从未运行：只给一句事实，不补「—」占位（避免「从未运行 —」的双重否定感） */
                   ? <span className={css.hint}>{t('backupSchedule.never')}</span>
                   : (
                     <span className={css.infoValue}>
@@ -274,25 +265,23 @@ export function BackupScheduleCard({ api, t, onBackupDone }: {
               </span>
             </div>
           </div>
-          {/* 卡片级说明（小字）：保留在事实行下方、设置行上方 —— 信息分层依次是
-              头部（标题/徽章/动作）→ 事实行 → 说明 → 设置 */}
-          <div className={css.hint} style={{ marginTop: 8 }}>{t('backupSchedule.hint')}</div>
 
-          {/* 设置行：开关（短标签）+（已开启时）间隔 / 周几 / 时刻 */}
+          {/* 设置行：开关 + 间隔（+ 自定义档的星期/时/分） */}
           <div className={css.actionRow} style={{ marginTop: 10, marginBottom: 0 }}>
             <Checkbox
               checked={draft.enabled}
-              onChange={(checked) => { updateDraft({ ...draft, enabled: checked }) }}
+              onChange={(checked: boolean) => { updateDraft({ ...draft, enabled: checked }) }}
               label={t('backupSchedule.enabled')}
               disabled={busy}
             />
+            {draft.enabled && <InfoHint text={t('backupSchedule.enabledHint')} label={t('common.infoHint')} />}
             {draft.enabled && (
               <Select
                 value={draft.interval}
                 disabled={busy}
                 style={{ width: 'auto' }}
                 ariaLabel={t('backupSchedule.interval')}
-                onChange={(next) => { updateDraft({ ...draft, interval: next as BackupInterval }) }}
+                onChange={(next) => { updateDraft({ ...draft, interval: next as BackupScheduleDraft['interval'] }) }}
                 options={BACKUP_INTERVAL_OPTIONS.map((interval) => ({
                   value: interval,
                   label: t(backupIntervalLabelKey(interval)),
@@ -308,14 +297,10 @@ export function BackupScheduleCard({ api, t, onBackupDone }: {
                 onChange={(next) => {
                   updateDraft({
                     ...draft,
-                    customSchedule: {
-                      dayOfWeek: Number(next),
-                      hour: draft.customSchedule?.hour ?? 3,
-                      minute: draft.customSchedule?.minute ?? 0,
-                    },
+                    customSchedule: { dayOfWeek: Number(next), hour: draft.customSchedule?.hour ?? 3, minute: draft.customSchedule?.minute ?? 0 },
                   })
                 }}
-                options={WEEKDAY_OPTIONS.map((w) => ({ value: String(w.value), label: weekdayText(w.value) }))}
+                options={WEEKDAY_OPTIONS.map((w) => ({ value: String(w), label: weekdayText(w) }))}
               />
             )}
             {draft.enabled && draft.interval === 'custom' && (
@@ -327,14 +312,10 @@ export function BackupScheduleCard({ api, t, onBackupDone }: {
                 onChange={(next) => {
                   updateDraft({
                     ...draft,
-                    customSchedule: {
-                      dayOfWeek: draft.customSchedule?.dayOfWeek ?? 1,
-                      hour: Number(next),
-                      minute: draft.customSchedule?.minute ?? 0,
-                    },
+                    customSchedule: { dayOfWeek: draft.customSchedule?.dayOfWeek ?? 1, hour: Number(next), minute: draft.customSchedule?.minute ?? 0 },
                   })
                 }}
-                options={Array.from({ length: 24 }, (_, h) => ({ value: String(h), label: `${String(h).padStart(2, '0')}:00` }))}
+                options={Array.from({ length: 24 }, (_, h) => ({ value: String(h), label: String(h).padStart(2, '0') + ':00' }))}
               />
             )}
             {draft.enabled && draft.interval === 'custom' && (
@@ -346,32 +327,24 @@ export function BackupScheduleCard({ api, t, onBackupDone }: {
                 onChange={(next) => {
                   updateDraft({
                     ...draft,
-                    customSchedule: {
-                      dayOfWeek: draft.customSchedule?.dayOfWeek ?? 1,
-                      hour: draft.customSchedule?.hour ?? 3,
-                      minute: Number(next),
-                    },
+                    customSchedule: { dayOfWeek: draft.customSchedule?.dayOfWeek ?? 1, hour: draft.customSchedule?.hour ?? 3, minute: Number(next) },
                   })
                 }}
-                options={[0, 15, 30, 45].map((m) => ({ value: String(m), label: String(m).padStart(2, '0') }))}
+                options={MINUTE_OPTIONS.map((m) => ({ value: String(m), label: String(m).padStart(2, '0') }))}
               />
             )}
+            {draft.enabled && draft.interval === 'custom' && (
+              <InfoHint text={t('backupSchedule.customHint')} label={t('common.infoHint')} />
+            )}
           </div>
-          {/* 设置行说明：勾选启用后启动即执行一次（行为说明；卡片级 hint 只讲「备什么」，
-              此处讲「何时跑」，两者语义不重复，故仅在已开启时出现，避免未开启时的说明噪音） */}
-          {draft.enabled && <div className={css.hint} style={{ marginTop: 6 }}>{t('backupSchedule.enabledHint')}</div>}
-          {/* custom 档专属说明：仅在已开启且选中自定义档时出现，紧贴上面的三个时刻下拉 */}
-          {draft.enabled && draft.interval === 'custom' && <div className={css.hint} style={{ marginTop: 6 }}>{t('backupSchedule.customHint')}</div>}
 
-          {/* m-retention：保留策略（GFS 分层；快照 + 定时备份共用）——无常量硬编码，值全来自本卡片状态 */}
+          {/* 保留策略（三层）：与间隔同属草稿，随「保存」一起提交 */}
           <div className={css.groupHeader} style={{ marginTop: 12 }}>
             <span className={css.groupLabel}>{t('retention.title')}</span>
+            <InfoHint text={t('retention.hint')} label={t('common.infoHint')} />
             <span className={css.statusSpacer} />
-            <span className={css.hint}>
-              {!hasRetentionTiers(retentionDraft) && t('retention.tiersOff')}
-            </span>
+            <span className={css.hint}>{!hasRetentionTiers(retentionDraft) && t('retention.tiersOff')}</span>
           </div>
-          <div className={css.hint} style={{ marginBottom: 8 }}>{t('retention.hint')}</div>
           <div className={css.actionRow} style={{ marginBottom: 0 }}>
             {RETENTION_FIELDS.map((field) => {
               const limits = RETENTION_FIELD_LIMITS[field]
@@ -396,32 +369,28 @@ export function BackupScheduleCard({ api, t, onBackupDone }: {
                     style={{ width: 88 }}
                     aria-label={t('retention.title')}
                     onChange={(event) => {
-                      // 空输入/非法文本 → 视为 0（受控 input 不吞掉用户输入，保存时再由校验层把关）
                       const raw = event.target.value
                       const parsed = raw === '' ? 0 : Number(raw)
-                      updateRetention({
-                        ...retentionDraft,
-                        [field]: Number.isFinite(parsed) ? parsed : 0,
-                      })
+                      updateRetention({ ...retentionDraft, [field]: Number.isFinite(parsed) ? parsed : 0 })
                     }}
                   />
                   <span className={css.hint}>{unit}</span>
                 </label>
               )
             })}
+            {hasRetentionTiers(retentionDraft) && (
+              <InfoHint
+                text={t('retention.keepLastHint') + ' · ' + t('retention.keepMonthlyHint') + ' · ' + t('retention.keepYearlyHint')}
+                label={t('common.infoHint')}
+              />
+            )}
+            <InfoHint text={t('retention.appliesTo')} label={t('common.infoHint')} />
           </div>
-          {/* 三层字段各自的行为说明（紧贴对应输入；仅在有分层时才需要，未启用时是噪音） */}
-          {hasRetentionTiers(retentionDraft) && (
-            <div className={css.hint} style={{ marginTop: 6 }}>
-              {t('retention.keepLastHint')} · {t('retention.keepMonthlyHint')} · {t('retention.keepYearlyHint')}
-            </div>
-          )}
-          <div className={css.hint} style={{ marginTop: 6 }}>{t('retention.appliesTo')}</div>
-          {/* P1-⑨：连续失败主动标红（≥1 次失败即在设置卡内醒目提示，恒在卡片底部、成块不被拆散） */}
+
           {(saved?.consecutiveFailures ?? 0) > 0 && (
             <div style={{ marginTop: 8 }}>
-              <Banner kind="error" >
-                {t('backupSchedule.consecutiveFailures', { count: String(saved!.consecutiveFailures) })}
+              <Banner kind="error">
+                {t('backupSchedule.consecutiveFailures', { count: String(saved?.consecutiveFailures ?? 0) })}
               </Banner>
             </div>
           )}

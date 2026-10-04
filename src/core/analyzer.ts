@@ -29,7 +29,7 @@ import { DEFAULT_SENSITIVE_RELS, restoreVaultFiles } from '../security/vault.ts'
 import { createSnapshot, planItemWritesTarget, resolveFileTarget, resolveFileTargetRel } from './backup.ts';
 import { isCredentialConfigured } from './credential-status.ts';
 import { rollback } from './rollback.ts';
-import { computeCompatibility } from './validator.ts';
+import { compatibilityReasons, computeCompatibility } from './validator.ts';
 import { msgOf } from './messages.ts';
 import { applyItemResolution } from './conflict-decisions.ts';
 import type { MsgFunc } from './messages.ts';
@@ -37,8 +37,8 @@ import {
   ImportNotConfirmedError, ImportUserSkippedError, type ApplyResult, type ConfigAdapter,
   type ExecutedItem, type HostContext, type ImportAnalysis, type ImportContext,
   type ImportDecisions, type ImportPlan, type ImportResult, type PathIssue,
-  type PathMapping, type PlanItem, type SkippedTombstone, type Snapshot, type SnapshotStore,
-  type TransactionSnapshotContext,
+  type PathMapping, type PlanItem, type SessionFormatProbeResult, type SkippedTombstone,
+  type Snapshot, type SnapshotStore, type TransactionSnapshotContext,
 } from './types.ts';
 
 /**
@@ -86,6 +86,12 @@ export interface AnalyzerOptions {
   parseZipOverride?: (buf: Uint8Array, limits?: ZipSafetyLimits) => ZipArchive;
   /** 消息翻译器（缺省 ctx.msg ?? zh） */
   msg?: MsgFunc;
+  /**
+   * 会话格式探针（宿主注入；**core 不解析 DSH 存储格式**，只消费探针结果）。
+   *
+   * 缺省 = 不做会话格式体检（旧调用方零改动）。
+   */
+  sessionFormatProbe?: (files: readonly { relativePath: string; data: Uint8Array }[]) => SessionFormatProbeResult;
 }
 
 interface Bundle {
@@ -108,11 +114,23 @@ interface SectionExtraction {
   warnings: string[];
 }
 
+/** 会话格式体检的「已落定」结果（探针 + 本机支持版本；不可判定时整体缺省）。 */
+interface ResolvedSessionFormats {
+  target: number;
+  unreadable: { unitId: string; version: number }[];
+  /** 本次体检真正看过的会话条数（解出 header 的 + 解不出的） */
+  examined: number;
+  /** 因抽样上限未检查的会话条数 */
+  skipped: number;
+}
+
 interface AnalyzedBundle extends Bundle {
   sections: Map<SectionId, unknown>;
   unsupportedSections: string[];
   unsupportedVersions: { section: SectionId; version: number }[];
   sectionWarnings: string[];
+  /** 只算一次：分析、计划项标记、ImportAnalysis 三方共用同一份结果 */
+  sessionFormats: ResolvedSessionFormats | null;
   adapterItems: PlanItem[];
   adapterIssues: string[];
 }
@@ -193,6 +211,7 @@ export class Analyzer {
   private readonly dependencyChecker?: (command: string) => Promise<boolean>;
   private readonly parseZipFn: (buf: Uint8Array, limits?: ZipSafetyLimits) => ZipArchive;
   private readonly msg: MsgFunc;
+  private readonly sessionFormatProbe?: (files: readonly { relativePath: string; data: Uint8Array }[]) => SessionFormatProbeResult;
   /** 会话内 bundle 缓存（zipPath → 解析结果），避免重复解压 */
   private readonly bundleCache = new Map<string, Bundle>();
 
@@ -207,6 +226,7 @@ export class Analyzer {
     // 不再是「默认弱解析 + 宿主注入强化版」的分工。
     this.parseZipFn = opts.parseZipOverride ?? parseZip;
     this.msg = opts.msg ?? msgOf(opts.ctx);
+    this.sessionFormatProbe = opts.sessionFormatProbe;
   }
 
   /* ---------------- 第 1-6 步：ZIP 读入 → 安全解析 → manifest → 完整性 → schema ---------------- */
@@ -400,6 +420,65 @@ export class Analyzer {
     return { sections, unsupportedSections, unsupportedVersions, warnings };
   }
 
+  /**
+   * 会话格式体检（宿主探针 + 本机支持的版本）—— **每份归档只跑一次**，结果供三方共用：
+   * 分析告警、计划项标记（`formatUnsupported`）、ImportAnalysis 摘要。
+   *
+   * 为什么必须在导入前说：DSH 读会话时对**非本 build 的格式版本直接拒绝**，而会话列表
+   * （`listArtifacts()`）对这种会话是**静默 continue** 的 —— 不报错、不显示，用户只会看到
+   * 「对话没了」。高版本能读低版本（DSH 自带 V0→V4 迁移链），反向不可读，所以只对
+   * 「包里的版本 > 本机支持的版本」告警；本机版本解析不到时**不猜**（宁可不报，也不谎报兼容）。
+   *
+   * 不可判定（无探针 / 无 sessions / 本机版本解析不到 / 探针抛错）一律返回 null。
+   */
+  private resolveSessionFormats(sections: Map<SectionId, unknown>): ResolvedSessionFormats | null {
+    const probe = this.sessionFormatProbe;
+    if (probe === undefined || !sections.has('sessions')) return null;
+    const target = this.ctx.sessionFormatVersion;
+    if (target === undefined) return null;
+    const rows = (sections.get('sessions') as { files?: unknown } | undefined)?.files;
+    if (!Array.isArray(rows)) return null;
+    const files: { relativePath: string; data: Uint8Array }[] = [];
+    for (const row of rows) {
+      const item = row as { relativePath?: unknown; data?: unknown };
+      if (typeof item.relativePath === 'string' && item.data instanceof Uint8Array) {
+        files.push({ relativePath: item.relativePath, data: item.data });
+      }
+    }
+    try {
+      const probed = probe(files);
+      // 只有明确「版本更高」才算读不了；units 缺省（旧探针实现）时退化为空数组（不猜单元）。
+      return {
+        target,
+        unreadable: (probed.units ?? []).filter((unit) => unit.version > target),
+        examined: probed.sampled + probed.unreadable,
+        skipped: probed.skipped,
+      };
+    } catch {
+      // 体检失败绝不拖垮分析，也绝不因此宣称兼容（本条静默，另有导出报告可核对）。
+      return null;
+    }
+  }
+
+  private sessionFormatWarnings(result: ResolvedSessionFormats | null): string[] {
+    if (result === null) return [];
+    const target = result.target;
+    const newer = result.unreadable.map((unit) => unit.version);
+    if (newer.length === 0) return [];
+    const warnings = [this.msg('import.sessionsFormatUnsupported', {
+      count: String(newer.length),
+      newer: String(Math.max(...newer)),
+      target: String(target),
+    })];
+    if (result.skipped > 0) {
+      warnings.push(this.msg('import.sessionsFormatSampled', {
+        sampled: String(result.examined),
+        skipped: String(result.skipped),
+      }));
+    }
+    return warnings;
+  }
+
   private async analyzeBundle(bundle: Bundle): Promise<AnalyzedBundle> {
     const extraction = this.extractSections(bundle);
     const { sections } = extraction;
@@ -435,6 +514,9 @@ export class Analyzer {
       }
     }
 
+    // 会话格式体检只跑一次：告警、计划项标记、ImportAnalysis 摘要共用（探针要解首帧，别重复跑）。
+    const sessionFormats = this.resolveSessionFormats(sections);
+
     return {
       ...bundle,
       sections,
@@ -445,7 +527,9 @@ export class Analyzer {
       sectionWarnings: [
         ...extraction.warnings,
         ...(sections.has('sessions') && !sections.has('workspaces') ? [this.msg('import.sessionsWithoutWorkspaces')] : []),
+        ...this.sessionFormatWarnings(sessionFormats),
       ],
+      sessionFormats,
       adapterItems,
       adapterIssues,
     };
@@ -487,14 +571,18 @@ export class Analyzer {
     if (missingSections.length > 0) {
       warnings.push(this.msg('import.missingSections', { sections: missingSections.join(', ') }));
     }
-    const compatibility = computeCompatibility({
+    // 评分与「为什么是这个评分」出自同一份输入：compatibility 由 compatibilityReasons 派生
+    // （见 validator.computeCompatibility），这里把两侧都回传，界面据此解释而不是猜。
+    const compatibilityInput = {
       sourceDsh: manifest.source.dshVersion,
       targetDsh: this.ctx.dshVersion,
       sourcePlatform: manifest.source.platform,
       targetPlatform: this.ctx.platform,
       schemaVersion: manifest.schemaVersion,
       missingSections,
-    });
+    };
+    const compatibility = computeCompatibility(compatibilityInput);
+    const compatReasons = compatibilityReasons(compatibilityInput);
 
     // 路径问题（第 12 步检测；核心只做形态判定，最终映射由 UI 确认）
     const pathIssues = detectPathIssues(
@@ -554,6 +642,13 @@ export class Analyzer {
       errors,
       warnings,
       compatibility,
+      compatibilityReasons: compatReasons,
+      source: {
+        dshVersion: manifest.source.dshVersion,
+        platform: manifest.source.platform,
+        schemaVersion: manifest.schemaVersion,
+      },
+      target: { dshVersion: this.ctx.dshVersion, platform: this.ctx.platform },
       sectionsInZip,
       unsupportedSections,
       unsupportedVersions: analyzed.unsupportedVersions,
@@ -567,6 +662,17 @@ export class Analyzer {
         refs,
         satisfied,
       },
+      // 会话格式体检摘要（不可判定时缺省，UI 不得据此宣称兼容）。
+      ...(analyzed.sessionFormats !== null
+        ? {
+            sessionFormats: {
+              target: analyzed.sessionFormats.target,
+              unreadable: analyzed.sessionFormats.unreadable,
+              sampled: analyzed.sessionFormats.examined,
+              skipped: analyzed.sessionFormats.skipped,
+            },
+          }
+        : {}),
     };
   }
 
@@ -610,6 +716,25 @@ export class Analyzer {
     // 过滤是纯函数（applyTombstoneFilter），此处只负责加载数据并调用。
     const tombstones = await loadTombstones(this.ctx.fs, path.join(this.ctx.homeDir, 'dsh-config-manager'));
     const { items: planItems, skipped: skippedTombstoned } = applyTombstoneFilter(items, tombstones);
+
+    // 会话格式处置的落点：把「本机读不了」标到**具体计划项**上（unitId = projectKey/会话目录）。
+    // 标记是纯附加字段：不拦执行、不改变 kind/conflict —— 决策权交给 UI（中止 / 跳过 / 引导升级）。
+    const formats = analyzed.sessionFormats;
+    if (formats !== null && formats.unreadable.length > 0) {
+      const byUnit = new Map(formats.unreadable.map((unit) => [unit.unitId, unit.version]));
+      for (const item of planItems) {
+        // 键空间对齐的两个形态：探针的单元键来自分区内的相对路径（`projectKey/会话目录`），
+        // 而计划项（file-collection）的 unitId 带适配器前缀（`sessions:projectKey/会话目录`）。
+        // 只用其中一种会**静默失配**（真机：探针报 v4、计划项一条都不带标记），两种都试。
+        const version = sessionUnitVersion(byUnit, item.unitId ?? item.id);
+        if (version !== undefined) {
+          item.formatUnsupported = { version, target: formats.target };
+          // severity 只是展示语义（写盘项标 warning；Skip/Warning 等诊断项保持原样），
+          // 让同步确认页/报告把它显式标成「这条会被 DSH 跳过」，而不是与普通项混在一起。
+          if (item.kind === 'Create' || item.kind === 'Update' || item.kind === 'Conflict') item.severity = 'warning';
+        }
+      }
+    }
 
     // 凭据计划项（MissingSecret / Skip）的唯一生成点 —— 规则见 buildCredentialPlanItems 文档。
     await buildCredentialPlanItems(
@@ -897,6 +1022,10 @@ export class Analyzer {
             ...(result.message !== undefined ? { message: result.message } : {}),
           });
           if (status === 'failed') anyFailed = true;
+          // 分区收尾也能宣布「需要重启」（会话写入即属此类：DSH 的会话列表在启动期读取，
+          // 不重启就看不到新导入的对话）。此前该字段只在逐项结果里被消费，收尾结果里的
+          // needsRestart 会被静默丢掉 —— 用户拿不到这条必需提示。
+          if (result.needsRestart === true) needsRestart = true;
           if (status !== 'ok' && result.message !== undefined) warnings.push(result.message);
         }
       }
@@ -1069,6 +1198,18 @@ export class Analyzer {
       warnings.push(this.msg('import.vaultBackfillFailed', { rel: DEFAULT_SENSITIVE_RELS.join(', '), reason: err instanceof Error ? err.message : String(err) }));
     }
 
+    // issue #56 第二条线：把「未生效项」（status='warning'）从 warnings 里**结构化**出来。
+    // warning 是刻意的非致命语义（不触发回滚、不让 ok 变 false），但上层必须能说清
+    // 「这次哪些步骤没生效」——真机：插件安装失败（warning）排在凭据写入之前且中断了它，
+    // 用户看到的却是「同步完成」。
+    const ineffective = executed
+      .filter((e) => e.status === 'warning')
+      .map((e) => ({
+        itemId: e.itemId,
+        adapter: e.itemId.split(':')[0] ?? e.itemId,
+        ...(e.message === undefined ? {} : { message: e.message }),
+      }));
+
     return {
       // 单项失败已如实记录在 executed；无未捕获异常即完成。
       // 保留分支恒 ok:false —— 这笔导入**没有完成**，只是用户选择了留下已应用部分。
@@ -1079,6 +1220,8 @@ export class Analyzer {
       warnings,
       rollback: null,
       snapshotId: snapshot.id,
+      // 字段只增不改：没有未生效项时**不出现**（旧行为逐字节不变）
+      ...(ineffective.length > 0 ? { ineffective } : {}),
       skippedTombstoned: plan.skippedTombstoned ?? [],
       // issue #39 Feature 3：字段只增不改；未经归档恢复时省略（旧行为逐字节不变）
       ...(credentialsRestored > 0 ? { credentialsRestored } : {}),
@@ -1335,6 +1478,21 @@ export function rebaseMapping(sourceHome: string | undefined, localHome: string)
   const isAbsolute = (value: string): boolean => value.startsWith('/') || /^[a-zA-Z]:[\/]/.test(value);
   if (!isAbsolute(from) || !isAbsolute(to)) return undefined;
   return { oldPrefix: from, newPrefix: to, appliesTo: [] };
+}
+
+/**
+ * 会话单元版本查询：探针的单元键（`projectKey/会话目录`）与计划项单元 id
+ * （`sessions:projectKey/会话目录`）是两个键空间，必须两种形态都试。
+ *
+ * 为什么不在探针里直接带上适配器前缀：探针只认「分区内的相对路径」，它不知道也不该知道
+ * 哪个适配器在消费它（core 也不得 import 会话字节工具）。键空间对齐因此落在计划生成期。
+ */
+function sessionUnitVersion(byUnit: ReadonlyMap<string, number>, unitId: string): number | undefined {
+  const direct = byUnit.get(unitId);
+  if (direct !== undefined) return direct;
+  const prefix = 'sessions:';
+  const bare = unitId.startsWith(prefix) ? unitId.slice(prefix.length) : prefix + unitId;
+  return byUnit.get(bare);
 }
 
 /** 路径映射合并：只保留「已解析」（newPrefix 非空）的映射用于执行期数据改写；

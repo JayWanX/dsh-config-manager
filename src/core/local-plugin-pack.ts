@@ -6,7 +6,10 @@
  * 目标机器上该路径根本不存在，导入时 `pnpm add link:/...` 必然失败，插件被静默丢失。
  * 本机实例：`web` profile 的 `"dsh-config-manager": "link:D:/Projects/personal/dsh-config-manager"`。
  *
- * 解法：导出时对本地源插件执行 `npm pack`，把产出的 tarball 一并放进备份；
+ * 解法（issue #57 起分两条路径）：① spec 指向**目录** → 执行 `npm pack` 产出 tarball；
+ * ② spec 指向**已打包的 .tgz 文件** → 该文件本身就是 `npm pack` 的产物，直接读取收编
+ * （此前一律当目录 spawn，`file:/abs/x.tgz` 必然 `spawn ENOTDIR`，插件被静默跳过）。
+ * 两条路径都把 tarball 一并放进备份；
  * 导入时用「解包后的 tarball 绝对路径」重写 spec，走 `file:<abs>` 安装（pnpm 原生支持）。
  *
  * 本模块前半部分是**纯函数**（零 IO、零依赖，只用于 spec 分类与路径推导，node 可直测）；
@@ -104,6 +107,22 @@ export function tarballNameFor(pkgName: string, version: string): string {
 }
 
 /**
+ * **已打包 tarball** 的归档名：保留源文件名（issue #57）。
+ *
+ * 为什么不像目录那样按「包名-版本」重命名：源文件里就带着它自己的包名与版本
+ * （`pnpm pack` 的 `dsh-academic-research-0.0.1.tgz`），改名只会让「备份里的是哪一份」
+ * 变得对不上；而且 `file:` 指向的 tarball 未必叫 `npm pack` 的默认名。
+ * 只做**文件名净化**（丢目录、把路径分隔符与非法字符折叠为 `-`），杜绝穿越。
+ */
+export function safeTarballFileNameFor(packageName: string, sourceFileName: string): string {
+  const raw = sourceFileName.split(/[/\\]/).pop() ?? '';
+  const cleaned = raw.replace(/[^A-Za-z0-9._-]/g, '-').replace(/^\.+/, '');
+  if (cleaned !== '' && cleaned !== '.tgz') return cleaned;
+  // 源文件名不可用（空 / 只剩扩展名）→ 回退到按包名推导，保证条目名永远合法
+  return tarballNameFor(packageName, '').slice(`${LOCAL_PLUGIN_DIR}/`.length);
+}
+
+/**
  * 本地 spec → 绝对路径。
  * - `link:D:/x` / `link:/abs/x` → 绝对路径原样（规范化分隔符）；
  * - `link:./x` / `link:../x` → 相对 profileDir 解析；
@@ -154,6 +173,19 @@ export function isPackedLocalSpec(spec: string | undefined): boolean {
   return rest.startsWith(`${LOCAL_PLUGIN_DIR}/`);
 }
 
+/**
+ * 本地 spec 是否**必然指向 tarball**（而非目录）—— `.tgz` / `.tar.gz` 后缀。
+ *
+ * 只是提示：真正的形态判定在打包期由 `statKind`（stat 实测）决定，本函数不作判据，
+ * 用于文档/UI 说明「哪些 spec 会走直读路径」。非 file:/link: 前缀的 spec 一律 false。
+ */
+export function isTarballLocalSpec(spec: string | undefined): boolean {
+  if (typeof spec !== 'string') return false;
+  if (!isLocalPluginSpec(spec)) return false;
+  const s = spec.trim().replace(/\\/g, '/');
+  return /\.(tgz|tar\.gz)$/i.test(s);
+}
+
 /* ---------------- 打包编排（exec 注入） ---------------- */
 
 /** 打包所需的插件最小信息（只依赖 core/types.ts 的 PluginInfo 子集，便于测试构造） */
@@ -191,6 +223,18 @@ export interface PackLocalPluginsOptions {
   readFile: (absPath: string) => Promise<Uint8Array>;
   /** 确保目录存在（注入） */
   mkdir: (absDir: string) => Promise<void>;
+  /**
+   * 路径形态判定（注入；缺省“判不出”）。
+   *
+   * issue #57：`file:` spec 可能直接指向**已打包的 .tgz**（`file:/abs/x.tgz`），
+   * 此时该文件本身就是 `npm pack` 的产物 —— 再拿它当 cwd 去 spawn `npm pack`
+   * 必然 `spawn ENOTDIR`，插件代码静默不进备份。有了这个探测就能「直接收编」：
+   * 读文件 + 重写 spec，跳过 npm pack。
+   *
+   * 契约：返回 'file' | 'dir'；**判不出来（不存在 / 无权限 / 未注入）必须返回 'unknown'**，
+   * 让调用方落回既有目录流程去产出可读告警，绝不把「判不出」当成文件。
+   */
+  statKind?: (absPath: string) => Promise<'file' | 'dir' | 'unknown'>;
   /** 目标平台校验（可选；'win32' 时 npm 是 .cmd 垫片，调用方负责 exec 形态） */
   timeoutMs?: number;
   /** tarball 体积上限（缺省 MAX_LOCAL_TARBALL_BYTES） */
@@ -289,6 +333,31 @@ export async function packLocalPlugins(
         homeDir: opts.homeDir,
         profileDir: opts.profileDir,
       });
+
+      // issue #57：`file:` 也可能直接指向**已打包的 tarball**（`file:/abs/x.tgz`）。
+      // 这种形态下文件本身就是 `npm pack` 的产物 —— 拿它当 cwd 去 spawn 必然
+      // `spawn ENOTDIR`（真机实测 9 个插件全军覆没），必须**直接收编、跳过 npm pack**。
+      const kind = opts.statKind === undefined ? 'unknown' : await opts.statKind(sourcePath).catch(() => 'unknown' as const);
+      if (kind === 'file') {
+        const data = await opts.readFile(sourcePath);
+        if (data.byteLength > maxBytes) {
+          warnings.push(
+            `本地插件 ${plugin.name} 的 tarball 超过上限（${data.byteLength} > ${maxBytes} 字节），已跳过打包`,
+          );
+          continue;
+        }
+        const relativePath = `${LOCAL_PLUGIN_DIR}/${safeTarballFileNameFor(plugin.name, sourcePath)}`;
+        const rewrittenSpec = rewriteLocalSpec(spec, { tarballRel: relativePath });
+        packed.push({
+          packageName: plugin.name,
+          version: plugin.version,
+          relativePath,
+          rewrittenSpec,
+          data,
+        });
+        rewritten[plugin.name] = rewrittenSpec;
+        continue;
+      }
 
       // cwd 设为插件目录 + `npm pack . --pack-destination <abs>`：跨 npm 版本最稳的形态
       const result = await opts.exec('npm', ['pack', '.', '--pack-destination', opts.packDir], {

@@ -310,6 +310,62 @@ test('错误消息 sanitize：git 失败 stderr 含 token → 抛出消息被替
   );
 });
 
+test('推送预检：http(s) 远端 + 空令牌 → 发起 git 之前给出可操作错误（不写空口令凭据）', async (t) => {
+  const dir = await makeGitWorkDir(t);
+  const calls: CallRecord[] = [];
+  const transport = new GitTransport(makeOptions({
+    workDir: dir,
+    // 真机形态：没配令牌（拉取公开仓库可匿名成功，推送必失败）
+    credentials: { getToken: async () => '' },
+    exec: mockExec(calls),
+  }));
+  await assert.rejects(
+    transport.upload(sampleSnapshot()),
+    (err: unknown) => {
+      assert.ok(err instanceof GitTransportError, '必须是 GitTransportError');
+      assert.equal(err.kind, 'auth');
+      assert.equal(err.retryable, false);
+      assert.match(err.message, /访问令牌/, '必须说清「没配令牌」，而不是把 git 的原文丢给用户');
+      assert.match(err.message, /通道配置/, '必须给出可操作入口');
+      return true;
+    },
+  );
+  assert.equal(joinedArgs(calls, 'push').length, 0, '空令牌必须在发起 push 之前拦下');
+  // 空令牌不得注入 credential helper —— `https://oauth2:@host` 会被远端回成
+  // 「Invalid username or token」（指向令牌错误，而真实原因是「没配令牌」）
+  for (const c of calls) {
+    assert.ok(!c.args.some((a) => a.includes('credential.helper=')), '空令牌不得注入 credential helper');
+  }
+});
+
+test('推送鉴权失败（GitHub 文案）→ 分类 auth + 可操作提示，且不泄漏 token', async (t) => {
+  const dir = await makeGitWorkDir(t);
+  const calls: CallRecord[] = [];
+  const transport = new GitTransport(makeOptions({
+    workDir: dir,
+    exec: mockExec(calls, {
+      failOn: {
+        match: 'push',
+        code: 128,
+        stderr: "remote: Invalid username or token. Password authentication is not supported for Git operations.\n"
+          + `fatal: Authentication failed for 'https://oauth2:${TEST_TOKEN}@github.com/example/private-config.git/'`,
+      },
+    }),
+  }));
+  await assert.rejects(
+    transport.upload(sampleSnapshot()),
+    (err: unknown) => {
+      assert.ok(err instanceof GitTransportError);
+      assert.equal(err.kind, 'auth', 'GitHub 的「Invalid username or token」必须归类为鉴权失败');
+      assert.equal(err.retryable, false);
+      assert.match(err.message, /推送认证失败/);
+      assert.match(err.message, /通道配置/);
+      assert.ok(!err.message.includes(TEST_TOKEN), `错误消息泄漏 token: ${err.message}`);
+      return true;
+    },
+  );
+});
+
 test('checkIsPrivate：匿名可达 → false；匿名失败+认证可达 → true；都失败 → 抛错', async (t) => {
   // 匿名成功
   const c1: CallRecord[] = [];

@@ -32,6 +32,7 @@ import Eye from 'lucide-react/dist/esm/icons/eye.mjs'
 import FolderInput from 'lucide-react/dist/esm/icons/folder-input.mjs'
 import HardDriveDownload from 'lucide-react/dist/esm/icons/hard-drive-download.mjs'
 import Info from 'lucide-react/dist/esm/icons/info.mjs'
+import Lock from 'lucide-react/dist/esm/icons/lock.mjs'
 import MessageSquare from 'lucide-react/dist/esm/icons/message-square.mjs'
 import PackageCheck from 'lucide-react/dist/esm/icons/package-check.mjs'
 import Pencil from 'lucide-react/dist/esm/icons/pencil.mjs'
@@ -58,6 +59,7 @@ const ICONS = {
   clock: Clock,
   about: Info,
   info: Info,
+  lock: Lock,
   message: MessageSquare,
   pencil: Pencil,
   close: X,
@@ -239,3 +241,5 @@ export const CheckIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name
 export const WarnIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="warn" {...p} />
 export const ErrorIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="error" {...p} />
 export const InfoIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="info" {...p} />
+/** 加密容器标注（issue #55：备份列表里区分「整包加密」的产物）。 */
+export const LockIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="lock" {...p} />

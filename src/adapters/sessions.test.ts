@@ -377,6 +377,79 @@ test('子代理会话：父对话不在包内但本机已有 → 不告警（把
   );
 });
 
+/* ---------------- T2：导入会话后必须提示「重启 DSH 才会刷新会话列表」 ---------------- */
+
+test('T2：真正写入会话文件 → finalizeApply 给出「需重启 DSH」提示；没写就不给', async () => {
+  const cwd = 'C:\\Users\\bob\\proj';
+  const key = projectKeyOf(cwd);
+
+  // ① 没走 applyItem（用户取消了全部会话）→ 不得提示重启
+  const idle = makeContext('win32', HOME);
+  ctxWithLayout(idle, { cwd });
+  const idleResults = await adapter.finalizeApply(makeImportContext(idle, new Map([['sessions', layoutSection(cwd, key)]])));
+  assert.equal(
+    idleResults.some((r) => r.needsRestart === true),
+    false,
+    '一个会话都没写 → 不能要求用户重启：' + idleResults.map((r) => r.message).join(' | '),
+  );
+
+  // ② 走真实 applyItem 写入 → 收尾结果里必须有一条 needsRestart
+  const dst = makeContext('win32', HOME);
+  ctxWithLayout(dst, { cwd });
+  const section = layoutSection(cwd, key);
+  const ctx = makeImportContext(dst, new Map([['sessions', section]]));
+  const applied = await adapter.applyItem({
+    id: 'sessions:' + section.files[0]!.relativePath,
+    unitId: 'sessions:' + key + '/session-a',
+    kind: 'Create',
+    adapter: 'sessions',
+    description: '',
+    severity: 'info',
+    target: { adapter: 'sessions', ref: section.files[0]!.relativePath },
+  }, ctx);
+  assert.equal(applied.ok, true);
+
+  const results = await adapter.finalizeApply(ctx);
+  const notice = results.find((r) => r.needsRestart === true);
+  assert.ok(notice !== undefined, '必须给出重启提示：' + results.map((r) => r.message).join(' | '));
+  assert.equal(notice.ok, true, '提示本身不是失败项');
+  assert.match(notice.message ?? '', /重启 DSH/);
+  assert.match(notice.message ?? '', /1 个会话文件/);
+});
+
+test('T2：计数按「本次导入」隔离 —— 上一次导入写过，不会让这一次误报重启', async () => {
+  const cwd = 'C:\\Users\\bob\\proj';
+  const key = projectKeyOf(cwd);
+  const write = async (): Promise<void> => {
+    const dst = makeContext('win32', HOME);
+    ctxWithLayout(dst, { cwd });
+    const section = layoutSection(cwd, key);
+    const ctx = makeImportContext(dst, new Map([['sessions', section]]));
+    await adapter.applyItem({
+      id: 'sessions:' + section.files[0]!.relativePath,
+      unitId: 'sessions:' + key + '/session-a',
+      kind: 'Create',
+      adapter: 'sessions',
+      description: '',
+      severity: 'info',
+      target: { adapter: 'sessions', ref: section.files[0]!.relativePath },
+    }, ctx);
+    const results = await adapter.finalizeApply(ctx);
+    assert.ok(results.some((r) => r.needsRestart === true), '本次写入必须提示');
+  };
+  await write();
+
+  // 宿主每个进程只建一次 adapters（实例复用）—— 第二次导入一个会话都没写，不得因为上次而提示
+  const next = makeContext('win32', HOME);
+  ctxWithLayout(next, { cwd });
+  const results = await adapter.finalizeApply(makeImportContext(next, new Map([['sessions', layoutSection(cwd, key)]])));
+  assert.equal(
+    results.some((r) => r.needsRestart === true),
+    false,
+    '写入标记必须按 ImportContext 隔离（否则第二次导入会假报「需重启」）',
+  );
+});
+
 test('子代理会话：父对话在包内 → 导入侧不告警', async () => {
   const dst = makeContext('win32', 'C:\\Users\\bob');
   const cwd = 'D:\\Ghost\\proj';
@@ -495,6 +568,45 @@ test('历史对话排序：unitActivityTimes 取每个会话**最新一份**日�
 
   assert.deepEqual([...at.entries()].sort(), [['a', 3000], ['b', 2000]],
     '多份 generation 取最新；附件不算会话日志；session- 前缀归一成裸键');
+});
+
+
+test('历史对话排序：给定预览顺带的时间（statTimes）时不再逐文件 stat', async () => {
+  const ctx = makeContext('win32', HOME);
+  await ctx.fs.writeFile('sessions/--p--/a/session.jsonl.zstd', bytes('x'));
+  await ctx.fs.writeFile('sessions/--p--/a/session.v3.jsonl.zstd', bytes('x'));
+  await ctx.fs.writeFile('sessions/--p--/a/attachments/blob.bin', bytes('x'));
+  await ctx.fs.writeFile('sessions/--p--/session-b/session.jsonl.zstd', bytes('x'));
+  const section = await adapter.export(ctx, { includeSecrets: false });
+
+  // 逐文件门面装成哨兵：只要还走老路（第二趟 stat）本用例立刻失败
+  Object.defineProperty(ctx.fs, 'mtimeMs', {
+    configurable: true,
+    value: async (): Promise<never> => { throw new Error('__NO_SECOND_STAT__') },
+  });
+  const at = await adapter.unitActivityTimes(ctx, section, new Map([
+    ['sessions/--p--/a/session.jsonl.zstd', 1000],
+    ['sessions/--p--/a/session.v3.jsonl.zstd', 3000],
+    ['sessions/--p--/a/attachments/blob.bin', 9999], // 附件不是会话日志 → 必须被忽略
+    ['sessions/--p--/session-b/session.jsonl.zstd', 2000],
+  ]));
+
+  assert.deepEqual([...at.entries()].sort(), [['a', 3000], ['b', 2000]],
+    '合并路径与逐文件路径必须给出同一结果（多份 generation 取最新；附件不算）');
+});
+
+test('历史对话排序：预览时间缺项 → 该会话不进 Map（不猜 0），与逐文件路径同语义', async () => {
+  const ctx = makeContext('win32', HOME);
+  await ctx.fs.writeFile('sessions/--p--/a/session.jsonl.zstd', bytes('x'));
+  await ctx.fs.writeFile('sessions/--p--/session-b/session.jsonl.zstd', bytes('x'));
+  const section = await adapter.export(ctx, { includeSecrets: false });
+  Object.defineProperty(ctx.fs, 'mtimeMs', { configurable: true, value: undefined });
+
+  const at = await adapter.unitActivityTimes(ctx, section, new Map([
+    ['sessions/--p--/a/session.jsonl.zstd', 1000],
+  ]));
+
+  assert.deepEqual([...at.entries()], [['a', 1000]], '只有真的拿到时间的会话进 Map');
 });
 
 test('历史对话排序：宿主不提供 mtimeMs 门面 → 空 Map（调用方退回元数据缓存时间，不猜 0）', async () => {

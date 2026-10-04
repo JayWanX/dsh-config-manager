@@ -36,7 +36,8 @@ export const USER_PATCH_FILE = 'cordis.patch.yml';
  */
 export type LocalPluginPackHook = (
   plugins: PluginEntry[],
-  ctx: HostContext,
+  /** 结构化类型：HostContext 满足它（core 侧刻意不 import adapters 的 HostContext 类型） */
+  ctx: Pick<HostContext, 'profile' | 'profileDir'>,
 ) => Promise<PackLocalPluginsResult>;
 
 /** tarball 字节 → base64（零依赖，避免 Buffer 在浏览器侧类型问题） */

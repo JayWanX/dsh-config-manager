@@ -11,7 +11,8 @@ import type { RoutesEnv } from './context.ts'
 import type { RunState } from '../core/run-registry.ts'
 import type { ImportPlan } from '../core/types.ts'
 import { decryptErrorText, isControlledPath, tryDecryptCredentials, writeRequestBodyToFile } from '../index.ts'
-import { SecurityError, decryptArchive, isArchiveBlob, verifyEncryptedBlob } from '../security/index.ts'
+import { resolveSessionFormatDisposition, sessionFormatAbortResponse } from './session-format.ts'
+import { ENCRYPTED_CONTAINER_CODE, SecurityError, decryptArchive, isArchiveBlob, readContainerKind, verifyEncryptedBlob } from '../security/index.ts'
 import { redact } from '../security/redaction.ts'
 import { atomicWriteFile } from '../utils/atomic-write.ts'
 import { randomBytes } from 'node:crypto'
@@ -33,6 +34,7 @@ export function importRoutes(env: RoutesEnv): WebRoute[] {
     runAbortControllers,
     runCancels,
     runs,
+    syncDir,
     tmpDir,
     tryAppendHistory,
     withMutationGate,
@@ -90,13 +92,8 @@ export function importRoutes(env: RoutesEnv): WebRoute[] {
         const sizeBytes = await writeRequestBodyToFile(req, tmp, MAX_UPLOAD_BYTES)
         // 探测上传文件是否为整体加密备份容器（DCA1 magic）：加密容器不能直接当作 ZIP 解析，
         // UI 据此插入「解锁加密备份」阶段（decrypt-archive），解出明文 ZIP 后再走导入。
-        let containerType: 'zip' | 'encrypted' = 'zip'
-        try {
-          const first = await fs.readFile(tmp)
-          containerType = isArchiveBlob(first) ? 'encrypted' : 'zip'
-        } catch {
-          containerType = 'zip'
-        }
+        // 只读前 4 字节判形态（此前为看这 4 个字节把整份备份 readFile 进内存）
+        const containerType: 'zip' | 'encrypted' = await readContainerKind(tmp)
         writeJson(res, 200, { zipPath: tmp, name, sizeBytes, containerType })
       } catch (error) {
         await fs.rm(tmp, { force: true }).catch(() => undefined)
@@ -170,12 +167,28 @@ export function importRoutes(env: RoutesEnv): WebRoute[] {
         writeJson(res, 400, { error: 'zipPath is required and must reference a staged backup' })
         return
       }
+      // 防御纵深（issue #55）：整体加密容器必须先经 /decrypt-archive 解锁。
+      // 到这一步说明调用方跳过了形态探测 —— 给可判别的错误码，而不是让 ZIP 解析器
+      // 报「缺少中央目录结束记录」把用户引向「备份损坏」的误解。
+      if ((await readContainerKind(zipPath)) === 'encrypted') {
+        writeJson(res, 400, { error: msg('import.encryptedContainerNeedsUnlock'), code: ENCRYPTED_CONTAINER_CODE })
+        return
+      }
       const plan = body?.['plan'] as ImportPlan | undefined
       if (plan === undefined || typeof plan !== 'object' || !Array.isArray(plan['items'])) {
         writeJson(res, 400, { error: 'plan is required and must be an ImportPlan' })
         return
       }
       const opts = (body?.['opts'] ?? {}) as Record<string, unknown>
+      // T1：abort 处置的**执行前**守卫（零写入）。客户端可能绕过 /plan 直接提交计划，
+      // 或计划是「先按 skip 生成、执行前又被改成 abort」—— 这里再判一次，保证 abort
+      // 语义在真正落盘的那一步仍然成立（判据与 /plan、界面共用同一份纯函数）。
+      const disposition = await resolveSessionFormatDisposition(syncDir, opts['sessionFormatDisposition'])
+      const blocked = sessionFormatAbortResponse(plan, disposition, msg)
+      if (blocked !== null) {
+        writeJson(res, 409, blocked)
+        return
+      }
       // 加密备份的解密密码（仅内存，来自导入向导 decrypt 阶段；绝不落盘/落日志）。
       // core 层强制：加密备份必须成功解密后才允许执行（import.encryptedPasswordRequired）。
       const decryptPassword =

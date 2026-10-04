@@ -1356,3 +1356,12 @@ test('集成: Importer + parseZipOverride=createHardenedZipParser 正常解析�
     assert.deepEqual(analysis.sectionsInZip, ['settings']);
   });
 });
+
+test('redact: 嵌在更长字段名里的敏感键也要掩码（验收 F7）', () => {
+  // 整体不是敏感名，但切段后能拼出敏感名（api + Key = apiKey）→ 必须掩码
+  assert.equal(redact('leak-apiKey=SECRET123.zip').includes('SECRET123'), false);
+  assert.equal(redact('my_apiKey=ABC').includes('ABC'), false);
+  assert.equal(redact('x.token=ABC').includes('ABC'), false);
+  // 不敏感的普通字段名不得被误伤（避免「全掩」导致真正的信息不可读）
+  assert.equal(redact('normal-file.zip'), 'normal-file.zip');
+});

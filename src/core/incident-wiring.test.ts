@@ -78,7 +78,12 @@ test('incident-07 导航与面板迁移：不再有灾备页，旧持久化值�
   assert.ok(!SECTION.includes('LifecyclePanel'), '灾备页引用应删除');
   assert.ok(!SECTION.includes("'nav.recovery'"), '灾备导航项应删除');
   assert.ok(RUN_STORE.includes("case 'lifecycle':"), '旧 panel=lifecycle 必须有迁移分支');
-  assert.ok(RUN_STORE.includes("snapshotsSubTab = 'recovery'"), '迁移目标应为事故恢复子 tab');
+  // UI v2：迁移目标从「备份页的恢复子 tab」改为**环境页**（维护与诊断是它的子视图）。
+  // 这里钉住「迁移到环境」，不再钉某一行赋值语句 —— 钉实现细节会让合理的重构假红。
+  assert.ok(
+    /case 'lifecycle':[\s\S]{0,200}panel = 'profiles'/.test(RUN_STORE),
+    'lifecycle 迁移目标应为环境页',
+  );
   assert.ok(!/PanelId = [^\n]*'lifecycle'/.test(RUN_STORE), 'PanelId 不应再含 lifecycle');
 });
 

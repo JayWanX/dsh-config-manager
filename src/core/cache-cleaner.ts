@@ -19,6 +19,7 @@
  */
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import type { Dirent, Stats } from 'node:fs'
 
 /** 临时文件缺省保留期：24 小时（覆盖跨会话「刷新恢复导入」窗口，昨天的残留自动清） */
 export const TMP_RETENTION_DEFAULT_MS = 24 * 60 * 60 * 1000
@@ -53,19 +54,46 @@ export interface CacheCleanupOptions {
   exportsExemptPrefix?: string
   /** 市场缓存/工作副本保留期（缺省 7 天） */
   marketRetentionMs?: number
+  /**
+   * true = 忽略保留期，**立即整块清空可重建的缓存**（tmp / market cache / market work）；
+   * exports 仍只按保留期回收（导出产物是用户可能还要下载/导入的备份文件，绝不「立即清空」）。
+   * 缺省 false —— 定时自动清理必须沿用保留期（保留窗口内的文件还要供跨请求流程消费）。
+   */
+  includeRecent?: boolean
+  /**
+   * 只跑这些分区（缺省 = 全部四个）。手动清理必须传 —— 用户只勾了「清理缓存」时
+   * **导出产物一个都不能碰**（即使有过期项；否则界面说「只清缓存」却删了他的备份）。
+   */
+  sections?: readonly CacheCleanupSection[]
   /** 时间源（测试注入；缺省 Date.now） */
   now?: () => number
 }
+
+/** 清理分区（与 disk-usage 的子区 id 对齐；presence 口径见 cachedSections） */
+export type CacheCleanupSection = 'tmp' | 'exports' | 'marketCache' | 'marketWork'
 
 export interface CacheCleanupResult {
   /** 删除条目数（文件 + 目录） */
   removed: number
   /** 释放字节数（仅被删文件的 size 累计；目录删除统计为 0） */
   freedBytes: number
+  /**
+   * 释放字节数（含目录递归：目录按删除前递归统计）。
+   * 与 freedBytes 并存 —— freedBytes 逐字保持旧语义（避免历史调用方/日志口径漂移），
+   * 界面用本字段（删整块缓存目录时 freedBytes 恒为 0，展示会误导）。
+   */
+  freedBytesRecursive: number
   /** 单项失败数（不影响主流程） */
   errors: number
   /** 每条删除记录（相对 dataDir 的描述 + 字节数），供日志/审计 */
   detail: string[]
+  /** 本次实际清理过的分区（只含**确实执行**清理的分区；供路由把结果映射回界面子区） */
+  sections: CacheCleanupSection[]
+}
+
+/** 新建空结果（导出给调用方拼装「无操作」回执，保证形状单点） */
+export function emptyCleanupResult(): CacheCleanupResult {
+  return { removed: 0, freedBytes: 0, freedBytesRecursive: 0, errors: 0, detail: [], sections: [] }
 }
 
 /** 目录是否超期（stat 失败保守视为未超期 → 不删） */
@@ -78,20 +106,55 @@ async function isExpired(target: string, retentionMs: number, nowMs: number): Pr
   }
 }
 
-/** 删除一个文件/目录并计入报告；目录的 freedBytes 统计为 0（递归统计不划算，用途仅是日志） */
+/**
+ * 删除前递归统计一个条目的字节数（仅用于「释放了多少」的回执）。
+ * 不跟随符号链接；读不到的条目不计数（宁可少报，不谎报）。
+ */
+async function measureBytes(target: string, depth = 0): Promise<number> {
+  if (depth > 48) return 0
+  let st: Stats
+  try {
+    st = await fs.lstat(target)
+  } catch {
+    return 0
+  }
+  if (st.isSymbolicLink()) return 0
+  if (!st.isDirectory()) return st.size
+  let total = 0
+  let entries: Dirent[]
+  try {
+    entries = await fs.readdir(target, { withFileTypes: true })
+  } catch {
+    return 0
+  }
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) continue
+    total += await measureBytes(path.join(target, entry.name), depth + 1)
+  }
+  return total
+}
+
+/** 删除一个文件/目录并计入报告；目录按删除前递归体积计入 freedBytesRecursive（freedBytes 保持旧语义） */
 async function removeEntry(target: string, label: string, result: CacheCleanupResult): Promise<void> {
   try {
-    let size = 0
+    let fileSize = 0
+    let totalSize = 0
     try {
-      const st = await fs.stat(target)
-      size = st.isFile() ? st.size : 0
+      const st = await fs.lstat(target)
+      if (st.isFile()) {
+        fileSize = st.size
+        totalSize = st.size
+      } else if (st.isDirectory()) {
+        totalSize = await measureBytes(target)
+      }
     } catch {
       /* stat 失败仍尝试删除（rm 自己会兜底不存在） */
     }
     await fs.rm(target, { recursive: true, force: true })
     result.removed += 1
-    result.freedBytes += size
-    result.detail.push(`${label} (${size} bytes)`)
+    result.freedBytes += fileSize
+    result.freedBytesRecursive += totalSize
+    result.detail.push(`${label} (${totalSize} bytes)`)
   } catch {
     result.errors += 1
   }
@@ -99,25 +162,34 @@ async function removeEntry(target: string, label: string, result: CacheCleanupRe
 
 /**
  * 执行一次缓存清理（幂等；可重复调用）。
- * 只清理超期（超过保留期）的缓存/临时条目，其余一律保留。
+ *
+ * 缺省（`includeRecent` 未开）：只清理**超期**（超过保留期）的缓存/临时条目，其余一律保留 ——
+ * 定时自动清理必须走这条（保留窗口内的文件还要供「刷新恢复导入/下载」跨请求流程消费）。
+ * `includeRecent: true`（用户点「立即清理」）：tmp / market cache / market work **忽略保留期整块清空**
+ * （都可重建/可重新下载），exports **仍只按保留期回收** —— 导出产物是用户可能还要下载/导入的备份文件。
  */
 export async function cleanupCaches(opts: CacheCleanupOptions): Promise<CacheCleanupResult> {
   const nowMs = (opts.now ?? Date.now)()
   const tmpRetentionMs = opts.tmpRetentionMs ?? TMP_RETENTION_DEFAULT_MS
   const exportsRetentionMs = opts.exportsRetentionMs ?? EXPORTS_RETENTION_DEFAULT_MS
   const marketRetentionMs = opts.marketRetentionMs ?? MARKET_RETENTION_DEFAULT_MS
-  const result: CacheCleanupResult = { removed: 0, freedBytes: 0, errors: 0, detail: [] }
+  const includeRecent = opts.includeRecent === true
+  const wanted = opts.sections ?? ['tmp', 'exports', 'marketCache', 'marketWork']
+  const result = emptyCleanupResult()
 
-  // 1) tmpDir：过期 .zip（导入/导出/市场/解密暂存）与 SyncEngine 遗留的 dsh-sync-pull-* 目录
+  // 1) tmpDir：过期（或 includeRecent 时全部）.zip（导入/导出/市场/解密暂存）
+  //    与 SyncEngine 遗留的 dsh-sync-pull-* 临时目录。
+  if (wanted.includes('tmp')) {
   try {
     const entries = await fs.readdir(opts.tmpDir, { withFileTypes: true })
+    result.sections.push('tmp')
     for (const entry of entries) {
       const target = path.join(opts.tmpDir, entry.name)
       const isTmpish =
         (entry.isFile() && entry.name.endsWith('.zip')) ||
         (entry.isDirectory() && entry.name.startsWith(SYNC_TMP_DIR_PREFIX))
       if (!isTmpish) continue
-      if (await isExpired(target, tmpRetentionMs, nowMs)) {
+      if (includeRecent || await isExpired(target, tmpRetentionMs, nowMs)) {
         await removeEntry(target, `tmp/${entry.name}`, result)
       }
     }
@@ -125,12 +197,16 @@ export async function cleanupCaches(opts: CacheCleanupOptions): Promise<CacheCle
     // tmpDir 不存在/不可读 → 跳过（尽力而为）
     result.errors += 1
   }
+  }
 
   // 2) exportsDir：过期的导出产物 .zip（导出时已下载/另存到本地，host 端副本按保留期回收）。
   //    豁免前缀（定时备份产物）跳过 —— 由备份保留策略管理，不按天回收。
+  //    **includeRecent 不作用于本区**：绝不「立即清空」用户的备份文件。
   const exemptPrefix = opts.exportsExemptPrefix
+  if (wanted.includes('exports')) {
   try {
     const entries = await fs.readdir(opts.exportsDir, { withFileTypes: true })
+    result.sections.push('exports')
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith('.zip')) continue
       if (exemptPrefix !== undefined && entry.name.startsWith(exemptPrefix)) continue
@@ -143,10 +219,13 @@ export async function cleanupCaches(opts: CacheCleanupOptions): Promise<CacheCle
     // exportsDir 不存在/不可读 → 跳过
     result.errors += 1
   }
+  }
 
-  // 3) market/cache：过期 index.json 与 items/<itemId> 条目缓存；删空后回收 hash 目录
+  // 3) market/cache：过期（或 includeRecent 时全部）index.json 与 items/<itemId> 条目缓存；删空后回收 hash 目录
+  if (wanted.includes('marketCache')) {
   try {
     const hashes = await fs.readdir(opts.marketCacheRoot)
+    result.sections.push('marketCache')
     for (const hash of hashes) {
       const hashDir = path.join(opts.marketCacheRoot, hash)
       let st
@@ -158,7 +237,7 @@ export async function cleanupCaches(opts: CacheCleanupOptions): Promise<CacheCle
       if (!st.isDirectory()) continue
 
       const indexFile = path.join(hashDir, 'index.json')
-      if (await isExpired(indexFile, marketRetentionMs, nowMs)) {
+      if (includeRecent || await isExpired(indexFile, marketRetentionMs, nowMs)) {
         await removeEntry(indexFile, `market/cache/${hash}/index.json`, result)
       }
 
@@ -166,7 +245,7 @@ export async function cleanupCaches(opts: CacheCleanupOptions): Promise<CacheCle
       const itemDirs = await fs.readdir(itemsDir).catch(() => [] as string[])
       for (const itemId of itemDirs) {
         const itemDir = path.join(itemsDir, itemId)
-        if (await isExpired(itemDir, marketRetentionMs, nowMs)) {
+        if (includeRecent || await isExpired(itemDir, marketRetentionMs, nowMs)) {
           await removeEntry(itemDir, `market/cache/${hash}/items/${itemId}`, result)
         }
       }
@@ -184,21 +263,25 @@ export async function cleanupCaches(opts: CacheCleanupOptions): Promise<CacheCle
     // marketCacheRoot 不存在/不可读 → 跳过
     result.errors += 1
   }
+  }
 
-  // 3) market/work：过期 git 只读工作副本（readIndex 时会按需重新 clone）
+  // 4) market/work：过期（或 includeRecent 时全部）git 只读工作副本（readIndex 时会按需重新 clone）
+  if (wanted.includes('marketWork')) {
   try {
     const hashes = await fs.readdir(opts.marketWorkRoot)
+    result.sections.push('marketWork')
     for (const hash of hashes) {
       const workDir = path.join(opts.marketWorkRoot, hash)
       const st = await fs.stat(workDir).catch(() => null)
       if (st === null || !st.isDirectory()) continue
-      if (await isExpired(workDir, marketRetentionMs, nowMs)) {
+      if (includeRecent || await isExpired(workDir, marketRetentionMs, nowMs)) {
         await removeEntry(workDir, `market/work/${hash}`, result)
       }
     }
   } catch {
     // marketWorkRoot 不存在/不可读 → 跳过
     result.errors += 1
+  }
   }
 
   return result

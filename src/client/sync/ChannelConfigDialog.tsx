@@ -1,18 +1,19 @@
 /**
- * t42 物理拆分（从 SyncSettingsView.tsx 拆出的渲染段，同领域目录平铺）。
+ * t42 物理拆分（从 SyncSettingsView.tsx 拆出的渲染段，同领域目录平铺；v2 第 5 步主文件改名 SyncPanel.tsx）。
  *
  * 约定：只接收「渲染所需的数据 + 回调」；React 状态、副作用与网络调用仍由
- * SyncSettingsView 持有（单一状态源）；可测纯逻辑在 src/ui/sync-settings-view.ts。
+ * SyncPanel 持有（单一状态源）；可测纯逻辑在 src/ui/sync-settings-view.ts。
  */
 import type { ChangeEvent } from 'react'
 import type { TranslateNS } from '../client-types.ts'
 import type { UiT } from '../../ui/i18n.ts'
 import { Badge, Banner, Button, Spinner } from '../common/ui.tsx'
+import { InfoHint } from '../common/InfoHint.tsx'
 import { Modal } from '../common/Modal.tsx'
 import { Select } from '../common/Select.tsx'
 import { SYNC_CREDENTIAL_REF, SYNC_WEBDAV_CREDENTIAL_REF } from './sync-api.ts'
 import type { SyncStatusResponse } from './sync-api.ts'
-import { channelTabModels, presetById, presetIdForUrl, privateRepoHint, WEBDAV_PRESETS } from './sync-view.ts'
+import { presetById, presetIdForUrl, privateRepoHint, WEBDAV_PRESETS } from './sync-view.ts'
 import type { GithubLoginView, SyncChannel } from './sync-view.ts'
 import css from '../config-manager.module.css'
 
@@ -26,11 +27,12 @@ export type ChannelFormPatch = {
 }
 
 /**
- * 通道配置弹窗（GitHub / WebDAV 两通道表单 + GitHub device flow 登录 + 保存按钮）。
+ * 通道配置弹窗（**按打开它的通道**渲染 Git 或 WebDAV 表单 + GitHub device flow 登录 + 保存按钮）。
+ * 弹窗内不再提供通道切换（子 tab 已移除）：换通道 = 回页面上点另一张通道卡的「配置」。
  * 拆出的职责单元只接收「渲染所需数据 + 回调」：`onFormChange` 由父组件实现为
  * 「patch 表单 + 防抖自动保存」—— 防抖定时器与卸载 flush 仍归父组件（单一状态源）。
  */
-export function ChannelConfigDialog({ open, onClose, t, uiT, channel, busy, savingConfig, remoteReady, repoUrl, token, webdavUrl, webdavUsername, webdavPassword, statusInfo, githubSignedIn, githubView, onSwitchChannel, onFormChange, onGithubStart, onGithubCancel, onSave }: {
+export function ChannelConfigDialog({ open, onClose, t, uiT, channel, busy, savingConfig, remoteReady, repoUrl, token, webdavUrl, webdavUsername, webdavPassword, statusInfo, githubSignedIn, githubView, onFormChange, onGithubStart, onGithubCancel, onSave }: {
   open: boolean
   onClose: () => void
   t: TranslateNS<'config-manager-sync'>
@@ -47,7 +49,6 @@ export function ChannelConfigDialog({ open, onClose, t, uiT, channel, busy, savi
   statusInfo: SyncStatusResponse | null
   githubSignedIn: boolean | null
   githubView: GithubLoginView
-  onSwitchChannel: (channel: SyncChannel) => void
   onFormChange: (patch: ChannelFormPatch) => void
   onGithubStart: () => void
   onGithubCancel: () => void
@@ -66,27 +67,11 @@ export function ChannelConfigDialog({ open, onClose, t, uiT, channel, busy, savi
         closeLabel={t('common.close')}
         onClose={onClose}
         closeDisabled={savingConfig}
+        // 通道身份徽章 + 弹窗级说明：贴在标题右边，不单独成行
+        // （子 tab 已移除，弹窗只配置**打开它的那条通道** —— 通道切换在页面的两张通道卡上做）
+        trailing={<><Badge kind="info">{channel === 'webdav' ? t('channel.webdav') : t('channel.git')}</Badge> <InfoHint text={t('channel.perChannelHint')} label={t('common.infoHint')} /></>}
       />
       <Modal.Body scroll>
-
-    {/* 通道子 tab：GitHub / WebDAV（modeTabs 样式；两通道设置各自独立） */}
-    <div className={css.modeTabs} role="tablist">
-      {channelTabModels(channel, busy || savingConfig).map((tab) => (
-        <button
-          key={tab.channel}
-          type="button"
-          role="tab"
-          aria-selected={tab.active}
-          data-active={tab.active ? '' : undefined}
-          className={css.modeTab}
-          disabled={tab.disabled}
-          onClick={() => { onSwitchChannel(tab.channel) }}
-        >
-          {tab.channel === 'webdav' ? t('channel.webdav') : t('channel.git')}
-        </button>
-      ))}
-    </div>
-    <div className={css.modeHint}>{t('channel.perChannelHint')}</div>
 
     {/* 私有仓库强制提示：仅 git 通道适用 */}
     {channel === 'git' && <Banner kind="warn">{privateRepoHint(uiT)}</Banner>}
@@ -96,7 +81,7 @@ export function ChannelConfigDialog({ open, onClose, t, uiT, channel, busy, savi
         <>
           <span className={css.groupLabel}>{t('config.title')}</span>
           <label className={css.field}>
-            <span className={css.fieldLabel}>{t('config.repoUrl')}</span>
+            <span className={css.fieldLabel}>{t('config.repoUrl')} <InfoHint text={t('config.repoUrlHint')} label={t('common.infoHint')} /></span>
             <input
               type="text"
               className={css.input}
@@ -107,7 +92,6 @@ export function ChannelConfigDialog({ open, onClose, t, uiT, channel, busy, savi
                 onFormChange({ repoUrl: e.target.value }) // 改动自动保存（防抖；关闭设置页不丢输入）
               }}
             />
-            <span className={css.hint}>{t('config.repoUrlHint')}</span>
           </label>
           <label className={css.field}>
             <span className={css.fieldLabel}>
@@ -135,8 +119,7 @@ export function ChannelConfigDialog({ open, onClose, t, uiT, channel, busy, savi
               {statusInfo?.credentialConfigured === true && (
                 <Banner kind="warn">{t('github.tokenInvalid')}</Banner>
               )}
-              <span className={css.groupLabel}>{t('github.title')}</span>
-              <span className={css.hint}>{t('github.description')}</span>
+              <span className={css.groupLabel}>{t('github.title')} <InfoHint text={t('github.description')} label={t('common.infoHint')} /></span>
               {githubView.showCode && (
                 <div className={css.statRow}>
                   <Badge kind="info">{t('github.userCode')}：<strong>{githubView.userCode}</strong></Badge>
@@ -182,20 +165,23 @@ export function ChannelConfigDialog({ open, onClose, t, uiT, channel, busy, savi
       {channel === 'webdav' && (
         <>
           <span className={css.groupLabel}>{t('webdav.title')}</span>
-          {/* 常见 WebDAV 服务器预设：选择后填充 url 模板（含占位符待替换） */}
-          <span className={css.hint}>{t('webdav.presetHint')}</span>
-          <Select
-            value={presetIdForUrl(webdavUrl)}
-            disabled={busy}
-            ariaLabel={t('webdav.presetHint')}
-            onChange={(next) => {
-              const preset = presetById(next)
-              onFormChange({ webdavUrl: preset.url })
-            }}
-            options={WEBDAV_PRESETS.map((preset) => ({ value: preset.id, label: preset.label }))}
-          />
+          {/* 常见 WebDAV 服务器预设：选择后填充 url 模板（含占位符待替换）。
+              ⓘ 与控件**同一行**（.controlRow：控件按自身宽度，ⓘ 保持自身尺寸）。 */}
+          <div className={css.controlRow}>
+            <Select
+              value={presetIdForUrl(webdavUrl)}
+              disabled={busy}
+              ariaLabel={t('webdav.presetHint')}
+              onChange={(next) => {
+                const preset = presetById(next)
+                onFormChange({ webdavUrl: preset.url })
+              }}
+              options={WEBDAV_PRESETS.map((preset) => ({ value: preset.id, label: preset.label }))}
+            />
+            <InfoHint text={t('webdav.presetHint')} label={t('common.infoHint')} />
+          </div>
           <label className={css.field}>
-            <span className={css.fieldLabel}>{t('webdav.url')}</span>
+            <span className={css.fieldLabel}>{t('webdav.url')} <InfoHint text={t('webdav.urlHint')} label={t('common.infoHint')} /></span>
             <input
               type="text"
               className={css.input}
@@ -206,13 +192,14 @@ export function ChannelConfigDialog({ open, onClose, t, uiT, channel, busy, savi
                 onFormChange({ webdavUrl: e.target.value })
               }}
             />
-            <span className={css.hint}>{t('webdav.urlHint')}</span>
           </label>
           <label className={css.field}>
             <span className={css.fieldLabel}>
               {t('webdav.username')}
               {' '}
               {statusInfo?.webdav?.usernameConfigured === true && <Badge kind="ok">{t('config.tokenSaved')}</Badge>}
+              {' '}
+              <InfoHint text={t('webdav.usernameHint')} label={t('common.infoHint')} />
             </span>
             <input
               type="text"
@@ -225,7 +212,6 @@ export function ChannelConfigDialog({ open, onClose, t, uiT, channel, busy, savi
                 onFormChange({ webdavUsername: e.target.value })
               }}
             />
-            <span className={css.hint}>{t('webdav.usernameHint')}</span>
           </label>
           <label className={css.field}>
             <span className={css.fieldLabel}>
@@ -258,8 +244,8 @@ export function ChannelConfigDialog({ open, onClose, t, uiT, channel, busy, savi
         >
           {savingConfig ? <Spinner label={t('config.saving')} /> : t('config.save')}
         </Button>
+        <InfoHint text={t('config.saveHint')} label={t('common.infoHint')} />
       </div>
-      <span className={css.hint}>{t('config.saveHint')}</span>
       </Modal.Body>
     </Modal>
   )

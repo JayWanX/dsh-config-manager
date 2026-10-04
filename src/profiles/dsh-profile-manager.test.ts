@@ -51,6 +51,32 @@ test('classifyShape：按 bundles 判定 web / headless / generic', () => {
   assert.equal(classifyShape([]), 'generic')
 })
 
+test('readMeta：读取档案依赖树里的 DSH 版本与会话格式版本；读不到 = null（绝不猜）', () => {
+  const { mgr, home, cleanup } = makeManager()
+  try {
+    const dir = join(home, 'profiles', 'work')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'dsh-profile-work' }), 'utf8')
+    mkdirSync(join(dir, 'node_modules'), { recursive: true })
+    const before = mgr.list().find((p) => p.name === 'work')
+    assert.equal(before?.dshVersion, null, '没装 DSH → null（不猜）')
+    assert.equal(before?.sessionFormatVersion, null)
+
+    const dshDir = join(dir, 'node_modules', '@deepseek-ai', 'dsh')
+    mkdirSync(dshDir, { recursive: true })
+    writeFileSync(join(dshDir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.5-rc.1' }), 'utf8')
+    const sessionLib = join(dir, 'node_modules', '@deepseek-ai', 'dsh-session', 'lib')
+    mkdirSync(sessionLib, { recursive: true })
+    writeFileSync(join(sessionLib, 'index.js'), 'const SESSION_FORMAT_VERSION = 3;\n', 'utf8')
+
+    const after = mgr.list().find((p) => p.name === 'work')
+    assert.equal(after?.dshVersion, '0.1.5-rc.1')
+    assert.equal(after?.sessionFormatVersion, 3)
+  } finally {
+    cleanup()
+  }
+})
+
 test('list：空 profiles 目录 → []', () => {
   const { mgr, cleanup } = makeManager()
   try {

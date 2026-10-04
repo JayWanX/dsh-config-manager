@@ -9,9 +9,10 @@
 # 部分 @deepseek-ai/* 只声明在 peerDependencies 且未发布到公共 registry，
 # 不带 `--legacy-peer-deps` 的普通 `npm ci` 会因无法解析 peer 而红灯。
 #
-# 单 job 跑完整阶梯（install → typecheck → test → build → pack）：
-# 实测全量测试 1558 项约 88 秒，无需拆分为多 job——拆分只会重复 checkout/setup-node，
+# 单 job × 平台矩阵跑完整阶梯（install → typecheck → typecheck:tests → test → build → bundle guard → pack）：
+# 实测全量测试约 90 秒（ubuntu），三平台并行；拆成多个 job 只会重复 checkout/setup-node，
 # 并增加「哪个 job 才是 required」的出错面。耗时由 concurrency + timeout 控制。
+# 平台矩阵的理由见 jobs.verify 的 matrix 注释（32 处 process.platform 分支此前只有 ubuntu 覆盖）。
 # 全量测试不按目录裁剪（裁剪会漏检）。任何失败一律保持真实红灯，不做「允许失败」、不加自动重试
 # （`src/utils/env-lock.test.ts` / `src/client/run-store.test.ts` 存在负载相关的间歇性失败，
 #  但多数运行全绿；若 CI 红灯先 `gh run rerun <id> --failed` 确认是否为该间歇，再判定缺陷）。
@@ -40,9 +41,27 @@ concurrency:
 
 jobs:
   verify:
-    name: Typecheck / Test / Build
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    name: Typecheck / Test / Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # 平台矩阵（2026-09，承接「CI 只有 ubuntu」的评审结论）：全仓有 32 处非测试 process.platform 分支
+    # （env-lock / atomic-write / process-control / plugin-cli / recursive-walk / 档案启动器…）。
+    # 此前只跑 ubuntu → Windows 侧只有作者本机跑得到（他人 PR 无从验证），macOS 侧（env-lock 的
+    # darwin 分支等）则**零真实执行**。三个平台跑同一套命令，结论才是「这个改动跨平台成立」。
+    #
+    # fail-fast: false —— 一个平台红了要能同时看到其余平台的结论，而不是把它们取消掉。
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: windows-latest
+          # macOS 观察期：作者只有 Windows，无法在合入前本地验证；先只**收集结论**。
+          # 连续 1~2 次绿灯后删掉这一行 `experimental: true` 即变成硬门禁 —— 不做长期「允许失败」。
+          - os: macos-latest
+            experimental: true
+    # 仅 macOS 观察期条目允许失败（其余两个平台恒为硬门禁）；见上面注释的退出条件。
+    continue-on-error: ${{ matrix.experimental == true }}
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -84,4 +103,7 @@ jobs:
         # 与发布流水线同构的打包校验：pack 失败说明 package.json "files" 白名单
         # 或 lib/ 产物已坏——在 PR 阶段暴露，而不是等到发版时才卡住。
         # npm pack --pack-destination 在目录不存在时报 ENOENT（fresh checkout）。
+        # 显式 shell: bash —— windows-latest 自带 Git Bash；默认的 PowerShell 里 `mkdir` 没有 `-p`
+        # （三个平台用同一条命令，避免「本机跑的是另一套 shell 语义」）。
+        shell: bash
         run: mkdir -p dist && npm pack --pack-destination ./dist

@@ -16,6 +16,13 @@ import {
   Banner, Button, Card, Checkbox, Empty, SectionTitle, Spinner,
 } from '../common/ui.tsx'
 import { ErrorBanner, ErrorList } from '../common/ErrorBanner.tsx'
+import { CopyButton } from '../common/CopyButton.tsx'
+import {
+  SESSION_FORMAT_DOCTOR_COMMAND,
+  sessionFormatNewest,
+  type SessionFormatFacts,
+} from '../../ui/session-format-disposition.ts'
+import type { SessionFormatDisposition } from '../../core/types.ts'
 import { ProgressBar } from '../common/ProgressBar.tsx'
 import type { RunProgress } from '../common/progress-view.ts'
 import { ConflictList } from './ConflictList.tsx'
@@ -290,6 +297,77 @@ export function SecretsStage(props: {
   )
 }
 
+/**
+ * 会话格式处置三选一（T1）—— 导入预览页与最终确认页**共用同一个组件**。
+ *
+ * 为什么必须有它：DSH 读到「非本 build 的会话格式版本」会**静默跳过**（不报错、不在工作区
+ * 列表里），而本插件是逐字节搬运，所以用户必须能在导入前显式决定：中止（缺省，零写入）/
+ * 跳过这些会话（其余照常导入）/ 仅提示照常导入。三选一 + 结果回显缺一不可。
+ *
+ * 判据全部来自 `src/ui/session-format-disposition.ts`（与宿主 409 判定同一个纯函数）：
+ * 组件只做渲染，不自己判断「读不了」。
+ */
+export function SessionFormatDispositionField(props: {
+  disposition: SessionFormatDisposition
+  onDispositionChange: (next: SessionFormatDisposition) => void
+  /** 单元级事实（本机版本未知 / 没有读不了的会话 → null：整个控件不渲染） */
+  facts: SessionFormatFacts | null
+  /** 宿主已按 abort 拒绝过本次计划生成（渲染阻断态说明） */
+  blocked: boolean
+  t: TranslateNS<'config-manager'>
+}) {
+  const { disposition, onDispositionChange, facts, blocked, t } = props
+  if (facts === null) return null
+  const newest = sessionFormatNewest(facts) ?? facts.target
+  const options: { value: SessionFormatDisposition; label: string; hint: string }[] = [
+    { value: 'abort', label: t('import.sessionFormat.option.abort'), hint: t('import.sessionFormat.hint.abort') },
+    { value: 'skip', label: t('import.sessionFormat.option.skip'), hint: t('import.sessionFormat.hint.skip') },
+    { value: 'guide', label: t('import.sessionFormat.option.guide'), hint: t('import.sessionFormat.hint.guide') },
+  ]
+  return (
+    <Card className={css.optionsCard}>
+      <div className={css.groupLabel}>{t('import.sessionFormat.title')}</div>
+      {blocked && <Banner kind="error">{t('import.sessionFormat.blocked')}</Banner>}
+      <Banner kind="warn">
+        {t('import.sessionFormat.summary', {
+          count: String(facts.unreadable.length),
+          newer: String(newest),
+          target: String(facts.target),
+        })}
+      </Banner>
+      {facts.unsampled !== undefined && facts.unsampled > 0 && (
+        <div className={css.hint}>
+          {t('import.sessionFormat.sampled', { checked: String(facts.inspected ?? 0), skipped: String(facts.unsampled) })}
+        </div>
+      )}
+      <div className={css.conflictOptions}>
+        {options.map((opt) => (
+          <label key={opt.value} className={css.radioLabel}>
+            <input
+              type="radio"
+              name="session-format-disposition"
+              checked={disposition === opt.value}
+              onChange={() => { onDispositionChange(opt.value) }}
+            />
+            <span>{opt.label}</span>
+          </label>
+        ))}
+      </div>
+      <div className={css.hint}>{options.find((o) => o.value === disposition)?.hint ?? ''}</div>
+      {/* 升级/重导出的指引 + 可复制命令：三种处置下都摆出来（guide 不阻塞，但也需要它） */}
+      <div className={css.groupLabel}>{t('import.sessionFormat.guide.title')}</div>
+      <ul className={css.reportList}>
+        <li>{t('import.sessionFormat.guide.upgrade', { newer: String(newest), target: String(facts.target) })}</li>
+        <li>{t('import.sessionFormat.guide.doctor')}</li>
+      </ul>
+      <div className={css.actionRow}>
+        <code className={css.hint}>{SESSION_FORMAT_DOCTOR_COMMAND}</code>
+        <CopyButton text={SESSION_FORMAT_DOCTOR_COMMAND} label={t('import.sessionFormat.guide.copy')} t={t} />
+      </div>
+    </Card>
+  )
+}
+
 /** 确认（最后一道闸门，phase=confirm）。 */
 export function ConfirmStage(props: {
   rollbackOnError: boolean
@@ -301,6 +379,13 @@ export function ConfirmStage(props: {
   running: boolean
   nothingSelected: boolean
   error: string | null
+  /** T1：会话格式处置（当前选择 / setter / 事实 / 是否被宿主按 abort 拦过） */
+  sessionFormatDisposition: SessionFormatDisposition
+  onSessionFormatDispositionChange: (next: SessionFormatDisposition) => void
+  sessionFormatFacts: SessionFormatFacts | null
+  sessionFormatBlocked: boolean
+  /** skip 处置下**实际未导入**的会话条数（与选择模型同源；>0 时逐条回显） */
+  sessionFormatSkipped: number
   onBack: () => void
   onExecute: () => void
   apiT: UiT
@@ -308,7 +393,10 @@ export function ConfirmStage(props: {
 }) {
   const {
     rollbackOnError, onRollbackChange, isEncrypted, decryptRefs, summary, excludedCount,
-    running, nothingSelected, error, onBack, onExecute, apiT, t,
+    running, nothingSelected, error,
+    sessionFormatDisposition, onSessionFormatDispositionChange, sessionFormatFacts, sessionFormatBlocked,
+    sessionFormatSkipped,
+    onBack, onExecute, apiT, t,
   } = props
   return (
     <div className={css.viewBody}>
@@ -330,6 +418,18 @@ export function ConfirmStage(props: {
         </div>
         {excludedCount > 0 && (
           <div className={css.hint}>{t('import.excludedByUser', { count: String(excludedCount) })}</div>
+        )}
+        {/* T1：确认页是最后一道闸门 —— 处置选择在这里仍可改（改完点「确认导入」时会用新处置
+            重新生成计划，abort 仍然在计划阶段被拦住）。 */}
+        <SessionFormatDispositionField
+          disposition={sessionFormatDisposition}
+          onDispositionChange={onSessionFormatDispositionChange}
+          facts={sessionFormatFacts}
+          blocked={sessionFormatBlocked}
+          t={t}
+        />
+        {sessionFormatSkipped > 0 && (
+          <Banner kind="info">{t('import.sessionFormat.skipped', { count: String(sessionFormatSkipped) })}</Banner>
         )}
         <Checkbox
           checked={rollbackOnError}

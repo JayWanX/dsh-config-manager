@@ -10,7 +10,11 @@
  *    保持纯函数零依赖，node 可直接单测（对齐 market-view.ts 的输入类型处理）。
  *
  * 安全：无任何输入表单、无写操作；纯展示数据，不含敏感信息。
+ *
+ * 2026-09 追加：**插件版本更新检查**的展示模型（`aboutUpdateView` / `aboutUpgradeCommand`）——
+ * 判定（是否真的有新版本、给不给终端命令）全在这里，面板只映射 kind → 文案与 Badge。
  */
+import type { PluginUpdateCheckResult } from '../../ui/types.ts';
 
 /** 插件的公开元数据（静态常量，来源见设计文档 §3 信息表） */
 export interface AboutMeta {
@@ -191,3 +195,55 @@ export const ABOUT_CLI: {
   ],
   docsUrl: 'https://github.com/xiajiajun516/dsh-config-manager#-cli--the-first-line-of-defense-when-dsh-is-broken',
 };
+/* ---------------------------------------------------------------- 插件版本更新检查（关于 tab） */
+
+/** 升级命令的上下文：当前档案名（'desktop' 由桌面端独占，不给终端命令）。 */
+export interface AboutUpdateContext {
+  /** 当前档案（status/diagnostics 提供；未知 → 命令里不带 --profile） */
+  profile?: string;
+}
+
+/**
+ * 组装升级命令。
+ *
+ * 为什么用**精确版本**而不是 `@latest`：pnpm 的 `minimumReleaseAge` 会让 `@latest` 解析到
+ * 「发布满阈值」的旧版（README「安装」段实测记录），而我们刚刚从 registry 拿到了确切的 latest ——
+ * 直接钉住它既不会装回旧版，也不会跟用户报告里看到的版本号对不上。
+ *
+ * `desktop` 档案由 Electron 独占管理（普通 CLI 对它无条件拒绝），未知档案也不猜 —— 两种情况
+ * 返回 null，界面改为提示「请在 DSH 插件页更新」，不给一条注定失败的命令。
+ */
+export function aboutUpgradeCommand(latest: string, ctx: AboutUpdateContext = {}): string | null {
+  const profile = (ctx.profile ?? '').trim();
+  if (profile === '' || profile === 'desktop') return null;
+  return `dsh plugin --profile ${profile} add dsh-config-manager@${latest}`;
+}
+
+/**
+ * 检查结果 → 展示模型（判定在纯函数里，面板只做「kind → 文案/Badge」映射）。
+ *
+ * - `upToDate`：latest ≤ current（**含本地跑预发布版的情况** —— 不提示降级）；
+ * - `available`：latest > current；`command` 为 null 时界面改给「插件页更新」提示；
+ * - `failed`：网络/超时/响应畸形 —— 如实展示原因并允许重试，**绝不当作「已是最新」**。
+ */
+export type AboutUpdateView =
+  | { kind: 'upToDate'; current: string; latest: string }
+  | { kind: 'available'; current: string; latest: string; command: string | null }
+  | { kind: 'failed'; current: string; error: string };
+
+/** 检查结果 → 展示模型（见 AboutUpdateView 的三档语义） */
+export function aboutUpdateView(
+  result: PluginUpdateCheckResult,
+  ctx: AboutUpdateContext = {},
+): AboutUpdateView {
+  if (!result.ok) return { kind: 'failed', current: result.current, error: result.error };
+  if (!result.updateAvailable) {
+    return { kind: 'upToDate', current: result.current, latest: result.latest };
+  }
+  return {
+    kind: 'available',
+    current: result.current,
+    latest: result.latest,
+    command: aboutUpgradeCommand(result.latest, ctx),
+  };
+}

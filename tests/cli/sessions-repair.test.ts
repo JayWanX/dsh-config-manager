@@ -15,6 +15,19 @@ import { parseCli, runCli, type CliIo } from '../../src/cli/index.ts';
 import { encodeZstdFrame } from '../../src/utils/zstd-frame.ts';
 import { readLogCwdFromBytes } from '../../src/utils/session-log.ts';
 
+/**
+ * 不带 DSH_HOME 的登记环境。
+ *
+ * 为什么必须显式给出：`sessions repair --fix` 在写会话字节前会检查「本机有没有 DSH 在跑」，
+ * 而心跳的候选根之一是缺省根 `$DSH_HOME/dsh-config-manager`。若让被测进程继承外层环境的
+ * `DSH_HOME`（本机跑测试时它指向真实 home、那里正跑着 DSH），这些用例会被那道门全部挡下 ——
+ * 测的就不是修复逻辑了。这里把 home 指到一个不存在的临时路径：**不阻断、也不掩盖真实行为**
+ * （候选根里没有心跳目录 → 视为没有实例在跑），安全门的用例见下一条。
+ */
+function noDshEnv(home: string): Record<string, string | undefined> {
+  return { DSH_HOME: path.join(home, 'no-running-dsh') };
+}
+
 async function withTmp<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-cm-sessions-cli-'));
   try {
@@ -77,7 +90,7 @@ test('parseCli：sessions repair 的参数面（--home/--fix/--keep/--map/--json
   assert.equal(parseCli(['sessions', 'repair', '--bogus']).ok, false, '未知参数');
   assert.equal(parseCli(['sessions', 'repair', '--map']).ok, false, '--map 缺值');
   assert.equal(parseCli(['sessions', 'repair', '--map', 'no-equals']).ok, true, '缺 = 由 runner 报错（解析层只管形状）');
-  assert.equal(parseCli(['snapshots', '--home', '/h']).ok, false, '--home 只属于 sessions');
+  assert.equal(parseCli(['snapshots', '--home', '/h']).ok, false, '--home 只属于 sessions / web（web 用 --home 指定 DSH home）');
 });
 
 test('sessions repair：默认 dry-run 零写入，--fix 才按 projectKeyOf(header cwd) 归位', async () => {
@@ -97,7 +110,7 @@ test('sessions repair：默认 dry-run 零写入，--fix 才按 projectKeyOf(hea
     assert.match(dryText, /reason=locked/);
 
     const fix = captureIo();
-    assert.equal(await runCli(['sessions', 'repair', '--home', home, '--fix'], fix.io), 0);
+    assert.equal(await runCli(['sessions', 'repair', '--home', home, '--fix'], fix.io, noDshEnv(home)), 0);
     const moved = path.join(home, 'sessions', '--D-Real-proj--', 'session-bad');
     assert.equal(await exists(moved), true, '已搬到 header cwd 对应的 projectKey 段');
     assert.equal(await exists(badDir), false);
@@ -110,7 +123,7 @@ test('sessions repair --map：命中前缀 → 先改写首帧 cwd 再搬到映�
   await withTmp(async (home) => {
     const dir = await seedSession(home, '--C-Users-alice-proj--', 'session-cross', 'C:/Users/alice/proj');
     const io = captureIo();
-    assert.equal(await runCli(['sessions', 'repair', '--home', home, '--map', 'C:/Users/alice=D:/Work', '--fix'], io.io), 0);
+    assert.equal(await runCli(['sessions', 'repair', '--home', home, '--map', 'C:/Users/alice=D:/Work', '--fix'], io.io, noDshEnv(home)), 0);
     const moved = path.join(home, 'sessions', '--D-Work-proj--', 'session-cross');
     assert.equal(await exists(moved), true);
     assert.equal(await exists(dir), false);
@@ -129,7 +142,7 @@ test('sessions repair：重复 id 只有 --keep 点名才隔离其它副本（�
     assert.match(report.out.join('\n'), /重复 id 1/);
 
     const io = captureIo();
-    assert.equal(await runCli(['sessions', 'repair', '--home', home, '--keep', keepDir, '--fix'], io.io), 0);
+    assert.equal(await runCli(['sessions', 'repair', '--home', home, '--keep', keepDir, '--fix'], io.io, noDshEnv(home)), 0);
     assert.equal(await exists(keepDir), true, '被保留的那份不动');
     assert.equal(await exists(dupDir), false);
     const quarantineRoot = path.join(home, 'sessions');
@@ -147,7 +160,7 @@ test('sessions repair --fix：目标目录已存在 → 拒绝覆盖并返回 1'
     // 但搬迁时必须拒绝覆盖（用户的东西一律不删）。
     await fs.mkdir(path.join(home, 'sessions', '--D-Real-proj--', 'session-c'), { recursive: true });
     const io = captureIo();
-    assert.equal(await runCli(['sessions', 'repair', '--home', home, '--fix'], io.io), 1);
+    assert.equal(await runCli(['sessions', 'repair', '--home', home, '--fix'], io.io, noDshEnv(home)), 1);
     assert.equal(await exists(fromDir), true, '冲突时原目录保持不动');
     assert.match(io.out.join('\n'), /目标目录已存在/);
   });
@@ -165,7 +178,7 @@ test('sessions repair：--map 形状非法（缺 =）→ 报错退出 1，不碰
   await withTmp(async (home) => {
     const dir = await seedSession(home, '--D-Ghost-proj--', 'session-x', 'D:/Real/proj');
     const io = captureIo();
-    assert.equal(await runCli(['sessions', 'repair', '--home', home, '--map', 'oops', '--fix'], io.io), 1);
+    assert.equal(await runCli(['sessions', 'repair', '--home', home, '--map', 'oops', '--fix'], io.io, noDshEnv(home)), 1);
     assert.equal(await exists(dir), true);
   });
 });

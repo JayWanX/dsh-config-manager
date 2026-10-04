@@ -10,7 +10,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { ABOUT_LINKS, ABOUT_META, aboutStatusRows, buildFeedbackSnippet, deriveAboutLinks } from './about-view.ts'
+import { ABOUT_LINKS, ABOUT_META, aboutStatusRows, aboutUpdateView, aboutUpgradeCommand, buildFeedbackSnippet, deriveAboutLinks } from './about-view.ts'
 
 /* ---------------------------------------------------------------- 链接派生 */
 
@@ -136,4 +136,44 @@ test('about-view: buildFeedbackSnippet 版本号为空时回落 unknown（不产
   }))
   assert.ok(text.includes('- 插件版本 / Plugin: unknown'))
   assert.ok(text.includes('- DSH 版本 / DSH: unknown'))
+})
+/* ---------------------------------------------------------------- 插件版本更新检查（2026-09） */
+
+test('about-view: aboutUpdateView 已是最新 → upToDate（不提示升级）', () => {
+  const view = aboutUpdateView({ ok: true, current: '1.2.0', latest: '1.2.0', updateAvailable: false, checkedAt: 1, cached: false })
+  assert.deepEqual(view, { kind: 'upToDate', current: '1.2.0', latest: '1.2.0' })
+})
+
+test('about-view: aboutUpdateView 有新版本 → available + 精确版本升级命令', () => {
+  const view = aboutUpdateView(
+    { ok: true, current: '1.2.0', latest: '1.3.0', updateAvailable: true, checkedAt: 1, cached: false },
+    { profile: 'web' },
+  )
+  assert.deepEqual(view, {
+    kind: 'available',
+    current: '1.2.0',
+    latest: '1.3.0',
+    command: 'dsh plugin --profile web add dsh-config-manager@1.3.0',
+  })
+})
+
+test('about-view: aboutUpgradeCommand 对 desktop / 未知档案返回 null（不给注定失败的命令）', () => {
+  assert.equal(aboutUpgradeCommand('1.3.0', { profile: 'desktop' }), null)
+  assert.equal(aboutUpgradeCommand('1.3.0', {}), null)
+  assert.equal(aboutUpgradeCommand('1.3.0', { profile: '   ' }), null)
+  assert.equal(aboutUpgradeCommand('1.3.0', { profile: 'cmtest' }), 'dsh plugin --profile cmtest add dsh-config-manager@1.3.0')
+})
+
+test('about-view: aboutUpdateView 检查失败 → failed（带原因，绝不当作已是最新）', () => {
+  const view = aboutUpdateView({ ok: false, current: '1.2.0', error: 'network error: ENOTFOUND' })
+  assert.deepEqual(view, { kind: 'failed', current: '1.2.0', error: 'network error: ENOTFOUND' })
+})
+
+test('about-view: available 视图在 desktop 档案下 command 为 null（界面改给插件页提示）', () => {
+  const view = aboutUpdateView(
+    { ok: true, current: '1.2.0', latest: '1.4.0', updateAvailable: true, checkedAt: 1, cached: true },
+    { profile: 'desktop' },
+  )
+  assert.equal(view.kind, 'available')
+  assert.equal(view.kind === 'available' ? view.command : 'x', null)
 })

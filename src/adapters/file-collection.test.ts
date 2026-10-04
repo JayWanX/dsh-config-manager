@@ -322,6 +322,77 @@ test('preview：字节闸门下的剔除与告警与 export 逐项相等（预�
   assert.deepEqual(previewed.section.warnings, exported.warnings, '闸门告警必须逐字相同（绝不静默）');
 });
 
+
+/* ---------------- ⑨ statInfo：体积与时间合并成一次 stat（2026-09） ---------------- */
+
+/**
+ * 「宿主实现 statInfo」的门面：一次 stat 同时给体积与 mtime。
+ *
+ * 断言口径与 ⑧ 同源：必须用**调用次数**证明合并生效 —— 旧的两个门面（statSize / mtimeMs）
+ * 与 readFile 都装成「一被调用就抛哨兵」，只要还走老路就立刻红。
+ */
+function withStatInfo(ctx: MockHostContext, sizes: Record<string, number>, mtimes: Record<string, number>): string[] {
+  const calls: string[] = [];
+  Object.defineProperty(ctx.fs, 'statInfo', {
+    configurable: true,
+    value: async (rel: string): Promise<{ size: number; mtimeMs: number } | null> => {
+      calls.push(rel);
+      const size = sizes[rel];
+      const mtimeMs = mtimes[rel];
+      return size === undefined || mtimeMs === undefined ? null : { size, mtimeMs };
+    },
+  });
+  const boom = async (): Promise<never> => { throw new Error('__SHOULD_NOT_BE_CALLED__'); };
+  Object.defineProperty(ctx.fs, 'statSize', { value: boom, configurable: true });
+  Object.defineProperty(ctx.fs, 'mtimeMs', { value: boom, configurable: true });
+  return calls;
+}
+
+test('preview：宿主实现 statInfo 时一次 stat 同时拿到体积与时间（不再调 statSize / mtimeMs / readFile）', async () => {
+  const ctx = makeContext('win32', 'C:\\Users\\alice');
+  ctx.fs = new CountingFs(ctx.homeDir);
+  await ctx.fs.writeFile('skills/alpha/SKILL.md', new Uint8Array(100));
+  await ctx.fs.writeFile('skills/alpha/extra.md', new Uint8Array(50));
+  const calls = withStatInfo(
+    ctx,
+    { 'skills/alpha/SKILL.md': 100, 'skills/alpha/extra.md': 50 },
+    { 'skills/alpha/SKILL.md': 111, 'skills/alpha/extra.md': 222 },
+  );
+  const adapter = new ProbeAdapter(1024 * 1024);
+
+  const previewed = await adapter.preview(ctx, { includeSecrets: false });
+
+  assert.equal(previewed.sizeBytes, 150);
+  assert.deepEqual(calls.sort(), ['skills/alpha/SKILL.md', 'skills/alpha/extra.md'], '每个文件恰好一次 statInfo');
+  assert.deepEqual(
+    [...(previewed.statTimes ?? new Map()).entries()].sort(),
+    [['skills/alpha/SKILL.md', 111], ['skills/alpha/extra.md', 222]],
+    '本趟 stat 顺带的时间必须带出来（调用方据此省掉第二趟）',
+  );
+  assert.deepEqual((ctx.fs as CountingFs).reads, [], '预览仍然不得读文件内容');
+});
+
+test('preview：statInfo 对某个文件返回 null → 退回 statSize（只慢不坏），且不产出该文件的时间', async () => {
+  const ctx = makeContext('win32', 'C:\\Users\\alice');
+  ctx.fs = new CountingFs(ctx.homeDir);
+  await ctx.fs.writeFile('skills/alpha/SKILL.md', new Uint8Array(100));
+  await ctx.fs.writeFile('skills/alpha/extra.md', new Uint8Array(50));
+  const calls = withStatInfo(
+    ctx,
+    { 'skills/alpha/extra.md': 50 },
+    { 'skills/alpha/extra.md': 222 },
+  );
+  // 只把 statSize 换成可用实现（mtimeMs 保持哨兵：退回路径也不该调它）
+  const realStatSize = MemFs.prototype.statSize.bind(ctx.fs);
+  Object.defineProperty(ctx.fs, 'statSize', { value: realStatSize, configurable: true });
+  const adapter = new ProbeAdapter(1024 * 1024);
+
+  const previewed = await adapter.preview(ctx, { includeSecrets: false });
+  assert.equal(previewed.sizeBytes, 150, '两个文件的体积都对（一个走 statInfo，一个走 statSize）');
+  assert.deepEqual(calls, ['skills/alpha/SKILL.md', 'skills/alpha/extra.md'], '两个文件都先试 statInfo');
+  assert.deepEqual([...(previewed.statTimes ?? new Map()).entries()], [['skills/alpha/extra.md', 222]], '只有拿到 statInfo 的文件有时间');
+});
+
 test('preview：宿主未实现 statSize 时退回 readFile，体积与导出一致（只慢，不坏）', async () => {
   const ctx = makeContext('win32', 'C:\\Users\\alice');
   ctx.fs = new CountingFs(ctx.homeDir);

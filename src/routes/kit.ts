@@ -44,6 +44,14 @@ export interface EndpointSpec {
   path: string
   /** 允许的方法白名单；不在白名单 → 405（与旧 guard 的文案一致）。 */
   methods: readonly HttpMethod[]
+  /**
+   * 可选的**错误渲染器**：默认（不传）维持既有 JSON 形状，供插件 API 客户端使用。
+   *
+   * 为什么需要这个口子：救急台是**人看的 HTML 页面**，把 RouteError 渲染成
+   * `{"error":"backup not found"}` 会让用户在浏览器窗口里看到一段裸 JSON（验收 F3）。
+   * 只加这一处注入点，插件那 70 余条路由的行为逐字不变（不传即走原路径）。
+   */
+  errorRenderer?: (res: ServerResponse, status: number, message: string) => void
 }
 
 /** 端点 handler：围栏与方法判定已由 kit 完成，body 解析按需调用本文件的 readJsonBody。 */
@@ -190,6 +198,11 @@ export function endpoint(spec: EndpointSpec, handler: EndpointHandler): WebRoute
         await handler(req, res)
       } catch (error) {
         // 预期错误走 RouteError（带 status/code），其余 500 —— 与旧路由的内联出口逐条对齐。
+        if (spec.errorRenderer !== undefined) {
+          if (res.headersSent) { res.end(); return }
+          spec.errorRenderer(res, error instanceof RouteError ? error.status : 500, errorMessage(error))
+          return
+        }
         writeRouteError(res, error)
       }
     },

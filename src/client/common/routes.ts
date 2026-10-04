@@ -44,6 +44,8 @@ export const CONFIG_MANAGER_API = {
   backupScheduleRun: `${API_BASE}/backup-schedule/run`,
   backupFiles: `${API_BASE}/backup-files`,
   backupFilesDelete: `${API_BASE}/backup-files/delete`,
+  diskUsage: `${API_BASE}/disk-usage`,
+  diskUsageCleanup: `${API_BASE}/disk-usage/cleanup`,
   consult: `${API_BASE}/consult`,
   profiles: `${API_BASE}/profiles`,
   profilesDetail: `${API_BASE}/profiles/detail`,
@@ -55,6 +57,7 @@ export const CONFIG_MANAGER_API = {
   profilesStop: `${API_BASE}/profiles/stop`,
   starPrompt: `${API_BASE}/star-prompt`,
   releaseNotesPrompt: `${API_BASE}/release-notes-prompt`,
+  updateCheck: `${API_BASE}/update-check`,
 } as const;
 
 /** 远程同步路由族（git / webdav 通道、GitHub device flow、历史快照、自动同步、分区选择）。 */
@@ -69,6 +72,8 @@ export const SYNC_API = {
   githubValidate: `${API_BASE}/sync/github/validate`,
   history: `${API_BASE}/sync/history`,
   snapshotsList: `${API_BASE}/sync/snapshots-list`,
+  download: `${API_BASE}/sync/download`,
+  snapshotDelete: `${API_BASE}/sync/snapshot-delete`,
   sync: `${API_BASE}/sync/sync`,
   applyItems: `${API_BASE}/sync/apply-items`,
   cancel: `${API_BASE}/sync/cancel`,
@@ -121,6 +126,19 @@ export const RECOVERY_API = {
   status: `${API_BASE}/recovery/status`,
   /** issue #31：残留锁显式回收（非 operationId 路径；'lock' 不是 UUID）。 */
   lockRecover: `${API_BASE}/recovery/lock/recover`,
+  /** issue #56：显式解除 SAFE MODE（非 operationId 路径；'safe-mode' 不是 UUID）。 */
+  safeModeClear: `${API_BASE}/recovery/safe-mode/clear`,
+  /**
+   * T5：**只读**会话体检（本机存量会话的损坏/可见性分类）。
+   *
+   * 路径形态与 'status' / 'lock/recover' 同族（都是 recovery prefix 路由下的子路径）——
+   * 不新增注册路由条目，只多一个逻辑端点（见 tests/route/route-parity.test.ts 的说明）。
+   */
+  sessions: `${API_BASE}/recovery/sessions`,
+  /** T8：应用内会话修复（写路径；同样由 recovery prefix 路由内部按 path 分发，不新增注册路由条目）。 */
+  sessionsRepair: `${API_BASE}/recovery/sessions/repair`,
+  /** T8：按 repairId 回滚一次修复（同上）。 */
+  sessionsRollback: `${API_BASE}/recovery/sessions/rollback`,
 } as const;
 
 /** 迁移历史审计路由族（只读列表 + 导出）。 */

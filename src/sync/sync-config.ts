@@ -284,6 +284,62 @@ export async function writeSyncConfig(dir: string, cfg: SyncConfig): Promise<voi
   await atomicWriteFile(file, stringifyJsonSafe(payload, { space: 2 }), { mode: 0o600 });
 }
 
+/** 断开单条通道配置的结果（供路由层决定凭据/自动同步/UI 偏好怎么收尾）。 */
+export interface ClearSyncChannelResult {
+  /** 该通道之前是否有配置；false = 本来就没配（幂等成功，不算失败） */
+  removed: boolean;
+  /** 是否仍有另一条通道的配置（false = 已无任何通道，configured 应回落为 false） */
+  hasRemaining: boolean;
+  /** 清除后的活动通道（无剩余时为被清除的通道，仅作占位） */
+  transport: SyncTransportType;
+}
+
+/**
+ * 从 sync-config.json 删除指定通道的命名空间（另一通道的配置原样保留）。
+ *
+ * 为什么必须有（用户实测）：通道一旦配置过就没有出口 —— 一条打不通的 WebDAV 通道会永久占位，
+ * 产物库的远端源与自动同步只能一直报读取失败，用户无从自救。
+ *
+ * 三条语义：
+ *  - 该通道本来没配置 → 幂等成功（removed=false），**不写文件**；
+ *  - 删完还剩另一条 → 重写文件；活动 transport 若指向被删通道则自动切到剩下的那条
+ *    （否则 readSyncConfig 会返回 null，那条**配置过**的通道反而被显示成「未配置」）；
+ *  - 删完一条不剩 → **删除整个文件**（configured 如实回落 false），而不是留一份空配置。
+ *
+ * 凭据（token / WebDAV 口令 / 该通道的加密解密密码）与自动同步开关**不在本函数职责内** ——
+ * 它们分别住在 DSH credentials 与 autosync.json，由路由层显式清除（本模块只碰 sync-config.json）。
+ */
+export async function clearSyncChannel(dir: string, channel: SyncTransportType): Promise<ClearSyncChannelResult> {
+  const file = path.join(dir, SYNC_CONFIG_FILE);
+  const both = await readBothNamespaces(file);
+  const other: SyncTransportType = channel === 'git' ? 'webdav' : 'git';
+  const removed = channel === 'git' ? both.git !== undefined : both.webdav !== undefined;
+  const otherCfg = other === 'git' ? both.git : both.webdav;
+
+  if (otherCfg === undefined) {
+    // 没有另一条通道 → 文件不再代表任何配置：删掉它（readFullSyncConfig 回落 null）
+    if (removed) await fs.rm(file, { force: true });
+    return { removed, hasRemaining: false, transport: channel };
+  }
+
+  // 读当前活动通道（与 readFullSyncConfig 同口径）；它指向被删通道时切到剩下的那条
+  let current: SyncTransportType = 'git';
+  try {
+    const raw = await fs.readFile(file, 'utf8');
+    const parsed = parseJsonSafe(raw);
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      current = parseSyncChannel((parsed as Record<string, unknown>)['transport']) ?? 'git';
+    }
+  } catch { /* 读不到 → 缺省 git（与 readFullSyncConfig 一致） */ }
+  const transport: SyncTransportType = current === channel ? other : current;
+
+  const payload: Record<string, unknown> = { schemaVersion: SYNC_CONFIG_SCHEMA_VERSION, transport };
+  if (other === 'git') payload.git = otherCfg;
+  else payload.webdav = otherCfg;
+  await atomicWriteFile(file, stringifyJsonSafe(payload, { space: 2 }), { mode: 0o600 });
+  return { removed, hasRemaining: true, transport };
+}
+
 /**
  * 仓库地址合法性校验（返回错误消息；null = 合法）。
  * 安全约束：token 永不拼入 repoUrl —— http(s) 地址带 userinfo（username[:password]@）直接拒绝，

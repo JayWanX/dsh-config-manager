@@ -72,6 +72,30 @@ test('http-02 readJson：非 2xx 带 { error } → ConfigManagerApiError（沿�
   });
 });
 
+test('http-02b readJson：透传 status 与机器可读 code（T1 的 409 阻断态靠它识别）', async () => {
+  await assert.rejects(
+    readJson(jsonResponse(409, {
+      code: 'sessionFormatUnsupported',
+      error: '包内有 1 条会话是 v4 格式…',
+      unreadable: [{ unitId: 'sessions:--p--/s1', version: 4 }],
+      target: 3,
+    }), zhUiT),
+    (err: unknown) => {
+      assert.ok(err instanceof ConfigManagerApiError);
+      assert.equal((err as ConfigManagerApiError).status, 409);
+      assert.equal((err as ConfigManagerApiError).code, 'sessionFormatUnsupported');
+      assert.equal((err as Error).message, '包内有 1 条会话是 v4 格式…', '正文仍取 {message}/{error} 口径');
+      return true;
+    },
+  );
+  // code 只在是字符串时透传：畸形响应不得让界面拿到一个「像 code」的东西
+  await assert.rejects(readJson(jsonResponse(500, { code: 42, error: 'boom' }), zhUiT), (err: unknown) => {
+    assert.equal((err as ConfigManagerApiError).code, undefined);
+    assert.equal((err as ConfigManagerApiError).status, 500);
+    return true;
+  });
+});
+
 test('http-03 readJson：{ message } 优先于 { error }（lifecycle 兼容口径成为唯一口径）', async () => {
   await assert.rejects(
     readJson(jsonResponse(503, { message: 'feature disabled', error: 'legacy' }), zhUiT),

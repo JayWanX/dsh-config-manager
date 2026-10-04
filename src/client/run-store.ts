@@ -35,6 +35,11 @@ import { effectiveImportPlan, type ImportSelectionState } from '../ui/selection-
 import { DEFAULT_CATEGORIES, ExportFlow } from '../ui/export-flow.ts'
 import type { ExportRunResult } from '../ui/export-flow.ts'
 import { ImportWizard } from '../ui/import-wizard.ts'
+import {
+  DEFAULT_SESSION_FORMAT_DISPOSITION,
+  parseSessionFormatDisposition,
+  type SessionFormatDisposition,
+} from '../ui/session-format-disposition.ts'
 import { renderExportReport } from '../ui/report.ts'
 import type { FlowPhase } from '../ui/flow.ts'
 import type { ImportStep } from '../ui/types.ts'
@@ -73,11 +78,27 @@ export type MainView = 'export' | 'import'
 
 /**
  * 设置页页面（Workbench Rebuild 2026-09：export/import 升为一级页面）。
- * 旧顶级 tab `more`（历史/关于子 tab）由 Shell 的活动抽屉/关于弹窗取代，
+ * 旧顶级 tab `more`（历史/关于子 tab）由 Shell 的只读 task 面板取代，
  * parsePersistedState 将旧值迁移到 'overview'；旧 `panel:null`（主视图）语义
  * 由 view 字段承担，持久化载荷向后兼容。
  */
-export type PanelId = 'overview' | 'export' | 'import' | 'snapshots' | 'sync' | 'market' | 'profiles'
+export type PanelId = 'overview' | 'library' | 'import' | 'sync' | 'market' | 'profiles'
+
+/**
+ * 流程任务层（UI v2 §5.8）：导出/导入/逛市场/发布市场这些**多阶段向导**不再占二级页签，
+ * 由内容区上的侧滑面板承载；活动/历史/关于三种只读视图也并入同一个面板（§5.9）。
+ *
+ * 判据：多阶段向导 → Task；单次决策 + 报告 → Modal（恢复/咨询/查看对比仍是弹窗）。
+ */
+export type TaskKind = 'export' | 'import' | 'market' | 'publish' | 'runs' | 'history' | 'about'
+
+export interface TaskState {
+  kind: TaskKind
+  /** 发起它的页面：面板只在 `panel === origin` 时渲染（切走收起、切回续做） */
+  origin: PanelId
+  /** 可选入参（如「从某个备份文件导入」的 zipPath） */
+  payload?: unknown
+}
 
 /** 存储抽象（浏览器 sessionStorage / 测试 mock / 无存储）。 */
 export interface StoreStorage {
@@ -166,7 +187,9 @@ export type SyncConfirmDecisions = Record<string, SyncConfirmDecision>
  */
 export type PersistedChannelSyncState = Omit<
   ChannelSyncState,
-  'encryptPassword' | 'encryptPasswordConfirm' | 'decryptPassword' | 'encryptPasswordSaved' | 'decryptPasswordSaved'
+  | 'encryptPassword' | 'encryptPasswordConfirm' | 'decryptPassword' | 'encryptPasswordSaved' | 'decryptPasswordSaved'
+  // issue #59：读失败诊断是远端**当下**的状态，不是用户配置 —— 不落盘（下次 list 重新得到）
+  | 'unreadableSnapshots'
 >
 
 /** 同步面板的持久化切片 = 运行时切片剔除敏感字段（顶层凭据 + byChannel 密码类）与瞬态字段。 */
@@ -228,7 +251,7 @@ export interface MarketStoreSlice {
  * recovery = 事故恢复（Phase 5）。旧顶级 tab `panel:'recovery'` 在 parsePersistedState
  * 迁移为 `panel:'snapshots'` + `subTab:'recovery'`。
  */
-export type SnapshotsSubTab = 'restore' | 'files' | 'schedule' | 'recovery'
+export type SnapshotsSubTab = 'restore' | 'files' | 'schedule' | 'maintenance' | 'recovery'
 
 /**
  * 档案面板的运行时切片。**面板组件自持的状态必须是这里的子集**（PanelState = 本切片）——
@@ -285,6 +308,12 @@ export interface ProfilesStoreSlice {
   copying: boolean
   /** 最近一次复制回执（内存瞬态：带 warnings，UI 据此给出安装命令；不落盘） */
   copyResult: DshProfileCopyResult | null
+  /**
+   * 环境页子视图：档案列表（主视图）/ 维护与诊断（全屏）。
+   * 它是**切片字段而不是组件私有 state**：命令面板（`maintenance.open` / `recovery.open`）
+   * 与 SAFE MODE 横幅只能写 store，却都要**直达**维护与诊断（§4.4）。
+   */
+  subView: 'profiles' | 'maintenance'
 }
 
 export interface SnapshotsStoreSlice {
@@ -300,8 +329,11 @@ export interface SnapshotsStoreSlice {
   /** 定时备份设置草稿（未保存修改切 tab / 刷新保留；null = 无草稿，以宿主配置为准） */
   backupDraft: BackupScheduleDraft | null
   /** 「一键导入」请求（内存瞬态：快照面板点导入 → 切到 Import tab，向导挂载时消费）。
-   *  zipPath 指向宿主 exports 目录的备份文件；消费后立即清空，不持久化。 */
-  importBackup: { zipPath: string; name: string } | null
+   *  zipPath 指向宿主 exports 目录的备份文件；消费后立即清空，不持久化。
+   *  `containerType` 来自备份文件列表（issue #55）：加密容器必须先解锁再分析，
+   *  与浏览器选文件的 `UploadResponse.containerType` 同源语义；旧宿主不回该字段时
+   *  由宿主 /analyze 的容器闸门兜底（见 use-import-wizard-controller）。 */
+  importBackup: { zipPath: string; name: string; containerType?: 'zip' | 'encrypted' } | null
   /** 当前二级 tab（restore/files；切 tab / 刷新恢复；非敏感可持久化） */
   subTab: SnapshotsSubTab
 }
@@ -313,6 +345,23 @@ export interface SnapshotsStoreSlice {
  * —— 恢复是否仍在执行以宿主 RunRegistry（/runs + /progress）为权威，刷新后经
  * resume() 重新发现；浏览器持久化绝不作为 destructive operation 的状态源。
  */
+/**
+ * 产物库切片（UI v2 §6）：来源筛选 / 搜索词 / 排序 / 展开的行。
+ *
+ * **四项全部非敏感**（都是界面偏好，不含任何路径以外的用户数据），所以整体可持久化。
+ * 展开的是哪一行也要留住 —— 用户切到同步页看一眼再回来，不该发现自己展开的行又合上了。
+ */
+import type { ArtifactKind } from '../ui/artifact-view.ts'
+
+export interface LibraryStoreSlice {
+  /** 来源筛选；null = 全部。**值域用「行 kind」而不是 '_all' 这类合成值** —— 少一套映射 */
+  sourceFilter: ArtifactKind | null
+  query: string
+  sort: 'time' | 'name'
+  /** 当前展开的行 key（`<kind>:<id>`）；null = 全合上 */
+  expandedKey: string | null
+}
+
 export interface RecoveryStoreSlice {
   /** GET /recovery/status 结果（incidents + running；非敏感可持久化） */
   status: RecoveryStatus | null
@@ -327,16 +376,6 @@ export interface RecoveryStoreSlice {
   /** 已 redact 的错误文本 */
   error: string | null
   actionError: string | null
-}
-
-/**
- * 「更多」面板的运行时切片（聚合优化 2026-08：把「关于」与「迁移历史」收进
- * 「更多」作为子 tab，一级 tab 从 8 收敛为 6）。仅记录当前子视图，非敏感可持久化
- * （切 tab/刷新恢复）；关于/历史面板自身的低频状态组件内自持，不关联本切片。
- */
-export interface MoreStoreSlice {
-  /** 「更多」下的子视图：进行中 / 迁移历史 / 关于 */
-  moreSub: 'runs' | 'history' | 'about'
 }
 
 /* ------------------------------------------------- 持久化（非敏感）状态形状 */
@@ -393,6 +432,12 @@ export interface PersistedImportState {
    * 结构里带 zipPath：换一份备份后旧选择自动失效（见 ui/selection-model 的键控说明）。
    */
   importSelection: ImportSelectionState | null
+  /**
+   * 会话格式处置开关（T1）：'abort'（缺省，计划阶段阻断）/ 'skip'（这些会话默认不勾选）/
+   * 'guide'（不改行为，只给指引）。非敏感的用户决策，跟着导入流程一起持久化 ——
+   * 组件卸载（切页签）后必须保留，否则用户回到确认页会看到与选择模型不一致的处置。
+   */
+  sessionFormatDisposition: SessionFormatDisposition
   uploading: boolean
   running: boolean
   progress: RunProgress | null
@@ -413,7 +458,7 @@ export interface PersistedState {
   snapshots: SnapshotsStoreSlice
   profiles: ProfilesStoreSlice
   recovery: RecoveryStoreSlice
-  more: MoreStoreSlice
+  library: LibraryStoreSlice
 }
 
 /* --------------------------------------- 运行时状态（含仅内存的敏感字段） */
@@ -470,7 +515,12 @@ export interface StoreState {
   snapshots: SnapshotsStoreSlice
   profiles: ProfilesStoreSlice
   recovery: RecoveryStoreSlice
-  more: MoreStoreSlice
+  library: LibraryStoreSlice
+  /**
+   * 流程任务层（UI v2 §5.8）：**不持久化**。
+   * 发起它的页面已随刷新销毁，重放一个空白向导只会骗人（与档案面板「进行中态不落 sessionStorage」同一条理由）。
+   */
+  task: TaskState | null
 }
 
 /** patch 的输入形状（浅合并对应切片）。 */
@@ -484,7 +534,9 @@ export interface StorePatch {
   snapshots?: Partial<SnapshotsStoreSlice>
   profiles?: Partial<ProfilesStoreSlice>
   recovery?: Partial<RecoveryStoreSlice>
-  more?: Partial<MoreStoreSlice>
+  library?: Partial<LibraryStoreSlice>
+  /** 整块替换（`null` 表示关闭面板）；不做 Partial 合并 —— 任务没有「改一半」的语义 */
+  task?: TaskState | null
 }
 
 /** 向导 step 的类型别名（与 src/ui/types.ts 的 ImportStep 保持一致）。 */
@@ -527,6 +579,7 @@ function defaultImportState(): ImportLiveState {
     conflictResolutions: {},
     pathMappings: [],
     importSelection: null,
+    sessionFormatDisposition: DEFAULT_SESSION_FORMAT_DISPOSITION,
     secretInputs: {},
     decryptPassword: '',
     decryptRefs: [],
@@ -600,7 +653,7 @@ function defaultSnapshotsState(): SnapshotsStoreSlice {
     error: null,
     backupDraft: null,
     importBackup: null,
-    subTab: 'restore',
+    subTab: 'schedule',
   }
 }
 
@@ -632,6 +685,7 @@ function defaultProfilesState(): ProfilesStoreSlice {
     copyIncludeModules: true,
     copying: false,
     copyResult: null,
+    subView: 'profiles',
   }
 }
 
@@ -665,6 +719,8 @@ export function normalizeProfilesSlice(raw: unknown): ProfilesStoreSlice {
     createTemplate: typeof r['createTemplate'] === 'string' && r['createTemplate'] !== ''
       ? r['createTemplate']
       : base.createTemplate,
+    // 只接受两个已知取值（旧载荷 / 脏数据一律回主视图，绝不把未校验的字符串当子视图用）
+    subView: r['subView'] === 'maintenance' ? 'maintenance' : 'profiles',
   }
 }
 
@@ -680,16 +736,16 @@ function defaultRecoveryState(): RecoveryStoreSlice {
   }
 }
 
-function defaultMoreState(): MoreStoreSlice {
-  return {
-    moreSub: 'about',
-  }
+function defaultLibraryState(): LibraryStoreSlice {
+  return { sourceFilter: null, query: '', sort: 'time', expandedKey: null }
 }
 
 function defaultState(): StoreState {
   return {
     v: 1,
     view: 'export',
+    // 流程任务层默认关闭（不持久化，见 StoreState.task）
+    task: null,
     // Workbench Rebuild（2026-09）：默认打开总览页
     panel: 'overview',
     export: defaultExportState(),
@@ -699,7 +755,7 @@ function defaultState(): StoreState {
     snapshots: defaultSnapshotsState(),
     profiles: defaultProfilesState(),
     recovery: defaultRecoveryState(),
-    more: defaultMoreState(),
+    library: defaultLibraryState(),
   }
 }
 
@@ -810,6 +866,7 @@ export function toProfilesStoreSlice(s: ProfilesStoreSlice): ProfilesStoreSlice 
     copyIncludeModules: s.copyIncludeModules,
     copying: s.copying,
     copyResult: s.copyResult,
+    subView: s.subView,
   }
 }
 
@@ -977,6 +1034,8 @@ export function toPersistedState(state: StoreState): PersistedState {
     selectedSnapshotId: c.selectedSnapshotId,
     // 快照列表按值复制，避免落盘对象与运行时切片共享可变数组
     snapshots: [...c.snapshots],
+    // issue #59 的读失败诊断：属于「远端当下的状态」而非用户配置，**不落盘**
+    // （刷新/切 tab 后重新 list 会重新得到，落盘只会在远端恢复后留下陈旧告警）
     loadingSnapshots: c.loadingSnapshots === true,
     autosync: c.autosync,
     autosyncEnabled: c.autosyncEnabled,
@@ -1010,6 +1069,7 @@ export function toPersistedState(state: StoreState): PersistedState {
       conflictResolutions: { ...imp.conflictResolutions },
       pathMappings: imp.pathMappings.map((m) => ({ ...m, appliesTo: [...m.appliesTo] })),
       importSelection: imp.importSelection,
+      sessionFormatDisposition: imp.sessionFormatDisposition,
       uploading: imp.uploading,
       running: imp.running,
       progress: imp.progress,
@@ -1104,6 +1164,9 @@ export function toPersistedState(state: StoreState): PersistedState {
       copyIncludeModules: true,
       copying: false,
       copyResult: null,
+      // 环境页子视图是**视图状态**（不含秘密值），与 snapshots.subTab 同性质 → 放行：
+      // 刷新/重开设置后仍停在用户被命令面板送到的那个子视图
+      subView: state.profiles.subView,
     },
     // recovery 切片为非敏感（incidents/preview/verifyResult 无秘密值）；running 为内存
     // 切片瞬态：不落盘（宿主 RunRegistry 为权威，刷新后由 resume() 重新发现）
@@ -1116,8 +1179,8 @@ export function toPersistedState(state: StoreState): PersistedState {
       error: state.recovery.error,
       actionError: state.recovery.actionError,
     },
-    // 「更多」切片为非敏感（仅记录子视图 history/about）
-    more: { moreSub: state.more.moreSub },
+    // 产物库切片全为非敏感界面偏好，原样落盘
+    library: { ...state.library },
   }
 }
 
@@ -1141,66 +1204,76 @@ export function parsePersistedState(raw: string): PersistedState | null {
   // 旧载荷迁移：null/缺失（旧「主视图」）→ 由 view 字段映射到具体页面（export/import），
   // 'more'/'about'/'history'（旧聚合 tab）→ 'overview'，'recovery' → 'snapshots' + subTab。
   const rawPanel = p['panel']
+  // 旧 snapshots 子视图要先读出来：它决定旧值落到产物库还是暂挂页（见下面 case 'snapshots'）
+  const rawSnapshots = isRecord(p['snapshots']) ? p['snapshots'] : null
+  const rawPanelSnapshotsSub = rawSnapshots !== null && typeof rawSnapshots['subTab'] === 'string' ? rawSnapshots['subTab'] : 'restore'
   let panel: PanelId
-  let moreSub: MoreStoreSlice['moreSub'] = 'about'
   let snapshotsSubTab: SnapshotsSubTab = 'restore'
   const viewRaw = view as MainView
   switch (rawPanel) {
     case 'overview':
-    case 'snapshots':
+    case 'library':
     case 'sync':
     case 'market':
     case 'profiles':
-    case 'export':
     case 'import':
       panel = rawPanel
       break
+    case 'export':
+      // v2：导出不再是页面（改为 Task Mode 的面板）。旧持久化值落到**产物库** ——
+      // 「我上次在导出页」的真实意图多半是「我要产物」，而导出流程在产物库底栏有入口。
+      panel = 'library'
+      break
+    case 'snapshots':
+      // v1 的「备份与快照」页已彻底解散（§10.1）：产物 → 产物库；
+      // 定时备份 → 首页（弹窗无法由持久化值表达，落到首页即可，用户一步就能点开）；
+      // 事故恢复 → 环境（维护与诊断同理，落到环境页）。
+      if (rawPanelSnapshotsSub === 'recovery') panel = 'profiles'
+      else if (rawPanelSnapshotsSub === 'schedule') panel = 'overview'
+      else panel = 'library'
+      break
     case 'about':
       panel = 'overview'
-      moreSub = 'about'
       break
     case 'recovery':
-      // 旧聚合 tab（Phase 5 引导式恢复）→ 备份与快照面板的恢复子 tab。
+      // 旧聚合 tab（Phase 5 引导式恢复）→ 环境页的「维护与诊断」子视图。
       // 注意：'recovery' 是**遗留值**，不是当前面板 id。
-      panel = 'snapshots'
-      snapshotsSubTab = 'recovery'
+      panel = 'profiles'
       break
     case 'lifecycle':
       // 已下线的「灾备」页（自动快照 / 撤销重做 / 快照库）：救援模式 + 崩溃归因
-      // 已并入事故恢复子 tab，旧持久化值一律落到这里。
-      panel = 'snapshots'
-      snapshotsSubTab = 'recovery'
+      // 已并入维护与诊断，旧持久化值一律落到环境页。
+      panel = 'profiles'
       break
     case 'history':
       panel = 'overview'
-      moreSub = 'history'
       break
     case 'more':
       panel = 'overview'
       break
     default:
-      // 旧「主视图」缺省值（null/缺失/非法）→ 由 view 映射（旧用户回到原导出/导入页）
-      panel = viewRaw
+      // 旧「主视图」缺省值（null/缺失/非法）→ 由 view 映射到具体页面。
+      // v2 里导出已改为 Task 面板（不再是页面），所以只有 import 有对应页面。
+      panel = viewRaw === 'import' ? 'import' : 'overview'
       break
   }
   // view 与 panel 镜像（export/import 页面时 view 同步，保证旧字段语义一致）
-  const mirroredView: MainView = panel === 'import' ? 'import' : panel === 'export' ? 'export' : viewRaw
+  const mirroredView: MainView = panel === 'import' ? 'import' : viewRaw
   // sync/market/snapshots：旧载荷可能缺失 → 默认切片（字段级缺失由 applyPersisted 兜底）
   const sync = isRecord(p['sync']) ? p['sync'] as unknown as PersistedSyncState : defaultSyncState()
   const market = isRecord(p['market']) ? p['market'] as unknown as MarketStoreSlice : defaultMarketState()
   const snapshots = isRecord(p['snapshots']) ? p['snapshots'] as unknown as SnapshotsStoreSlice : defaultSnapshotsState()
   const profiles = isRecord(p['profiles']) ? p['profiles'] as unknown as ProfilesStoreSlice : defaultProfilesState()
   const recovery = isRecord(p['recovery']) ? p['recovery'] as unknown as RecoveryStoreSlice : defaultRecoveryState()
+  const library = isRecord(p['library']) ? p['library'] as unknown as LibraryStoreSlice : defaultLibraryState()
   // 从旧顶级 tab 'recovery' / 已下线的 'lifecycle' 迁移：快照面板 subTab 强制为 recovery
   // （用户当时在恢复 tab，或站就在灾备页 —— 两者现在都归事故恢复子 tab）。
   const migratedSnapshots: SnapshotsStoreSlice = rawPanel === 'recovery' || rawPanel === 'lifecycle'
     ? { ...snapshots, subTab: snapshotsSubTab }
     : snapshots
-  // 「更多」切片：旧载荷可能缺失 → 默认（about）；若从旧 about/history 迁移，用迁移值覆盖
-  const more = isRecord(p['more'])
-    ? { ...defaultMoreState(), ...p['more'] as unknown as MoreStoreSlice }
-    : { moreSub }
-  return { v: 1, view: mirroredView, panel, export: exp as PersistedExportState, import: imp as PersistedImportState, sync, market, snapshots: migratedSnapshots, profiles, recovery, more }
+  // 旧载荷里的 `more: { moreSub }` 已随抽屉一起废弃：面板是否打开是**瞬态**（v1 也没恢复抽屉），
+  // 所以这里只忽略它，不做任何迁移。
+  return { v: 1, view: mirroredView, panel, export: exp as PersistedExportState, import: imp as PersistedImportState, sync, market, snapshots: migratedSnapshots, profiles, recovery, library }
 }
 
 /* ----------------------------------------------------- 控制器 rehydrate */
@@ -1383,6 +1456,24 @@ export class RunStore {
 
   /* ------------------------------------------------------- 状态更新 */
 
+  /**
+   * issue #60：把「**在途的密码输入**」回填进内存切片。
+   *
+   * 为什么需要单开一个入口：`save()` 每次 patch 都会跑持久化白名单，而白名单把密码字段
+   * **写成空串**（这是安全不变量，必须保留）—— 于是每次 patch 之后都得把密码重新写回内存，
+   * 否则一次无关的 patch（例如远端快照列表到货）就会把用户正在输入的 webdav 密码清空，
+   * 表现就是「密码框输入几个字符就被自动清空、粘贴也清空、保存按钮闪一下」。
+   *
+   * 只写**内存**（绝不触发持久化）：密码永远不进 sessionStorage/磁盘/日志。
+   */
+  patchSyncPasswords(passwords: { token?: string; webdavPassword?: string }): void {
+    const sync = { ...this.state.sync }
+    if (passwords.token !== undefined) sync.token = passwords.token
+    if (passwords.webdavPassword !== undefined) sync.webdavPassword = passwords.webdavPassword
+    this.state = { ...this.state, sync }
+    this.notify()
+  }
+
   /** 浅合并补丁并立即持久化（保存走白名单，敏感字段不落盘）。 */
   patch(patchObj: StorePatch): void {
     this.state = {
@@ -1397,7 +1488,9 @@ export class RunStore {
       snapshots: { ...this.state.snapshots, ...patchObj.snapshots },
       profiles: { ...this.state.profiles, ...patchObj.profiles },
       recovery: { ...this.state.recovery, ...patchObj.recovery },
-      more: { ...this.state.more, ...patchObj.more },
+      library: { ...this.state.library, ...patchObj.library },
+      // task 是整块替换：undefined = 不动，null = 关闭面板
+      task: patchObj.task !== undefined ? patchObj.task : this.state.task,
     }
     this.notify()
     this.save()
@@ -1454,6 +1547,8 @@ export class RunStore {
   private applyPersisted(parsed: PersistedState): void {
     this.state = {
       v: 1,
+      // 流程面板不持久化：刷新后一律关闭（见 StoreState.task 的注释）
+      task: null,
       view: parsed.view,
       // parsePersistedState 已把旧 null/非法值迁移为具体页面；这里兜底 'overview'
       panel: parsed.panel ?? 'overview',
@@ -1478,6 +1573,10 @@ export class RunStore {
         selectedFileName: parsed.import.selectedFileName ?? null,
         // 旧版持久化载荷可能缺 containerEncrypted（undefined）→ 归一到 false
         containerEncrypted: parsed.import.containerEncrypted === true,
+        // 旧版持久化载荷可能缺 sessionFormatDisposition（undefined）/ 值非法 → 回到缺省 abort
+        // （缺省是**安全侧**：宁可多问一次，也不静默带着「读不了的会话」继续导入）
+        sessionFormatDisposition:
+          parseSessionFormatDisposition(parsed.import.sessionFormatDisposition) ?? DEFAULT_SESSION_FORMAT_DISPOSITION,
         // 硬性：秘密补录值 / 解密密码 / 解密覆盖清单 / 容器解锁标志绝不从存储恢复；
         // collector 由 plan+决策重建；「跳过当前」为内存瞬态，刷新后复位
         secretInputs: {},
@@ -1554,8 +1653,12 @@ export class RunStore {
         running: false,
         // 硬性：「一键导入」请求为一次性瞬态，绝不从存储恢复
         importBackup: null,
-        // 旧载荷可能缺 subTab / 带非法值 → 归一（只认 restore/files/recovery；聚合优化加 recovery）
-        subTab: parsed.snapshots.subTab === 'files' ? 'files' : parsed.snapshots.subTab === 'recovery' ? 'recovery' : 'restore',
+        // 旧载荷可能缺 subTab / 带非法值 → 归一。
+        // v2：restore / files 两个子视图已随产物搬进产物库，旧值一律落到 schedule；
+        // maintenance 是第 2 步临时挂进来的（磁盘体检第 3 步归位到环境页）。
+        subTab: parsed.snapshots.subTab === 'recovery'
+          ? 'recovery'
+          : parsed.snapshots.subTab === 'maintenance' ? 'maintenance' : 'schedule',
       },
       profiles: normalizeProfilesSlice(parsed.profiles),
       recovery: {
@@ -1565,11 +1668,15 @@ export class RunStore {
         // 是否仍有恢复在执行以宿主 /runs 为权威，resume() 会重新发现并置 true
         running: false,
       },
-      // 「更多」切片非敏感（仅子视图 history/about），原样恢复；moreSub 非法值归一为 about
-      more: {
-        moreSub: parsed.more.moreSub === 'history'
-          ? 'history'
-          : parsed.more.moreSub === 'runs' ? 'runs' : 'about',
+      // 产物库：非法值归一（筛选来源 / 排序都是窄值域，坏值一律回默认）
+      library: {
+        sourceFilter: parsed.library.sourceFilter === 'snapshot' || parsed.library.sourceFilter === 'backup-file'
+          || parsed.library.sourceFilter === 'remote-snapshot' || parsed.library.sourceFilter === 'market'
+          ? parsed.library.sourceFilter
+          : null,
+        query: typeof parsed.library.query === 'string' ? parsed.library.query : '',
+        sort: parsed.library.sort === 'name' ? 'name' : 'time',
+        expandedKey: typeof parsed.library.expandedKey === 'string' ? parsed.library.expandedKey : null,
       },
     }
     // 安全兜底：整体加密备份容器已解锁标志绝不从存储恢复（archiveUnlocked 必为 false）→

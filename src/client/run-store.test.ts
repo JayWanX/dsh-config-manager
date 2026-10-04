@@ -19,6 +19,7 @@ import assert from 'node:assert/strict'
 
 import {
   RunStore, STATE_KEY, normalizeProfilesSlice, redactPersistedValue, toPersistedState, toProfilesStoreSlice,
+  toSyncStoreSlice,
   type PersistedState, type ProfilesStoreSlice, type StoreStorage,
 } from './run-store.ts'
 import type { DshProfileCopyResult, DshProfileLaunchResult, DshProfileTemplate } from '../profiles/dsh-profile-shared.ts'
@@ -752,6 +753,7 @@ function makeSyncPatch(): Parameters<RunStore['patch']>[0]['sync'] {
         decryptPasswordSaved: true,
         selectedSnapshotId: '',
         snapshots: [],
+        unreadableSnapshots: [],
         autosync: null,
         autosyncEnabled: false,
         autosyncInterval: '30m',
@@ -770,6 +772,7 @@ function makeSyncPatch(): Parameters<RunStore['patch']>[0]['sync'] {
         decryptPasswordSaved: false,
         selectedSnapshotId: 'snap-xyz',
         snapshots: [],
+        unreadableSnapshots: [],
         autosync: null,
         autosyncEnabled: false,
         autosyncInterval: '30m',
@@ -783,6 +786,34 @@ function makeSyncPatch(): Parameters<RunStore['patch']>[0]['sync'] {
     loadError: null,
   }
 }
+
+test('issue #60: patch 之后在途密码仍留在内存（否则无关回填会清空用户正在输入的密码）', () => {
+  const { storage, raw } = makeStorage()
+  const store = new RunStore({ storage })
+  // 用户在 webdav 密码框里输入
+  store.patchSyncPasswords({ webdavPassword: 'typed-by-user', token: 'typed-token' })
+  assert.equal(store.getSnapshot().sync.webdavPassword, 'typed-by-user')
+  assert.equal(store.getSnapshot().sync.token, 'typed-token')
+
+  // 一次**无关**的 patch（真机场景：远端快照列表到货 / GitHub 轮询结束）——
+  // 持久化白名单会把密码字段写成空串，随后必须由 patchSyncPasswords 写回内存
+  const slice = toSyncStoreSlice(store.getSnapshot().sync)
+  store.patch({ sync: { ...slice, webdavPassword: '', token: '' } })
+  store.patchSyncPasswords({ webdavPassword: 'typed-by-user', token: 'typed-token' })
+  const after = store.getSnapshot().sync
+  assert.equal(after.webdavPassword, 'typed-by-user', '在途 webdav 密码不得被无关 patch 清空')
+  assert.equal(after.token, 'typed-token', '在途 git token 不得被无关 patch 清空')
+
+  // 仍然绝不落盘（本轮修复不得放宽安全不变量）
+  const persisted = raw()
+  assert.ok(persisted !== null, 'patch 后已同步持久化')
+  assert.ok(!persisted.includes('typed-by-user'), 'webdav 密码绝不进 sessionStorage')
+  assert.ok(!persisted.includes('typed-token'), 'git token 绝不进 sessionStorage')
+
+  // 未给出的字段保持不变（部分更新语义）
+  store.patchSyncPasswords({})
+  assert.equal(store.getSnapshot().sync.webdavPassword, 'typed-by-user')
+})
 
 test('低频面板: 同步凭据（token/webdav/加密与解密密码）绝不写入 sessionStorage', () => {
   const { storage, raw } = makeStorage()
@@ -851,8 +882,11 @@ test('低频面板: 同步/市场/快照切片与当前面板刷新往返恢复�
       loadError: null,
     },
   })
+  // UI v2：产物列表已从 snapshots 页搬去产物库（library 页）——旧 snapshots 面板现在
+  // 只承载「定时备份 / 事故恢复」两个子视图，所以「刷新后回到原面板」这条用例改成 library。
+  // 注意快照切片本身**照旧持久化**（它仍是非敏感界面状态），只是面板 id 换了。
   first.patch({
-    panel: 'snapshots',
+    panel: 'library',
     snapshots: {
       selectedId: 'snap-1',
       plan: {
@@ -879,7 +913,7 @@ test('低频面板: 同步/市场/快照切片与当前面板刷新往返恢复�
   // 新实例 + 同一存储 = 模拟页面刷新
   const second = new RunStore({ storage })
   const st = second.getSnapshot()
-  assert.equal(st.panel, 'snapshots', '刷新后回到原低频面板')
+  assert.equal(st.panel, 'library', '刷新后回到原低频面板')
   assert.equal(st.sync.channel, 'webdav')
   assert.equal(st.sync.byChannel.webdav.syncMode, 'advanced', 'webdav 通道模式恢复')
   assert.deepEqual(st.sync.byChannel.webdav.syncSections, ['settings', 'plugins'], 'webdav 通道勾选恢复')
@@ -973,7 +1007,7 @@ test('低频面板: 旧版顶层 syncMode 载荷 → 迁移为 git 通道的 byC
 
 /* -------------------------------------------------- 聚合优化（2026-08）：一级 tab 8→6 的旧值迁移 */
 
-test('聚合优化: 旧 panel "recovery" → 迁移为 snapshots + subTab=recovery（不丢、不报错）', () => {
+test('UI v2 迁移: 旧 panel "recovery" → 环境页（维护与诊断的宿主）', () => {
   const { storage } = makeStorage()
   storage.setItem(STATE_KEY, JSON.stringify({
     v: 1, view: 'export', panel: 'recovery',
@@ -984,47 +1018,34 @@ test('聚合优化: 旧 panel "recovery" → 迁移为 snapshots + subTab=recove
   } as Record<string, unknown>))
   const store = new RunStore({ storage })
   const st = store.getSnapshot()
-  assert.equal(st.panel, 'snapshots', '旧 recovery tab → 备份与快照面板')
-  assert.equal(st.snapshots.subTab, 'recovery', '旧 recovery tab → snapshots 恢复子 tab')
+  // v2：备份与快照页已解散 —— 事故恢复归「环境 → 维护与诊断」。
+  // 落到环境页即可：维护与诊断是它的子视图，用户一步就能点开。
+  assert.equal(st.panel, 'profiles', '旧 recovery tab → 环境页')
+  // 快照切片**照旧恢复**（它仍是非敏感界面状态），但 subTab 会被归一：
+  // 'restore' 这个子视图已随产物搬进产物库 ⇒ 归一为当前存在的第一个（schedule）。
+  assert.equal(st.snapshots.subTab, 'schedule', '旧 subTab=restore → 归一为 schedule（该子视图已不存在）')
 })
 
-test('Workbench Rebuild: 旧 panel "about"/"history"/"more" → 迁移为 overview；moreSub 保留；新载荷往返', () => {
+test('UI v2：旧 panel "about"/"history"/"more" → overview；旧 more 载荷被忽略（面板是瞬态）', () => {
   const { storage } = makeStorage()
-  // 旧 about → overview + moreSub=about
-  storage.setItem(STATE_KEY, JSON.stringify({
-    v: 1, view: 'export', panel: 'about',
-    export: { mode: 'quick', selection: [], includeSecrets: false, encrypt: false, fileName: '', note: '', error: null },
-    import: { step: 'select', selectedFileName: null, containerEncrypted: false, error: null },
-  }))
-  const about = new RunStore({ storage })
-  assert.equal(about.getSnapshot().panel, 'overview', '旧 about tab → 总览（更多已由抽屉/弹窗取代）')
-  assert.equal(about.getSnapshot().more.moreSub, 'about', '旧 about tab → moreSub=about')
+  const load = (panel: string, extra: Record<string, unknown> = {}): RunStore => {
+    storage.setItem(STATE_KEY, JSON.stringify({
+      v: 1, view: 'export', panel, ...extra,
+      export: { mode: 'quick', selection: [], includeSecrets: false, encrypt: false, fileName: '', note: '', error: null },
+      import: { step: 'select', selectedFileName: null, containerEncrypted: false, error: null },
+    }))
+    return new RunStore({ storage })
+  }
 
-  // 旧 history → overview + moreSub=history
-  storage.setItem(STATE_KEY, JSON.stringify({
-    v: 1, view: 'export', panel: 'history',
-    export: { mode: 'quick', selection: [], includeSecrets: false, encrypt: false, fileName: '', note: '', error: null },
-    import: { step: 'select', selectedFileName: null, containerEncrypted: false, error: null },
-  }))
-  const history = new RunStore({ storage })
-  assert.equal(history.getSnapshot().panel, 'overview', '旧 history tab → 总览')
-  assert.equal(history.getSnapshot().more.moreSub, 'history', '旧 history tab → moreSub=history')
+  for (const panel of ['about', 'history', 'more']) {
+    assert.equal(load(panel).getSnapshot().panel, 'overview', `旧 ${panel} tab → 总览`)
+  }
 
-  // 旧「更多」载荷往返（panel=more 迁移为 overview；moreSub 持久化保留 + 刷新恢复）
-  storage.setItem(STATE_KEY, JSON.stringify({
-    v: 1, view: 'export', panel: 'more', more: { moreSub: 'history' },
-    export: { mode: 'quick', selection: [], includeSecrets: false, encrypt: false, fileName: '', note: '', error: null },
-    import: { step: 'select', selectedFileName: null, containerEncrypted: false, error: null },
-  }))
-  const more = new RunStore({ storage })
-  assert.equal(more.getSnapshot().panel, 'overview')
-  assert.equal(more.getSnapshot().more.moreSub, 'history', '新 more 载荷刷新恢复 moreSub')
-
-  // 运行时 patch: 切换 moreSub (about <-> history)
-  more.patch({ more: { moreSub: 'about' } })
-  assert.equal(more.getSnapshot().more.moreSub, 'about', 'patch 切换到 about')
-  more.patch({ more: { moreSub: 'history' } })
-  assert.equal(more.getSnapshot().more.moreSub, 'history', 'patch 切换到 history')
+  // v2：抽屉整体删除，活动/历史/关于变成 task 面板。**面板是否打开是瞬态** ——
+  // 旧载荷里的 `more: { moreSub }` 直接忽略，不恢复、也不报错。
+  const store = load('more', { more: { moreSub: 'history' } })
+  assert.equal(store.getSnapshot().task, null, '旧 more 载荷不得恢复出任何面板')
+  assert.equal('more' in store.getSnapshot(), false, 'more 切片已随抽屉废弃')
 })
 
 /* -------------------------------------------------- restore（P1-1）权威状态 */
@@ -1033,7 +1054,8 @@ test('低频面板: 快照恢复 running 为瞬态——不写入 sessionStorage
   const { storage, raw } = makeStorage()
   const first = new RunStore({ storage })
   first.patch({
-    panel: 'snapshots',
+    // UI v2：快照切片现由产物库承载（panel 只是「当前页」标记，与本用例的断言无关）
+    panel: 'library',
     snapshots: {
       selectedId: 'snap-1', running: true,
       importBackup: { zipPath: '/exports/x.zip', name: 'x.zip' },
@@ -1059,22 +1081,29 @@ test('低频面板: 快照恢复 running 为瞬态——不写入 sessionStorage
   assert.equal(second.getSnapshot().snapshots.selectedId, 'snap-1', '非瞬态字段仍恢复')
 })
 
-test('快照面板二级 tab: subTab 持久化——切换后刷新恢复，旧载荷缺省回退 restore', () => {
+test('备份页二级 tab: subTab 持久化——切换后刷新恢复；已消失的旧值落到 schedule', () => {
   const { storage, raw } = makeStorage()
   const first = new RunStore({ storage })
-  // 默认 restore；切到 files 后写入 sessionStorage
-  assert.equal(first.getSnapshot().snapshots.subTab, 'restore', '缺省为快照恢复')
-  first.patch({ snapshots: { subTab: 'files' } })
+  // v2：本页只剩 schedule / maintenance / recovery 三个子视图，缺省是 schedule
+  assert.equal(first.getSnapshot().snapshots.subTab, 'schedule', '缺省为定时备份')
+  first.patch({ snapshots: { subTab: 'recovery' } })
   const persisted = JSON.parse(raw() ?? '{}') as { snapshots?: { subTab?: string } }
-  assert.equal(persisted.snapshots?.subTab, 'files', 'subTab 非敏感可持久化')
+  assert.equal(persisted.snapshots?.subTab, 'recovery', 'subTab 非敏感可持久化')
 
   const second = new RunStore({ storage })
-  assert.equal(second.getSnapshot().snapshots.subTab, 'files', '刷新后恢复上次子 tab')
+  assert.equal(second.getSnapshot().snapshots.subTab, 'recovery', '刷新后恢复上次子 tab')
 
-  // 旧版载荷（无 subTab 字段）→ 回退缺省 restore
+  // 旧载荷（无 subTab 字段）→ 回退缺省 schedule
   storage.setItem(STATE_KEY, JSON.stringify({ ...persisted, snapshots: { ...persisted.snapshots, subTab: undefined } }))
   const third = new RunStore({ storage })
-  assert.equal(third.getSnapshot().snapshots.subTab, 'restore', '旧载荷缺省回退 restore')
+  assert.equal(third.getSnapshot().snapshots.subTab, 'schedule', '旧载荷缺省回退 schedule')
+
+  // v2 迁移：restore / files 两个子视图已随产物搬进产物库 —— 旧值不得把用户丢在一个不存在的视图上
+  for (const stale of ['restore', 'files']) {
+    storage.setItem(STATE_KEY, JSON.stringify({ ...persisted, snapshots: { ...persisted.snapshots, subTab: stale } }))
+    const restored = new RunStore({ storage })
+    assert.equal(restored.getSnapshot().snapshots.subTab, 'schedule', `旧值 ${stale} → schedule`)
+  }
 })
 
 test('m2-resume: 活跃 restore run 经 /runs 恢复 running 并轮询到完成回填报告（宿主为权威）', async () => {
@@ -1131,7 +1160,8 @@ test('recovery: running 为瞬态——不写入 sessionStorage、刷新后复�
   const { storage, raw } = makeStorage()
   const first = new RunStore({ storage })
   first.patch({
-    panel: 'snapshots',
+    // UI v2：事故恢复归「环境 → 维护与诊断」（panel 只是「当前页」标记）
+    panel: 'profiles',
     recovery: {
       status: { incidents: [], running: [] },
       selectedOperationId: '00000000-0000-4000-8000-0000000000aa',
@@ -1161,7 +1191,7 @@ test('recovery: status/preview/verifyResult 非敏感可持久化——刷新后
   const { storage, raw } = makeStorage()
   const first = new RunStore({ storage })
   first.patch({
-    panel: 'snapshots',
+    panel: 'profiles',
     recovery: {
       status: {
         incidents: [{
@@ -1435,7 +1465,7 @@ test('P0-9: 放行清单之外的未知字段默认不落盘（各切片，含 b
     snapshots: Record<string, unknown>
     profiles: Record<string, unknown>
     recovery: Record<string, unknown>
-    more: Record<string, unknown>
+    task: Record<string, unknown>
   }
   snap.export['futureSecret'] = 'LEAK-EXPORT'
   snap.import['futureToken'] = 'LEAK-IMPORT'
@@ -1445,14 +1475,15 @@ test('P0-9: 放行清单之外的未知字段默认不落盘（各切片，含 b
   snap.snapshots['futureSecret'] = 'LEAK-SNAPSHOTS'
   snap.profiles['futureSecret'] = 'LEAK-PROFILES'
   snap.recovery['futureSecret'] = 'LEAK-RECOVERY'
-  snap.more['futureSecret'] = 'LEAK-MORE'
+  // v2：task 面板整体不落盘（不是字段级白名单，是整块剔除）；默认是 null，先塞一个对象
+  snap.task = { futureSecret: 'LEAK-TASK' }
 
   store.save() // 走唯一写盘路径
   const text = raw()
   assert.ok(text !== null)
   for (const leak of [
     'LEAK-EXPORT', 'LEAK-IMPORT', 'LEAK-SYNC', 'LEAK-CHANNEL',
-    'LEAK-MARKET', 'LEAK-SNAPSHOTS', 'LEAK-PROFILES', 'LEAK-RECOVERY', 'LEAK-MORE',
+    'LEAK-MARKET', 'LEAK-SNAPSHOTS', 'LEAK-PROFILES', 'LEAK-RECOVERY', 'LEAK-TASK',
   ]) {
     assert.ok(!text.includes(leak), `${leak} 不得落盘（放行清单之外默认拒绝）`)
   }
@@ -1467,7 +1498,7 @@ test('P0-9: 持久化字段清单显式化（键集合断言 —— 新增字段
   assert.deepEqual(keys(p.import), [
     'analysis', 'conflictResolutions', 'conflictStrategy', 'containerEncrypted', 'error', 'errors',
     'importSelection', 'pathMappings', 'phase', 'plan', 'progress', 'result', 'rollbackOnError',
-    'runId', 'running', 'selectedFileName', 'step', 'uploading', 'zipPath',
+    'runId', 'running', 'selectedFileName', 'sessionFormatDisposition', 'step', 'uploading', 'zipPath',
   ])
   assert.deepEqual(keys(p.sync), [
     'byChannel', 'channel', 'confirmDecisions', 'confirmSession', 'error', 'lastRestoreId',
@@ -1492,10 +1523,13 @@ test('P0-9: 持久化字段清单显式化（键集合断言 —— 新增字段
     'createName', 'createTemplate', 'creating', 'current', 'deleteCurrentConfirmed', 'deleteTargetName',
     'deleting', 'error', 'launchBlocked', 'launchResult', 'launching', 'loadError', 'profiles',
     'renameTargetName', 'renameValue', 'renaming', 'running', 'selectedName', 'stopTargetName', 'stopping',
-    'templates',
+    'subView', 'templates',
   ])
   assert.deepEqual(keys(p.recovery), ['actionError', 'error', 'preview', 'running', 'selectedOperationId', 'status', 'verifyResult'])
-  assert.deepEqual(keys(p.more), ['moreSub'])
+  // v2：抽屉已废弃 → persisted 里既没有 more（子视图），也没有 task（面板开关是瞬态）。
+  // 这两条是「新字段默认不落盘」的回归护栏：将来往 StoreState 加瞬态字段忘了剔除，这里会红。
+  assert.equal('more' in p, false, 'more 切片已随抽屉废弃')
+  assert.equal('task' in p, false, 'task 面板不持久化')
   // 瞬态与凭据不得出现在任何切片（回归护栏）
   assert.equal(p.snapshots.running, false)
   assert.equal(p.snapshots.importBackup, null)

@@ -14,6 +14,8 @@
  *             离线只读自检备份 ZIP（结构 + integrity/checksums 完整性；不改一个字节）
  *   backup [--sections <a,b,c>] [--out <path>] [--dry-run] [--data-dir <dir>]
  *             离线文件级备份（导出目录内生成与 GUI 同结构的 ZIP，落盘后自检）
+ *   web [--port <n>] [--no-open] [--home <dir>] [--data-root <dir>] [--idle-timeout <分钟>]
+ *             离线只读救急台（本机网页：实例/SafeMode/锁/快照/备份自检/磁盘/会话体检）
  *   help | --help | -h                    显示全部命令与说明
  *
  * 缺省数据目录 = $DSH_HOME/dsh-config-manager/snapshots（$DSH_HOME 缺省 ~/.dsh）。
@@ -41,6 +43,8 @@ import {
 } from '../core/reinstall.ts';
 import { EnvironmentLockManager, runWithMutationLock, EnvironmentLockUnavailableError, OWNERSHIP_FILE } from '../utils/env-lock.ts';
 import { runSessionsRepair } from './sessions-repair.ts';
+import { runSessionsInspect } from './sessions-inspect.ts';
+import { collectVerifyResults, readRunningInstances } from './actions.ts';
 import { Phase3Recovery, readSafeModeMarkerSync, safeModeMarkerPath } from '../core/phase3-host.ts';
 import {
   verifyBackupZip, type BackupVerifyResult, type BackupVerifyVerdict,
@@ -60,7 +64,7 @@ import type { Manifest, SectionId } from '../schema/types.ts';
 
 export type CliCommand =
   | 'snapshots' | 'restore' | 'reinstall' | 'recover-stale-lock'
-  | 'verify' | 'backup' | 'sessions' | 'help';
+  | 'verify' | 'backup' | 'sessions' | 'web' | 'help';
 
 export interface CliOptions {
   command: CliCommand;
@@ -103,6 +107,12 @@ export interface CliOptions {
   maps?: string[];
   /** verify 的位置参数（文件名或路径；与 --id 同义，最多一个） */
   positionals: string[];
+  /** web：离线救急台监听端口（缺省 0 = 由内核分配，避免与 DSH 抢端口） */
+  port?: number;
+  /** web：启动后不自动打开浏览器（SSH / 无桌面场景） */
+  noOpen?: boolean;
+  /** web：空闲多少分钟自动退出（0 = 不自动退出；缺省 30） */
+  idleTimeoutMin?: number;
 }
 
 export type ParseResult = { ok: true; options: CliOptions } | { ok: false; error: string };
@@ -132,6 +142,15 @@ const RESTORE_ONLY_FLAGS = new Set(['--id', '--dry-run', '--profile', '--setting
 /** 仅 reinstall 子命令允许的参数 */
 const REINSTALL_ONLY_FLAGS = new Set(['--yes', '--list', '--wipe-config', '--version']);
 
+/** 仅 web（离线救急台）允许的参数 */
+const WEB_ONLY_FLAGS = new Set(['--port', '--no-open', '--idle-timeout']);
+
+/** web 明确不支持的参数：宁可报错，也不悄悄忽略（它们属于读写命令，不属于只读台） */
+const WEB_REJECTED_FLAGS = new Set([
+  '--id', '--settings', '--dry-run', '--sections', '--out', '--yes', '--list',
+  '--wipe-config', '--version', '--json', '--fix',
+]);
+
 /** recover-stale-lock 专用解析：只接受 --data-dir（用于定位 locks 目录），返回 dataDir 选项 */
 function parseCliDataDir(argv: readonly string[]): ParseResult {
   const options: CliOptions = { command: 'recover-stale-lock', dryRun: false, profile: 'web', yes: false, list: false, wipeConfig: false, json: false, positionals: [] };
@@ -154,6 +173,14 @@ function parseCliDataDir(argv: readonly string[]): ParseResult {
   return { ok: true, options };
 }
 
+/*
+ * 「本机有没有 DSH 在跑」的判据已抽到 src/cli/actions.ts 的 readRunningInstances
+ * （救急台网页与 sessions repair 的安全门共用同一实现；旧实现把快照目录当 dataDir 用，
+ * 缺省路径下找不到心跳 → 门形同虚设，已一并修正）。
+ */
+
+
+
 /**
  * sessions 专用解析：sessions repair [--home <dir>] [--fix] [--keep <dir>] [--map old=new]... [--json]
  *
@@ -167,11 +194,15 @@ function parseCliSessions(argv: readonly string[]): ParseResult {
   const rest = argv.slice(1);
   const action = rest[0];
   if (action === undefined) return { ok: false, error: 'sessions 需要子动作 / missing action: sessions repair' };
-  if (action !== 'repair') return { ok: false, error: 'sessions 只支持 repair / unsupported action: ' + action };
+  // T6：三个只读/安全动作 —— list（列出会话）/ doctor（体检）/ repair（预览或 --fix 执行）
+  if (action !== 'repair' && action !== 'list' && action !== 'doctor') {
+    return { ok: false, error: 'sessions 只支持 list / doctor / repair / unsupported action: ' + action };
+  }
   options.positionals.push(action);
   for (let i = 1; i < rest.length; i += 1) {
     const flag = rest[i]!;
     if (flag === '--fix') { options.fix = true; continue; }
+    if (flag === '--apply') { options.fix = true; continue; }  // --apply 是 --fix 的可读别名（T6）
     if (flag === '--json') { options.json = true; continue; }
     if (flag === '--home' || flag === '--keep' || flag === '--map') {
       const value = rest[i + 1];
@@ -206,7 +237,7 @@ export function parseCli(argv: readonly string[]): ParseResult {  const command 
     return { ok: true, options: { command: 'help', dryRun: false, profile: 'web', yes: false, list: false, wipeConfig: false, json: false, positionals: [] } };
   }
   if (command !== 'snapshots' && command !== 'restore' && command !== 'reinstall' && command !== 'sessions'
-    && command !== 'recover-stale-lock' && command !== 'verify' && command !== 'backup') {
+    && command !== 'recover-stale-lock' && command !== 'verify' && command !== 'backup' && command !== 'web') {
     return { ok: false, error: `未知子命令 / unknown subcommand: ${command}` };
   }
   if (command === 'sessions') return parseCliSessions(argv);
@@ -254,6 +285,43 @@ export function parseCli(argv: readonly string[]): ParseResult {  const command 
     }
     if (command !== 'reinstall' && REINSTALL_ONLY_FLAGS.has(flag)) {
       return { ok: false, error: `${command} 子命令不支持参数 / flag not allowed here: ${flag}` };
+    }
+    if (command !== 'web' && WEB_ONLY_FLAGS.has(flag)) {
+      return { ok: false, error: `${command} 子命令不支持参数 / flag not allowed here: ${flag}` };
+    }
+    if (command === 'web' && WEB_REJECTED_FLAGS.has(flag)) {
+      return { ok: false, error: `web 子命令不支持参数 / flag not allowed here: ${flag}` };
+    }
+    if (flag === '--no-open') {
+      options.noOpen = true;
+      continue;
+    }
+    if (flag === '--home') {
+      // --home 只属于 web（sessions 有自己的解析器）：其余子命令沿用改造前的拒绝行为
+      if (command !== 'web') {
+        return { ok: false, error: `${command} 子命令不支持参数 / flag not allowed here: ${flag}` };
+      }
+      const value = rest[i + 1];
+      if (value === undefined || value === '' || value.startsWith('-')) {
+        return { ok: false, error: '参数 --home 缺少值 / missing value for --home' };
+      }
+      options.home = value;
+      i += 1;
+      continue;
+    }
+    if (flag === '--port' || flag === '--idle-timeout') {
+      const value = rest[i + 1];
+      if (value === undefined || value === '' || value.startsWith('-')) {
+        return { ok: false, error: `参数 ${flag} 缺少值 / missing value for ${flag}` };
+      }
+      const parsed = Number(value);
+      if (!Number.isInteger(parsed) || parsed < 0 || (flag === '--port' && parsed > 65535)) {
+        return { ok: false, error: `参数 ${flag} 需要 0 以上的整数 / ${flag} expects a non-negative integer` };
+      }
+      if (flag === '--port') options.port = parsed;
+      else options.idleTimeoutMin = parsed;
+      i += 1;
+      continue;
     }
     if (flag === '--dry-run') {
       options.dryRun = true;
@@ -455,7 +523,7 @@ const CLI_EXPORTER_VERSION = resolveCliVersion();
 export function printUsage(io: CliIo = defaultIo): void {
   io.log(
     [
-      'dsh-config-manager — DSH Config Manager CLI（离线救急 / snapshot restore + 一键重装）',
+      'dsh-config-manager（简写 dcm）— DSH Config Manager CLI（离线救急 / snapshot restore + 一键重装）',
       '',
       '用法 / Usage:',
       '  dsh-config-manager snapshots [--data-dir <dir>]',
@@ -483,7 +551,15 @@ export function printUsage(io: CliIo = defaultIo): void {
       '      离线文件级备份（导出目录内生成与 GUI 同结构的 ZIP，落盘后自动自检）',
       '      / offline file-level backup（dropped ZIP is self-verified）',
       '      只打包离线可直读的分区；凭据类文件（凭据文件名 / .env / *.pem）永不进入备份。',
-      '  dsh-config-manager sessions repair [--home <dir>] [--fix] [--keep <dir>] [--map old=new]...',
+      '  dsh-config-manager web [--port <n>] [--no-open] [--home <dir>] [--data-root <dir>]',
+      '                        [--idle-timeout <分钟>]',
+      '      启动离线只读救急台（本机网页）：实例心跳 / SAFE MODE / 残留锁 / 快照 / 备份产物',
+      '      （可一键自检）/ 磁盘占用 / 会话体检，全部只读 / offline read-only rescue console',
+      '      只绑 127.0.0.1，端口缺省 0（内核分配）；启动后打印带一次性 token 的 URL 并打开浏览器。',
+      '      Ctrl+C 或空闲超时即退出；等价简写：dcm web',
+      '  dsh-config-manager sessions list   [--home <dir>] [--json]        # 只读：列出本机会话',
+'  dsh-config-manager sessions doctor [--home <dir>] [--json]        # 只读：体检并给处置建议',
+'  dsh-config-manager sessions repair [--home <dir>] [--apply] [--keep <dir>] [--map old=new]...',
       '      离线修复会话日志布局（DSH 已起不来时的唯一通道）/ offline session layout repair',
       '      按每条会话 header 的 cwd 把目录归位到 projectKeyOf(cwd)；缺省只报告，--fix 才落盘。',
       '      --map 用于跨机恢复：old=new 前缀映射会先改写会话日志第 1 帧 header（其余帧逐字节保留）。',
@@ -510,8 +586,11 @@ export function printUsage(io: CliIo = defaultIo): void {
       '  --json             verify 输出机器可读 JSON / machine-readable output',
       '  --sections <list>  backup 分区白名单（逗号分隔；缺省 ' + DEFAULT_BACKUP_SECTIONS.join(',') + '）',
       '  --out <path>       backup 输出 ZIP 路径（缺省自动命名，绝不覆盖既有文件）',
-      '  --home <dir>       sessions repair 的 DSH home（缺省 $DSH_HOME，即 ~/.dsh）',
-      '  --fix              sessions repair 真的落盘（缺省只打印计划）',
+      '  --home <dir>       sessions repair / web 的 DSH home（缺省 $DSH_HOME，即 ~/.dsh）',
+      '  --port <n>         web：监听端口（缺省 0 = 内核随机分配；恒只绑 127.0.0.1）',
+      '  --no-open          web：启动后不自动打开浏览器 / do not open the browser',
+      '  --idle-timeout <m> web：空闲多少分钟自动退出（0 = 不自动退出；缺省 30）',
+      '  --fix / --apply    sessions repair 真的落盘（缺省只打印计划；写前会检查 DSH 是否在跑）',
       '  --keep <dir>       重复 id 时保留哪一份会话目录（其余移入隔离目录，不删除）',
       '  --map old=new      路径前缀映射（可重复；命中即改写会话首帧 cwd）',
     ].join('\n'),
@@ -834,6 +913,10 @@ export async function runCli(
   if (options.command === 'reinstall') {
     return runReinstall(options, io, env, deps);
   }
+  // web：离线只读救急台（只绑 127.0.0.1 的本地网页；不写配置、不需要环境锁）
+  if (options.command === 'web') {
+    return runWeb(options, io, env);
+  }
   // verify / backup 全程只读或只写导出目录：不碰 $DSH_HOME 配置、不需要环境锁
   if (options.command === 'verify') {
     return runVerify(options, io, env);
@@ -843,9 +926,29 @@ export async function runCli(
   }
   if (options.command === 'sessions') {
     // 离线修复：不碰 $DSH_HOME 的其它部分、不需要环境锁（只读写会话目录，且默认 dry-run）
+    const home = options.home ?? resolveDshHome(env);
+    const action = options.positionals[0] ?? 'repair';
+    // T6：list / doctor 是**只读**动作 —— 不检查「DSH 是否在跑」，因为读永远不会伤害运行中的实例。
+    if (action === 'list' || action === 'doctor') {
+      return runSessionsInspect(
+        { home, action: action === 'doctor' ? 'doctor' : 'list', json: options.json },
+        io,
+      );
+    }
+    // T6：repair（含 --fix/--apply）先跑安全修复计划；**写操作前必须确认 DSH 没在跑**。
+    if (options.fix === true) {
+      const running = (await readRunningInstances(
+        resolveControlRoots({ dataRoot: options.dataRoot, dataDir: options.dataDir }, env),
+      )).map((instance) => instance.name);
+      if (running.length > 0) {
+        io.error('检测到 DSH 正在运行（' + running.join(', ') + '）：请先关闭 DSH 再执行修复。');
+        io.error('DSH running (' + running.join(', ') + '): close DSH before repairing session bytes.');
+        return 1;
+      }
+    }
     return runSessionsRepair(
       {
-        home: options.home ?? resolveDshHome(env),
+        home,
         fix: options.fix === true,
         ...(options.keep !== undefined ? { keep: options.keep } : {}),
         maps: options.maps ?? [],
@@ -955,6 +1058,63 @@ export async function runCli(
   }
 }
 
+/* ------------------------------------------------------------ web：离线只读救急台 */
+
+/**
+ * 启动离线救急台（**只读**）。
+ *
+ * 为什么目录要在这一侧解析：`--data-dir / --data-root` 的既有语义只有本文件的 resolve* 系列说了算——
+ * 网页与各子命令必须看到同一份目录事实，否则迟早出现「命令行说没有、网页说有一个」的分叉。
+ * 这里统一按**控制面根**派生（`<root>/snapshots` 与 `<root>/exports`）。`--data-dir` 的历史语义是
+ * 「快照目录 / 导出目录」，所以尾段命中 `snapshots` / `exports` 时会**上溯一层**再派生
+ * （否则 <root>/snapshots 会变成 <root>/snapshots/snapshots，快照列表恒空 —— 验收 F6）；
+ * `--data-root` 仍恒为准。
+ *
+ * 服务端只绑 127.0.0.1，端口缺省 0（内核分配）；启动后打印带一次性 token 的 URL 并打开浏览器。
+ */
+async function runWeb(
+  options: CliOptions,
+  io: CliIo,
+  env: Record<string, string | undefined>,
+): Promise<number> {
+  const homeDir = options.home ?? resolveDshHome(env);
+  const controlRoots = resolveControlRoots({ dataRoot: options.dataRoot, dataDir: options.dataDir }, env);
+  const dataDir = controlRoots[0] ?? path.join(homeDir, 'dsh-config-manager');
+  // --data-dir 的历史语义是「快照目录 / 导出目录」：用户按该语义传 <root>/snapshots 时，
+  // 不能把它本身当作数据根（否则会派生出 <root>/snapshots/snapshots，真实快照必然看不见 —— 验收 F6）。
+  // 尾段命中 snapshots / exports 就上溯一层；显式 --data-root 仍以它为准。
+  const resolvedSnapshotsDir = options.dataRoot === undefined
+    && options.dataDir !== undefined
+    && ['snapshots', 'exports'].includes(path.basename(path.resolve(options.dataDir)))
+    ? path.resolve(options.dataDir)
+    : path.join(dataDir, 'snapshots');
+  const snapshotsDir = resolvedSnapshotsDir;
+  const exportsDir = options.dataDir !== undefined && path.basename(path.resolve(options.dataDir)) === 'exports'
+    ? path.resolve(options.dataDir)
+    : path.join(dataDir, 'exports');
+  const locksDir = resolveRecoverLocksDir({ dataRoot: options.dataRoot, dataDir: options.dataDir }, env);
+  // 懒加载：http 服务端代码不进其他子命令（尤其 reinstall/restore 的救急路径）的启动链路
+  const { startConsoleServer } = await import('./web/server.ts');
+  const server = await startConsoleServer({
+    paths: {
+      homeDir,
+      dataDir,
+      snapshotsDir,
+      exportsDir,
+      locksDir,
+      controlRoots,
+      profile: options.profile,
+    },
+    version: CLI_EXPORTER_VERSION,
+    port: options.port ?? 0,
+    openBrowser: options.noOpen !== true,
+    idleTimeoutMs: (options.idleTimeoutMin ?? 30) * 60_000,
+    io,
+  });
+  await server.closed;
+  return 0;
+}
+
 /* ------------------------------------------------------------ verify：备份只读自检 */
 
 /** verdict → 行首标记（人读摘要用；OK 才不显眼） */
@@ -974,31 +1134,6 @@ export function resolveExportsDir(flag: string | undefined, env: Record<string, 
   return path.join(resolveDshHome(env), 'dsh-config-manager', 'exports');
 }
 
-/** 定位待校验目标：显式目标（文件名或路径）优先，否则列出导出目录下全部 *.zip（名称升序） */
-async function resolveVerifyTargets(
-  dataDir: string,
-  explicit: string | undefined,
-): Promise<{ ok: true; targets: string[] } | { ok: false; error: string }> {
-  if (explicit !== undefined && explicit !== '') {
-    // 文件名：在导出目录内解析；路径：按原样使用（相对当前工作目录）
-    const looksLikePath = explicit.includes('/') || explicit.includes('\\') || path.isAbsolute(explicit);
-    const target = looksLikePath ? path.resolve(explicit) : path.join(dataDir, explicit);
-    return { ok: true, targets: [target] };
-  }
-  let names: string[];
-  try {
-    names = (await fsp.readdir(dataDir)).filter((n) => n.endsWith('.zip')).sort();
-  } catch (err) {
-    if ((err as { code?: string }).code === 'ENOENT') {
-      return { ok: false, error: `导出目录不存在 / export directory not found: ${dataDir}` };
-    }
-    return { ok: false, error: `读取导出目录失败 / failed to read export directory: ${err instanceof Error ? err.message : String(err)}` };
-  }
-  if (names.length === 0) {
-    return { ok: false, error: `导出目录内没有备份 ZIP / no backup ZIP in: ${dataDir}` };
-  }
-  return { ok: true, targets: names.map((n) => path.join(dataDir, n)) };
-}
 
 /** 打印单个校验结果（文件级一行摘要 + 详情缩进） */
 function printVerifyResult(r: BackupVerifyResult, io: CliIo): void {
@@ -1016,15 +1151,15 @@ async function runVerify(
 ): Promise<number> {
   const dataDir = resolveExportsDir(options.dataDir, env);
   const explicit = options.id ?? options.positionals[0];
-  const resolved = await resolveVerifyTargets(dataDir, explicit);
-  if (!resolved.ok) {
+  // 自检收集与救急台网页共用同一实现（阶段 0）—— 两处绝不允许给出不同结论
+  const outcome = await collectVerifyResults(dataDir, explicit);
+  if (!outcome.ok) {
     // --json：错误也走 JSON（否则 CI 会拿到空 stdout 导致 jq 解析失败）
-    if (options.json) io.log(stringifyJsonSafe({ error: resolved.error }, { space: 2 }));
-    else io.error(resolved.error);
+    if (options.json) io.log(stringifyJsonSafe({ error: outcome.error }, { space: 2 }));
+    else io.error(outcome.error);
     return 1;
   }
-  const results: BackupVerifyResult[] = [];
-  for (const target of resolved.targets) results.push(await verifyBackupZip(target));
+  const results: BackupVerifyResult[] = outcome.results;
 
   if (options.json) {
     // 机器可读：单目标 → 对象；多目标 → 数组（便于 CI 用 jq 直接取 verdict）

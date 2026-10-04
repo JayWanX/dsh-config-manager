@@ -259,6 +259,14 @@ export interface ApplyItemsReport {
   rolledBack: boolean;
   warnings: string[];
   failed: { itemId: string; message?: string }[];
+  /**
+   * 未生效项（issue #56 第二条线）：`status='warning'` 的计划项 —— **非致命但确实没写进去**。
+   *
+   * 为什么同步层要有自己的字段：`ok` 不因 warning 变 false（刻意如此），所以上层
+   * （路由 / 历史 / 界面）必须靠这个字段才能把「部分成功」讲出来，而不是只报一句「同步完成」。
+   * 真机：插件安装失败（warning）排在凭据写入之前，密钥因此没导进来，用户以为成功了。
+   */
+  ineffective: { itemId: string; adapter: string; message?: string }[];
   /** 透传 executeImportPlan 结果 */
   result: ImportResult | null;
   needsRestart?: boolean;
@@ -895,18 +903,82 @@ export class SyncEngine {
         ? this.msg('sync.unchanged')
         : this.msg('sync.changesSummary', { compatibility: analysis.compatibility, count: String(changes.length) });
       // P1-5：墓碑剔除必须可见（绝不静默少带）
-      const message = tombstoned.length === 0
-        ? baseMessage
-        : baseMessage + ' · ' + this.msg('sync.sessionsTombstoned', { count: String(tombstoned.length) });
+      const tombstoneNote = tombstoned.length === 0
+        ? ''
+        : ' · ' + this.msg('sync.sessionsTombstoned', { count: String(tombstoned.length) });
+      // 分析期告警（会话格式不可读、包内会话缺工作区…）必须随差异报告一起可见：
+      // 这条链路只回一个 message 字符串，没有独立 warnings 通道 —— 不并进来就是静默。
+      const analysisNote = analysis.warnings.length === 0 ? '' : ' · ' + analysis.warnings.join(' · ');
+      const message = baseMessage + tombstoneNote + analysisNote;
       return { ok: analysis.valid, snapshotId: targetId, changes, needsReview, message };
     } finally {
       await fs.rm(path.dirname(zipPath), { recursive: true, force: true });
     }
   }
 
+  /**
+   * 把远端快照**落地成本机 ZIP**（供「拉取即导入」）。
+   *
+   * 与 `pull()` 的区别：pull 只做只读差异预览并在 finally 里删掉临时 ZIP；
+   * 本方法把 ZIP 留在**调用方指定的目录**（由调用方负责清理），返回它的绝对路径。
+   *
+   * 三条边界：
+   *  - **只读远端**：不改远端、不写 sync-state（同步基线只在 apply 之后才动）；
+   *  - **加密快照仍要密码**：`prepareSnapshot` 会在缺密码时明确报错，绝不静默产出空包；
+   *  - **墓碑剔除同样生效**：与 pull 一致，已删除的会话不随包复活。
+   */
+  async downloadSnapshot(opts: { snapshotId?: string; password?: string; dir: string; name?: string }): Promise<{ path: string; snapshotId: string }> {
+    const metas = await this.transport.list()
+    if (metas.length === 0) throw new Error(this.msg('sync.remoteEmpty'))
+    const targetId = opts.snapshotId ?? metas[metas.length - 1]!.id
+    const snapshot = await this.transport.download(targetId)
+    await this.prepareSnapshot(snapshot, opts.password)
+    this.stripTombstonedSessions(snapshot)
+    const portableIds = this.pullSectionIds()
+    const zipPath = await this.snapshotToZip(snapshot, portableIds)
+    // snapshotToZip 产出在临时目录；搬到调用方指定目录（同盘 rename，跨盘退化为复制）
+    // name 由调用方给（产物库「下载」需要一个可辨识的文件名，而不是固定的 snapshot.zip）。
+    // **只接受 basename 形态**：校验在宿主路由（isValidExportFileName 白名单），引擎侧只做拼接。
+    const dest = path.join(opts.dir, opts.name ?? path.basename(zipPath))
+    await fs.mkdir(opts.dir, { recursive: true })
+    try {
+      await fs.rename(zipPath, dest)
+    } catch {
+      await fs.copyFile(zipPath, dest)
+      await fs.rm(path.dirname(zipPath), { recursive: true, force: true }).catch(() => undefined)
+    }
+    return { path: dest, snapshotId: targetId }
+  }
+
+  /**
+   * 删除**远端**的一份快照（产物库「远端快照 → 删除」，不可恢复）。
+   *
+   * 三条边界：
+   *  - **只动远端**：不写 sync-state、不碰本机配置 —— 本机的 `lastSnapshotId` 只是「上次共同祖先」
+   *    的记录，远端少一份不会让本机配置变坏；若删掉的正是它，下一次 `hasNewRemoteSnapshot()`
+   *    会把远端最新快照当作新的可拉项（远端为空时它返回 false，不会拿空列表去取快照）；
+   *  - **与保留策略裁剪共用同一条 `transport.delete`**（两条通道的删除语义只有一份实现），
+   *    区别只在「谁点名」：这里是用户显式指定的 id，pruneRemoteSnapshots 由 RetentionPolicy 挑；
+   *  - **不存在视为成功**（SyncTransport 契约），所以重复点删除 / 已被裁剪掉都不会报错。
+   */
+  async deleteSnapshot(id: string): Promise<void> {
+    await this.transport.delete(id)
+  }
+
   /** 列出远端已有快照（按 createdAt 升序）—— 供「选择历史快照」下拉。 */
   async listSnapshots(): Promise<SyncSnapshotMeta[]> {
     return this.transport.list();
+  }
+
+  /**
+   * 列表时**读不出来/解析失败**的远端快照（issue #59）：通道实现可选暴露该诊断。
+   *
+   * 为什么要有：列表把坏快照跳过是必要防御（不能因为一条坏数据让整体失败），但**静默跳过**
+   * 会让「push 报成功 + 远端列表为空」变成用户无从自查的矛盾状态。路由层把它随列表一起回传。
+   */
+  unreadableSnapshots(): readonly { file: string; reason: string }[] {
+    const fn = (this.transport as unknown as { unreadableSnapshots?: readonly { file: string; reason: string }[] }).unreadableSnapshots;
+    return Array.isArray(fn) ? fn : [];
   }
 
   /**
@@ -1028,7 +1100,7 @@ export class SyncEngine {
       // 副本缺失/被裁剪/损坏 → undefined（两方合并），绝不上抛成整轮失败（P0-7）
       ancestor = await tryLoadAncestor(this.localSnapshotsDir, ancestorId, this.fsx);
     }
-    // 本地当前：现场 export（含 s​e​c​r​e​t 剥离），与 push 同口径
+    // 本地当前：现场 export（含 secret 剥离），与 push 同口径
     const localSections: Partial<Record<SectionId, SectionData>> = {};
     const localIds = this.pullSectionIds();
     for (const adapter of this.adapters.filter((a) => localIds.has(a.id))) {
@@ -1148,7 +1220,7 @@ export class SyncEngine {
     sourceHome?: string;
   } = {}): Promise<ApplyReport> {
     if (!this.importer) {
-      throw new Error('applyMergePlan: SyncEngine 缺少 importer（需在 options 中注​入）');
+      throw new Error('applyMergePlan: SyncEngine 缺少 importer（需在 options 中注入）');
     }
     const appliedIds = apply.autoApply.map((r) => r.id);
     // 0) 空 autoApply：无物可应用，直接短路（不构造 ZIP、不调 Importer）
@@ -1287,10 +1359,10 @@ export class SyncEngine {
     } = {},
   ): Promise<ApplyItemsReport> {
     if (!this.importer) {
-      throw new Error('applyItems: SyncEngine 缺少 importer（需在 options 中注​入）');
+      throw new Error('applyItems: SyncEngine 缺少 importer（需在 options 中注入）');
     }
     if (subPlan.items.length === 0) {
-      return { ok: true, applied: [], restoreId: '', rolledBack: false, warnings: [], failed: [], result: null };
+      return { ok: true, applied: [], restoreId: '', rolledBack: false, warnings: [], failed: [], ineffective: [], result: null };
     }
 
     // 兜底快照（拿到 restoreId 给 UI 一键回滚用）
@@ -1312,6 +1384,8 @@ export class SyncEngine {
         rolledBack: false,
         warnings: [`应用前快照失败：${backupErr instanceof Error ? backupErr.message : String(backupErr)}`],
         failed: subPlan.items.map((i) => ({ itemId: i.id })),
+        // 快照都没建成 ⇒ 一项都没执行，全部项都未生效（与 failed 同源，界面按硬失败处理）
+        ineffective: [],
         result: null,
       };
     }
@@ -1337,6 +1411,7 @@ export class SyncEngine {
         rolledBack: true,
         warnings: result.warnings ?? [],
         failed: result.executed.filter((e) => e.status === 'failed').map((e) => ({ itemId: e.itemId, message: e.message })),
+        ineffective: result.ineffective ?? [],
         result,
       };
     }
@@ -1373,6 +1448,8 @@ export class SyncEngine {
       rolledBack: false,
       warnings: result.warnings ?? [],
       failed: [],
+      // ok:true 也可以带着「未生效项」——这正是 issue #56 里被藏起来的那一半事实
+      ineffective: result.ineffective ?? [],
       needsRestart: result.needsRestart,
       result,
     };

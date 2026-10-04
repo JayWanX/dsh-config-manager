@@ -7,9 +7,9 @@ import assert from 'node:assert/strict'
 
 import type { ApplyItemsResponse, AutosyncStatusResponse, SyncConfirmItem } from './sync-api.ts'
 import {
-  applyItemsReportView, autosyncIntervalMs, autosyncStatusText, buildAdoptions,
+  applyItemsReportView, autosyncIntervalMs, autosyncStatusText, buildAdoptions, confirmListSummary,
   computeAutosyncCountdown, hasBulkDecidable, isBulkDecidable, isReviewItem, isToolchainChangeItem,
-  keepLocalAll, reviewItems, summarizeConfirmItems, useRemoteAll,
+  keepLocalAll, needsGitToken, reviewItems, summarizeConfirmItems, useRemoteAll,
 } from './sync-view.ts'
 
 /* ---------------------------------------------------------------- 一键同步差异确认 */
@@ -206,7 +206,59 @@ test('sync-view: applyItemsReportView null → null', () => {
   assert.equal(applyItemsReportView(null), null)
 })
 
+/* ---------- issue #56：ok=true 但有未生效项（warning）必须呈现为「部分成功」 ---------- */
+
+test('issue#56：有未生效项时 kind=partial（不得显示为成功）', () => {
+  const report: ApplyItemsResponse = {
+    ok: true, applied: ['settings', 'providers'], skipped: [], needsRestart: false,
+    warnings: ['插件 some-plugin 安装失败：…'],
+    restoreId: 'rest-3', rolledBack: false, failed: [],
+    // 真机形态：插件安装失败排在凭据写入之前，密钥因此没导进来
+    ineffective: [{ itemId: 'plugins:some-plugin', adapter: 'plugins', message: '插件 some-plugin 安装失败：release-age-violation' }],
+    result: {},
+  }
+  const view = applyItemsReportView(report)
+  assert.equal(view?.kind, 'partial', 'ok=true 但有未生效项 ⇒ partial，绝不是 ok')
+  assert.match(view?.headline ?? '', /1/, '头部要给出未生效条数')
+  assert.deepEqual(view?.ineffective.map((i) => i.itemId), ['plugins:some-plugin'])
+  // 语义边界：没有回滚、也没判成失败
+  assert.equal(view?.restoreId, 'rest-3')
+})
+
+test('issue#56：未生效项不影响「全部成功」判定（空/缺字段 → ok）', () => {
+  const base = {
+    ok: true, applied: ['settings'], skipped: [], needsRestart: false,
+    warnings: [], restoreId: 'r', rolledBack: false, failed: [], result: {},
+  } as ApplyItemsResponse
+  // 空数组（新宿主明确回报「没有未生效项」）
+  assert.equal(applyItemsReportView({ ...base, ineffective: [] })?.kind, 'ok')
+  // 缺字段（旧宿主）→ 按无未生效项处理，绝不误报部分成功
+  assert.equal(applyItemsReportView(base)?.kind, 'ok')
+})
+
 /* ---------------------------------------------------------------- 自动同步 */
+
+test('sync-view: needsGitToken 只对 http(s) 远端为真（本地路径 / ssh 走 git 原生认证）', () => {
+  assert.equal(needsGitToken('https://github.com/u/r.git'), true)
+  assert.equal(needsGitToken('HTTP://gitlab.example.com/u/r.git'), true)
+  assert.equal(needsGitToken('  https://gitee.com/u/r.git  '), true)
+  assert.equal(needsGitToken('git@github.com:u/r.git'), false)
+  assert.equal(needsGitToken('D:/repos/config.git'), false)
+  assert.equal(needsGitToken(''), false)
+})
+
+test('sync-view: confirmListSummary 拆出「逐项确认」与「自动采用」两个数字（57 项差异 vs 1 行列表）', () => {
+  const items: SyncConfirmItem[] = [
+    confirmItem({ itemId: 'a', kind: 'Update' }), // 自动采用
+    confirmItem({ itemId: 'b', kind: 'Create' }), // 自动采用
+    confirmItem({ itemId: 'c', kind: 'Conflict', defaultAdopt: false }),
+    confirmItem({ itemId: 'plugins:pnpm-workspace', kind: 'Update', detail: '移除 1 条 patchedDependencies' }),
+  ]
+  assert.deepEqual(confirmListSummary(items), { reviewCount: 2, autoCount: 2 })
+  // 与 reviewItems 同口径：列表里的项数就是 reviewCount
+  assert.equal(reviewItems(items).length, confirmListSummary(items).reviewCount)
+  assert.deepEqual(confirmListSummary([]), { reviewCount: 0, autoCount: 0 })
+})
 
 test('sync-view: autosyncIntervalMs 换算正确', () => {
   assert.equal(autosyncIntervalMs('5m'), 5 * 60 * 1000)

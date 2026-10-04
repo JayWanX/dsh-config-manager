@@ -4,7 +4,7 @@
 import { validateSectionData } from '../schema/config.ts';
 import { canImport, describeVersion } from '../schema/versions.ts';
 import type { SectionId } from '../schema/types.ts';
-import type { CompatibilityInput, CompatibilityScore, ValidationResult } from './types.ts';
+import type { CompatibilityInput, CompatibilityReason, CompatibilityScore, ValidationResult } from './types.ts';
 
 export { validateManifest } from '../schema/manifest.ts';
 export { validateSectionData } from '../schema/config.ts';
@@ -39,32 +39,64 @@ function compareVersions(a: ReturnType<typeof parseVersion>, b: ReturnType<typeo
 }
 
 /**
+ * 语义化版本比较（-1 / 0 / 1；预发布版低于同名正式版）。
+ *
+ * 导出供 `core/update-check.ts` 复用**同一份**解析与比较规则 —— 插件版本比较若另写一套
+ * （例如直接字符串比大小），`1.10.0` vs `1.9.0` 这类就会判错。
+ */
+export function compareVersionStrings(a: string, b: string): -1 | 0 | 1 {
+  return compareVersions(parseVersion(a), parseVersion(b));
+}
+
+/**
+ * 兼容性判定的**结构化原因**（与 `computeCompatibility` 同源：评分由本函数派生）。
+ *
+ * 顺序固定为「跨平台 → 分区缺失 → 版本方向」，界面按此顺序逐条解释。
+ * 注意：`sourceOlder` 与其它原因可**同时成立**（跨平台 + 备份更旧），
+ * 评分口径见 `computeCompatibility` 的注释（历史行为：更旧 → good，覆盖跨平台的 partial）。
+ */
+export function compatibilityReasons(input: CompatibilityInput): CompatibilityReason[] {
+  const reasons: CompatibilityReason[] = [];
+  if (!canImport(input.schemaVersion)) {
+    // schema 超出支持范围：bundle 整体被拒，其余原因不再有意义
+    return [{ kind: 'schemaUnsupported', schemaVersion: input.schemaVersion }];
+  }
+  if (input.sourcePlatform !== input.targetPlatform) {
+    reasons.push({
+      kind: 'crossPlatform',
+      sourcePlatform: input.sourcePlatform,
+      targetPlatform: input.targetPlatform,
+    });
+  }
+  if (input.missingSections.length > 0) {
+    reasons.push({ kind: 'missingSections', sections: [...input.missingSections] });
+  }
+  const cmp = compareVersions(parseVersion(input.sourceDsh), parseVersion(input.targetDsh));
+  if (cmp > 0) {
+    reasons.push({ kind: 'sourceNewer', sourceDsh: input.sourceDsh, targetDsh: input.targetDsh });
+  } else if (cmp < 0) {
+    reasons.push({ kind: 'sourceOlder', sourceDsh: input.sourceDsh, targetDsh: input.targetDsh });
+  }
+  return reasons;
+}
+
+/**
  * 兼容性评分（规则驱动，不凭感觉）：
  *  unsupported — schema 超出本插件支持范围（过高/过低）
  *  partial     — 跨平台、分区缺失、或备份 DSH 比目标新
- *  good        — 备份 DSH 比目标旧（向后兼容）且其余正常
+ *  good        — 备份 DSH 比目标旧（向后兼容）
  *  excellent   — 同平台、无缺失、schema 支持
+ *
+ * 2026-09：实现改为**由 `compatibilityReasons` 派生**（单一事实源 —— 界面解释与评分不可能漂移）。
+ * 派生顺序刻意保持改造前的行为：`sourceOlder` 一旦成立即 good，**即使同时跨平台/分区缺失**
+ * （旧实现的 `cmp < 0 → score = 'good'` 会覆盖先前的 partial）。这是有意的兼容性冻结：
+ * 改它会让既有的导入报告与用户预期一起变脸，需要单独决策。
  */
 export function computeCompatibility(input: CompatibilityInput): CompatibilityScore {
-  if (!canImport(input.schemaVersion)) return 'unsupported';
-
-  let score: CompatibilityScore = 'excellent';
-
-  if (input.sourcePlatform !== input.targetPlatform) score = 'partial';
-  if (input.missingSections.length > 0) score = 'partial';
-
-  const src = parseVersion(input.sourceDsh);
-  const tgt = parseVersion(input.targetDsh);
-  const cmp = compareVersions(src, tgt);
-  if (cmp > 0) {
-    // 备份来自更新的 DSH → 可能有目标版本不认识的配置
-    score = 'partial';
-  } else if (cmp < 0) {
-    // 备份来自更旧的 DSH → 目标向后兼容
-    score = 'good';
-  }
-
-  return score;
+  const reasons = compatibilityReasons(input);
+  if (reasons.some((r) => r.kind === 'schemaUnsupported')) return 'unsupported';
+  if (reasons.some((r) => r.kind === 'sourceOlder')) return 'good';
+  return reasons.length > 0 ? 'partial' : 'excellent';
 }
 
 /** 兼容性得分的可读描述（UI 报告用） */

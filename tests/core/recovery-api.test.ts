@@ -68,6 +68,10 @@ interface Harness {
   orch: ReturnType<typeof createRecoveryOrchestrator>;
   snap: Snapshot;
   opId: string;
+  /** 模拟宿主启动分类：内存标志 + durable 标记一起进入阻断态 */
+  enterSafeMode: () => Promise<void>;
+  /** 当前内存阻断标志（宿主 isBlocked 同源） */
+  safeModeActive: () => boolean;
 }
 
 async function setup(t: test.TestContext, opts: { state?: OperationJournal['state']; env?: string; opId?: string; createJournal?: boolean } = {}): Promise<Harness> {
@@ -88,17 +92,26 @@ async function setup(t: test.TestContext, opts: { state?: OperationJournal['stat
   if (opts.createJournal !== false) {
     await store.create(mkJournal(opId, opts.state ?? 'NEEDS_ATTENTION', snap.id));
   }
+  // SAFE MODE 内存标志（宿主侧由 phase3Recovery.safeModeActive 提供；此处等价模拟）
+  let safeModeActive = false;
   const orch = createRecoveryOrchestrator({
     store, runs, snapshotsDir, host, msg: zhMsg,
     snapshotExists: async (id) => id !== null && id !== '',
     getEnvironmentFingerprint: () => FP,
-    clearSafeMode: async () => { await store.writeSafeMode(false); },
+    clearSafeMode: async () => { safeModeActive = false; await store.writeSafeMode(false); },
+    // 与宿主同源：内存标志 ⇄ durable 标记一并反映（生产实现见 src/index.ts 的注入点）
+    safeModeBlocked: () => safeModeActive,
     // 本用例不注入环境锁端口：按 src/index.ts 的无锁端口分支如实回答（FREE / 无可回收对象），
     // 既让依赖齐全，也不谎称回收成功。
     inspectLockState: async () => ({ state: 'FREE' }),
     recoverStaleLock: async () => ({ ok: false, removed: false, state: 'FREE', detail: 'no lock port configured' }),
   });
-  return { store, runs, snapshotsDir, homeDir, transactionsDir, host, orch, snap, opId };
+  return {
+    store, runs, snapshotsDir, homeDir, transactionsDir, host, orch, snap, opId,
+    /** 置位 SAFE MODE（模拟「启动分类判定需保护」：内存标志 + durable 标记同时生效） */
+    enterSafeMode: async (): Promise<void> => { safeModeActive = true; await store.writeSafeMode(true); },
+    safeModeActive: (): boolean => safeModeActive,
+  };
 }
 
 /** mock 执行器的「是否真的执行了破坏性动作」证据位（由回调写入，用例据此断言） */
@@ -390,4 +403,96 @@ test('dismiss：quarantine，不销毁 snapshot/journal evidence', async (t) => 
   // journal evidence 仍在 quarantine
   const q = await fs.readdir(path.join(h.transactionsDir, 'quarantine')).catch(() => []);
   assert.ok(q.length > 0, 'dismiss 不得销毁 journal evidence');
+});
+
+/* ------------------------- issue #56：dismiss 之后必须解除 SAFE MODE -------------------------
+ *
+ * 真机（issue #56）：dismiss 只把事务移进 quarantine，不清 durable 标记 ⇒ 界面显示
+ * 「暂无需要处理的恢复事项」，写操作却持续 423，重启也无效；唯一出路是手工删
+ * transactions/safe-mode。下面三条钉住修复与它的两个边界。
+ */
+
+test('issue#56 dismiss：#56 场景（active 空、标记在）→ 一并解除 SAFE MODE', async (t) => {
+  const h = await setup(t);
+  await h.enterSafeMode();
+  assert.equal(h.safeModeActive(), true, '前置：保护已开启');
+  assert.equal(await h.store.readSafeModeState(), 'blocked', '前置：durable 标记在');
+
+  const r = await h.orch.dismiss(h.opId, true);
+  assert.equal(r.status, 200);
+  assert.equal((r.body as { safeMode?: boolean }).safeMode, true, '响应如实回报已解除保护');
+
+  // durable 标记删除 + 内存标志复位（宿主 isBlocked 读它 ⇒ 写操作恢复可用）
+  assert.equal(await h.store.readSafeModeState(), 'clear', 'dismiss 后 durable 标记必须清掉');
+  assert.equal(h.safeModeActive(), false, 'dismiss 后内存阻断标志必须复位');
+  assert.deepEqual(await h.store.scanActive(), [], '事务仍按原语义移出 active（quarantine）');
+});
+
+test('issue#56 dismiss：还有别的未解决 incident 时**保留**保护（绝不顺手放开）', async (t) => {
+  const h = await setup(t);
+  await h.enterSafeMode();
+  // 第二个未解决事务（NEEDS_ATTENTION）——dismiss 一个不能让保护整体消失
+  const other = '00000000-0000-4000-8000-0000000000bb';
+  await h.store.create(mkJournal(other, 'NEEDS_ATTENTION', h.snap.id));
+
+  const r = await h.orch.dismiss(h.opId, true);
+  assert.equal(r.status, 200);
+  assert.equal((r.body as { safeMode?: boolean }).safeMode, false, '仍有未解决事项 → 不解除');
+  assert.equal(await h.store.readSafeModeState(), 'blocked', '保护必须保持');
+  assert.equal(h.safeModeActive(), true);
+  // 该事务本身仍被正常隔离（dismiss 语义不变）
+  assert.deepEqual(await h.store.scanActive(), [other], '只移走被 dismiss 的那一个');
+});
+
+test('issue#56 status：如实回传 safeMode.blocked / clearable（结案但保护仍开着）', async (t) => {
+  const h = await setup(t);
+  await h.enterSafeMode();
+  // dismiss 之前：有未解决 incident ⇒ blocked 且不可解除
+  const before = await h.orch.status();
+  assert.deepEqual(
+    (before.body as { safeMode: { blocked: boolean; clearable: boolean } }).safeMode,
+    { blocked: true, clearable: false },
+    '还有待处理事项时 clearable 必须为 false（界面据此不渲染解除按钮）',
+  );
+  await h.orch.dismiss(h.opId, true);
+  // 模拟「旧版本遗留 / 手工删过 journal」：没有 active、标记仍在（这正是 issue #56 的现场）
+  await h.store.writeSafeMode(true);
+  await h.enterSafeMode();
+  const after = await h.orch.status();
+  assert.deepEqual(
+    (after.body as { safeMode: { blocked: boolean; clearable: boolean } }).safeMode,
+    { blocked: true, clearable: true },
+    '结案但保护仍开着 → clearable=true（界面必须给出解除入口）',
+  );
+  assert.deepEqual((after.body as { incidents: unknown[] }).incidents, [], '此时确实没有 incident 可处理');
+});
+
+test('issue#56 clearSafeModeBlock：确认 + 无未解决事项 → 解除；否则拒绝', async (t) => {
+  const h = await setup(t);
+  await h.enterSafeMode();
+
+  // ① 缺 userConfirmed → 400，且不做任何改动
+  assert.equal((await h.orch.clearSafeModeBlock(false)).status, 400);
+  assert.equal(await h.store.readSafeModeState(), 'blocked', '未确认不得改标记');
+
+  // ② 仍有未解决 incident（本 fixture 就是 NEEDS_ATTENTION）→ 400 + 明确原因，保护保持
+  const refused = await h.orch.clearSafeModeBlock(true);
+  assert.equal(refused.status, 400);
+  assert.equal((refused.body as { reason?: string }).reason, 'unresolved-incidents');
+  assert.equal(await h.store.readSafeModeState(), 'blocked', '有未解决事项时绝不解除（不是绕过恢复的后门）');
+
+  // ③ 结案（quarantine 掉该事务）后再解除 → 成功，标记与内存标志都复位
+  await h.orch.dismiss(h.opId, true);
+  await h.store.writeSafeMode(true);
+  await h.enterSafeMode();
+  const ok = await h.orch.clearSafeModeBlock(true);
+  assert.equal(ok.status, 200);
+  assert.equal((ok.body as { cleared?: boolean }).cleared, true);
+  assert.equal(await h.store.readSafeModeState(), 'clear');
+  assert.equal(h.safeModeActive(), false);
+
+  // ④ 幂等：本来就没阻断 → ok 且不计为「已解除」（不是错误）
+  const again = await h.orch.clearSafeModeBlock(true);
+  assert.equal(again.status, 200);
+  assert.deepEqual(again.body, { ok: true, cleared: false, reason: 'not-blocked' });
 });

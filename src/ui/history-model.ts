@@ -190,7 +190,7 @@ export function isEmpty(entries: StoredMigrationHistoryEntry[]): boolean {
 
 /**
  * 分区列的紧凑显示：至多 `max` 个，其余折叠为 `+N`；空数组 → null（调用方不渲染占位）。
- * 全量备份条目常带 10+ 个分区，整条铺在窄抽屉的行里会把摘要挤到看不见。
+ * 全量备份条目常带 10+ 个分区，整条铺在窄面板的行里会把摘要挤到看不见。
  */
 export function formatHistorySections(sections: readonly string[], max = 3): string | null {
   if (sections.length === 0) return null

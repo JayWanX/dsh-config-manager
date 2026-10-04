@@ -12,7 +12,136 @@ import { deleteBackupFile, isValidBackupFileName, listBackupFiles } from '../syn
 import { readBackupSchedule, writeBackupSchedule } from '../sync/backup-schedule-config.ts'
 import type { BackupScheduleConfig } from '../sync/backup-schedule-config.ts'
 import { DEFAULT_RETENTION_POLICY } from '../sync/retention-policy.ts'
+import type { RetentionPolicy } from '../sync/retention-policy.ts'
+import { AUTO_BACKUP_PREFIX } from '../sync/backup-files.ts'
+import {
+  MARKET_RETENTION_DEFAULT_MS,
+  TMP_RETENTION_DEFAULT_MS,
+  EXPORTS_RETENTION_DEFAULT_MS,
+  cleanupCaches,
+} from '../core/cache-cleaner.ts'
+import type { CacheCleanupSection } from '../core/cache-cleaner.ts'
+import { scanDiskUsage } from '../core/disk-usage.ts'
+import type { DiskUsageArea, DiskUsageDirs, DiskUsagePolicyInput, DiskUsageReport } from '../core/disk-usage.ts'
+import type { DiskUsageCleanCategory } from '../ui/types.ts'
 import { validateBackupScheduleDraft } from '../ui/backup-schedule.ts'
+import { join as joinPath } from 'node:path'
+
+
+/** 磁盘体检子区 → 物理目录（`$DSH_HOME/dsh-config-manager` 下的固定布局，单一映射点） */
+function diskUsageDirsOf(env: RoutesEnv): DiskUsageDirs {
+  const { dataDir, syncDir, marketDir, tmpDir, snapshotsDir, exportsDir } = env
+  return {
+    dataDir,
+    exportsDir,
+    snapshotsDir,
+    // 同步历史/快照/工作副本都在 <dataDir>/sync 下（Git 通道另有 .git 工作副本，一并计入）
+    syncDir: syncDir ?? joinPath(dataDir, 'sync'),
+    marketCacheDir: joinPath(marketDir, 'cache'),
+    marketWorkDir: joinPath(marketDir, 'work'),
+    tmpDir,
+    logsDir: joinPath(dataDir, 'logs'),
+    bootStateDir: joinPath(dataDir, 'boot-state'),
+    migrationHistoryDir: joinPath(dataDir, 'migration-history'),
+    transactionsDir: joinPath(dataDir, 'transactions'),
+    locksDir: joinPath(dataDir, 'locks'),
+    vaultDir: joinPath(dataDir, 'vault'),
+  }
+}
+
+/** 体检/清理共用的保留期口径（与 cache-cleaner 缺省逐字一致；定时备份前缀豁免同源） */
+async function diskUsagePolicyOf(env: RoutesEnv): Promise<{ policy: DiskUsagePolicyInput; retention: RetentionPolicy }> {
+  const schedule = await readBackupSchedule(env.syncDir)
+  return {
+    policy: {
+      tmpRetentionMs: TMP_RETENTION_DEFAULT_MS,
+      exportsRetentionMs: EXPORTS_RETENTION_DEFAULT_MS,
+      marketRetentionMs: MARKET_RETENTION_DEFAULT_MS,
+      // 定时备份产物不按天回收（保留策略归 BackupScheduler）——「已超期」统计必须排除它们
+      exportsExemptPrefix: AUTO_BACKUP_PREFIX,
+    },
+    retention: schedule.retention ?? DEFAULT_RETENTION_POLICY,
+  }
+}
+
+/** 体检报告（GET /disk-usage 与清理后的刷新共用同一份组装） */
+async function diskUsageReportOf(env: RoutesEnv): Promise<DiskUsageReport> {
+  const dirs = diskUsageDirsOf(env)
+  const { policy, retention } = await diskUsagePolicyOf(env)
+  const usage = await scanDiskUsage({ dirs, policy })
+  // 定时备份产物的「保留最近 N 个」口径如实回传：界面要解释「为什么有的备份不会被自动回收」
+  const backups = await listBackupFiles(env.exportsDir)
+  const latest = backups[0]
+  return {
+    ...usage,
+    backupRetention: {
+      keepLast: retention.keepLast,
+      latestBackupBytes: latest?.sizeBytes ?? 0,
+      latestBackupAt: latest === undefined ? null : new Date(latest.mtimeMs).toISOString(),
+    },
+  }
+}
+
+/**
+ * 执行一次**手动**清理。缺省只清「可重建的缓存与暂存」（tmp + 市场缓存/工作副本）
+ * —— 它们随时可重建，清掉不影响任何用户数据；`categories` 可选加入 `expired-exports`
+ * （只删**已超过保留期**的导出产物）。snapshots 与 sync **永不在候选集内**（用户数据/安全网）。
+ */
+async function runDiskUsageCleanup(env: RoutesEnv, categories: readonly DiskUsageCleanCategory[]): Promise<Record<string, unknown>> {
+  const dirs = diskUsageDirsOf(env)
+  const { policy } = await diskUsagePolicyOf(env)
+  const before = await scanDiskUsage({ dirs, policy })
+  const wantsTmpMarket = categories.includes('tmp')
+  const wantsExpiredExports = categories.includes('expired-exports')
+
+  // 分区白名单 = 用户这次**显式**勾选的动作：没勾 exports 就一个导出文件都不碰
+  //（即使有过期项 —— 否则界面写着「只清缓存」却删掉用户的备份）
+  const sections: CacheCleanupSection[] = wantsTmpMarket ? ['tmp', 'marketCache', 'marketWork'] : []
+  if (wantsExpiredExports) sections.push('exports')
+  const result = await cleanupCaches({
+    tmpDir: dirs.tmpDir,
+    exportsDir: dirs.exportsDir,
+    exportsExemptPrefix: policy.exportsExemptPrefix,
+    marketCacheRoot: dirs.marketCacheDir,
+    marketWorkRoot: dirs.marketWorkDir,
+    // 立即清理只作用于可重建区；exports 仍按保留期（cleanupCaches 内部即如此实现）
+    includeRecent: wantsTmpMarket,
+    sections,
+    tmpRetentionMs: policy.tmpRetentionMs,
+    exportsRetentionMs: policy.exportsRetentionMs,
+    marketRetentionMs: policy.marketRetentionMs,
+  })
+
+  const sectionToArea: Record<string, DiskUsageArea> = {
+    tmp: 'tmp',
+    marketCache: 'marketCache',
+    marketWork: 'marketWork',
+    exports: 'exports',
+  }
+  // 分区级释放量 = 清理前后该子区体积之差（比 result 的计数更贴用户看到的数字）；
+  // 目录删空时 freedBytes（旧语义）恒为 0，所以界面/回执一律用这个差值。
+  const after = await scanDiskUsage({ dirs, policy })
+  const freedByArea: Partial<Record<DiskUsageArea, number>> = {}
+  for (const section of result.sections) {
+    const area = sectionToArea[section]
+    if (area === undefined) continue
+    const delta = (before.areas[area]?.sizeBytes ?? 0) - (after.areas[area]?.sizeBytes ?? 0)
+    freedByArea[area] = delta > 0 ? delta : 0
+  }
+
+  const report = await diskUsageReportOf(env)
+  return {
+    ok: true,
+    requested: categories,
+    excluded: wantsExpiredExports ? [] : ['expired-exports'],
+    removed: result.removed,
+    freedBytes: result.freedBytesRecursive,
+    freedByArea,
+    errors: result.errors,
+    detail: result.detail,
+    report,
+  }
+}
 
 export function backupRoutes(env: RoutesEnv): WebRoute[] {
   const {
@@ -22,6 +151,41 @@ export function backupRoutes(env: RoutesEnv): WebRoute[] {
     withMutationGate,
   } = env
   return [
+    // ------------------------------------------------------- disk-usage（只读体检）
+    // 界面「磁盘占用」卡的数据源：按子区回传字节数/文件数 + 各保留期的「已到期」量。
+    // 零写入、零敏感（只有本机目录布局与体积）；子区读不到时如实标 unreadable（绝不显示 0 诱导）。
+    endpoint({ path: '/api/dsh-config-manager/disk-usage', methods: ['GET'] }, async (_req, res) => {
+      try {
+        writeJson(res, 200, { ok: true, report: await diskUsageReportOf(env) })
+      } catch (error) {
+        writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+      }
+    }),
+    // ------------------------------------------------- disk-usage/cleanup（手动清理）
+    // 缺省只清可重建的缓存/暂存（tmp + 市场缓存 + 市场工作副本，忽略保留期整块清）；
+    // categories 可加入 'expired-exports'（只删已超保留期的导出产物，豁免定时备份）。
+    // **snapshots / sync 永不在候选集内**（用户数据与安全网）。走 mutation gate：同一时刻只允许一个写操作。
+    endpoint({ path: '/api/dsh-config-manager/disk-usage/cleanup', methods: ['POST'] }, withMutationGate('disk-usage-cleanup', async (req, res) => {
+      try {
+        const body = await readJsonBody(req)
+        const raw = typeof body === 'object' && body !== null
+          ? (body as Record<string, unknown>)['categories']
+          : undefined
+        const categories: Array<'tmp' | 'expired-exports'> = []
+        if (Array.isArray(raw)) {
+          for (const item of raw) {
+            if (item === 'tmp' || item === 'expired-exports') categories.push(item)
+          }
+        }
+        if (categories.length === 0) {
+          writeJson(res, 400, { error: "categories must be a non-empty array of 'tmp' | 'expired-exports'" })
+          return
+        }
+        writeJson(res, 200, await runDiskUsageCleanup(env, categories))
+      } catch (error) {
+        writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+      }
+    })),
     // 定时全量备份设置（GET 读 / PUT 存 sync/backup-schedule.json；无敏感字段）：
     // 保存后重排调度器（reload）；恒不含 secret、不加密（与自动同步同语义）。
     // 与全仓一致：每个方法分支都过 loopback fence（guard）——其他 /api/dsh-config-manager/*
@@ -78,7 +242,9 @@ export function backupRoutes(env: RoutesEnv): WebRoute[] {
     // 安全：删除只接受文件名（服务端 basename 校验防路径穿越）；恒 loopback guard。
     endpoint({ path: '/api/dsh-config-manager/backup-files', methods: ['GET'] }, async (req, res) => {
       try {
-        writeJson(res, 200, { ok: true, files: await listBackupFiles(exportsDir) })
+        // 备份文件列表要驱动「导入」的解锁判定（issue #55）→ 逐文件探测容器形态；
+        // 其它调用方（磁盘体检 / 保留策略）保持不探测的快速路径。
+        writeJson(res, 200, { ok: true, files: await listBackupFiles(exportsDir, { withContainerKind: true }) })
       } catch (error) {
         writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
       }

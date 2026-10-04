@@ -81,11 +81,13 @@ import type { ConfigAdapter, CredentialsFacade, ExportUnit, FileSystemFacade, Ho
 import { ImportUserSkippedError } from './core/types.ts'
 import { createAdapters, USER_PATCH_FILE } from './adapters/index.ts'
 import { createLocalPluginPackHook } from './core/local-plugin-host.ts'
-import { createEncryptionProvider, decryptCredentials, SecurityError, encryptArchive } from './security/index.ts'
+import { ENCRYPTED_CONTAINER_CODE, createEncryptionProvider, decryptCredentials, readContainerKind, SecurityError, encryptArchive } from './security/index.ts'
 import { createHardenedZipParser } from './security/zip-security.ts'
 import { collectCredentialRefs } from './security/credentials-yaml.ts'
 import { applySessionMeta, applySessionMetaToPlanItems, applySessionParentLinks, readSessionMeta, subagentParentMap } from './core/session-meta.ts'
+import { projectKeyOf, sessionIdKey } from './core/session-select.ts'
 import { PROJECT_KEY_RE, readLogCwdFromBytes, rewriteSessionLogDir } from './utils/session-log.ts'
+import { probeSessionFormats, resolveSessionFormatVersion } from './utils/session-format.ts'
 import { atomicCopyFile, atomicWriteFile } from './utils/atomic-write.ts'
 import { EnvironmentLockManager, runWithMutationLock, EnvironmentLockUnavailableError, type MutationLockContext } from './utils/env-lock.ts'
 import { activeProxySummary } from './utils/proxy.ts'
@@ -113,6 +115,12 @@ import type { AutosyncInterval, AutosyncRunStatus } from './sync/autosync-config
 import { appendAutosyncEntry } from './sync/sync-history.ts'
 import { MigrationStore, type MigrationKind, type MigrationResult, MIGRATION_HISTORY_DIR } from './core/migration-history.ts'
 import { readSyncConfig, validateRepoUrl, validateWebDavUrl, isWebDavConfig, channelOf, parseSyncChannel, SYNC_CHANNELS } from './sync/sync-config.ts'
+import {
+  resolveSessionFormatDisposition,
+  sessionFormatAbortResponse,
+  type SessionFormatAbortBody,
+} from './routes/session-format.ts'
+import type { SessionFormatDisposition } from './core/types.ts'
 import type { SyncConfig, SyncTransportType } from './sync/sync-config.ts'
 import { defaultSyncSelection, effectiveSections, normalizeSessionsInclude, OPT_IN_SYNC_SECTIONS, readAllSyncSelections, readSyncSelection } from './sync/sync-selection.ts'
 import type { SyncSelection, SyncSelectionMode } from './sync/sync-selection.ts'
@@ -130,6 +138,7 @@ import { createConfiguredSecretScanner } from './security/secret-scanner.ts'
 import type { ConfiguredSecretPatterns } from './security/secret-scanner.ts'
 import type { SecretScanner } from './core/types.ts'
 import { sha256Hex } from './utils/hashing.ts'
+import { createTtlAsyncCache } from './utils/ttl-cache.ts'
 import { MANIFEST_FILE, parseManifest } from './schema/manifest.ts'
 import { isFileSection, SECTION_IDS } from './schema/config.ts'
 import { stringifyJsonSafe } from './utils/json.ts'
@@ -147,7 +156,7 @@ export const name = 'config-manager'
 export const inject = ['settings', 'credentials']
 
 /** Plugin version, kept in sync with package.json ("version"). */
-export const PLUGIN_VERSION = '0.1.68'
+export const PLUGIN_VERSION = '0.1.69'
 
 /** Plugin own package name — excluded from its own exported plugins list. */
 const PLUGIN_NAME = 'dsh-config-manager'
@@ -318,9 +327,8 @@ function readPackageVersion(path: string): string | null {
 }
 
 /**
- * 当前真正在跑的 DSH 版本（只读）。
+ * 定位「本机 DSH」的候选 `@deepseek-ai/dsh/package.json`（只读，**顺序就是真伪顺序**）。
  *
- * 优先级（**顺序就是真伪顺序**，桌面端实测）：
  *  ① `profileContext.installAnchor` —— 拉起本宿主的那份 `@deepseek-ai/dsh/package.json`。
  *     Desktop 从 `app.asar` 内加载运行时（0.2.0-rc.2），**磁盘上其它任何位置都没有它**；
  *  ② 当前档案自己的依赖树 `<home>/profiles/<profile>/node_modules/...`；
@@ -328,9 +336,9 @@ function readPackageVersion(path: string): string | null {
  *
  * 为什么不能用 ③ 打头（原实现的 bug）：那棵树是 web 档案装出来的 **hoisted 副本**，
  * 真机上它是 0.1.5-rc.1，而 Desktop 实际跑的是 0.2.0-rc.2 —— 「关于」页与导出 manifest
- * 的 DSH 版本因此整个报错版本号。
+ * 的 DSH 版本因此整个报错版本号。会话格式版本（`resolveSessionFormatVersion`）共用同一份候选。
  */
-export function resolveDshVersion(home: string, profile?: string, installAnchor?: string | null): string {
+export function dshPackageJsonCandidates(home: string, profile?: string, installAnchor?: string | null): string[] {
   const candidates: string[] = []
   if (typeof installAnchor === 'string' && installAnchor !== '') candidates.push(installAnchor)
   if (profile !== undefined && profile !== '') {
@@ -340,7 +348,12 @@ export function resolveDshVersion(home: string, profile?: string, installAnchor?
     join(home, 'profiles', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
     join(home, 'profiles', 'web', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
   )
-  for (const p of candidates) {
+  return candidates
+}
+
+/** 当前真正在跑的 DSH 版本（只读；候选顺序见 `dshPackageJsonCandidates`）。 */
+export function resolveDshVersion(home: string, profile?: string, installAnchor?: string | null): string {
+  for (const p of dshPackageJsonCandidates(home, profile, installAnchor)) {
     const version = readPackageVersion(p)
     if (version !== null) return version
   }
@@ -611,10 +624,27 @@ class DshWorkspaceFacade implements WorkspaceFacade {
 // 字节级工具（projectKey 形状 / 首帧 cwd 读写 / 多 generation 改写）已抽到 utils/session-log.ts：
 // 宿主在线路径与 CLI 离线修复共用同一份实现（避免两处口径漂移）。
 
+/**
+ * 父子关系缓存的 TTL（毫秒）。
+ *
+ * 取值依据：`sessionPersistence.list()` 在真机上约 **0.7 s**，而 `/export-preview` 每次都要它；
+ * 父子关系只在「有新子代理会话」时变化，几秒陈旧对选择器的「勾父带子 / 勾子带父」联动毫无影响。
+ * 取 5 s：连续打开/刷新选择器都在同一窗口内命中，同时保证新会话最多 5 s 后就能被联动识别。
+ */
+const PARENT_RELATIONS_CACHE_TTL_MS = 5_000
+
 export class DshSessionStoreFacade implements SessionStoreFacade {
   private readonly ctx: Context
   /** DSH 缺省会话根（配置改过时只影响快路径命中率，慢路径仍正确） */
   private readonly root: string
+  /**
+   * 父子关系的短 TTL 缓存（见 `PARENT_RELATIONS_CACHE_TTL_MS`；同 key 并发合并成一次列举）。
+   * `parentRelations()` 把「列举失败」收成空 Map —— 那个空 Map 会进缓存 TTL（5 s），
+   * 对一个已经坏掉的服务连打不划算，且 5 s 后自然重试。
+   */
+  private readonly parentRelationsCache = createTtlAsyncCache<Map<string, SessionParentRelation>>({
+    ttlMs: PARENT_RELATIONS_CACHE_TTL_MS,
+  })
 
   constructor(ctx: Context, homeDir: string, msg: MsgFunc = zhMsg) {
     this.ctx = ctx
@@ -736,6 +766,11 @@ export class DshSessionStoreFacade implements SessionStoreFacade {
    * 服务缺失 / 列举失败 → 空 Map（调用方按「无法连带」处理，绝不假装带全）。
    */
   async parentRelations(): Promise<Map<string, SessionParentRelation>> {
+    return this.parentRelationsCache.resolve('local', () => this.loadParentRelations())
+  }
+
+  /** 真正列举一次 DSH 会话存储（语义见 `parentRelations()`；本方法不做缓存） */
+  private async loadParentRelations(): Promise<Map<string, SessionParentRelation>> {
     const out = new Map<string, SessionParentRelation>()
     const store = readService<{ list(): Promise<readonly { header?: { id?: unknown; parentSession?: unknown; origin?: unknown } }[]> }>(this.ctx, 'sessionPersistence')
     if (store === undefined) return out
@@ -960,6 +995,23 @@ export class DshFileSystemFacade implements FileSystemFacade {
   }
 
   /**
+   * 一次 stat 同时取「字节数 + mtime」（只读预览用；不存在 / 读不到 / 非普通文件 → null）。
+   *
+   * 为什么合并：`/export-preview` 对同一个文件既要体积（`statSize`）又要时间（`mtimeMs`，
+   * sessions 的排序兜底）—— 分两次调用就是两次 `fs.stat`（实测会话树 983 个文件，第二趟是净开销）。
+   * 与 `mtimeMs`/`statSize` 同一条安全约定：`this.abs()` 的越界错误向上抛。
+   */
+  async statInfo(relPath: string): Promise<{ size: number; mtimeMs: number } | null> {
+    const target = this.abs(relPath)
+    try {
+      const st = await fs.stat(target)
+      return st.isFile() ? { size: st.size, mtimeMs: st.mtimeMs } : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
    * 文件字节数（只读预览用；不存在 / 读不到 → null）。
    *
    * 与 mtimeMs 同一条安全约定：`this.abs()` 的越界错误向上抛（被 catch 吞成 null 会让
@@ -1040,6 +1092,8 @@ export class ConfigManagerHostContext implements HostContext {
   readonly homeDir: string
   readonly dshVersion: string
   readonly profile: string
+  /** profile 目录绝对路径（profiles/<name>；宿主解析，避免拼接布局猜错） */
+  readonly profileDir: string
   readonly log: Logger
   readonly msg: MsgFunc
   /** 应用语言（resolveAppLanguage；导出历史报告 locale 用） */
@@ -1052,6 +1106,13 @@ export class ConfigManagerHostContext implements HostContext {
   readonly fs: FileSystemFacade
   /** 会话存储端口（issue #45 会话归位；对 ctx.sessionPersistence 的薄适配） */
   readonly sessions: SessionStoreFacade
+  /**
+   * 本机 DSH 支持的**会话日志格式版本**（`SESSION_FORMAT_VERSION`；解析不到 = undefined）。
+   *
+   * 用于导入/同步的「这条对话目标机读不读得了」体检：DSH 对读不出的格式是**静默跳过**的
+   * （不报错、不出现在工作区列表里）。解析不到时**不猜** —— 体检整体跳过，绝谎报兼容。
+   */
+  readonly sessionFormatVersion: number | undefined
   /** Phase 2 跨进程环境锁端口（宿主注入；测试 mock 不注入 → 无锁环境） */
   mutationLock?: MutationLockPort
   /** Phase 3 SAFE MODE：注入同步谓词（读内存标志，供 withMutationLock isBlocked 用；env-lock 不识 policy） */
@@ -1063,14 +1124,22 @@ export class ConfigManagerHostContext implements HostContext {
     this.homeDir = homeDir
     // 「当前 DSH 版本」= 拉起本宿主的那份 runtime（profileContext.installAnchor），
     // 而不是磁盘上可能早已过期的 hoisted 副本（Desktop 实测：0.2.0-rc.2 vs 0.1.5-rc.1）。
-    this.dshVersion = resolveDshVersion(homeDir, profile, installAnchorFromProfileContext(readService<unknown>(ctx, 'profileContext')))
+    const installAnchor = installAnchorFromProfileContext(readService<unknown>(ctx, 'profileContext'))
+    this.dshVersion = resolveDshVersion(homeDir, profile, installAnchor)
+    // 会话格式版本与 DSH 版本同源同候选（桌面端的运行时在 app.asar 内）。
+    this.sessionFormatVersion = resolveSessionFormatVersion(dshPackageJsonCandidates(homeDir, profile, installAnchor))
     this.profile = profile
+    this.profileDir = resolveProfileDir(homeDir, profile)
     this.language = resolveAppLanguage(ctx)
     this.msg = makeMsg(this.language)
     // 日志级别缺省 warn：启动 dsh web 后控制台只留 warn/error —— 挂载横幅、调度器跳过、
     // 导出/备份完成等常规 info 不再刷屏（用户要求移除启动后的日志噪音）；
     // 排查时 DSH_CONFIG_MANAGER_LOG_LEVEL=info|debug 恢复逐条输出。
     this.log = createLogger({ level: parseLogLevel(process.env.DSH_CONFIG_MANAGER_LOG_LEVEL) })
+    if (this.sessionFormatVersion === undefined) {
+      // 绝不静默：解析不到就明说体检不可用（用户仍能导出/导入，只是拿不到格式告警）。
+      this.log.warn('无法解析本机 DSH 的会话格式版本：导入/同步不做「会话格式是否可读」体检')
+    }
     this.settings = new DshSettingsFacade(ctx)
     this.credentials = new DshCredentialsFacade(ctx)
     this.patchFile = new DshPatchFileFacade(homeDir, profile, this.msg)
@@ -1176,7 +1245,7 @@ export async function tryDecryptCredentials(
  * （见 W1 报告的重测配方），把结果落到这里；makeRoutes 里的 const routeEnv: RouteEnvInferred =
  * 注解保证两侧不漂移（新增依赖漏登记会在构造点报错）。
  */
-export type RouteEnvInferred = { adapters: ConfigAdapter<unknown>[]; backupScheduler: BackupScheduler; bootSafetyAudit: () => Promise<BootSafetyReport>; cancelDecisionTimeoutMs: number; buildMarketSummary: (e: { url: string; addedAt: string; }) => Promise<MarketSummary>; credentials: CredentialProvider; dataDir: string; exportsDir: string; githubAuth: GitHubAuthClient; githubClientId: string | undefined; githubClientSecret: string | undefined; githubFlows: DeviceFlowStore; history: MigrationStore; host: ConfigManagerHostContext; itemCached: (url: string, itemId: string) => Promise<boolean>; knownSyncSectionIds: Set<SectionId>; makeImporter: () => Importer; makeMarketReader: () => GitMarketReader; makeRecoveryExecutors: (runId: string) => RecoveryExecutorFns; makeSyncEngine: (cfg: SyncConfig, engineOpts?: { includeOptInSections?: boolean; }) => SyncEngine; marketBootAutoRefreshed: { value: boolean; }; marketCacheIndex: (url: string) => string; marketCacheItemDir: (url: string) => string; marketStarCache: StarCache; marketWorkDir: (url: string) => string; meGitHubRest: GitHubAuthRest; meService: MyRepoService; meTokenProvider: () => Promise<string>; msg: MsgFunc; prepareSync: (body: Record<string, unknown>) => Promise<SyncConfig>; profileLauncher: DshProfileLauncher; profileRuntime: DshProfileRuntimeRegistry; profiles: DshProfileManager; pruneStagedMarketZips: () => Promise<void>; readCachedIndexObj: (url: string) => Promise<MarketIndex | null>; recoveryOrchestrator: RecoveryOrchestrator; resolveSyncPassword: (ref: string) => Promise<string | undefined>; roots: string[]; runAbortControllers: Map<string, AbortController>; runCancels: Map<string, { signal: AbortController; settle: (d: 'rollback' | 'keep') => void; decided: boolean }>; runs: RunRegistry; scheduler: AutoSyncScheduler; selectionCache: Partial<Record<"git" | "webdav", SyncSelection>>; selectionHasOptInSections: (channel: SyncTransportType) => boolean; selectionView: (channel: SyncTransportType) => Promise<SelectionView>; selectionViewByChannel: () => Promise<Record<SyncTransportType, SelectionView>>; snapshotEntrySections: (snapshotDir: string) => Promise<string[]>; snapshotsDir: string; syncCredentialsByChannelView: () => Promise<Record<SyncTransportType, { encryptPasswordConfigured: boolean; decryptPasswordConfigured: boolean; }>>; syncDir: string; syncPasswordConfigured: (ref: string) => Promise<boolean>; syncSectionCatalog: { id: SectionId; displayName: string; portability: Portability; defaultIncluded: boolean; }[]; syncSessions: SyncSessionStore; tmpDir: string; tryAppendHistory: (raw: { kind: MigrationKind; result: MigrationResult; sections: string[]; operationId?: string; snapshotId?: string; runId?: string; source: 'api' | 'autosync' | 'backup-scheduler' | 'recovery' | 'cli' | 'internal'; summary: string; error?: string; }) => Promise<string | undefined>; withMutationGate: (op: string, handler: (req: IncomingMessage, res: ServerResponse, lockCtx?: MutationLockContext, journalCtx?: JournalRunContext) => Promise<void>, opts?: { journaled?: boolean; deferredSnapshot?: boolean; }) => ((req: IncomingMessage, res: ServerResponse) => Promise<void>); writeItemCache: (url: string, itemId: string, manifestRaw: string, zipBytes: Uint8Array) => Promise<void>; }
+export type RouteEnvInferred = { adapters: ConfigAdapter<unknown>[]; sessionHealth: { homeDir: string; targetFormatVersion: () => number | undefined; workspaceKeys: () => Promise<ReadonlySet<string>>; knownSessionIds: () => Promise<ReadonlySet<string>>; }; backupScheduler: BackupScheduler; bootSafetyAudit: () => Promise<BootSafetyReport>; cancelDecisionTimeoutMs: number; buildMarketSummary: (e: { url: string; addedAt: string; }) => Promise<MarketSummary>; credentials: CredentialProvider; dataDir: string; exportsDir: string; githubAuth: GitHubAuthClient; githubClientId: string | undefined; githubClientSecret: string | undefined; githubFlows: DeviceFlowStore; history: MigrationStore; host: ConfigManagerHostContext; itemCached: (url: string, itemId: string) => Promise<boolean>; knownSyncSectionIds: Set<SectionId>; makeImporter: () => Importer; makeMarketReader: () => GitMarketReader; makeRecoveryExecutors: (runId: string) => RecoveryExecutorFns; makeSyncEngine: (cfg: SyncConfig, engineOpts?: { includeOptInSections?: boolean; }) => SyncEngine; marketBootAutoRefreshed: { value: boolean; }; marketCacheIndex: (url: string) => string; marketDir: string; marketCacheItemDir: (url: string) => string; marketStarCache: StarCache; marketWorkDir: (url: string) => string; meGitHubRest: GitHubAuthRest; meService: MyRepoService; meTokenProvider: () => Promise<string>; msg: MsgFunc; prepareSync: (body: Record<string, unknown>) => Promise<SyncConfig>; profileLauncher: DshProfileLauncher; profileRuntime: DshProfileRuntimeRegistry; profiles: DshProfileManager; pruneStagedMarketZips: () => Promise<void>; readCachedIndexObj: (url: string) => Promise<MarketIndex | null>; recoveryOrchestrator: RecoveryOrchestrator; resolveSyncPassword: (ref: string) => Promise<string | undefined>; roots: string[]; runAbortControllers: Map<string, AbortController>; runCancels: Map<string, { signal: AbortController; settle: (d: 'rollback' | 'keep') => void; decided: boolean }>; runs: RunRegistry; scheduler: AutoSyncScheduler; selectionCache: Partial<Record<"git" | "webdav", SyncSelection>>; selectionHasOptInSections: (channel: SyncTransportType) => boolean; selectionView: (channel: SyncTransportType) => Promise<SelectionView>; selectionViewByChannel: () => Promise<Record<SyncTransportType, SelectionView>>; snapshotEntrySections: (snapshotDir: string) => Promise<string[]>; snapshotsDir: string; syncCredentialsByChannelView: () => Promise<Record<SyncTransportType, { encryptPasswordConfigured: boolean; decryptPasswordConfigured: boolean; }>>; syncDir: string; syncPasswordConfigured: (ref: string) => Promise<boolean>; syncSectionCatalog: { id: SectionId; displayName: string; portability: Portability; defaultIncluded: boolean; }[]; syncSessions: SyncSessionStore; tmpDir: string; tryAppendHistory: (raw: { kind: MigrationKind; result: MigrationResult; sections: string[]; operationId?: string; snapshotId?: string; runId?: string; source: 'api' | 'autosync' | 'backup-scheduler' | 'recovery' | 'cli' | 'internal'; summary: string; error?: string; }) => Promise<string | undefined>; withMutationGate: (op: string, handler: (req: IncomingMessage, res: ServerResponse, lockCtx?: MutationLockContext, journalCtx?: JournalRunContext) => Promise<void>, opts?: { journaled?: boolean; deferredSnapshot?: boolean; }) => ((req: IncomingMessage, res: ServerResponse) => Promise<void>); writeItemCache: (url: string, itemId: string, manifestRaw: string, zipBytes: Uint8Array) => Promise<void>; }
 
 /** 解密错误 → 用户可读文本：BAD_PASSWORD 只报「密码错误」（不泄内部细节），其余原文 */
 export function decryptErrorText(error: unknown, msg: MsgFunc): string {
@@ -1763,6 +1832,89 @@ async function readPluginDiagnostics(host: HostContext): Promise<Partial<PluginD
   }
 }
 
+/**
+ * 会话体检的「下一步」建议（**可复制命令**；给应用内修不了的那些损坏类别）。
+ *
+ * 为什么仍然需要这条出路：应用内修复（T8）只覆盖「重放重复行」这一**能从字节证明**的零损失类；
+ * 其余类别（seq 空洞 / 不可解析行 / 容器非法 / 格式超前）必须离线进行（DSH 运行中改写会话会让
+ * 它下次启动直接报 corrupt session log）。
+ * 界面给不出的动作，就用可复制命令如实交代。
+ */
+function sessionHealthNextSteps(rowCount: number, summary: { bySeverity: Record<string, number>; deepUnverified: number }): {
+  commands: { command: string; reason: string }[]
+  notes: string[]
+} {
+  const commands: { command: string; reason: string }[] = []
+  const notes: string[] = []
+  const blocking = (summary.bySeverity['blocksStartup'] ?? 0) + (summary.bySeverity['unloadable'] ?? 0)
+  if (blocking > 0) {
+    commands.push({ command: 'dsh-config-manager sessions repair', reason: 'preview-repair-plan' })
+  }
+  if (rowCount > 0) {
+    // 修复必须在 DSH **停止**时进行（两个同类生态工具同结论；运行中改写会让它下次启动报 corrupt）
+    commands.push({ command: 'dsh-config-manager sessions doctor --json', reason: 'offline-inspection' })
+  }
+  if (summary.deepUnverified > 0) notes.push('deep-unverified')
+  return { commands, notes }
+}
+
+export { sessionHealthNextSteps };
+
+/**
+ * 会话体检（T4）的两个**只读**事实来源：本机工作区记录的 cwd 目录键、本机全部已知会话 id。
+ *
+ * 都在 index.ts（宿主侧）实现：它们要读 DSH 自己的存储（workspace.json / session_projcache.json），
+ * 而路由组不许自己读盘（kit 只负责围栏与错误映射）。两者**都只读、都不抛错**
+ * （读不到 = 空集合，体检据此不下「未登记 / 缺父」这类结论 —— 见 core/session-health 的口径）。
+ */
+async function sessionHealthWorkspaceKeys(host: HostContext): Promise<ReadonlySet<string>> {
+  const keys = new Set<string>()
+  try {
+    // WorkspaceFacade 是 DSH 的权威注册表视图（与 adapters/workspaces 同源）
+    for (const record of await host.workspace.listRecords()) {
+      const p = (record as { path?: unknown }).path
+      if (typeof p === 'string' && p !== '') keys.add(projectKeyOf(p))
+    }
+  } catch {
+    // 读不到工作区注册表 → 空集合（调用方不据此下结论）
+  }
+  if (keys.size > 0) return keys
+  // 回退：直接读 DSH 的 workspace.json（facade 读不到时的兜底）
+  try {
+    const meta = await readSessionMeta(host)
+    for (const key of meta.workspacePathByProjectKey.keys()) keys.add(key)
+  } catch {
+    /* 尽力而为 */
+  }
+  return keys
+}
+
+/** 本机全部已知会话 id 的**归一化键**（子代理会话的「父对话是否存在」判定用）。 */
+async function sessionHealthKnownIds(host: HostContext): Promise<ReadonlySet<string>> {
+  const ids = new Set<string>()
+  // 父对话存在性判定的权威来源 = DSH 自己的会话存储列举（它同时给出 origin='subagent' 的
+  // 会话与它们的父 id），插件不重复解析日志字节。
+  const facade = host.sessions
+  if (facade?.parentRelations !== undefined) {
+    try {
+      for (const [childId, relation] of await facade.parentRelations()) {
+        ids.add(sessionIdKey(childId))
+        if (typeof relation.parent === 'string' && relation.parent !== '') ids.add(sessionIdKey(relation.parent))
+      }
+    } catch {
+      /* 落回 storages 缓存 */
+    }
+  }
+  if (ids.size > 0) return ids
+  try {
+    const meta = await readSessionMeta(host)
+    for (const key of meta.bySessionId.keys()) ids.add(sessionIdKey(key))
+  } catch {
+    /* 尽力而为 */
+  }
+  return ids
+}
+
 /** Build the /api/dsh-config-manager route family. */
 function makeRoutes(deps: RoutesDeps): { routes: WebRoute[]; scheduler: AutoSyncScheduler; makeSyncEngine: (cfg: SyncConfig) => SyncEngine; profileRuntime: DshProfileRuntimeRegistry } {
   const { host, adapters, exportsDir, tmpDir, snapshotsDir, runs, syncDir, marketDir, dataDir, credentials, githubClientId, githubClientSecret, backupScheduler, history } = deps
@@ -1780,6 +1932,15 @@ function makeRoutes(deps: RoutesDeps): { routes: WebRoute[]; scheduler: AutoSync
    */
   const retentionPruneSelector: PruneSelector = (metas, policy) =>
     selectPruneCandidatesByPolicy(metas, policy, selectPruneCandidates)
+
+  /**
+   * 会话格式处置（T1）：解析与阻断判定统一走 src/routes/session-format.ts（与 /execute、
+   * 同步 preview/apply 共用同一条口径）。此处只做本地绑定，避免每个 handler 重复写路径。
+   */
+  const resolveDisposition = (raw: unknown): Promise<SessionFormatDisposition> =>
+    resolveSessionFormatDisposition(syncDir, raw)
+  const dispositionAbort = (plan: ImportPlan, disposition: SessionFormatDisposition): SessionFormatAbortBody | null =>
+    sessionFormatAbortResponse(plan, disposition, msg)
 
   /**
    * Phase 6：迁移历史 best-effort 追加（写失败不阻断操作，但记录/降级，不静默丢）。
@@ -1899,6 +2060,8 @@ function makeRoutes(deps: RoutesDeps): { routes: WebRoute[]; scheduler: AutoSync
   const makeImporter = (): Importer => new Importer({
     ctx: host,
     adapters,
+    // 会话格式体检：宿主探针只解**首帧**，成本与分区大小无关（core 只消费数字，不碰存储格式）。
+    sessionFormatProbe: (files) => probeSessionFormats(files),
     snapshotStore: new FileSnapshotStore({
       dir: snapshotsDir,
       // Phase 4 F3：active/quarantine 未收敛 journal 引用的 snapshot 绝不自动 prune
@@ -2329,10 +2492,14 @@ function makeRoutes(deps: RoutesDeps): { routes: WebRoute[]; scheduler: AutoSync
     // 改动态读取保证 API 调用时取到真实指纹（recovery-orchestrator 已改为 getter 语义）。
     getEnvironmentFingerprint: () => host.phase3Recovery?.recoveryEnvFingerprint ?? 'unknown',
     // 清除 SAFE MODE：同时重置内存标志（isBlocked 读它）与 durable 标记。
-    // 仅当 recovery 成功且无其他未解决 incident 时由编排器调用（§5.3 / §10.2）。
+    // 仅当无其他未解决 incident 时由编排器调用（§5.3 / §10.2；判据为单一实现 resolveSafeMode）。
     clearSafeMode: async () => {
       if (host.phase3Recovery !== undefined) await host.phase3Recovery.clearSafeMode()
     },
+    // issue #56：SAFE MODE 阻断态的**动态**探测。必须动态读（不能创建期捕获）：durable 标记由
+    // 启动分类阶段落盘，且运行期 mutation gate 用的就是 phase3Recovery.safeModeActive 这个内存标志，
+    // 两侧同源才能保证「界面说保护开着 ⟺ 写操作真的被 423 挡着」。
+    safeModeBlocked: () => host.phase3Recovery?.safeModeActive === true,
     // issue #31：环境锁只读探测 + 显式回收，供「事故恢复」面板显示/处理**残留锁**。
     // 残留锁不是 journal（journalId 恒 null、transactions/active 为空），旧面板因此恒空。
     inspectLockState: async () => {
@@ -2396,6 +2563,7 @@ function makeRoutes(deps: RoutesDeps): { routes: WebRoute[]; scheduler: AutoSync
       makeSyncEngine,
       marketBootAutoRefreshed: { value: marketBootAutoRefreshed },
       marketCacheIndex,
+      marketDir,
       marketCacheItemDir,
       marketStarCache,
       marketWorkDir,
@@ -2407,6 +2575,14 @@ function makeRoutes(deps: RoutesDeps): { routes: WebRoute[]; scheduler: AutoSync
       profileLauncher,
       profileRuntime,
       profiles,
+      // T4：会话体检（只读）。宿主侧注入「本机会话库扫描」的依赖来源 —— 路由不许自己读盘。
+      sessionHealth: {
+        // profileDir/dataDir 不在本作用域（apply() 的局部量），体检只认 homeDir 与两个事实来源
+        homeDir: host.homeDir,
+        targetFormatVersion: () => host.sessionFormatVersion,
+        workspaceKeys: async () => await sessionHealthWorkspaceKeys(host),
+        knownSessionIds: async () => await sessionHealthKnownIds(host),
+      },
       pruneStagedMarketZips,
       readCachedIndexObj,
       recoveryOrchestrator,
@@ -2658,7 +2834,9 @@ function makeRoutes(deps: RoutesDeps): { routes: WebRoute[]; scheduler: AutoSync
               // sessions：单元级活跃时间（会话日志 mtime）—— 元数据缓存没覆盖的会话靠它排序
               if (adapter.id === 'sessions' && items.length > 0 && adapter.unitActivityTimes !== undefined) {
                 try {
-                  sessionActivityTimes = await adapter.unitActivityTimes(host, section)
+                  // 预览本趟已 stat 过（statInfo 同时给体积与 mtime）→ 把时间顺带传下去，
+                  // 省掉第二趟逐文件 stat；旧宿主没有 statTimes 时退回原有逐文件 mtimeMs。
+                  sessionActivityTimes = await adapter.unitActivityTimes(host, section, summary?.statTimes)
                 } catch {
                   sessionActivityTimes = undefined
                 }
@@ -2713,6 +2891,14 @@ function makeRoutes(deps: RoutesDeps): { routes: WebRoute[]; scheduler: AutoSync
           writeJson(res, 400, { error: 'zipPath is required and must reference a staged backup' })
           return
         }
+        // 防御纵深（issue #55）：整体加密容器必须先经 /decrypt-archive 解锁再分析。
+        // 正常客户端到不了这里（备份文件列表带 containerType，向导会先进解锁阶段）；
+        // 但「按宿主路径直进分析」的入口（查看 / 对比、旧客户端、脚本）必须得到一句
+        // 可行动的话，而不是 ZIP 解析器的「缺少中央目录结束记录」（会把用户引向「备份坏了」）。
+        if ((await readContainerKind(zipPath)) === 'encrypted') {
+          writeJson(res, 400, { error: msg('import.encryptedContainerNeedsUnlock'), code: ENCRYPTED_CONTAINER_CODE })
+          return
+        }
         // issue #39 Feature 2：可选解密密码 —— 提供即解开 secrets.enc，把
         // `credentials: { inArchive, refs, satisfied }` 一并回传（只回传 ref 名，永不回传值），
         // 宿主不必自己解析 .credentials.yaml。未提供 = refs 为空数组，其余分析不变。
@@ -2746,6 +2932,12 @@ function makeRoutes(deps: RoutesDeps): { routes: WebRoute[]; scheduler: AutoSync
           writeJson(res, 400, { error: 'decisions is required' })
           return
         }
+        // 防御纵深（issue #55，与 /analyze、/execute 同一道闸门）：加密容器未解锁不得生成计划，
+        // 否则会以「ZIP 损坏」的形态暴露给用户。
+        if ((await readContainerKind(zipPath)) === 'encrypted') {
+          writeJson(res, 400, { error: msg('import.encryptedContainerNeedsUnlock'), code: ENCRYPTED_CONTAINER_CODE })
+          return
+        }
         // 加密备份的密码（仅内存，与 /analyze、/execute 同源）：计划生成必须知道「归档里有哪些
         // 凭据值」——否则这些值不会进计划，导入时被静默丢掉（真机反馈：导入密钥没生效）。
         const planPassword = typeof body?.['decryptPassword'] === 'string' && body['decryptPassword'] !== ''
@@ -2761,6 +2953,15 @@ function makeRoutes(deps: RoutesDeps): { routes: WebRoute[]; scheduler: AutoSync
             return
           }
           const plan = await makeImporter().createImportPlan(zipPath, decisions, { decryptedCredentials })
+          // T1：abort 处置下「本机读不了的会话」在**计划阶段**就阻断（零写入，HTTP 409 +
+          // code=sessionFormatUnsupported）。放在补会话标题之前：阻断态既不需要标题，
+          // 也不该为一个注定被拒的计划多读一次 storages。
+          const disposition = await resolveDisposition(body?.['sessionFormatDisposition'])
+          const blocked = dispositionAbort(plan, disposition)
+          if (blocked !== null) {
+            writeJson(res, 409, blocked)
+            return
+          }
           // sessions 计划项：补「会话标题 + 工作区分组」（用户实测：导入页此前只显示会话目录名）。
           // 只在计划真的含该分区时才读 storages；读不到就保持目录名，绝不让计划生成失败。
           if (plan.items.some((i) => i.adapter === 'sessions')) {

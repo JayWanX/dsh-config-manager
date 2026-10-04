@@ -12,11 +12,15 @@
  *  - 秘密补录值仅内存（secretInputs），绝不落日志/落盘。
  */
 import type {
-  GlobalConflictStrategy, ImportAnalysis, ImportDecisions, ImportPlan, ImportResult,
+  CompatibilityReason, GlobalConflictStrategy, ImportAnalysis, ImportDecisions, ImportPlan, ImportResult,
   PathIssue, PathMapping, PlanItem,
 } from '../core/types.ts';
 import type { SectionId } from '../schema/types.ts';
 import type { ImportPort, ImportPreviewSummary, ImportStep, ProgressListener, WizardSnapshot } from './types.ts';
+import {
+  DEFAULT_SESSION_FORMAT_DISPOSITION,
+  type SessionFormatDisposition,
+} from './session-format-disposition.ts';
 import { EXECUTING_STAGE, IMPORT_STAGES, ProgressTracker } from './progress.ts';
 import { formatActionableError, toActionableError } from './errors.ts';
 import { nextFlowPhase, type FlowPhase } from './flow.ts';
@@ -145,6 +149,69 @@ export function compatibilityBadgeKind(level: CompatibilityLevel): 'error' | 'wa
   return level === 'unsupported' ? 'error' : level === 'partial' ? 'warn' : 'ok'
 }
 
+
+/* ---------------- 兼容性判定的解释（2026-09：core 回传结构化原因，界面只做映射） ---------------- */
+
+/** 原因 → 字典键（**客户端字典**：本模块只产出键名，文案解析在 client 侧，见 ImportWizardView 的注释） */
+export type CompatibilityNoteKey =
+  | 'import.reason.schemaUnsupported'
+  | 'import.reason.crossPlatform'
+  | 'import.reason.missingSections'
+  | 'import.reason.sourceNewer'
+  | 'import.reason.sourceOlder'
+
+/** 一条可直接喂给 `t(key, params)` 的解释项 */
+export interface CompatibilityNote {
+  key: CompatibilityNoteKey
+  params: Record<string, string>
+}
+
+/**
+ * 结构化原因 → 可渲染的解释项（顺序与 core 的 `compatibilityReasons` 一致）。
+ *
+ * 老宿主（未回传 `compatibilityReasons`）或字段缺失 → 空数组：界面不编原因、只显示评分
+ * （「不知道为什么」和「没有问题」必须可区分）。
+ */
+export function compatibilityNotes(reasons: readonly CompatibilityReason[] | undefined): CompatibilityNote[] {
+  if (reasons === undefined) return []
+  const notes: CompatibilityNote[] = []
+  for (const reason of reasons) {
+    switch (reason.kind) {
+      case 'schemaUnsupported':
+        notes.push({ key: 'import.reason.schemaUnsupported', params: { version: String(reason.schemaVersion) } })
+        break
+      case 'crossPlatform':
+        notes.push({
+          key: 'import.reason.crossPlatform',
+          params: { source: reason.sourcePlatform, target: reason.targetPlatform },
+        })
+        break
+      case 'missingSections':
+        notes.push({
+          key: 'import.reason.missingSections',
+          params: {
+            count: String(reason.sections.length),
+            sections: reason.sections.join(', '),
+          },
+        })
+        break
+      case 'sourceNewer':
+        notes.push({
+          key: 'import.reason.sourceNewer',
+          params: { source: reason.sourceDsh, target: reason.targetDsh },
+        })
+        break
+      case 'sourceOlder':
+        notes.push({
+          key: 'import.reason.sourceOlder',
+          params: { source: reason.sourceDsh, target: reason.targetDsh },
+        })
+        break
+    }
+  }
+  return notes
+}
+
 /** 预览步的两页：迁移前咨询（只读结论）/ 选择要导入的内容 */
 export type ImportPreviewStage = 'consult' | 'select'
 
@@ -191,6 +258,11 @@ export class ImportWizard {
   private secretInputs: Record<string, string> = {};
   /** 加密备份的解密密码（仅内存，绝不持久化；刷新后要求重输） */
   private decryptPassword = '';
+  /**
+   * 会话格式处置（T1）：`abort` = 计划阶段阻断（缺省，安全侧）。宿主以每次 plan/execute
+   * 请求携带的值为准，所以这里只是「用户当前选择」的唯一事实，不缓存任何服务端结论。
+   */
+  private sessionFormatDisposition: SessionFormatDisposition = DEFAULT_SESSION_FORMAT_DISPOSITION;
   /** 整体加密备份容器是否已解锁（upload 探测到 encrypted 容器后为 false；unlockArchive 成功后为 true） */
   private archiveUnlocked = false;
   /**
@@ -287,8 +359,12 @@ export class ImportWizard {
    * 计划期共用参数：解密密码（仅内存）。加密备份的计划生成也必须能看到归档里的凭据，
    * 否则「随加密备份恢复」的凭据不会进计划、导入时静默丢掉（execute 侧同源传参）。
    */
-  private planOpts(): { decryptPassword?: string } {
-    return this.decryptPassword === '' ? {} : { decryptPassword: this.decryptPassword };
+  private planOpts(): { decryptPassword?: string; sessionFormatDisposition: SessionFormatDisposition } {
+    return {
+      ...(this.decryptPassword === '' ? {} : { decryptPassword: this.decryptPassword }),
+      // 处置**恒**随计划/执行下发：宿主不猜用户意图（缺省读插件配置项，再缺省 abort）。
+      sessionFormatDisposition: this.sessionFormatDisposition,
+    };
   }
 
   /** 步骤 3→4：用户确认兼容性后进入 Preview（Dry Run：用当前决策生成计划摘要，零写入） */
@@ -324,6 +400,16 @@ export class ImportWizard {
   /** 设置加密备份的解密密码（仅内存，绝不持久化；导出密码不可复用，无明文存储） */
   setDecryptPassword(password: string): void {
     this.decryptPassword = password;
+  }
+
+  /** 设置会话格式处置（T1；'abort' / 'skip' / 'guide'，缺省 abort） */
+  setSessionFormatDisposition(next: SessionFormatDisposition): void {
+    this.sessionFormatDisposition = next;
+  }
+
+  /** 当前的会话格式处置（渲染与报告回显用） */
+  get currentSessionFormatDisposition(): SessionFormatDisposition {
+    return this.sessionFormatDisposition;
   }
 
   /**
@@ -410,6 +496,8 @@ export class ImportWizard {
         rollbackOnError,
         // 未设置解密密码（普通备份/未解锁）→ 不携带该字段
         decryptPassword: this.decryptPassword === '' ? undefined : this.decryptPassword,
+        // 处置随执行一起下发：宿主在真正写盘前再判一次（abort 时仍是零写入）
+        sessionFormatDisposition: this.sessionFormatDisposition,
       });
       // 失败且已整体回滚（场景 E）→ 报告回滚阶段
       if (!this.result.ok && this.result.rollback) {
@@ -469,6 +557,7 @@ export class ImportWizard {
         secretInputs: this.secretInputs,
         rollbackOnError,
         decryptPassword: this.decryptPassword === '' ? undefined : this.decryptPassword,
+        sessionFormatDisposition: this.sessionFormatDisposition,
       });
       if (!this.result.ok && this.result.rollback) {
         this.tracker.emit('rolling-back');
@@ -496,6 +585,7 @@ export class ImportWizard {
     this.decryptPassword = '';
     this.archiveUnlocked = false;
     this.unlockedZipPath = null;
+    this.sessionFormatDisposition = DEFAULT_SESSION_FORMAT_DISPOSITION;
   }
 }
 

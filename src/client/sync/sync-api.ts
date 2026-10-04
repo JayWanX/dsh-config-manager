@@ -25,7 +25,7 @@
  */
 import type { SyncPullReport, SyncPushPreview, SyncPushReport } from '../../sync/sync-engine.ts';
 import type { SyncTransportType as HostSyncTransportType } from '../../sync/sync-config.ts';
-import type { PlanItemKind } from '../../core/types.ts';
+import type { PlanItemKind, SessionFormatDisposition } from '../../core/types.ts';
 import type { SectionId } from '../../schema/types.ts';
 import type { ConsultReport } from '../../core/migration-consult.ts';
 import { getJson, LONG_REQUEST_TIMEOUT_MS, postJson, type RequestOptions } from '../common/http.ts';
@@ -152,6 +152,19 @@ export interface SyncConfigSaveResponse {
   };
 }
 
+/** POST /sync/config 且 clear:true 的响应：断开一条通道配置后的轻量事实（无任何 secret 值）。 */
+export interface SyncChannelClearResponse {
+  ok: boolean;
+  /** 被断开的通道 */
+  cleared: SyncTransportType;
+  /** 该通道之前是否有配置（false = 本来就没配；幂等成功，不算失败） */
+  removed: boolean;
+  /** 断开后是否**还有**别的通道配置（false = 已无任何通道，页面应显示「未配置」） */
+  configured: boolean;
+  /** 断开后的活动通道（被删的是活动通道时已自动切到剩下的那条） */
+  transport: SyncTransportType;
+}
+
 /** 可同步分区条目（status.syncSections 项）。只含 portable —— 与 SyncEngine 同步通道一致。 */
 export interface SyncSectionInfo {
   id: SectionId;
@@ -213,6 +226,13 @@ export interface SyncSnapshotsListResponse {
   snapshots: SyncSnapshotLite[];
   /** 当前本地祖先指针（sync-state.lastSnapshotId），用于高亮当前基线 */
   currentSnapshotId?: string;
+  /**
+   * 远端**存在但读不出来**的快照（issue #59）。
+   *
+   * 为什么必须回传：列表跳过坏文件是必要防御，但静默跳过会让「推送成功 + 列表为空」
+   * 变成自相矛盾且无从自查的状态。有值即代表「远端列表不完整」，界面须如实告知。
+   */
+  unreadable?: { file: string; reason: string }[];
 }
 
 /** 远端快照摘要（「选择历史快照」下拉项）。 */
@@ -228,6 +248,12 @@ export interface SyncSnapshotLite {
 export interface SyncStartPayload extends SyncPushPayload {
   /** 缺省 = 最新快照；传入则对该历史快照拉取 */
   snapshotId?: string;
+  /**
+   * 会话格式处置（T1）。**一键同步显式传 `guide`**：差异确认弹窗是本流程唯一的决策界面，
+   * 而预览发生在它出现之前 —— 用缺省 abort 会让用户什么都看不到就被拒。真正的阻断语义
+   * 由 apply-items 上同名字段承担（此刻已有决策界面），服务端两处都会校验。
+   */
+  sessionFormatDisposition?: SessionFormatDisposition;
 }
 
 /** POST /sync/sync 响应：差异确认会话（items 供 UI 逐项确认）。 */
@@ -278,6 +304,11 @@ export interface ApplyItemsPayload {
   syncSessionId: string;
   /** 每项的最终采纳决策（未列出项视为 adopt=false） */
   adoptions: SyncItemAdoption[];
+  /**
+   * 会话格式处置（T1）。一键同步当前恒传 `guide`（确认页尚无三选一控件；服务端已按
+   * `abort`/`skip`/`guide` 三态校验）。缺省（不传）由宿主按插件配置项 → abort 决定。
+   */
+  sessionFormatDisposition?: SessionFormatDisposition;
 }
 
 /** 单条采纳决策。 */
@@ -301,6 +332,13 @@ export interface ApplyItemsResponse {
   /** 任一失败是否整体回滚 */
   rolledBack: boolean;
   failed: { itemId: string; message?: string }[];
+  /**
+   * 未生效项（issue #56）：`status='warning'` 的计划项 —— 非致命但确实没写进去
+   * （典型：插件安装失败，而排在它后面的步骤因此不会执行）。
+   * `ok` 不会因它变 false，所以界面必须单独拿这个字段把「部分成功」讲出来。
+   * 旧宿主不返回 → undefined（按「无未生效项」处理，不误报）。
+   */
+  ineffective?: { itemId: string; adapter: string; message?: string }[];
   result: unknown;
 }
 
@@ -461,6 +499,26 @@ export class SyncApi {
     return postJson<SyncPullReport>(SYNC_API.pull, payload, this.t, SYNC_OPTS);
   }
 
+  /**
+   * 「拉取即导入」：把远端快照**落地成本机 ZIP**，返回它的路径。
+   * 拿到路径后交给导入向导 —— 与从备份文件导入**同一条路径**（可解锁、可选内容、可回滚），
+   * 而不是另造一套"直接写配置"的通道。
+   * 与 pull 的区别：pull 只回差异预览（临时 ZIP 用完即删）；本方法真的留下一个文件。
+   */
+  async download(payload: SyncPullPayload & { name?: string }): Promise<{ ok: boolean; zipPath: string; snapshotId: string }> {
+    return postJson<{ ok: boolean; zipPath: string; snapshotId: string }>(SYNC_API.download, payload, this.t, SYNC_OPTS);
+  }
+
+  /**
+   * 删除**远端**的一份快照（产物库「远端快照 → 删除」，不可恢复）。
+   *
+   * 只动远端：本机配置与同步基线都不变（宿主 `SyncEngine.deleteSnapshot`）；
+   * 远端不存在时同样返回成功（transport 契约：不存在视为成功）。
+   */
+  async deleteSnapshot(payload: SyncPushPayload & { snapshotId: string }): Promise<{ ok: boolean; snapshotId: string }> {
+    return postJson<{ ok: boolean; snapshotId: string }>(SYNC_API.snapshotDelete, payload, this.t, SYNC_OPTS);
+  }
+
   /** GitHub OAuth device flow：发起登录，返回一次性用户码 + 授权页 URL + flowId */
   async githubStart(): Promise<GithubDeviceFlowStartResponse> {
     return postJson<GithubDeviceFlowStartResponse>(SYNC_API.githubStart, {}, this.t, SYNC_OPTS);
@@ -533,6 +591,13 @@ export class SyncApi {
    *  password/token 经 Host 写入 DSH credentials（值永不回传）；返回凭据布尔供 UI 刷新徽章。 */
   async saveConfig(payload: SyncPushPayload): Promise<SyncConfigSaveResponse> {
     return postJson<SyncConfigSaveResponse>(SYNC_API.config, payload, this.t, SYNC_OPTS);
+  }
+
+  /** 断开同步通道配置（POST /sync/config 带 clear:true）：删除该通道的配置、凭据（token / 口令 /
+   *  加密·解密密码）与自动同步开关。用户要求：配置过的通道必须能删掉，否则一条打不通的通道
+   *  会永久占位，产物库远端源与自动同步只能一直报读取失败。**只解除本机绑定**，远端数据不动。 */
+  async clearChannel(channel: SyncTransportType): Promise<SyncChannelClearResponse> {
+    return postJson<SyncChannelClearResponse>(SYNC_API.config, { transport: channel, clear: true }, this.t, SYNC_OPTS)
   }
 
   /** 保存插件 UI 偏好（POST /sync/ui-prefs）：当前为上次选择的同步通道（ui-prefs.json，

@@ -8,9 +8,15 @@
  *    （ExportPort / ImportPort，宿主在 settings.section 挂载时把真实 Exporter/Importer 接入）。
  */
 import type { SectionId } from '../schema/types.ts';
+import type { DiskUsageReport } from '../core/disk-usage.ts';
+import type {
+  SessionHealthResponse,
+  SessionRepairResult,
+  SessionRepairRollbackResult,
+} from './session-inventory-view.ts';
 import type {
   ImportAnalysis, ImportDecisions, ImportPlan, ImportResult,
-  ItemResolution, PathIssue, PlanItem, Portability,
+  ItemResolution, PathIssue, PlanItem, Portability, SessionFormatDisposition,
 } from '../core/types.ts';
 
 /* ---------------- 导出（规范 §1 / §21） ---------------- */
@@ -169,7 +175,14 @@ export interface ImportPort {
   createImportPlan(
     zipPath: string,
     decisions: ImportDecisions,
-    opts?: { decryptPassword?: string },
+    opts?: {
+      decryptPassword?: string;
+      /**
+       * 会话格式处置（T1；缺省 = 宿主按插件配置项，再缺省 `abort`）：
+       * `abort` 时若包内有本机读不了的会话，宿主**在计划阶段**返回带 code 的拒绝（零写入）。
+       */
+      sessionFormatDisposition?: SessionFormatDisposition;
+    },
   ): Promise<ImportPlan>;
   /**
    * 解锁整体加密备份（只读，零写入）：用备份密码解密上传的加密容器，得到明文 ZIP
@@ -190,8 +203,65 @@ export interface ImportPort {
       rollbackOnError: boolean;
       /** 加密备份的解密密码（仅内存；core 拒绝加密备份无密码执行） */
       decryptPassword?: string;
+      /** 会话格式处置（T1；`abort` 时计划含读不了的会话即拒绝执行，仍是零写入） */
+      sessionFormatDisposition?: SessionFormatDisposition;
     },
   ): Promise<ImportResult>;
+}
+
+/* ---------------- 插件版本更新检查（关于 tab；只读探测 npm latest） ---------------- */
+
+/**
+ * GET /update-check 的结果。
+ *
+ * 成功与失败都用 HTTP 200：离线 / registry 不可达**不是插件故障**，界面据 `ok` 决定显示
+ * 「已是最新 / 有新版本 / 检查失败（可重试）」，而不是弹错误横幅。
+ */
+export type PluginUpdateCheckResult =
+  | {
+      ok: true;
+      /** 当前运行的插件版本 */
+      current: string;
+      /** npm 上的 latest */
+      latest: string;
+      /** latest > current（严格更新才算；本地跑预发布版时不提示降级） */
+      updateAvailable: boolean;
+      /** 本次结论时间戳（ms；缓存命中时为首查时间） */
+      checkedAt: number;
+      /** 是否来自进程内缓存 */
+      cached: boolean;
+    }
+  | {
+      ok: false;
+      current: string;
+      /** 失败原因（网络 / 超时 / 响应畸形；可读、可重试、无敏感信息） */
+      error: string;
+    };
+
+/* ---------------- 磁盘占用（快照 tab 的只读体检 + 手动清理） ---------------- */
+
+/** 手动清理可点选的动作：可重建区（tmp + 市场缓存/工作副本）/ 已到期的导出产物。 */
+export type DiskUsageCleanCategory = 'tmp' | 'expired-exports';
+
+/** POST /disk-usage/cleanup 的回执（回执里带刷新后的报告，避免界面再发一次 GET）。 */
+export interface DiskUsageCleanupResult {
+  ok: boolean;
+  /** 本次请求实际覆盖的动作 */
+  requested: DiskUsageCleanCategory[];
+  /** 被排除的动作（只请求了 tmp 时 = ['expired-exports']）——界面据此如实说明，不假装清过 */
+  excluded: DiskUsageCleanCategory[];
+  /** 删除条目数（文件 + 目录） */
+  removed: number;
+  /** 释放字节数（含目录递归，按清理前后子区体积差计） */
+  freedBytes: number;
+  /** 分区级释放量（子区 id → 字节；只含本次实际清理过的子区） */
+  freedByArea: Partial<Record<string, number>>;
+  /** 单项失败数（不影响其余清理） */
+  errors: number;
+  /** 逐条删除记录（相对 dataDir 的描述 + 字节数） */
+  detail: string[];
+  /** 清理后重新体检的报告 */
+  report: DiskUsageReport;
 }
 
 /* ---------------- Recovery（Phase 5：引导式恢复工作流） ---------------- */
@@ -225,6 +295,26 @@ export interface RecoveryStatus {
    * 旧宿主不返回 → undefined（面板按「无锁事项」处理，不误报）。
    */
   lock?: RecoveryLockStatus;
+  /**
+   * SAFE MODE 阻断态（issue #56）。此前 status 完全没有这个信息 ⇒ 「durable 标记还在、
+   * active/ 却已空」时面板显示「暂无需要处理的恢复事项」，而所有写操作持续 423 —— 用户
+   * 看不到任何线索，也没有任何出口。
+   *
+   * 旧宿主不返回 → undefined（面板按「未阻断」处理，不误报保护）。
+   */
+  safeMode?: RecoverySafeModeStatus;
+}
+
+/** SAFE MODE 阻断态摘要（只暴露结论与是否可解除）。 */
+export interface RecoverySafeModeStatus {
+  /** durable 标记当前是否在阻断写操作（与 mutation gate 的 isBlocked 同源）。 */
+  blocked: boolean;
+  /**
+   * 是否「没有未解决 incident，可安全解除」——即「结案但保护仍开着」。
+   * 面板仅在 blocked && clearable 时渲染「解除安全模式」入口；还有 NEEDS_ATTENTION
+   * 事务时必须先处理它（宿主侧也会拒绝，界面不给假按钮）。
+   */
+  clearable: boolean;
 }
 
 /** 环境锁状态摘要：**只暴露分类**（owner pid/op/hostname 属内部诊断，不进 UI/响应体）。 */
@@ -240,6 +330,19 @@ export interface RecoveryLockRecoverResult {
   ok: boolean;
   removed: boolean;
   state: string;
+}
+
+/**
+ * POST /recovery/safe-mode/clear 响应（issue #56：显式解除 SAFE MODE）。
+ * - 已解除 → `ok:true, cleared:true`；
+ * - 本来就没阻断 → `ok:true, cleared:false, reason:'not-blocked'`（幂等，不是错误）；
+ * - 还有未解决 incident → `ok:false, cleared:false, reason:'unresolved-incidents', unresolved:N`。
+ */
+export interface RecoverySafeModeClearResult {
+  ok: boolean;
+  cleared: boolean;
+  reason?: string;
+  unresolved?: number;
 }
 
 /** GET /recovery/:operationId/preview 响应（只读，零写入）。 */
@@ -313,4 +416,28 @@ export interface RecoveryPort {
    * 无法证明（活锁/判定不确定/二次验证失败）→ 返回 ok=false 且不做任何改动。
    */
   recoverStaleLock(userConfirmed: boolean): Promise<RecoveryLockRecoverResult>;
+  /**
+   * POST /recovery/safe-mode/clear（issue #56）：显式解除仍然生效的 SAFE MODE 保护。
+   * 不带 operationId（该状态下往往已无 active journal）；宿主侧会重新判定
+   * 「是否还有未解决的恢复事项」，有则拒绝（ok=false），绝不无条件清标记。
+   */
+  clearSafeMode(userConfirmed: boolean): Promise<RecoverySafeModeClearResult>;
+  /**
+   * GET /recovery/sessions（T5，**只读**）：本机存量会话的体检（损坏分类 + 可见性）。
+   *
+   * 为什么挂在 RecoveryPort 而不是新开一个端口：它与「我的对话去哪了」是同一件事，
+   * 且宿主把它挂在既有 recovery prefix 路由下（不新增注册路由条目）。
+   * `limit` 只影响回传浏览器的行数（摘要里的 total 仍是全量口径）。
+   */
+  sessions(limit?: number): Promise<SessionHealthResponse>;
+  /**
+   * POST /recovery/sessions/repair（T8）：应用内修复一份会话日志。
+   *
+   * apply=false 只预览（零写入）；apply=true 时**必须**回传预览给出的 expect 指纹 ——
+   * 宿主用它做 TOCTOU 判定（预览之后文件被改过就拒绝，绝不按旧计划写入）。
+   * 执行器自带完整安全序列（写前校验 → 时间戳备份 → 原子换入 → 写后复验）。
+   */
+  repairSession(unitId: string, apply: boolean, expect?: { size: number; mtimeMs: number }, allowLossy?: boolean): Promise<SessionRepairResult>;
+  /** POST /recovery/sessions/rollback（T8）：按台账里的 repairId 回滚一次修复（客户端不传路径）。 */
+  rollbackSessionRepair(repairId: string): Promise<SessionRepairRollbackResult>;
 }

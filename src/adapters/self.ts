@@ -11,8 +11,17 @@
  * snapshots/（快照）、tmp/ exports/（临时/导出产物）——只备份「配置」，不备份数据。
  *
  * 实现：继承 FileCollectionAdapter 复用 analyzeImport/applyItem/validate（幂等 hash 比对、
- * 快照/回滚路径一致），仅覆写 export() 为白名单收集（self 目录内存在大量非配置子目录，
- * 不能像 skills/sessions 那样整体递归）。
+ * 快照/回滚路径一致）；**清单来自覆写的 listRelPaths()（白名单），export() 与 preview() 都经
+ * 基类 collect()**（self 目录内存在大量非配置子目录，不能像 skills/sessions 那样整体递归）。
+ *
+ * 为什么必须靠 listRelPaths() 而不是覆写 export() 来收窄（2026-10 真机报告）：
+ * `preview()` / `listRelPaths()` 是后来才加进基类的。本类此前只覆写 export()，于是只读预览
+ * 落到基类的目录递归 —— 把整个 $DSH_HOME/dsh-config-manager（快照、config-snapshots、
+ * sync/work 的 Git 工作副本与远端快照、transactions、exports、遗留 profiles）都当成该分区的
+ * 可勾选单元：实测 2460 个文件 / 11.44 MB，而真实导出只有 6 个文件 / 1936 B；界面上
+ * 「插件自身配置 已选 2460/2460 11.5 MB」即由此而来。同款缺陷已在 agent-instructions.ts 踩过
+ * 并修复（那边 baseDir='' 时更夸张：把整个 home 当该分区）。覆写 listRelPaths() 让两条路径
+ * 共用同一份清单 —— 这正是基类 preview() 存在的意义。
  *
  * relativePath 一律是「相对 baseDir」的路径（如 sync/sync-config.json），与
  * FileCollectionAdapter 的基准目录语义一致：导入时按 path.join(baseDir, rel) 写回
@@ -21,13 +30,9 @@
  * 安全不变量：配置文件本身不含凭据值（同步凭据走 DSH credentials 槽位引用），
  * 且文件类分区不进 SecretScanner（与 pluginFiles/skills 同语义）。
  */
-import path from 'node:path';
-import { msgOf } from '../core/messages.ts';
-import type { ExportOptions, ExportSection, HostContext } from '../core/types.ts';
-import type { FilesSection } from '../schema/types.ts';
-import { sha256Hex } from '../utils/hashing.ts';
+import type { HostContext } from '../core/types.ts';
+import type { RecursiveListing } from '../utils/recursive-walk.ts';
 import { FileCollectionAdapter } from './file-collection.ts';
-import { unitAllowed } from './units.ts';
 
 /** self 分区白名单文件（相对 baseDir，即 $DSH_HOME/dsh-config-manager/）。 */
 export const SELF_CONFIG_FILES: readonly string[] = [
@@ -55,33 +60,44 @@ export class SelfAdapter extends FileCollectionAdapter {
     this.baseDir = baseDir;
   }
 
-  /** 白名单收集：只导出配置类文件（存在才收），不递归（排除快照/历史/缓存/临时产物）。
-   *  relativePath 产出相对 baseDir 的路径（与 analyzeImport/applyItem 的 path.join(baseDir, ref) 匹配）。 */
   /** self 的白名单文件彼此独立（同步配置 / 市场配置 / UI 偏好…），不构成 bundle
    *  → 覆写为「逐文件单元」，用户可以只带走其中几项。 */
   protected override unitIdOf(relativePath: string): string {
     return relativePath;
   }
 
-  override async export(ctx: HostContext, options: ExportOptions): Promise<ExportSection<FilesSection>> {
-    const files: FilesSection['files'] = [];
-    const warnings: string[] = [];
-    const allow = options.includeItems?.[this.id];
+  /**
+   * 清单枚举 = **白名单文件**（覆写基类的目录递归）。
+   *
+   * 为什么必须覆写：self 目录下并存着插件自身的数据（snapshots/、config-snapshots/、
+   * sync/work/ 的 Git 工作副本与远端快照、transactions/、exports/、遗留 profiles/），
+   * 整目录递归会把它们全部当成「可勾选单元」（实测本机 2460 个文件 / 11.44 MB）。
+   * 覆写后 export()（基类 collect，content 模式）与 preview()（size 模式）拿到**同一份清单**，
+   * 选择器显示的条目/体积与真实导出逐项一致。
+   *
+   * 存在性判定优先 statSize（只 stat；白名单最多 7 个文件）；旧宿主未实现时退回读一次文件
+   * （单文件代价可忽略，且 collect 之后还要读它）。读不到 / 未创建 → 跳过，
+   * 与「文件不存在 = 非白名单命中」同语义（如从未配置市场/同步）。
+   *
+   * 路径一律用 POSIX 分隔符拼：relativePath 是**备份格式的一部分**（ZIP 内为 self/<rel>），
+   * 同时是单元 id（self:<rel>）与 includeItems 的比对键 —— 不能随平台漂移成反斜杠。
+   */
+  protected override async listRelPaths(ctx: HostContext): Promise<RecursiveListing> {
+    const empty: RecursiveListing = { paths: [], skippedLinks: [], followedLinks: 0, unreadableDirs: [] };
+    const found: string[] = [];
     for (const rel of SELF_CONFIG_FILES) {
-      if (!unitAllowed(allow, `${this.id}:${this.unitIdOf(rel)}`)) continue;
-      // ctx.fs.readFile 语义 = 相对 homeDir 的完整路径 → 拼接 baseDir；产出仍为相对 baseDir
-      const data = await ctx.fs.readFile(path.join(this.baseDir, rel)).catch(() => null);
-      if (data === null) continue; // 未创建过的配置文件跳过（如从未配置市场/同步）
-      files.push({ relativePath: rel, data, contentHash: sha256Hex(data) });
+      const full = `${this.baseDir}/${rel}`;
+      try {
+        if (ctx.fs.statSize !== undefined) {
+          if ((await ctx.fs.statSize(full)) === null) continue;
+        } else {
+          await ctx.fs.readFile(full);
+        }
+        found.push(full);
+      } catch {
+        // 未创建过的配置文件跳过
+      }
     }
-    if (files.length === 0) {
-      warnings.push(msgOf(ctx)('adapter.dirEmpty', { type: this.displayName }));
-    }
-    return {
-      sectionId: this.id,
-      data: { version: 1, files },
-      counts: { files: files.length },
-      warnings,
-    };
+    return { ...empty, paths: found };
   }
 }

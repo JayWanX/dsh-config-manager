@@ -1,6 +1,6 @@
 /**
  * 安全模块公共出口（m4-security）：
- *  secret-scanner / encryption / integrity / zip-security / redaction。
+ *  secret-scanner / encryption / container-kind / integrity / zip-security / redaction。
  *
  * 与 core 的注入点对齐：
  *  - `createSecretScanner()`        → ExporterOptions.scanner（SecretScanner 契约）
@@ -11,6 +11,7 @@
  */
 export * from './secret-scanner.ts';
 export * from './encryption.ts';
+export * from './container-kind.ts';
 export * from './integrity.ts';
 export * from './credentials-yaml.ts';
 export * from './zip-security.ts';

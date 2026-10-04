@@ -16,14 +16,15 @@
  * （防 tabnabbing）；错误文本渲染前经 redact() 兜底（安全不变量）。
  * 状态组件内自持（低频静态视图，同 Snapshots/Sync/Market 策略，不进 sessionStorage）。
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { TranslateNS } from '../client-types.ts'
 import type { ConfigManagerApi } from '../api.ts'
 import { Badge, Banner, Button, Card, SectionTitle } from '../common/ui.tsx'
 import { Skeleton } from '../common/Skeleton.tsx'
 import { CopyButton } from '../common/CopyButton.tsx'
-import { ABOUT_CLI, ABOUT_LINKS, ABOUT_META, aboutStatusRows, buildFeedbackSnippet } from './about-view.ts'
-import type { AboutStatusRows } from './about-view.ts'
+import { InfoHint } from '../common/InfoHint.tsx'
+import { ABOUT_CLI, ABOUT_LINKS, ABOUT_META, aboutStatusRows, aboutUpdateView, buildFeedbackSnippet } from './about-view.ts'
+import type { AboutStatusRows, AboutUpdateView } from './about-view.ts'
 import { ReleaseNotesDialog } from './ReleaseNotesDialog.tsx'
 import { redact } from '../../security/redaction.ts'
 import css from '../config-manager.module.css'
@@ -47,6 +48,11 @@ export function AboutPanel({ api, t }: AboutPanelProps) {
   const [state, setState] = useState<AboutUiState>(initial)
   const [releaseNotesOpen, setReleaseNotesOpen] = useState(false)
   const patch = (p: Partial<AboutUiState>): void => setState((s) => ({ ...s, ...p }))
+  /** 版本更新检查（只读探测 npm；低频动作，状态自持，与 status 同策略） */
+  const [updateChecking, setUpdateChecking] = useState(false)
+  const [updateView, setUpdateView] = useState<AboutUpdateView | null>(null)
+  const mountedRef = useRef(true)
+  useEffect(() => () => { mountedRef.current = false }, [])
 
   /** 读取运行时版本信息（pluginVersion / dshVersion / platform+arch → 展示行） */
   const loadStatus = useCallback(async (): Promise<void> => {
@@ -58,6 +64,30 @@ export function AboutPanel({ api, t }: AboutPanelProps) {
       patch({ loading: false, loadError: err instanceof Error ? err.message : String(err) })
     }
   }, [api])
+
+  /**
+   * 检查更新（`force=true` 走宿主 ?force=1 绕过 10 分钟缓存 —— 用户点「重新检查」的语义）。
+   * 失败一律落成 `failed` 视图（带原因、可重试），**绝不显示成「已是最新」**。
+   */
+  const runUpdateCheck = useCallback((force: boolean): void => {
+    setUpdateChecking(true)
+    api.checkUpdate(force).then(
+      (result) => {
+        if (!mountedRef.current) return
+        setUpdateView(aboutUpdateView(result, { profile: state.rows?.diagnostics?.profile }))
+        setUpdateChecking(false)
+      },
+      (err) => {
+        if (!mountedRef.current) return
+        setUpdateView({
+          kind: 'failed',
+          current: state.rows?.version ?? '',
+          error: err instanceof Error ? err.message : String(err),
+        })
+        setUpdateChecking(false)
+      },
+    )
+  }, [api, state.rows?.diagnostics?.profile, state.rows?.version])
 
   useEffect(() => {
     void loadStatus()
@@ -96,14 +126,13 @@ export function AboutPanel({ api, t }: AboutPanelProps) {
             用于自查「装了插件却没被备份识别到」——此前用户完全无从查看。 */}
         {state.rows?.diagnostics != null && (
           <div className={css.statRow} style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '4px' }}>
-            <span className={css.groupLabel}>{t('about.diag.label')}</span>
+            <span className={css.groupLabel}>{t('about.diag.label')} <InfoHint text={t('about.diag.hint')} label={t('common.infoHint')} /></span>
             <span>{t('about.diag.profileDir', { path: state.rows.diagnostics.profileDir })}</span>
             <span>{t('about.diag.profile', { profile: state.rows.diagnostics.profile })}</span>
             <span>{t('about.diag.pluginCount', { count: String(state.rows.diagnostics.pluginCount) })}</span>
             {state.rows.diagnostics.manifestUnreadable && (
               <Banner kind="warn">{t('about.diag.manifestUnreadable')}</Banner>
             )}
-            <span className={css.groupLabel}>{t('about.diag.hint')}</span>
           </div>
         )}
 
@@ -111,7 +140,7 @@ export function AboutPanel({ api, t }: AboutPanelProps) {
             拼接规则是 ./about-view.ts 的纯函数，组件只装配（AGENTS.md §UI 分层铁律）。 */}
         {state.rows !== null && (
           <div className={css.actionRow}>
-            <span className={css.hint}>{t('about.feedbackHint')}</span>
+            <InfoHint text={t('about.feedbackHint')} label={t('common.infoHint')} />
             <CopyButton
               text={buildFeedbackSnippet(state.rows)}
               label={t('about.copyEnv')}
@@ -119,6 +148,53 @@ export function AboutPanel({ api, t }: AboutPanelProps) {
             />
           </div>
         )}
+      </Card>
+
+
+      {/* 插件版本更新检查（2026-09）：只读探测 npm latest + 给一条可复制的升级命令。
+          为什么放在「关于」页：这是用户唯一会主动查看「我装的是哪一版」的地方；
+          检查失败如实显示原因并允许重试，绝不显示成「已是最新」。 */}
+      <Card>
+        <span className={css.groupLabel}>{t('about.update.title')} <InfoHint text={t('about.update.offline')} label={t('common.infoHint')} /></span>
+        <div className={css.statRow} style={{ flexWrap: 'wrap', gap: '8px', alignItems: 'center' }}>
+          {state.rows !== null && (
+            <Badge kind="info">{t('about.update.current', { version: state.rows.version })}</Badge>
+          )}
+          {updateView?.kind === 'upToDate' && <Badge kind="ok">{t('about.update.upToDate')}</Badge>}
+          {updateView?.kind === 'available' && (
+            <Badge kind="warn">
+              {t('about.update.available', { latest: updateView.latest, current: updateView.current })}
+            </Badge>
+          )}
+          {updateView?.kind === 'failed' && (
+            <Badge kind="error">{t('about.update.failed', { error: updateView.error })}</Badge>
+          )}
+        </div>
+
+        {updateView?.kind === 'available' && (
+          updateView.command !== null ? (
+            <>
+              <div className={css.hint}>{t('about.update.commandHint')}</div>
+              <pre className={css.cliCommand}>{updateView.command}</pre>
+              <div className={css.actionRow}>
+                <CopyButton text={updateView.command} label={t('about.update.copyCommand')} t={t} />
+                <span className={css.hint}>{t('about.update.copyCommand')}</span>
+              </div>
+            </>
+          ) : (
+            <div className={css.hint}>{t('about.update.noCommand')}</div>
+          )
+        )}
+
+        <div className={css.actionRow}>
+          <Button
+            onClick={() => { runUpdateCheck(updateView !== null) }}
+            loading={updateChecking}
+            disabled={updateChecking}
+          >
+            {updateView === null ? t('about.update.check') : t('about.update.recheck')}
+          </Button>
+        </div>
       </Card>
 
       {/* 相关链接卡：Star 主按钮 + 仓库/文档/Issues 链接行 + 作者行（全部外链） */}
@@ -148,8 +224,7 @@ export function AboutPanel({ api, t }: AboutPanelProps) {
 
       {/* P1-⑩：CLI 救援工具引导卡（GUI 里唯一能发现 CLI 的地方；独立安装、DSH 挂了也能用） */}
       <Card>
-        <span className={css.groupLabel}>{t('about.cli.title')}</span>
-        <div className={css.hint}>{t('about.cli.hint')}</div>
+        <span className={css.groupLabel}>{t('about.cli.title')} <InfoHint text={t('about.cli.hint')} label={t('common.infoHint')} /></span>
         <pre className={css.cliCommand}>{ABOUT_CLI.installCommand}</pre>
         <ul className={css.reportList}>
           {ABOUT_CLI.commands.map((c) => (

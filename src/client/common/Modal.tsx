@@ -41,8 +41,16 @@ import css from '../config-manager.module.css'
  */
 export const MODAL_ROOT_ID = 'dsh-config-manager-root'
 
-/** 插件根节点查询（Portal 容器）：渲染期与 layout effect 共用同一份实现。 */
-function resolveModalRoot(): HTMLElement | null {
+/**
+ * 插件根节点查询（Portal 容器）：渲染期与 layout effect 共用同一份实现。
+ *
+ * **导出的原因**：InfoHint（ⓘ 气泡）也要把它的气泡 Portal 到这里 —— 两个 Portal 的容器必须是
+ * 同一个 `#dsh-config-manager-root`（同一条铁律：绝不能挂 `document.body`，见上）。
+ * 而且气泡**必须**脱离 `.dialogContentCenter` 的常驻 `transform: translate(-50%,-50%)`：
+ * 按 CSS Transforms L1，带 transform 的祖先会成为后代 `position: fixed` 的包含块 ——
+ * 裸 fixed 的气泡在 Modal 内会整体偏移卡片位移，并被 `.dialogBody{overflow-y:auto}` 裁剪。
+ */
+export function resolveModalRoot(): HTMLElement | null {
   return typeof document === 'undefined' ? null : document.getElementById(MODAL_ROOT_ID)
 }
 
@@ -106,6 +114,10 @@ export function Modal({ open, onClose, title, wide, busy, onOpenAutoFocus, cardS
           className={`${css.dialogContentCenter} ${css.dialogCard}${wide === true ? ` ${css.dialogWide}` : ''}`}
           style={cardStyle}
           aria-label={title}
+          // 「这是我们自己的弹窗卡片」标记：Select 的弹层据此决定挂载点 —— 弹层**必须**进弹窗内容子树，
+          // 否则会被 radix 的 body{pointer-events:none}、外部交互判定与 RemoveScroll 滚动锁挡死
+          // （2026-10-04 用户反馈「选项点不动」；见 common/Select.tsx 的 resolveMenuHost）。
+          data-cm-dialog=""
           onOpenAutoFocus={onOpenAutoFocus}
           // busy 时阻止 Radix 默认的 Esc/外部指针关闭（双保险，配合 onOpenChange 守卫）
           onEscapeKeyDown={(e) => { if (busy === true) e.preventDefault() }}

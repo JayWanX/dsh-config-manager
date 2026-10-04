@@ -11,6 +11,7 @@ import { redact } from '../../security/redaction.ts'
 import { myPrLinkSource } from '../../ui/my-configs-view.ts'
 import { Badge, Banner, Button, Field, Spinner } from '../common/ui.tsx'
 import { Modal } from '../common/Modal.tsx'
+import { InfoHint } from '../common/InfoHint.tsx'
 import { myConfigFormValid } from './my-configs-view.ts'
 import type { AutoFieldBadge, MyConfigForm, MyWizardState } from './my-configs-view.ts'
 import css from '../config-manager.module.css'
@@ -121,7 +122,7 @@ export function MyConfigsWizard({
       {wizard.step === 'form' && (<>
         {/* update 模式：表单页内嵌「选择新 ZIP」入口（选中自动校验，通过后才可一键更新） */}
         {wizard.mode === 'update' && (<>
-          <span className={css.hint}>{t('myconfigs.update.zipHint')}</span>
+          <InfoHint text={t('myconfigs.update.zipHint')} label={t('common.infoHint')} />
           <input
             ref={fileInput}
             type="file"
@@ -150,7 +151,8 @@ export function MyConfigsWizard({
             <Badge kind="ok">{t('myconfigs.upload.validateOk')}</Badge>
           </div>
         )}
-        <Field label={t('myconfigs.upload.form.name')} hint={t('myconfigs.upload.form.nameHint')}>
+        <Field label={t('myconfigs.upload.form.name')}>
+          <InfoHint text={t('myconfigs.upload.form.nameHint')} label={t('common.infoHint')} />
           <input className={css.input} value={wizard.form.name} onChange={(e) => { onFormField('name', e.target.value) }} />
           {wizard.formErrors.name !== null && <span className={css.formError}>{redact(wizard.formErrors.name)}</span>}
         </Field>

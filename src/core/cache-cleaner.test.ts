@@ -360,3 +360,69 @@ test('自定义保留期生效（market 保留期缩短 → 较早条目被删�
     await d.cleanup();
   }
 });
+
+/* ---------------- m-disk-usage：手动「立即清理」语义 ---------------- */
+
+test('includeRecent：忽略保留期清空可重建区，但**绝不**动导出产物', async () => {
+  const d = await makeDataDir();
+  try {
+    const now = Date.now();
+    // 保留期内的新文件（自动清理会保留它们）
+    const freshTmp = path.join(d.tmpDir, 'upload-fresh.zip');
+    const freshIndex = path.join(d.marketCacheRoot, 'h4', 'index.json');
+    const freshWork = path.join(d.marketWorkRoot, 'h4');
+    const freshExport = path.join(d.exportsDir, 'dsh-config-just-exported.zip');
+    const oldExport = path.join(d.exportsDir, 'dsh-config-old.zip');
+    await fs.writeFile(freshTmp, Buffer.alloc(11));
+    await fs.mkdir(path.dirname(freshIndex), { recursive: true });
+    await fs.writeFile(freshIndex, '{}');
+    await fs.mkdir(freshWork, { recursive: true });
+    await fs.writeFile(freshExport, Buffer.alloc(5));
+    await fs.writeFile(oldExport, Buffer.alloc(7));
+    await touch(oldExport, now - EXPORTS_RETENTION_DEFAULT_MS - 1000);
+
+    const report = await cleanupCaches({
+      tmpDir: d.tmpDir,
+      exportsDir: d.exportsDir,
+      marketCacheRoot: d.marketCacheRoot,
+      marketWorkRoot: d.marketWorkRoot,
+      includeRecent: true,
+      now: () => now,
+    });
+
+    // 可重建区：保留期内也照清
+    await assert.rejects(() => fs.stat(freshTmp), 'tmp 立即清空');
+    await assert.rejects(() => fs.stat(freshIndex), '市场缓存立即清空');
+    await assert.rejects(() => fs.stat(freshWork), '市场工作副本立即清空');
+    // 导出产物：新文件保留（用户的备份文件绝不「立即清空」），过期文件照旧回收
+    assert.equal((await fs.stat(freshExport)).size, 5, '新导出文件必须保留');
+    await assert.rejects(() => fs.stat(oldExport), '过期导出文件仍按保留期回收');
+    // 结果形状：sections 覆盖四个分区；目录删除计入 freedBytesRecursive
+    assert.deepEqual([...report.sections].sort(), ['exports', 'marketCache', 'marketWork', 'tmp']);
+    assert.ok(report.freedBytesRecursive >= 11 + 2 + 7, '目录体积按删除前递归统计');
+  } finally {
+    await d.cleanup();
+  }
+});
+
+test('缺省（无 includeRecent）仍只清超期项：保留期内的 tmp 文件不动', async () => {
+  const d = await makeDataDir();
+  try {
+    const now = Date.now();
+    const fresh = path.join(d.tmpDir, 'upload-fresh.zip');
+    await fs.writeFile(fresh, Buffer.alloc(9));
+    const report = await cleanupCaches({
+      tmpDir: d.tmpDir,
+      exportsDir: d.exportsDir,
+      marketCacheRoot: d.marketCacheRoot,
+      marketWorkRoot: d.marketWorkRoot,
+      now: () => now,
+    });
+    assert.equal(report.removed, 0);
+    assert.equal((await fs.stat(fresh)).size, 9, '自动清理必须沿用保留期');
+    assert.equal(report.freedBytesRecursive, 0);
+  } finally {
+    await d.cleanup();
+  }
+});
+

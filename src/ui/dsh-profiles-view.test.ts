@@ -7,8 +7,8 @@ import assert from 'node:assert/strict'
 import {
   bundleLines, canLaunchProfile, copyWarningKey, dependencyLines, formatBytes, formatProfileTime,
   isProfileRunning, issueLabelKey, launchBlockReason, launchState, launchWarningKey, profileInstallCommand, profileRowAction,
-  profileRowFacts, profilesPanelPhase, restartCommand, runningRecordFor, shapeLabelKey, sortProfilesForDisplay,
-  stopResultKey, suggestCopyName, summarizeProfiles, validateProfileNameInput,
+  profileRowFacts, profileVersionFacts, profilesPanelPhase, restartCommand, runningRecordFor, sessionFormatRisk,
+  shapeLabelKey, sortProfilesForDisplay, stopResultKey, suggestCopyName, summarizeProfiles, validateProfileNameInput,
 } from './dsh-profiles-view.ts'
 import type { DshProfileLaunchResult, DshProfileMeta, DshProfileRunningView } from '../profiles/dsh-profile-shared.ts'
 
@@ -29,6 +29,25 @@ function meta(name: string, over: Partial<DshProfileMeta> = {}): DshProfileMeta 
     ...over,
   }
 }
+
+test('profileVersionFacts：读不到的版本一律 null（绝不显示假版本号）', () => {
+  assert.deepEqual(profileVersionFacts(meta('a')), { dshVersion: null, sessionFormatVersion: null });
+  assert.deepEqual(
+    profileVersionFacts(meta('a', { dshVersion: '0.1.5-rc.1', sessionFormatVersion: 3 })),
+    { dshVersion: '0.1.5-rc.1', sessionFormatVersion: 3 },
+  );
+  assert.deepEqual(profileVersionFacts(meta('a', { dshVersion: '', sessionFormatVersion: null })), { dshVersion: null, sessionFormatVersion: null });
+});
+
+test('sessionFormatRisk：只对「确定更高/更低」报风险，任一侧读不到一律 none（不猜）', () => {
+  const v = (n: number | null) => meta('p', { sessionFormatVersion: n });
+  assert.equal(sessionFormatRisk(v(4), 3), 'newer', '档案更新 → 它的对话在本实例看不见');
+  assert.equal(sessionFormatRisk(v(3), 4), 'older', '档案更旧 → 本实例的对话在该档案看不见');
+  assert.equal(sessionFormatRisk(v(3), 3), 'none');
+  assert.equal(sessionFormatRisk(v(null), 3), 'none', '读不到该档案版本 → 不提示');
+  assert.equal(sessionFormatRisk(v(4), null), 'none', '读不到本实例版本 → 不提示');
+  assert.equal(sessionFormatRisk(v(4), undefined), 'none', '旧宿主不回传 → 不提示');
+});
 
 test('profilesPanelPhase：无数据 = loading、有数据 = ready、失败优先 error', () => {
   assert.equal(profilesPanelPhase(null, null), 'loading')

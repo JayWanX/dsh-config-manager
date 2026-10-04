@@ -12,6 +12,9 @@ npm run typecheck                # 类型检查：根 tsconfig（只覆盖 src/*
 npm run typecheck:tests          # 类型检查：tsconfig.tests.json（src/** + tests/**，CI 已接）
 npm run build                    # 构建：Host 半 lib/（tsc）+ client bundle lib/client.js（tsdown）
 npm run bundle                   # 仅重建 client bundle（tsdown）
+# 注意：client 半（src/client/**，含文案/样式）改动后必须重新 build（或 bundle）并重启 DSH 才生效
+#     —— 宿主半在 DSH 启动时加载、没有热重载；只改源码不 build，界面仍是旧 UI。
+#     产物：lib/client.js（CSS Modules 内联其中）+ lib/（host）。
 npm test                         # 运行全部测试（node --test，192 个）
 npm run smoke                    # 仅核心引擎冒烟测试
 ```
@@ -72,6 +75,14 @@ install → typecheck（src）→ typecheck:tests（tests/**）→ npm test（�
 - **并发**：`concurrency.group: ci-${{ github.ref }}` + `cancel-in-progress`，同一分支的新提交自动取消旧运行
 - **PR 要求**：合并进 `main` 前需 ci.yml 全绿；**发布仍是打 tag → `publish.yml`**（见上一节），两条流水线互不触发
 - **已知间歇性失败（非必然红灯）**：`src/utils/env-lock.test.ts` 与 `src/client/run-store.test.ts` 存在**负载相关的间歇性**失败（多数运行 0 fail 全绿，单独跑必过）。若 CI 首次红灯，可先 `gh run rerun <id> --failed` 确认是否为该间歇，**而非直接认定为缺陷**——但也不要因为「可能是间歇」而放松警觉。
+- **平台矩阵（2026-09）**：`verify` job 用 `strategy.matrix`（`include`：`ubuntu-latest` / `windows-latest` / `macos-latest`，`fail-fast: false`）
+  —— 全仓有 32 处非测试 `process.platform` 分支（env-lock / atomic-write / process-control / plugin-cli / recursive-walk / 档案启动器…），
+  此前只有 ubuntu 被 CI 覆盖：Windows 侧只有作者本机能跑、macOS 侧（env-lock 的 darwin 分支等）零真实执行。
+  - **macOS 是观察期**：矩阵里带 `experimental: true` + job 级 `continue-on-error: ${{ matrix.experimental == true }}`，
+    因为作者只有 Windows、无法在合入前本地验证。**连续 1~2 次绿灯后删掉 `experimental` 那一行**即变硬门禁 —— 不做长期「允许失败」。
+  - **pack 步骤显式 `shell: bash`**：`mkdir -p dist && npm pack` 里的 `-p` 是 POSIX 语义，Windows 默认 PowerShell 的 `mkdir` 不认识它；
+    `windows-latest` 自带 Git Bash，三个平台用同一条命令才能保证「跑的是同一套步骤」。
+  - **`publish.yml` 保持单平台**：发版只做一次，平台覆盖由 PR/主干门禁负责（避免发布流水线三倍耗时）。
 
 ## 🧪 测试矩阵
 
@@ -105,6 +116,30 @@ install → typecheck（src）→ typecheck:tests（tests/**）→ npm test（�
 
 ## 📌 常见坑
 
+- **收集面需要收窄的文件类分区（单文件 / 白名单）必须覆写 `listRelPaths()`**（2026-09 首例、2026-10 复发）：
+  `FileCollectionAdapter.preview()`（v0.1.68 引入）走 `collect() → listRelPaths(baseDir)`，而**覆写 `export()` 不参与预览**
+  —— 只覆写 `export()` 的分区，预览会落到基类的目录递归。两起实测：
+  - `agentInstructions`（2026-09）：`baseDir` 是 `''`（AGENTS.md 就在 `$DSH_HOME` 根），**预览**递归了整个 home：
+    4.8 s / 4016 个文件 / 242 MB，选择器还冒出 21 个假单元（`profiles/`、`sessions/`、`attachments/`…）；
+    总览页调 `/export-preview`，**5.0 s 里 4.8 s 都来自这一项**，而真实导出只读一个文件。
+  - `self`（2026-10 复发）：只覆写 `export()`（7 条白名单），预览递归了整个 `$DSH_HOME/dsh-config-manager`
+    （快照 / config-snapshots / `sync/work` 的 Git 工作副本与远端快照 / transactions / exports / 遗留 profiles）：
+    **2460 个文件 / 11.44 MB**，界面显示「插件自身配置 已选 2460/2460 11.5 MB」，而真实导出只有 6 个文件 / 1936 B。
+  **后果不止数字错**：单元 id 要与 `includeItems` 求交 —— 假单元一旦被用户取舍（全不选后只勾几项），
+  白名单里的真实配置文件会被静默挡在导出之外。
+  修法：覆写 `listRelPaths()` 返回白名单（存在性判定走 `ctx.fs.statSize`，旧门面退回读一次文件；路径用 **POSIX 分隔符**，
+  它同时是 `relativePath` 与单元 id，不能随平台漂移），并**删掉原来的 `export()` 覆写** —— 预览与导出因此共用同一份清单与同一个 `collect()` 内核。
+  回归护栏：`src/adapters/agent-instructions.test.ts`、`src/adapters/self.test.ts`（后者用快照/同步工作副本造出真机同款场景，
+  断言预览只列白名单且与导出逐项一致；修复前该断言必然失败）。
+  新增文件类分区时自检：`baseDir` 是否为 `''`/过宽？收集面是不是靠覆写 `export()` 收窄的（是 → 必须改成覆写 `listRelPaths()`）？
+- **`sessions` 预览的成本与两项优化**（2026-09，均已落地）：真实遍历 324 ms（983 文件 / 517 MB）+ 逐文件 stat ≈ 64 ms
+  + DSH `parentRelations()` ≈ 0.7 s（走 `sessionPersistence.list()`，每次预览都要）。两项改法：
+  ① **`parentRelations()` 短 TTL 缓存**（`src/utils/ttl-cache.ts` 的通用缓存，5 s + 同 key 并发合并 + 失败不缓存；
+  `PARENT_RELATIONS_CACHE_TTL_MS` 在 `src/index.ts` 的会话门面里），连续预览只付一次；
+  ② **体积与时间合并成一次 stat**：`FileSystemFacade.statInfo` → `SectionPreview.statTimes` →
+  `unitActivityTimes(ctx, section, statTimes)`，真机实测**1361 次 stat → 983 次**，结果逐项相同。
+  两处都保留旧路径（未实现 `statInfo` / 未传 `statTimes` 时退回逐文件 `mtimeMs`），**旧宿主只慢不坏**。
+  它只在 `sessions` 显式放行时发生（该分区 `defaultIncluded = false`），所以不影响总览页默认加载。
 - **pnpm 裸名 add 不升级**：`dsh plugin add dsh-config-manager`（无版本）会保留已记录版本；用 `@latest` 或精确版本
 - **`@latest` 装到旧版 = pnpm 11 发布年龄策略（不是缓存）**：`minimumReleaseAge` 默认把发布不足 30 天的新版本排除出版本解析，只有 `minimumReleaseAgeExclude` 白名单里的版本可用。`pnpm cache delete` 无效。解决：
   1. **精确版本装一次即自动白名单**（推荐）：
@@ -115,6 +150,43 @@ install → typecheck（src）→ typecheck:tests（tests/**）→ npm test（�
   2. 或彻底关闭年龄门槛：在 profile 的 `pnpm-workspace.yaml` 加 `minimumReleaseAge: 0`
 - **MemFs 测试路径**：内存 fs 的 key 必须与宿主 path 解耦（POSIX 上 path.resolve 对 win32 home 会注入 cwd）
 - **插件控制台日志默认静音**：宿主入口（`src/index.ts` 的 `ConfigManagerHostContext`）用 `parseLogLevel(process.env.DSH_CONFIG_MANAGER_LOG_LEVEL)` 解析级别，**缺省 warn**——启动 `dsh web` 后只留 warn/error，常规 info（挂载横幅、调度器跳过、导出/备份完成、保留策略清理）不再刷屏；排查时设 `DSH_CONFIG_MANAGER_LOG_LEVEL=info`（或 `debug`）。级别只在入口解析一次，勿在调用点加 `if (debug)` 分支。
+
+## ⬆️ 插件版本更新检查（m-update-check，2026-09）
+
+入口：`GET /api/dsh-config-manager/update-check`（声明在 `src/routes/prefs.ts`，与 star / 更新内容提示同组）
+实现：`src/core/update-check.ts`（`UpdateChecker` / `probeLatestVersion` / `parseLatestVersion` / `wantsForcedUpdateCheck`）
+
+- **只读**：请求 `https://registry.npmjs.org/dsh-config-manager/latest`（约 3 KB），**绝不安装/升级**；界面给的是可复制的命令。
+- **缓存**：进程内 10 分钟（`UPDATE_CHECK_CACHE_MS`）；`?force=1` 由「关于」页的「重新检查」触发 —— 不把 registry 当轮询端点。
+- **失败分类**（全部结构化 `{ ok:false, current, error }`，HTTP 仍 200）：`registry returned HTTP <n>` /
+  `registry response is not valid JSON` / `registry response has no usable version` / `registry response too large`（> 64 KiB）/
+  `timed out after <n> ms` / `network error: <msg>`。**绝不「失败当最新」**；失败不写缓存，下次仍会重试。
+- **HTTP 为什么仍 200**：离线 / 公司网络 / registry 抖动不是插件故障；界面据 `ok` 显示可重试提示而不是错误横幅。
+- **版本比较**：复用 `src/core/validator.ts` 的 `compareVersionStrings`（同一份 semver 解析，`1.10.0 > 1.9.0`、预发布 < 正式版）；
+  只有**严格更新**才提示（本地跑更新的预发布版时不提示降级）。
+- **升级命令用精确版本**（`dsh plugin --profile <档案> add dsh-config-manager@<latest>`）：pnpm 的 `minimumReleaseAge`
+  会让 `@latest` 解析到旧版（README「安装」段有实测记录），而我们刚拿到确切的 latest —— 精确版本既不会装旧版，也与界面显示一致。
+- **`desktop` 档案与未知档案不给终端命令**（前者被 DSH 无条件拒绝，见 AGENTS「DSH Desktop」条），界面改提示去插件页更新。
+- **不读代理设置**（Node 的 fetch 默认不认 `HTTP_PROXY`/`HTTPS_PROXY`）：公司网络下可能直接失败 —— 如实报错，不影响其它功能。
+- 测试：`src/core/update-check.test.ts`（注入 `fetchImpl` + 注入时钟，**绝不真连 registry**）+ `src/client/about/about-view.test.ts`
+  （`aboutUpdateView` / `aboutUpgradeCommand` 的 upToDate / available / desktop / failed 四档）。
+
+## 🧭 兼容性评分与结构化原因（2026-09）
+
+- **单一事实源**：`src/core/validator.ts` 的 `compatibilityReasons(input)` 产出原因数组，`computeCompatibility(input)` **由它派生**评分：
+  `schemaUnsupported` → unsupported；含 `sourceOlder` → good；其余非空 → partial；空 → excellent。
+  原因与评分出自同一份输入，界面解释与评分**不可能漂移**。
+- **评分口径冻结**：旧实现里「来源更旧」会覆盖先前判定的 partial，因此「来源更旧 + 跨平台」仍是 good。这是历史行为，
+  **本次刻意不改**（改它会让既有导入报告变脸），已由 `src/core/compatibility-reasons.test.ts` 的「历史行为（冻结）」用例显式写下。
+- **回传字段**（`ImportAnalysis`，全部可选 → 旧宿主 / 旧测试零改动）：`compatibilityReasons`（结构化原因）、
+  `source`（来源 DSH 版本 / 平台 / schema 版本）、`target`（本机 DSH 版本 / 平台）。缺省时界面**不显示对照行、也不编原因**
+  （「不知道为什么」与「没有问题」必须可区分）。
+- **界面只做映射**：`src/ui/import-wizard.ts` 的 `compatibilityNotes(reasons)` → `{ key, params }[]`（五类原因 → 五条字典键），
+  导入向导渲染「来源与兼容性」卡；原因里的平台 / 版本字符串来自**包内**，渲染前一律过 `redact()`（B1 教训）。
+- **禁止渲染裸枚举**：同步确认页此前直接显示 `{compatibility}`（中文界面里出现 `partial`）且 Badge 恒 `info`；现在两处都走
+  `src/ui/import-wizard.ts` 的 `compatibilityLevel` / `compatibilityBadgeKind`，评分标签映射只有 `src/client/common/compat-label.ts` 一份
+  （`src/client/common/compat-label.test.ts` 用源码级断言禁止第二份与裸枚举回归）。
+- 测试：`src/core/compatibility-reasons.test.ts`（8 例，含「评分 = 原因的函数」跨用例校验）、`src/ui/import-wizard.test.ts`（`compatibilityNotes` 3 例）。
 
 ## 📥 从 AGENTS.md 下移的细则（2026-09）
 
@@ -160,18 +232,33 @@ CI 门禁：`.github/workflows/ci.yml` 对 `pull_request`→main 与 `push`→ma
 
 | 字典 | zh/en | `t` 的来源 | 缺 key 行为 |
 |---|---|---|---|
-| `src/client/locales.ts` | 506 / 506 | 组件 props `t`（`ConfigManagerKey`） | **编译期报错** |
-| `src/ui/i18n.ts` | 278 / 278 | `UiT`（`api.t` / `zhUiT` / props） | **静默返回 key 本身** |
-| `src/core/messages.ts` | 291 / 291 | host/adapter `msg()` | 编译期（`keyof typeof zh`） |
-| `history-locales.ts` | 51 / 51 | `historyT` → ns `config-manager-history` | 静默 |
-| `market-locales.ts` | 138 / 138 | `marketT` → ns `config-manager-market` | 静默 |
-| `recovery-locales.ts` | 104 / 104 | `recoveryT` → ns `config-manager-recovery` | 静默 |
-| `sync-locales.ts` | 198 / 198 | `syncT` → ns `config-manager-sync` | 静默 |
+| `src/client/locales.ts` | 695 / 695 | 组件 props `t`（`ConfigManagerKey`） | **编译期报错** |
+| `src/ui/i18n.ts` | 370 / 370 | `UiT`（`api.t` / `zhUiT` / props） | **静默返回 key 本身** |
+| `src/core/messages.ts` | 353 / 353 | host/adapter `msg()` | 编译期（`keyof typeof zh`） |
+| `history-locales.ts` | 54 / 54 | `historyT` → ns `config-manager-history` | 静默 |
+| `market-locales.ts` | 182 / 182 | `marketT` → ns `config-manager-market` | 静默 |
+| `recovery-locales.ts` | 170 / 170 | `recoveryT` → ns `config-manager-recovery` | 静默 |
+| `sync-locales.ts` | 219 / 219 | `syncT` → ns `config-manager-sync` | 静默 |
 
-> 上表数量为 2026-09-20 **最终态**实测（node 直读字典对象逐个计数）：7 套字典的 zh / en **键集合完全相等**、无重复键。
+> 上表数量为 **2026-10-02 重数**（ⓘ 说明性文案迁移收口时实测，node 直读字典对象逐个计数）：7 套字典的 zh / en **键集合完全相等**、无重复键。
+> **ⓘ 迁移（2026-10）的净增**：`locales.ts` / `market-locales.ts` / `recovery-locales.ts` / `sync-locales.ts` 各 **+1**
+> （键 `common.infoHint`，zh「查看说明」/ en「Show description」，四本同键同值；由 `src/client/common/info-hint-guard.test.ts` 的 t6-4 钉住），
+> `history-locales.ts` **+0**（history 零 MOVE、全目录无 ⓘ，故不要求该键）。表内其余增量来自本轮之前的工作树改动 ——
+> 因此**必须按重数更新，不得按旧值 +1 硬算**。
 > 数量历史（不同时点，勿混用）：`locales.ts` HEAD 517（本机脚本按 `'key':` 字面量统计；t1 审计报告写 533 属其统计口径）
-> → t3 复核 558（批次一新增文案后）→ t12 收口前 522 → **最终 506**（t12 删除 16 个 `overview.*` 死键，zh/en 同步；t15 只删代码不删键）。
+> → t3 复核 558（批次一新增文案后）→ t12 收口前 522 → 2026-09-20 最终态 506（t12 删除 16 个 `overview.*` 死键）
+> → **2026-10-02 重数 695**（此后工作树累计新增，含 ⓘ 的 +1）。
 > 改动文案后如要引用数量，请重新实测，不要沿用旧数字。
+
+**重数命令（仓库根；逐套打印 zh / en 键数与键集合相等判定）**：
+
+```bash
+node --input-type=module -e "for (const r of [['./src/client/locales.ts','zh','en'],['./src/ui/i18n.ts','uiZh','uiEn'],['./src/core/messages.ts','zh','en'],['./src/client/history/history-locales.ts','zh','en'],['./src/client/market/market-locales.ts','zh','en'],['./src/client/recovery/recovery-locales.ts','zh','en'],['./src/client/sync/sync-locales.ts','zh','en']]) { const m = await import(new URL(r[0], new URL('file://' + process.cwd() + '/')).href); const z = Object.keys(m[r[1]]); const e = Object.keys(m[r[2]]); console.log(r[0], 'zh=' + z.length, 'en=' + e.length, 'same=' + (z.length === e.length && z.every((k) => k in m[r[2]]))) }"
+```
+
+实测输出（2026-10-02）：`locales.ts` 695/695 · `ui/i18n.ts` 370/370 · `core/messages.ts` 353/353 ·
+`history-locales.ts` 54/54 · `market-locales.ts` 182/182 · `recovery-locales.ts` 170/170 · `sync-locales.ts` 219/219
+（七套全部 `same=true`）。
 
 **第四个坑：`t` 可经 props 注入 → 静态归属不可判。**
 `ConsultCard` 声明 `t: UiT`（不是本地字典），由调用方传 `t={api.t}`。因此「按文件在哪个目录就查哪套字典」**永远判不对**；实测这种静态归属扫描会产生 **600+ 处假阳性**（`error.*`/`history.*`/`myconfigs.*`/`report.*` 等全是注入式 `t`）。
@@ -209,4 +296,3 @@ CI 门禁：`.github/workflows/ci.yml` 对 `pull_request`→main 与 `push`→ma
   封装层：`common/Icon.tsx` 的 `ExpandChevron` + `common/morph-icons.ts`（数据表）。
   护栏：`src/client/common/morph-icons.test.ts`（形变必须是纯 90° 旋转、无缩放 + 端点恰好落在两个图标上 + 两包版本相等）。
   使用边界与两条硬约定（`reducedMotion="user"` / `spring="smooth"`）见 `DESIGN.md §6`。
-

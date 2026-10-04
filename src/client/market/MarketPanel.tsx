@@ -68,6 +68,11 @@ export interface MarketPanelProps {
    * 市场面板的 `api.t` 是 UiT（另一套键空间），不能顶替它。
    */
   cmT: TranslateNS<'config-manager'>
+  /**
+   * 产物库行内「安装」带过来的市场条目 id：面板就绪后**直达该条目**的下载 / 审阅流程。
+   * 缺省（页面路径、从「逛市场」按钮进入）= 只打开列表，行为不变。
+   */
+  openItemId?: string
 }
 
 interface MarketUiState {
@@ -173,7 +178,7 @@ function initFromStore(): MarketUiState {
   }
 }
 
-export function MarketPanel({ api, myConfigsApi, importApi, syncApi, t, cmT }: MarketPanelProps) {
+export function MarketPanel({ api, myConfigsApi, importApi, syncApi, t, cmT, openItemId }: MarketPanelProps) {
   const uiT = api.t // 展示层翻译器（zh/en）：供应链警示 / 状态行 / 徽章文本走 UiT（market.* 键）
   const [state, setState] = useState<MarketUiState>(initFromStore)
   /** 最新 state 镜像（commit/卸载 flush 读取，避免闭包过期值） */
@@ -260,13 +265,23 @@ export function MarketPanel({ api, myConfigsApi, importApi, syncApi, t, cmT }: M
    * bootAutoChecked 同步置位防 StrictMode 双执行/竞态重复触发（同一组件实例只自动刷一次）。
    */
   const bootAutoChecked = useRef(false)
+  /**
+   * 启动序列（读状态 → 首开自动拉取）是否已跑完。
+   * 「安装直达条目」必须等它结束再动作：自动拉取开头会 `patch({ detail: null })`，
+   * 抢在它前面下载会被清掉（审阅页停在空态，用户以为安装没反应）。
+   */
+  const [bootSettled, setBootSettled] = useState(false)
   useEffect(() => {
     if (bootAutoChecked.current) return
     bootAutoChecked.current = true
     void (async () => {
-      const info = await loadStatus()
-      if (info !== null && info.bootAutoRefreshed !== true) {
-        await runRefresh(false)
+      try {
+        const info = await loadStatus()
+        if (info !== null && info.bootAutoRefreshed !== true) {
+          await runRefresh(false)
+        }
+      } finally {
+        if (mountedRef.current) setBootSettled(true)
       }
     })()
     // api 为注入单例（注册时创建），生命周期内稳定；仅挂载时执行一次
@@ -306,6 +321,39 @@ export function MarketPanel({ api, myConfigsApi, importApi, syncApi, t, cmT }: M
       toast.error(redact(err instanceof Error ? err.message : String(err)))
     }
   }
+
+  /**
+   * 产物库「安装」直达：openItemId 非空时打开它的下载 / 审阅流程（与点列表里的「查看详情」同一条路）。
+   * 三条时序约束：
+   *  ① 等启动序列结束（bootSettled）—— 首开自动拉取开头会清 detail，抢在它前面下载会被清掉；
+   *  ② 等没有在跑的读操作（loading / refreshing / browsing / downloading）—— 不与它们抢 state；
+   *  ③ 清单里找不到时**先浏览一次**再判定，仍找不到才如实提示（绝不静默地什么都不做）。
+   * 一次挂载只消费一次（两个 ref 记账），关面板重开不会重放。
+   */
+  const installHandled = useRef(false)
+  const installBrowsed = useRef(false)
+  useEffect(() => {
+    if (openItemId === undefined || installHandled.current || !bootSettled) return
+    if (state.loading || state.refreshing || state.browsing || state.downloadingId !== null) return
+    const item = state.items.find((it) => it.id === openItemId)
+    if (item === undefined) {
+      // 该实例首次打开：清单还没到货 → 先浏览一次，不报错
+      if (state.items.length === 0 && !installBrowsed.current) {
+        installBrowsed.current = true
+        void runBrowse(false)
+        return
+      }
+      installHandled.current = true
+      toast.error(t('list.installMissing'))
+      return
+    }
+    installHandled.current = true
+    if (stateRef.current.subView !== 'browse') patch({ subView: 'browse' })
+    openDownload(item)
+    // 依赖刻意只收「影响判定的状态」：patch / openDownload / runBrowse 每次渲染都重建，
+    // 放进依赖会让本 effect 每渲染都跑（重复消费由 installHandled 记账兜住）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openItemId, bootSettled, state.loading, state.refreshing, state.browsing, state.downloadingId, state.items])
 
   /** 下载 + 校验单条目 → dry-run 详情预览（零写入）。自托管条目（带 repo）必须携带来源仓库。
    *  竞态守卫：下载期间用户可发起另一条目下载（downloadingId 已变），晚到响应一律丢弃，

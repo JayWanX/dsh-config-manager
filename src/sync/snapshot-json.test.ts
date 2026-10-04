@@ -11,6 +11,7 @@ import {
   deserializeSnapshot, sectionsFromJsonSafe, sectionsToJsonSafe, serializeSnapshot,
 } from './snapshot-json.ts';
 import { encryptSectionsPayload, decryptSectionsPayload } from './snapshot-crypto.ts';
+import { DEFAULT_MAX_JSON_BYTES, MAX_OWN_PAYLOAD_JSON_BYTES, parseJsonSafe } from '../utils/json.ts';
 import type { SyncSnapshot } from './transport.ts';
 import { isEncryptedSections } from './transport.ts';
 import type { SectionId } from '../schema/types.ts';
@@ -113,6 +114,40 @@ test('回归：webdav 序列化快照含文件分区 → JSON 中无数字索引
   const files = (rt.sections as { skills: { files: Array<{ data: Uint8Array }> } }).skills.files;
   assert.equal(files[0]!.data.length, 0);
   assert.ok(files[0]!.data instanceof Uint8Array);
+});
+
+/* ---------------- issue #59：读写体积口径必须一致 ---------------- */
+
+test('issue #59：快照读取上限高于不可信输入的缺省上限（否则自产载荷读不回来）', () => {
+  assert.ok(
+    MAX_OWN_PAYLOAD_JSON_BYTES > DEFAULT_MAX_JSON_BYTES,
+    '自产载荷上限必须高于 DEFAULT_MAX_JSON_BYTES',
+  );
+  assert.equal(MAX_OWN_PAYLOAD_JSON_BYTES, 512 * 1024 * 1024);
+});
+
+test('issue #59：大于 64 MiB 的快照 JSON 能成功反序列化（此前被缺省上限拒绝）', () => {
+  // 造一份「明文 JSON 体积已越过 64 MiB」的加密快照。真机形态是 base64 双膨胀的
+  // 密文载荷；这里直接给一个超过缺省上限的字符串，验证的是**上限选择**而非加密流程。
+  const oversized = 'x'.repeat(DEFAULT_MAX_JSON_BYTES + 1024);
+  const snap = fileSnapshot({
+    sections: { encrypted: { info: { salt: 's', iv: 'i', authTag: 't' }, data: oversized } },
+  } as Partial<SyncSnapshot>);
+  const raw = serializeSnapshot(snap as SyncSnapshot);
+  assert.ok(raw.length > DEFAULT_MAX_JSON_BYTES, '构造的快照必须真的越过缺省上限');
+
+  // 同一份载荷若还在走**缺省**上限（旧行为）会被直接拒掉 —— 钉住它就是这条链路的开关
+  assert.throws(
+    () => parseJsonSafe(raw),
+    /体积超过上限/,
+    '缺省上限（64 MiB）必须拒绝它 —— 这正是 issue #59 的复现条件',
+  );
+
+  const back = deserializeSnapshot(raw);
+  assert.equal(back.id, snap.id);
+  assert.equal(back.createdAt, snap.createdAt);
+  const enc = (back.sections as { encrypted: { data: string } }).encrypted;
+  assert.equal(enc.data.length, oversized.length, '密文载荷长度必须无损');
 });
 
 // 类型辅助（避免未使用告警）

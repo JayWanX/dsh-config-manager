@@ -42,6 +42,7 @@ import { ContentPicker } from '../common/ContentPicker.tsx'
 import { SectionComposition } from '../common/SectionComposition.tsx'
 import { sectionLabel, sectionLabeler } from '../common/section-labels.ts'
 import { Modal } from '../common/Modal.tsx'
+import { InfoHint } from '../common/InfoHint.tsx'
 import { PreviewIcon } from '../common/Icon.tsx'
 import { ErrorBanner } from '../common/ErrorBanner.tsx'
 import { ProgressBar } from '../common/ProgressBar.tsx'
@@ -370,8 +371,10 @@ export function ExportView({ api, t }: ExportViewProps) {
         <Button size="sm" disabled={running} title={t('picker.title')} onClick={openPicker}>
           {invLoading ? <Spinner /> : <PreviewIcon size={13} />} {t('picker.title')}
         </Button>
+        {/* 工具栏「模式提示」属「机制怎么工作 + 省事提示」（MOVE 类）：收进 ⓘ，
+            不再常驻占首屏一行（默认导出推荐分区 + 去哪里调整勾选）。 */}
+        <InfoHint text={t('export.hint')} label={t('common.infoHint')} />
       </div>
-      <div className={css.modeHint}>{t('export.hint')}</div>
       {/* 公告位 = **恒定高度**槽位（.noticeSlot）。原先「未勾选」与「设备相关」是两个各自条件
           渲染的 Banner，出现/消失时内容流高度变化 —— 垂直居中的弹窗与页面会跳（用户实测反馈）。
           两者天然互斥（未勾选时 deviceSpecific 必为空），因此共用同一个槽位。 */}
@@ -415,7 +418,12 @@ export function ExportView({ api, t }: ExportViewProps) {
       <div className={css.groupLabel}>{t('export.naming')}</div>
       <div className={css.secretFields}>
         <label className={css.field}>
-          <span className={css.fieldLabel}>{t('export.fileName')}</span>
+          <span className={css.fieldLabel}>
+            {t('export.fileName')}
+            {/* 输入规则属 MOVE 类（规则行收进字段标签旁的 ⓘ）：非法时下面的 css.formError
+                仍常驻重申字符规则（校验错误属 KEEP ①），规则不会因此不可见。 */}
+            <InfoHint text={t('export.fileNameHint')} label={t('common.infoHint')} />
+          </span>
           <input
             type="text"
             className={css.input}
@@ -427,14 +435,16 @@ export function ExportView({ api, t }: ExportViewProps) {
               if (fileName.trim() !== '') setFileName(normalizeExportFileName(fileName))
             }}
           />
-          {/* UI-12：规则提示**常驻**（原来只有输入非法后才出现错误，用户在此之前不知道规则）；
-              顺序保持「先说明规则、后报错」。 */}
-          {fileNameInvalid
-            ? <span className={css.formError}>{t('export.fileNameInvalid')}</span>
-            : <span className={css.hint}>{t('export.fileNameHint')}</span>}
+          {/* KEEP ①：校验错误仍常驻（export.fileNameInvalid 本身就重申了允许的字符集），
+              渲染与改前逐字一致；规则说明已收进字段标签旁的 ⓘ。 */}
+          {fileNameInvalid && <span className={css.formError}>{t('export.fileNameInvalid')}</span>}
         </label>
         <label className={css.field}>
-          <span className={css.fieldLabel}>{t('export.note')}</span>
+          <span className={css.fieldLabel}>
+            {t('export.note')}
+            {/* 备注说明属 MOVE 类（补充背景）：收进字段标签旁的 ⓘ，不再常驻占一行 */}
+            <InfoHint text={t('export.noteHint')} label={t('common.infoHint')} />
+          </span>
           <input
             type="text"
             className={css.input}
@@ -442,8 +452,6 @@ export function ExportView({ api, t }: ExportViewProps) {
             placeholder={t('export.notePlaceholder')}
             onChange={(e: ChangeEvent<HTMLInputElement>) => { setNote(e.target.value) }}
           />
-          {/* UI-12：备注说明同样常驻（键 export.noteHint 此前无引用点） */}
-          <span className={css.hint}>{t('export.noteHint')}</span>
         </label>
       </div>
 

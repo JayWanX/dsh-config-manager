@@ -27,6 +27,7 @@ import { parseJsonSafe, stringifyJsonSafe } from '../utils/json.ts';
 import { atomicWriteFile } from '../utils/atomic-write.ts';
 import { parseSyncChannel } from './sync-config.ts';
 import type { SyncTransportType } from './sync-config.ts';
+import type { SessionFormatDisposition } from '../core/types.ts';
 
 export const UI_PREFS_FILE = 'ui-prefs.json';
 export const UI_PREFS_SCHEMA_VERSION = 1;
@@ -50,6 +51,15 @@ export interface UiPrefs {
   releaseNotesLastSeenVersion?: string;
   /** 更新内容弹窗：用户点过「永不提示」（永久不再自动弹出） */
   releaseNotesDismissed?: boolean;
+  /**
+   * 会话格式处置的**插件级缺省**（T1；缺省值见 ui/session-format-disposition.ts 的
+   * DEFAULT_SESSION_FORMAT_DISPOSITION = 'abort'）。
+   *
+   * 语义：请求体没带 `sessionFormatDisposition` 时（第三方客户端 / 老客户端 / 脚本）
+   * 宿主按这里的值处置；本插件自己的向导**总是**显式下发用户当前选择，所以这里只在
+   * 「用户主动改配置」或「非本插件客户端」时起作用。
+   */
+  sessionFormatDisposition?: SessionFormatDisposition;
 }
 
 /** 缺省配置（首次无文件 / 损坏 / 不支持 schema 时回退） */
@@ -103,6 +113,11 @@ export async function readUiPrefs(dir: string): Promise<UiPrefs> {
   if (obj['releaseNotesDismissed'] === true) {
     prefs.releaseNotesDismissed = true;
   }
+  // 处置值只认三个字面量（与其他字段同姿态：非法值一律丢，绝不猜）
+  const disposition = obj['sessionFormatDisposition'];
+  if (disposition === 'abort' || disposition === 'skip' || disposition === 'guide') {
+    prefs.sessionFormatDisposition = disposition;
+  }
   return prefs;
 }
 
@@ -117,6 +132,7 @@ export async function writeUiPrefs(dir: string, prefs: UiPrefs): Promise<void> {
     ...(prefs.starPromptClicked === true ? { starPromptClicked: true } : {}),
     ...(prefs.releaseNotesLastSeenVersion !== undefined ? { releaseNotesLastSeenVersion: prefs.releaseNotesLastSeenVersion } : {}),
     ...(prefs.releaseNotesDismissed === true ? { releaseNotesDismissed: true } : {}),
+    ...(prefs.sessionFormatDisposition !== undefined ? { sessionFormatDisposition: prefs.sessionFormatDisposition } : {}),
   };
   const target = path.join(dir, UI_PREFS_FILE);
   const data = stringifyJsonSafe(payload, { space: 2 });

@@ -7,6 +7,20 @@
 export const DEFAULT_MAX_JSON_DEPTH = 64;
 export const DEFAULT_MAX_JSON_BYTES = 64 * 1024 * 1024;
 
+/**
+ * **本插件自产载荷**的体积上限（加密同步快照单文件，issue #59）。
+ *
+ * 为什么必须与不可信输入的上限分开：`DEFAULT_MAX_JSON_BYTES`（64 MiB）是防「外部喂进来的
+ * 巨型 JSON」的闸门，而加密同步快照是**我们自己写出去的**——加密单文件布局把明文
+ * sections 序列化 → base64 → 整体加密 → 再 base64，膨胀约 1.78 倍，勾选 sessions 分区
+ * 后单文件轻松越过 64 MiB（真机 4 个快照均 ≈66 MiB）。
+ *
+ * 越界的后果不是报错而是**静默**：`list()` 里解析失败被吞掉 → 远端列表恒为空；
+ * `download()` 报「快照损坏」→ 拉取彻底不可用；`hasNewRemoteSnapshot()` 恒 false →
+ * 自动同步永远 `upToDate`。故读取侧必须显式抬到与写出能力相称的上限。
+ */
+export const MAX_OWN_PAYLOAD_JSON_BYTES = 512 * 1024 * 1024;
+
 export class JsonDepthError extends Error {
   constructor(message = `JSON 嵌套深度超过上限 ${DEFAULT_MAX_JSON_DEPTH}`) {
     super(message);

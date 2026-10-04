@@ -113,8 +113,8 @@ export interface AutosyncHistoryRow {
 /* ---------------------------------------------------------------- 展示辅助（UI 重构新增） */
 /**
  * 中段省略：唯一实现在 `../../ui/mid-ellipsis.ts`（t6 去重——此前本文件自带一份与
- * `ui/snapshots-view.ts`、`OverviewPanel.tsx` 逐字相同的实现，默认 `max = 26`）。
- * 此处保留同名再导出，让既有调用点（`./SyncHistoryView.tsx` 与本目录单测）按原路径引用。
+ * `ui/snapshots-view.ts`、`HomePanel.tsx`（原 OverviewPanel）逐字相同的实现，默认 `max = 26`）。
+ * 此处保留同名再导出，让既有调用点（`./SyncLogList.tsx` 与本目录单测）按原路径引用。
  */
 export { midEllipsis } from '../../ui/mid-ellipsis.ts';
 

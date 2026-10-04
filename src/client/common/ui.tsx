@@ -97,7 +97,7 @@ export interface IconButtonProps {
   label: string
   onClick?: () => void
   disabled?: boolean
-  /** 高亮态（如抽屉打开时对应按钮 active） */
+  /** 高亮态（如侧滑面板打开时对应按钮 active） */
   active?: boolean
   /** 危险语义（红色；用于行内删除等破坏性动作的视觉隔离） */
   danger?: boolean

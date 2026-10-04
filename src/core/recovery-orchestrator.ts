@@ -57,9 +57,21 @@ export interface RecoveryOrchestratorDeps {
   /**
    * 清除 SAFE MODE（解除阻断）。宿主注入 `phase3Recovery.clearSafeMode()`：
    * 同时重置内存 `safeModeActive` 标志（isBlocked 读它）与 durable 标记。
-   * 仅当 recovery 成功且无其他未解决 incident 时调用（见 maybeClearSafeMode）。
+   * 仅在「无其他未解决 incident」时调用（判据见 resolveSafeMode，issue #56 起为单一实现）。
    */
   clearSafeMode: () => Promise<void>;
+  /**
+   * SAFE MODE durable 标记当前是否阻断（issue #56）。
+   *
+   * 必须以**动态探测**提供（读 durable 标记的 fail-closed 三态，与 mutation gate 的
+   * `isBlocked` 同源），而不是创建期捕获的快照：RECOVERY_REQUIRED 的 durable 标记在
+   * 启动分类阶段才落盘，创建期读取会恒为 false。
+   *
+   * 未注入 → 恒 false（等价改造前行为：status 不含 safeMode、clearSafeMode 不检查前置态）。
+   * 有它之后：「已结案但保护仍开着」（dismiss 后的旧版本遗留态、手工删过 journal 的残留态）
+   * 才能在界面上看得见、并有显式出口 —— 这正是 issue #56 里「面板显示无事可做、写操作却 423」的根因。
+   */
+  safeModeBlocked?: () => boolean;
   /**
    * 只读环境锁状态（issue #31）。**由宿主注入而非本模块 import**：本模块不依赖 env-lock，
    * 无锁环境（测试 mock 端口）可返回保守的 UNKNOWN_STATE。
@@ -93,10 +105,17 @@ export interface RecoveryOrchestrator {
   dismiss(operationId: string, userConfirmed: boolean): Promise<RecoveryResult>;
   /** issue #31：显式回收 stale 残留锁（无 operationId；非 journal 事项）。 */
   recoverStaleLock(userConfirmed: boolean): Promise<RecoveryResult>;
+  /**
+   * issue #56：显式解除 SAFE MODE（无 operationId；同样不是 journal 事项）。
+   * 判据与 verify/dismiss 后的自动解除**同一个** resolveSafeMode：还有未解决 incident
+   * 时拒绝清除（ok=false + reason），不让这个入口变成绕过恢复的旁路。
+   */
+  clearSafeModeBlock(userConfirmed: boolean): Promise<RecoveryResult>;
 }
 
 export function createRecoveryOrchestrator(deps: RecoveryOrchestratorDeps): RecoveryOrchestrator {
   const { store, runs, snapshotsDir, host, snapshotExists, getEnvironmentFingerprint, clearSafeMode, inspectLockState, recoverStaleLock } = deps;
+  const safeModeBlocked = deps.safeModeBlocked ?? ((): boolean => false);
 
   /**
    * 只读 recovery decision（不修改 journal）。**不用 reconcileActive**：其 §6.5 硬门控会把
@@ -120,13 +139,23 @@ export function createRecoveryOrchestrator(deps: RecoveryOrchestratorDeps): Reco
   };
 
   /**
-   * recovery 成功后清除 SAFE MODE（§5.3 / §10.2「SAFE MODE 退出」）。
+   * **SAFE MODE 的唯一解除判据**（§5.3 / §10.2「SAFE MODE 退出」，issue #56 收敛为单一实现）。
+   *
    * 仅当 **不存在其他未解决 active journal**（active 全部为已解决 terminal：
    * COMMITTED/ROLLED_BACK/RECOVERED，**NEEDS_ATTENTION 视为未解决**——它代表仍需
    * 人工处理的 incident，必须保持 SAFE MODE 阻断）时，才清除 durable 标记与内存标志。
    * fail-closed：扫描失败不强行清除（保守保留 SAFE MODE）。
+   *
+   * 三个调用时机（此前只有第一个，正是 issue #56 的死结）：
+   *  - verify 判 ROLLED_BACK 之后（恢复成功）；
+   *  - **dismiss 之后**：用户放弃恢复 = 该 incident 结案，若没有别的未解决 incident
+   *    就必须一并解除保护，否则「面板空了、写操作仍 423、重启无效」；
+   *  - **显式清除路由**（`clearSafeModeBlock(state)`，面板上的解除入口）。
+   *
+   * @param probeOnly true = 只判定不写盘（供 status 如实回传「结案但保护仍开」）。
+   * @returns 判定通过时实际调用 clearSafeMode 后为 true。
    */
-  const maybeClearSafeMode = async (): Promise<void> => {
+  const resolveSafeMode = async (probeOnly = false): Promise<boolean> => {
     try {
       const activeIds = await store.scanActive();
       let allResolved = true;
@@ -137,11 +166,12 @@ export function createRecoveryOrchestrator(deps: RecoveryOrchestratorDeps): Reco
         if (j.state === 'NEEDS_ATTENTION') { allResolved = false; break; }
         if (!isTerminalState(j.state)) { allResolved = false; break; }
       }
-      if (allResolved) {
-        await clearSafeMode();
-      }
+      if (!allResolved) return false;
+      if (!probeOnly) await clearSafeMode();
+      return true;
     } catch {
       // 扫描失败保守：不清除 SAFE MODE（fail-closed）
+      return false;
     }
   };
 
@@ -178,6 +208,11 @@ export function createRecoveryOrchestrator(deps: RecoveryOrchestratorDeps): Reco
 
   return {
     async status() {
+      // issue #56：SAFE MODE 阻断态必须如实回传（此前 status 只有 incidents/running/lock）。
+      // 「durable 标记还在 + active/ 已空」= 保护开着却没有可操作对象 —— 界面据此渲染
+      // 「解除安全模式」入口，而不是显示「暂无需要处理的恢复事项」然后继续 423。
+      const blocked = safeModeBlocked();
+      const clearable = blocked ? await resolveSafeMode(true) : false;
       const activeIds = await store.scanActive();
       const incidents: Array<{
         operationId: string; operationType: string; state: string; decision: string;
@@ -213,7 +248,9 @@ export function createRecoveryOrchestrator(deps: RecoveryOrchestratorDeps): Reco
       } catch {
         lock = { state: 'UNKNOWN_STATE', attention: true };
       }
-      return { status: 200, body: { incidents, running, lock } };
+      // issue #56：SAFE MODE 阻断态如实回传。`clearable` = 「结案但保护仍开着」
+      // （durable 标记在、没有任何未解决 incident）—— 界面据此渲染显式解除入口。
+      return { status: 200, body: { incidents, running, lock, safeMode: { blocked, clearable } } };
     },
 
     async preview(operationId) {
@@ -298,7 +335,7 @@ export function createRecoveryOrchestrator(deps: RecoveryOrchestratorDeps): Reco
       });
       if (terminal === 'ROLLED_BACK') await store.moveToCompleted(operationId).catch(() => undefined);
       // §5.3 / §10.2：recovery 成功后若无其他未解决 incident → 清除 SAFE MODE（解除阻断）
-      if (terminal === 'ROLLED_BACK') await maybeClearSafeMode();
+      if (terminal === 'ROLLED_BACK') await resolveSafeMode();
       return {
         status: 200,
         body: {
@@ -331,7 +368,45 @@ export function createRecoveryOrchestrator(deps: RecoveryOrchestratorDeps): Reco
       // dismiss → quarantine（用户放弃；不删除 snapshot/journal evidence，不强行 RECOVERED）
       const result = await executeRecovery(store, { operationId, action: 'dismiss', snapshotId: j.snapshotId }, true);
       if (result === 'failed') return { status: 400, body: { error: 'dismiss 失败' } };
-      return { status: 200, body: { ok: true, operationId, dismissed: true } };
+      // issue #56：放弃恢复 = 该 incident 结案 —— 若没有别的未解决 incident，必须同时解除保护。
+      // 此前这里只 quarantine 不清 SAFE MODE，而唯一的清除点挂在 verify(ROLLED_BACK) 上，
+      // 事务已被移出 active/ ⇒ 那条分支永远走不到：界面显示「暂无待处理」，写操作却持续 423，
+      // 且 durable 标记跨重启生效 ⇒ 用户没有任何自动出路（只能手工删 transactions/safe-mode）。
+      // 判定仍是同一份 resolveSafeMode（还有别的 incident 时它会保守保留保护）。
+      const cleared = await resolveSafeMode();
+      return { status: 200, body: { ok: true, operationId, dismissed: true, safeMode: cleared } };
+    },
+
+    /**
+     * 显式解除 SAFE MODE（issue #56 的通用出口）。
+     *
+     * 适用场景（dismiss 修复后仍然存在）：事务已被手工移走/隔离、durable 标记却还在。
+     * 语义与 verify/dismiss 完全同源 —— 调用同一份 resolveSafeMode 判定，**绝不无条件清标记**：
+     * 只要还有 NEEDS_ATTENTION / 非 terminal 的 active journal 就拒绝（ok=false + 原因），
+     * 避免让「解除入口」变成绕过恢复的旁路。
+     */
+    async clearSafeModeBlock(userConfirmed) {
+      if (userConfirmed !== true) return { status: 400, body: { error: 'userConfirmed required' } };
+      if (!safeModeBlocked()) {
+        // 幂等：本来就没在阻断（旧客户端/重复点击）→ 不是错误，如实回报
+        return { status: 200, body: { ok: true, cleared: false, reason: 'not-blocked' } };
+      }
+      const activeIds = await store.scanActive();
+      let unresolved = 0;
+      for (const opId of activeIds) {
+        const j = await store.loadActive(opId);
+        if (j === null) continue;
+        if (j.state === 'NEEDS_ATTENTION' || !isTerminalState(j.state)) unresolved += 1;
+      }
+      if (unresolved > 0) {
+        return { status: 400, body: { ok: false, cleared: false, reason: 'unresolved-incidents', unresolved } };
+      }
+      const cleared = await resolveSafeMode();
+      if (!cleared) {
+        return { status: 500, body: { ok: false, cleared: false, reason: 'clear-failed' } };
+      }
+      host.log.warn('SAFE MODE cleared explicitly (user confirmed)');
+      return { status: 200, body: { ok: true, cleared: true } };
     },
 
     /**

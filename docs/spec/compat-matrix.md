@@ -158,7 +158,14 @@ react, react/jsx-runtime, react-dom, react-dom/client,
 | **DSH 应用本体** | `D:\Apps\nodejs\node_global\node_modules\@deepseek-ai\dsh` | **`0.1.5-rc.1`** | — （仅决定 loader / 客户端 shell 行为） |
 | **DSH profile 解析** | `$DSH_HOME/profiles/node_modules/@deepseek-ai/*`（244 个包） | **`0.1.5-rc.2`** | 否（见下） |
 | **插件自身解析** | `D:\Projects\personal\dsh-config-manager\node_modules/@deepseek-ai/*` | **`0.1.0-rc.6` / `0.1.0-rc.8`** | **是** |
-| 仓库 devDependencies 声明 | `package.json:109-137` | 多数 `^0.1.0-rc.6`，`dsh-timeout` 为 `^0.1.0-rc.8` | 决定上者装到什么 |
+| 仓库 devDependencies 声明 | `package.json`（2026-10-04 复核，PR #64 / #65 合并后） | 多数 `^0.1.0-rc.6`；`dsh-timeout` 为 `^0.1.0-rc.8`；**`dsh-client-ui-slots` / `dsh-client-locale` 为 `^0.2.0-rc.2`**（`package-lock.json` 实测解析到 `0.2.0-rc.2`；其余官方包在 npm 上没有 0.2.0-rc.2，`dsh-client-runtime` 最新仍为 `0.1.0-rc.8`） | 决定上者装到什么 |
+
+> **2026-10-04 追加（PR #64 / #65）**：`dsh-client-ui-slots` 与 `dsh-client-locale` 的 devDependencies 下限已提到
+> `^0.2.0-rc.2`。两者在本插件里**只有 type-only import**（`src/client/index.ts:18,22`、`src/client/client-types.ts:13`），
+> 因此升级只影响类型面：**不进产物、不改运行时解析**（peer 区间仍是 `>=0.1.0-rc.6 <0.3.0-0`，用户端不受影响）。
+> 官方 monorepo 并非每个包都发 0.2.0-rc.2（`dsh-client-runtime` 就没有），所以「让全部官方包同版本」在当前上游
+> 发布节奏下做不到。本机 `node_modules` 尚未重装，仍为 `0.1.0-rc.6` / `0.1.0-rc.8`；下一次 `npm install` 后这两个
+> 包会变成 `0.2.0-rc.2`（`package-lock.json` 已按此锁定）。
 
 **为什么插件用的是 rc.6/rc.8 而不是 profile 的 rc.2**：
 
@@ -234,6 +241,7 @@ react, react/jsx-runtime, react-dom, react-dom/client,
 | **`desktop` 是 Electron 独占保留档案**：普通 CLI 对 `--profile desktop` **无条件**报 `error: profile "desktop" is managed exclusively by the Electron application` | `@deepseek-ai/dsh@0.1.5-rc.1` 与 `0.2.0-rc.2` 的 `lib/bin.js` 中 `rejectElectronProfile`（`plugin` 子命令分支只在 `manageDesktopProfile` 为真时跳过它）；0.2.0 的 `lib/plugin-BGnVfe_D.js` 对 desktop 额外要求 `package.json` 已存在 | 插件通道（安装/更新/卸载/恢复）在桌面端一度**全部失败**；0.1.67 起改走下面的 CLI 载体 |
 | **桌面端自带 CLI 载体 = `@deepseek-ai/dsh-desktop-host/lib/cli.js`**：它以 `runCli({ manageDesktopProfile: true, packageManager })` 启动，用桌面端内置 runtime 与内置 pnpm；宿主进程由 Electron 主进程以 Node 模式拉起，`process.argv[1]` 即同包的 `lib/index.js` | `app.asar` 内 `dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js`（`runDesktopCli`）与 `lib/index.js`（`main()` 读 `process.argv[2..6]`）；Electron 主进程 `lib/main.js` 的 `HostProcess.start()`（`spawn(node, ['--expose-internals', <runtimeDir>/node_modules/@deepseek-ai/dsh-desktop-host/lib/index.js, runtimeDir, projectDir, primaryRuntime, pnpm, nodeBin])`，env 带 `ELECTRON_RUN_AS_NODE=1`） | 插件据此识别载体（`src/utils/desktop-carrier.ts`）并在目标是 desktop 档案时改用它 |
 | **运行时在 `app.asar` 内**：桌面端的 `@deepseek-ai/dsh` 是 `0.2.0-rc.2`，磁盘上 `<home>/profiles/node_modules/@deepseek-ai/dsh` 却是 web 档案 hoisted 出来的 `0.1.5-rc.1` | `app.asar` 内 `dsh/node_modules/@deepseek-ai/dsh/package.json`（`version: 0.2.0-rc.2`）vs 本机 `<DSH_HOME>/profiles/node_modules/@deepseek-ai/dsh/package.json`（`0.1.5-rc.1`） | 「关于」页与导出 manifest 的 DSH 版本一度报错版本号；0.1.67 起优先读 `profileContext.installAnchor`（= `app.asar` 内那份 `package.json`） |
+| **会话日志格式版本单向不兼容，且 DSH 静默跳过**：读会话时对非本 build 的 `header.version` 直接拒绝，而会话列表 `listArtifacts()` 对这种错误 `continue`（不报错、不显示 → 用户看到「对话消失」）。高版本可读低版本（V0→V4 迁移链），**反向不可读** | `@deepseek-ai/dsh-session` 的 `SESSION_FORMAT_VERSION`：桌面端内置 0.2.0-rc.2 = **4**，磁盘 CLI 档案 0.1.5-rc.1 = **3**；`dsh-session-persistence-jsonl` 的 `refuseForeignFormatVersion` 与 `listArtifacts` 的 catch-continue | 插件在导入/同步分析阶段做格式体检并告警（`import.sessionsFormatUnsupported`），档案页展示每个档案的 DSH 版本与会话格式版本；**跨版本迁移前请先把目标机 DSH 升到与导出机相同或更新的版本**（反向只能靠升级，插件不代做格式迁移） |
 | **`profileContext` 是宿主 boot 时 provide 的服务**（含 `name` / `dir` / `patchPath` / **`installAnchor`** / `startedBundles` / `packageManager`…），desktop 才带 `packageManager` | 0.2.0-rc.2 的 `dsh/lib/profile-boot-BZ2ZjNWi.js` 的 `profileContext` 构造 + `hostCtx.provide("profileContext", …)` | 档案识别（issue #52）、DSH 版本（0.1.67）都从这里取；`packageManager` 可作为「是否桌面端」的旁证 |
 
 > 真机复核（2026-09-30，隔离 `DSH_HOME`）：桌面端载体 `plugin --profile desktop add <pkg>` 落盘成功（`package.json` 依赖 + `node_modules` + pnpm 日志），

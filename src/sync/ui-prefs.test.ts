@@ -35,6 +35,30 @@ test('writeUiPrefs：无通道 → 文件不写 lastSyncChannel 字段', async (
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
+test('ui-prefs：会话格式处置（T1）字段往返 + 非法值忽略（绝不猜）', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ui-prefs-sessionfmt-'));
+  try {
+    // 合法值往返
+    await writeUiPrefs(dir, { schemaVersion: 1, sessionFormatDisposition: 'skip' });
+    assert.equal((await readUiPrefs(dir)).sessionFormatDisposition, 'skip');
+    const raw = JSON.parse(await fs.readFile(path.join(dir, UI_PREFS_FILE), 'utf8'));
+    assert.equal(raw.sessionFormatDisposition, 'skip');
+
+    // 未配置 → 不落字段、读回 undefined（由调用方回退缺省 abort）
+    await writeUiPrefs(dir, defaultUiPrefs());
+    assert.equal((await readUiPrefs(dir)).sessionFormatDisposition, undefined);
+    assert.equal('sessionFormatDisposition' in JSON.parse(await fs.readFile(path.join(dir, UI_PREFS_FILE), 'utf8')), false);
+
+    // 手改文件写入非法值 → 忽略（不是「读到就用」）
+    await fs.writeFile(
+      path.join(dir, UI_PREFS_FILE),
+      JSON.stringify({ schemaVersion: 1, sessionFormatDisposition: 'BLOCK' }),
+      'utf8',
+    );
+    assert.equal((await readUiPrefs(dir)).sessionFormatDisposition, undefined);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
 test('readUiPrefs：文件不存在 → 缺省（无通道）', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ui-prefs-default-'));
   try {

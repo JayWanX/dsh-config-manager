@@ -154,6 +154,8 @@ export abstract class FileCollectionAdapter implements ConfigAdapter<FilesSectio
       },
       sizeBytes: collected.totalBytes,
       items: unitsFromEntries(this.id, collected.sizes, (rel) => this.unitIdOf(rel)),
+      // 本趟 stat 顺带取到的时间（宿主有 statInfo 时才有）：调用方据此省掉第二趟逐文件 stat。
+      ...(collected.statTimes.size > 0 ? { statTimes: collected.statTimes } : {}),
     };
   }
 
@@ -178,16 +180,20 @@ export abstract class FileCollectionAdapter implements ConfigAdapter<FilesSectio
     sizes: { relativePath: string; sizeBytes: number }[];
     totalBytes: number;
     warnings: string[];
+    /** size 模式 + 宿主实现 statInfo 时：本趟真正 stat 过的文件（homeDir 相对路径 → mtime） */
+    statTimes: Map<string, number>;
   }> {
     const files: FilesSection['files'] = [];
+    const statTimes = new Map<string, number>();
     const sizes: { relativePath: string; sizeBytes: number }[] = [];
     const warnings: string[] = [];
     const allow = options.includeItems?.[this.id];
     // issue #37：用「跟随 junction/符号链接」的遍历，并把跟随/跳过的链接写进告警——
     // 此前链接目录及其全部内容被静默排除，备份仍报成功。
+    // 枚举走 listRelPaths 钩子（单文件分区覆写它，避免对 home 根整目录递归）。
     let listing: RecursiveListing = { paths: [], skippedLinks: [], followedLinks: 0, unreadableDirs: [] };
     try {
-      listing = await listFilesDetailed(ctx.fs, this.baseDir);
+      listing = await this.listRelPaths(ctx);
     } catch {
       // 目录不存在视为空
     }
@@ -230,7 +236,7 @@ export abstract class FileCollectionAdapter implements ConfigAdapter<FilesSectio
       const pending: { rel: string; entry: FilesSection['files'][number]; sizeBytes: number }[] = [];
       let unitBytes = 0;
       for (const member of unitEntries.get(unitId) ?? []) {
-        const read = await this.readMember(ctx, member.rel, mode);
+        const read = await this.readMember(ctx, member.rel, mode, statTimes);
         unitBytes += read.sizeBytes;
         if (unitBytes > room) break;
         pending.push({
@@ -267,7 +273,18 @@ export abstract class FileCollectionAdapter implements ConfigAdapter<FilesSectio
     }
     if (rels.length === 0) warnings.push(msgOf(ctx)('adapter.dirEmpty', { type: this.displayName }));
     warnings.push(...linkWarnings(msgOf(ctx), this.displayName, listing));
-    return { entries: files, sizes, totalBytes: usedBytes, warnings };
+    return { entries: files, sizes, totalBytes: usedBytes, warnings, statTimes };
+  }
+
+  /**
+   * 分区清单枚举（`export` / `preview` 共用；两者必须走同一份清单，否则预览与导出分叉）。
+   *
+   * **单文件分区必须覆写它**：`AgentInstructionsAdapter` 的 `baseDir` 是 ''（AGENTS.md 就放在
+   * `$DSH_HOME` 根），走缺省实现会递归**整个 home** —— 实测 4016 个文件 / 242 MB / 4.8 s，而且
+   * 选择器会把 `profiles/`、`sessions/`、`attachments/` 这些无关目录当成该分区的「单元」。
+   */
+  protected async listRelPaths(ctx: HostContext): Promise<RecursiveListing> {
+    return listFilesDetailed(ctx.fs, this.baseDir);
   }
 
   /**
@@ -282,8 +299,18 @@ export abstract class FileCollectionAdapter implements ConfigAdapter<FilesSectio
     ctx: HostContext,
     rel: string,
     mode: 'content' | 'size',
+    statTimes?: Map<string, number>,
   ): Promise<{ data: Uint8Array; sizeBytes: number; contentHash: string }> {
     if (mode === 'size') {
+      // 优先 statInfo：一次 stat 同时拿体积与 mtime（sessions 的排序时间顺带就有了，
+      // 省掉 unitActivityTimes 的第二趟逐文件 stat —— 实测会话树 983 个文件）。
+      if (ctx.fs.statInfo !== undefined) {
+        const info = await ctx.fs.statInfo(rel);
+        if (info !== null) {
+          statTimes?.set(rel, info.mtimeMs);
+          return { data: EMPTY_DATA, sizeBytes: info.size, contentHash: '' };
+        }
+      }
       const size = (await ctx.fs.statSize?.(rel)) ?? null;
       if (size !== null) return { data: EMPTY_DATA, sizeBytes: size, contentHash: '' };
     }

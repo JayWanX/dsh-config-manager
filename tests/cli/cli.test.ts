@@ -61,6 +61,40 @@ test('C-01 parseCli：子命令/help/未知命令/缺值/未知参数/子命令�
   assert.equal(parseCli(['restore', '--bogus']).ok, false, '未知参数 → 错误');
 });
 
+test('C-01b parseCli：web（离线救急台）的参数面与拒绝面', () => {
+  const plain = parseCli(['web']);
+  assert.ok(plain.ok, 'web 是合法子命令');
+  if (!plain.ok) return;
+  assert.equal(plain.options.command, 'web');
+  assert.equal(plain.options.port, undefined, '端口缺省不写死（= 内核分配）');
+  assert.equal(plain.options.noOpen, undefined);
+  assert.equal(plain.options.idleTimeoutMin, undefined);
+
+  const full = parseCli(['web', '--port', '3099', '--no-open', '--home', '/h', '--idle-timeout', '5', '--data-root', '/r']);
+  assert.ok(full.ok);
+  if (!full.ok) return;
+  assert.equal(full.options.port, 3099);
+  assert.equal(full.options.noOpen, true);
+  assert.equal(full.options.home, '/h');
+  assert.equal(full.options.idleTimeoutMin, 5);
+  assert.equal(full.options.dataRoot, '/r');
+
+  // 只读台：读写类参数一律拒绝，绝不悄悄忽略
+  for (const flag of ['--dry-run', '--yes', '--fix', '--out', 'x.zip', '--json', '--id', 'x']) {
+    assert.equal(parseCli(['web', flag]).ok, false, 'web 不支持 ' + flag);
+  }
+  assert.equal(parseCli(['web', '--port']).ok, false, '--port 缺值');
+  assert.equal(parseCli(['web', '--port', '-1']).ok, false, '端口必须非负');
+  assert.equal(parseCli(['web', '--port', '70000']).ok, false, '端口不得超过 65535');
+  assert.equal(parseCli(['web', '--port', 'abc']).ok, false, '端口必须是整数');
+  assert.equal(parseCli(['web', '--idle-timeout', 'x']).ok, false, '空闲超时必须是非负整数');
+
+  // 反向：web 专属参数不得泄漏到其它子命令
+  assert.equal(parseCli(['snapshots', '--port', '1']).ok, false, '--port 只属于 web');
+  assert.equal(parseCli(['verify', '--no-open']).ok, false, '--no-open 只属于 web');
+  assert.equal(parseCli(['restore', '--idle-timeout', '5']).ok, false, '--idle-timeout 只属于 web');
+});
+
 test('C-02 resolveDataDir/resolveDshHome：DSH_HOME 环境变量与缺省 ~/.dsh', () => {
   assert.equal(resolveDshHome({ DSH_HOME: '/custom/home' }), '/custom/home');
   assert.equal(resolveDshHome({ DSH_HOME: '' }), path.join(os.homedir(), '.dsh'));

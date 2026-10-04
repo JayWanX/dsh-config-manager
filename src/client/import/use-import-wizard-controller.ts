@@ -10,15 +10,26 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { ConflictCollector } from '../../ui/conflict-view.ts'
 import type { FlowPhase } from '../../ui/flow.ts'
 import { applicablePathIssues, importFlowFlags, importPreviewStageAfter, nextImportPhase, type ImportFlowInputs } from '../../ui/import-wizard.ts'
+import {
+  DEFAULT_SESSION_FORMAT_DISPOSITION,
+  sessionFormatFactsFromAnalysis,
+  sessionFormatSkipUnits,
+  type SessionFormatDisposition,
+} from '../../ui/session-format-disposition.ts'
 import type { ConsultReport } from '../../core/migration-consult.ts'
 import type { ConfigManagerApi, UploadResponse } from '../api.ts'
 import type { TranslateNS } from '../client-types.ts'
 import { runStore } from '../run-store.ts'
 import {
-  buildSelectedPlan, effectiveImportPlan, effectiveImportSelection, excludedPlanItems,
+  buildSelectedPlan, defaultSelectionFromPlan, effectiveImportPlan, effectiveImportSelection, excludedPlanItems,
   planWriteSections, sectionsFromPlan, selectionHasItems, type Selection,
 } from '../../ui/selection-model.ts'
 import { applyPickedFile, cancelSelection, fileSelectModel } from './import-file-select.ts'
+import { ConfigManagerApiError } from '../common/http.ts'
+// 只 import 零依赖常量模块（utils/shared-constants）：这里若 import security/container-kind.ts，
+// 会把 security 桶 → encryption.ts（node:crypto/node:util）打进 lib/client.js，DSH 的 client loader
+// 直接报 "missed the module table"，整个插件不加载（仓库既有铁律 + 本轮实测）。
+import { ENCRYPTED_CONTAINER_CODE } from '../../utils/shared-constants.ts'
 
 export function useImportWizardController(api: ConfigManagerApi, t: TranslateNS<'config-manager'>) {
 
@@ -83,6 +94,20 @@ export function useImportWizardController(api: ConfigManagerApi, t: TranslateNS<
    * 本地 state（不持久化）：换备份或重走流程时回到咨询页（见下方 zipPath effect）。
    */
   const [previewStage, setPreviewStage] = useState<'consult' | 'select'>('consult')
+  /**
+   * 会话格式处置的**阻断态**（T1）：宿主在 /plan 阶段返回 409 + code=sessionFormatUnsupported
+   * 时为 true —— 此刻没有任何计划，预览页改为渲染「三选一 + 可复制指引」，而不是一屏错误。
+   * 本地 state（非持久化）：它描述的是「这一次 /plan 被拒了」，刷新后按当前选择重新请求即可。
+   */
+  const [sessionFormatBlocked, setSessionFormatBlocked] = useState(false)
+  /** 当前处置（持久化在 run 切片里：切页签/刷新都必须保留用户的这个决定） */
+  const sessionFormatDisposition: SessionFormatDisposition = imp.sessionFormatDisposition
+  const setSessionFormatDisposition = (next: SessionFormatDisposition): void => {
+    wizard.setSessionFormatDisposition(next)
+    runStore.patch({ import: { sessionFormatDisposition: next } })
+  }
+  /** 本机读不了的会话（来自 /analyze 的单元级结论；没有/无法判定 → null，界面据此不渲染控件） */
+  const sessionFormatFacts = sessionFormatFactsFromAnalysis(imp.analysis)
 
   const setPhase = (next: FlowPhase): void => {
     runStore.patch({ import: { phase: next } })
@@ -192,27 +217,66 @@ export function useImportWizardController(api: ConfigManagerApi, t: TranslateNS<
 
   /**
    * 一键导入（快照面板「备份文件 → 导入」）：消费 runStore.snapshots.importBackup，
-   * 跳过上传直接对宿主 exports 目录的 zipPath 执行 selectZip（analyze 零写入）。
+   * 跳过上传直接对宿主 exports 目录的 zipPath 分析（analyze 零写入）。
    * 一次性瞬态：消费后立即清空，刷新/重挂载不会重放；与 onPickFile 共用
    * pickGeneration 竞态守卫（用户取消选择后晚到的分析结果丢弃）。
+   *
+   * issue #55：宿主侧路径**没有上传那一步的形态探测**，所以「整包加密」的备份此前直接被
+   * 当 ZIP 分析 → 用户看到「不是合法的 ZIP 文件（缺少中央目录结束记录）」。现在快照面板
+   * 把列表接口的 containerType 带进来，这里与 onPickFile 的加密分支**逐字同源**：
+   * 先进入解密阶段（decrypt-archive），解锁成功后再走同一个 selectZip。
    */
   useEffect(() => {
     const req = runStore.getSnapshot().snapshots.importBackup
     if (req === null) return
     runStore.patch({ snapshots: { importBackup: null } })
+    // **先完整重置向导**：此前这里只清了 encrypt/decrypt 那几个字段，
+    // 于是上一次导入的 step / analysis / plan / result / progress 全部残留 ——
+    // 从「上次已执行到某一步」的状态进来时，向导仍停在那一步，
+    // **加密备份的密码输入框根本不出现**（真机反馈）。
+    // resetWizard 是既有的完整重置（回到 preview + 清 run/plan/result/…），这里复用它，
+    // 不再维护第二份"部分重置"清单（那种清单必然漏字段）。
+    pickGeneration.current += 1
     const generation = pickGeneration.current
+    wizard.reset()
     runStore.patch({
       import: {
-        selectedFileName: req.name,
+        phase: 'preview',
         uploading: true,
+        running: false,
+        progress: null,
+        runId: null,
         error: null,
+        selectedFileName: req.name,
+        conflictCollector: null,
+        conflictStrategy: 'merge',
+        conflictResolutions: {},
+        pathMappings: [],
+        importSelection: null,
+        sessionFormatDisposition: DEFAULT_SESSION_FORMAT_DISPOSITION,
+        secretInputs: {},
         // 换文件：清空上一份备份的仅内存解密状态（与 onPickFile 一致）
         decryptPassword: '',
         decryptRefs: [],
         archiveUnlocked: false,
         containerEncrypted: false,
+        skipRequested: false,
       },
     })
+    const encrypted = req.containerType === 'encrypted'
+    /** 解密阶段：告知向导（容器路径不会被 syncWizard 覆盖回 null）+ 让流程停在解锁页 */
+    const enterDecryptStage = (): void => {
+      wizard.setArchiveEncrypted(true, req.zipPath)
+      runStore.patch({
+        import: { containerEncrypted: true, archiveUnlocked: false, zipPath: req.zipPath, phase: 'decrypt-archive' },
+      })
+      runStore.syncWizard()
+      runStore.patch({ import: { uploading: false } })
+    }
+    if (encrypted) {
+      enterDecryptStage()
+      return
+    }
     wizard.selectZip(req.zipPath)
       .then(() => {
         if (generation !== pickGeneration.current) return
@@ -220,6 +284,13 @@ export function useImportWizardController(api: ConfigManagerApi, t: TranslateNS<
       })
       .catch((err) => {
         if (generation !== pickGeneration.current) return
+        // 旧宿主（列表接口不回 containerType）或别处直传宿主路径：宿主 /analyze 的
+        // 容器闸门会回 code=encrypted-container —— 据此进入解锁阶段，而不是把
+        // 「这是加密备份，需先解锁」当成未知故障弹红条（issue #55 的降级路径）。
+        if (err instanceof ConfigManagerApiError && err.code === ENCRYPTED_CONTAINER_CODE) {
+          enterDecryptStage()
+          return
+        }
         runStore.patch({ import: { error: err instanceof Error ? err.message : String(err) } })
         runStore.syncWizard()
       })
@@ -248,13 +319,42 @@ export function useImportWizardController(api: ConfigManagerApi, t: TranslateNS<
     setPreviewStage((current) => importPreviewStageAfter('new-zip', current))
   }, [imp.zipPath])
 
-  /** Compatibility → Preview */
+  /**
+   * Compatibility → Preview（Dry Run 计划）。
+   *
+   * T1：`abort` 处置下宿主会以 409 + code=sessionFormatUnsupported 拒绝 —— 那不是「出错」，
+   * 而是**必须由用户决策**的流程状态，因此转成阻断态（渲染三选一 + 指引），不弹错误横幅。
+   * 用户改选 skip/guide 后再点同一按钮重试即可。
+   */
   const goPreview = async (): Promise<void> => {
     runStore.patch({ import: { error: null } })
     try {
-      await wizard.confirmCompatibility()
+      const plan = await wizard.confirmCompatibility()
+      setSessionFormatBlocked(false)
+      // skip 处置：这些会话单元**默认不勾选**（复用既有的 Selection/includeItems 机制，
+      // 不新增第二套服务端过滤）。只在用户还没为这份备份做过选择时施加初值 ——
+      // 用户一旦自己勾过（importSelection 已绑定同一 zipPath），界面就是权威。
+      if (sessionFormatDisposition === 'skip' && imp.zipPath !== null) {
+        const units = sessionFormatSkipUnits(sessionFormatFacts, 'skip')
+        const current = imp.importSelection
+        const fresh = current === null || current.zipPath !== imp.zipPath
+        if (fresh && units.length > 0) {
+          const base = defaultSelectionFromPlan(plan)
+          runStore.patch({
+            import: {
+              importSelection: { zipPath: imp.zipPath, selection: { sections: base.sections, excluded: [...units] } },
+            },
+          })
+        }
+      }
       runStore.syncWizard()
     } catch (err) {
+      if (err instanceof ConfigManagerApiError && err.code === 'sessionFormatUnsupported') {
+        setSessionFormatBlocked(true)
+        runStore.patch({ import: { error: null } })
+        runStore.syncWizard()
+        return
+      }
       runStore.patch({ import: { error: err instanceof Error ? err.message : String(err) } })
       runStore.syncWizard()
     }
@@ -405,6 +505,8 @@ export function useImportWizardController(api: ConfigManagerApi, t: TranslateNS<
         conflictResolutions: {},
         pathMappings: [],
         importSelection: null,
+        // 重置向导 = 回到最安全的缺省（中止），不沿用上一份备份的处置选择
+        sessionFormatDisposition: DEFAULT_SESSION_FORMAT_DISPOSITION,
         secretInputs: {},
         decryptPassword: '',
         decryptRefs: [],
@@ -413,6 +515,7 @@ export function useImportWizardController(api: ConfigManagerApi, t: TranslateNS<
         skipRequested: false,
       },
     })
+    setSessionFormatBlocked(false)
   }
 
   return {
@@ -467,6 +570,11 @@ export function useImportWizardController(api: ConfigManagerApi, t: TranslateNS<
     setConsultLoading,
     previewStage,
     setPreviewStage,
+    /** T1：会话格式处置（当前值 / setter / 事实 / 阻断态） */
+    sessionFormatDisposition,
+    setSessionFormatDisposition,
+    sessionFormatFacts,
+    sessionFormatBlocked,
     hasConflicts,
     hasPathIssues,
     hasSecrets,

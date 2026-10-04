@@ -1,5 +1,5 @@
 /**
- * SyncSettingsView.tsx 的**分层/拆分结构守卫**（t42）。
+ * SyncPanel.tsx 的**分层/拆分结构守卫**（t42；v2 第 5 步由 SyncSettingsView.tsx 改名而来）。
  *
  * 为什么是源码级：本仓库 React 无组件测试框架（AGENTS.md：逻辑提炼到 src/ui/ 保证可测），
  * 「组件已退化成装配层 + 渲染段各成文件 + 纯逻辑只在 src/ui」这件事只能按**源码结构**钉住。
@@ -13,7 +13,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-/* ------------------------------- 结构守卫：SyncSettingsView.tsx 的分层边界（t42） */
+/* ------------------------------- 结构守卫：SyncPanel.tsx 的分层边界（t42） */
 
 /**
  * 为什么守卫放在这里而不是 src/client/sync/SyncSettingsView.test.tsx：
@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url'
  * 的源码守卫同源思路）：断言只锚**真实代码结构**（函数定义 / JSX 用法 / import / 逻辑片段），
  * 不锚注释文本，注释里出现同名字符串不会让守卫假绿。
  */
-const VIEW_PATH = fileURLToPath(new URL('./SyncSettingsView.tsx', import.meta.url))
+const VIEW_PATH = fileURLToPath(new URL('./SyncPanel.tsx', import.meta.url))
 const LOGIC_PATH = fileURLToPath(new URL('../../ui/sync-settings-view.ts', import.meta.url))
 /** 统一换行（守卫要按 `\n` 跨行匹配，避免 CRLF 让断言静默失真）。 */
 const readSource = (file: string): string => fs.readFileSync(file, 'utf8').split('\r\n').join('\n')
@@ -68,7 +68,7 @@ test('t42: 组件按职责物理拆分成独立文件（各自导出 + 主文件
     // 单元文件：必须存在、导出该组件、且不反向 import 主文件（避免环）
     const unitSource = readSource(fileURLToPath(new URL('./' + file, import.meta.url)))
     assert.match(unitSource, new RegExp('export function ' + name + '\\('), name + ' 必须在自己的文件里导出')
-    assert.doesNotMatch(unitSource, /from '\.\/SyncSettingsView\.tsx'/, name + ' 不得反向 import 主文件')
+    assert.doesNotMatch(unitSource, /from '\.\/SyncPanel\.tsx'/, name + ' 不得反向 import 主文件')
   }
   // 已迁出的渲染不再出现在主文件（整文件级断言：搬出后必然为真，回退即变红）
   assert.doesNotMatch(viewSource, /WEBDAV_PRESETS\.map/, 'WebDAV 预设渲染必须只在 ChannelConfigDialog.tsx 里')
@@ -76,7 +76,42 @@ test('t42: 组件按职责物理拆分成独立文件（各自导出 + 主文件
   assert.doesNotMatch(viewSource, /settings\.encryptPasswordConfirm/, '加密密码输入必须只在 SecurityOptionsCard.tsx 里')
   // 行数棘轮：主文件显著低于拆分前（1792 行 → 拆分后约 1300 行），回退合并会立刻变大
   const viewLines = viewSource.split('\n').length
-  assert.ok(viewLines <= 1400, '主文件行数必须保持在拆分后的量级（实际 ' + viewLines + ' 行）')
+  // v2 第 5 步把「当前通道」参数化并抽出 ChannelCard：行数仍须保持拆分后的量级。
+  // 上限随「确实不得不落在装配层」的改动上调，且每次上调都要有理由（否则棘轮会被慢慢磨平）：
+  // 1450 → 1480（issue #59/#60）：commit() 必须在 runStore.patch 之后把**在途密码**写回内存
+  // （否则任何无关 patch 都会清空用户正在输入的 webdav 密码），加上列表回传的读失败提示接线。
+  // 展示段本身已拆到 UnreadableSnapshotsBanner.tsx，所以主文件只多了装配与状态同步的几行。
+  // 1480 → 1500（用户要求：同步通道配置必须能删掉）：断开流程自身已外置到
+  // ChannelClearConfirmDialog.tsx（确认弹窗 + 宿主调用 + 回执），主文件只多了
+  // 「待确认通道」一个状态、一次收尾（清表单/撤在途自动保存/重拉 status）与渲染接线。
+  // 1500 → 1520（用户要求：点 GitHub 登录自动复制一次性授权代码 + 断开 git 通道必须同步复位
+  // 「已登录」内存态）。两条都属于「弹窗/卡片之外的跨切片状态接线」，没有可下沉的纯逻辑：
+  // 复制是浏览器副作用（实现在 common/clipboard.ts），登录态复位是 SyncPanel 自己的内存状态。
+  assert.ok(viewLines <= 1520, '主文件行数必须保持在拆分后的量级（实际 ' + viewLines + ' 行）')
+})
+
+test('t42: 通道卡必须是渲染函数（内联组件 = 每次渲染新类型 → 子树重挂、Select 展开态清零）', () => {
+  // 真机 bug：打开同步页「选择历史快照」下拉时 onOpen 会触发一次 loadSnapshots → 父组件重渲染；
+  // 若通道卡是组件体内定义的组件，React 按类型不同整棵子树重挂，Select 的 open 状态当场归零 ——
+  // 下拉刚展开就被关掉，根本选不中。渲染函数返回 JSX 直接调用即可保持元素标识稳定。
+  assert.doesNotMatch(viewSource, /<ChannelCard[\s/>]/, '通道卡不得渲染成 JSX 组件（内联组件会让子树在每次渲染重挂）')
+  assert.doesNotMatch(viewSource, /const ChannelCard = \(/, '不得在组件体内定义 ChannelCard 组件')
+  assert.match(viewSource, /const renderChannelCard = \(channel: SyncChannel\): ReactNode =>/, '通道卡必须是返回 JSX 的渲染函数')
+  assert.match(viewSource, /\{renderChannelCard\('git'\)\}/, 'git 通道卡必须经渲染函数调用')
+  assert.match(viewSource, /\{renderChannelCard\('webdav'\)\}/, 'webdav 通道卡必须经渲染函数调用')
+})
+
+test('t42: 断开 git 通道必须同步复位内存登录态（令牌槽位被删 = 已登出，否则登录入口恒隐藏）', () => {
+  // 真机用户报告：点「断开配置」删掉的是 SYNC_CREDENTIAL_REF —— 与 GitHub 登录**同一个槽位**，
+  // 但 githubSignedIn 当时不复位，登录块恒隐藏，用户以为要重启 profile 才能重新登录。
+  const start = viewSource.indexOf('const onChannelCleared')
+  assert.ok(start > 0, 'onChannelCleared 必须存在')
+  const body = viewSource.slice(start, start + 900)
+  assert.match(body, /channel === 'git' \? \{ githubSignedIn: false, github: initialGithub \}/, '断开 git 必须复位 githubSignedIn + 清 github 流程态')
+})
+
+test('t42: 发起 GitHub 登录即自动复制一次性授权代码（用户要求）', () => {
+  assert.match(viewSource, /copyTextToClipboard\(info\.userCode\)/, '一次性代码必须在登录发起后自动复制（走 common/clipboard.ts）')
 })
 
 test('t42: 未新增硬编码颜色（DESIGN.md：颜色/阴影走 --dsw-* token）', () => {

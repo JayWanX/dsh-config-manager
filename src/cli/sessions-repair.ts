@@ -70,7 +70,17 @@ export function parseRepairMaps(maps: readonly string[]): { mappings: PathMappin
 /** 扫描 <home>/sessions：projectKey 段 → 会话目录 → 首帧 cwd。任何读不出的都如实记为「无法判定」。 */
 async function scanSessions(sessionsRoot: string, io: SessionsRepairIo): Promise<ScannedSession[]> {
   const out: ScannedSession[] = [];
-  const projectDirs = await fs.readdir(sessionsRoot, { withFileTypes: true });
+  let projectDirs: import('node:fs').Dirent[];
+  try {
+    projectDirs = await fs.readdir(sessionsRoot, { withFileTypes: true });
+  } catch (error) {
+    // 会话根不是目录 / 读不出来（ENOTDIR、EACCES…）：绝不能把裸异常抛给调用方
+    // （救急台会因此吐一段 Node 原始 JSON 500 —— 验收 F3）。如实报错并返回空扫描结果。
+    const code = (error as { code?: string }).code;
+    io.error('会话根读不出来 / sessions root not readable（' + String(code ?? 'unknown') + '）: ' + sessionsRoot);
+    io.error(error instanceof Error ? error.message : String(error));
+    return out;
+  }
   for (const entry of projectDirs) {
     if (!entry.isDirectory()) continue;
     const projectKey = entry.name;

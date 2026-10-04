@@ -167,7 +167,7 @@ export function HistoryPanel({ historyApi, t }: HistoryPanelProps) {
           <Select
             value={String(state.filter.recent ?? 0)}
             onChange={(next) => setFilter({ recent: Number(next) })}
-            /* 与前两个下拉同构（「<维度>: 全部」），否则窄抽屉里三个「全部」含义不明 */
+            /* 与前两个下拉同构（「<维度>: 全部」），否则窄面板里三个「全部」含义不明 */
             options={[
               { value: '0', label: `${t('history.filter.recent')}: ${t('history.filter.recent.all')}` },
               { value: '50', label: t('history.filter.recent.50') },
@@ -231,7 +231,7 @@ function HistoryList({ groups, t }: { groups: ReturnType<typeof groupByKind>; t:
 
 function HistoryRow({ entry, t }: { entry: StoredMigrationHistoryEntry; t: TranslateNS<'config-manager-history'> }) {
   const result = <Badge kind={resultBadgeKind(entry.result)}>{t(`history.result.${entry.result}`)}</Badge>
-  // 时间：本地紧凑时间（悬停给完整本地时间）。原样渲染 ISO（含 T/Z/毫秒）在 409px 抽屉里既占宽又难扫读。
+  // 时间：本地紧凑时间（悬停给完整本地时间）。原样渲染 ISO（含 T/Z/毫秒）在 409px 宽的旧抽屉里既占宽又难扫读。
   const time = formatDateTime(entry.at)
   const timeTitle = formatDateTimeFull(entry.at)
   const sections = formatHistorySections(entry.sections)

@@ -68,7 +68,7 @@ export const inject = ['slots', 'locale']
 export type { ConfigManagerSectionProps } from './ConfigManagerSection.tsx'
 export type { ExportViewProps } from './export/ExportView.tsx'
 export type { ImportWizardViewProps } from './import/ImportWizardView.tsx'
-export type { SyncSettingsViewProps } from './sync/SyncSettingsView.tsx'
+export type { SyncPanelProps } from './sync/SyncPanel.tsx'
 export type { MarketPanelProps } from './market/MarketPanel.tsx'
 export type { AboutPanelProps } from './about/AboutPanel.tsx'
 export type { ConfigManagerApiError, DownloadResult, ServiceStatus, UploadResponse } from './api.ts'
@@ -115,6 +115,6 @@ export function apply(ctx: ClientContext): void {
     order: 60,
     label: () => t('section.label'),
     locale: NS,
-    inject: () => ({ api, syncApi, syncT, marketApi, marketT, myConfigsApi, recoveryApi, recoveryT, historyApi, historyT, incidentApi }),
+    inject: () => ({ api, syncApi, syncT, marketApi, marketT, myConfigsApi, recoveryApi, recoveryT, historyApi, historyT, incidentApi, uiT }),
   }, ConfigManagerSection))
 }

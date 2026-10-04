@@ -165,10 +165,16 @@ export function MarketImportReview({
     onErrorChange(null)
     onImportingChange(true)
     try {
-      const fresh = await importApi.createImportPlan(zipPath, marketDecisions(resolutions))
+      // 会话格式处置显式用 'guide'：市场/「我的配置」的复核页**没有**「中止 / 跳过 / 引导」的
+      // 决策界面（它是逐分区批准模型），沿用缺省 abort 会让这类包在这里被 409 挡住而没有出路；
+      // 该分区的内容警告仍由计划与报告如实呈现（T1 的阻断只发生在导入向导/一键同步这两条
+      // 有决策界面的路径上）。
+      const fresh = await importApi.createImportPlan(zipPath, marketDecisions(resolutions), { sessionFormatDisposition: 'guide' })
       onPlanChange(fresh)
       const sub = buildSelectedPlan(fresh, selection)
-      const executed = await importApi.executeImportPlan(zipPath, sub, { confirm: true, rollbackOnError: true })
+      const executed = await importApi.executeImportPlan(zipPath, sub, {
+        confirm: true, rollbackOnError: true, sessionFormatDisposition: 'guide',
+      })
       onResultChange(executed)
       setStep('result')
       const okCount = executed.executed.filter((e) => e.status === 'ok').length

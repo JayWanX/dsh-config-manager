@@ -72,8 +72,16 @@ export function consultRoutes(env: RoutesEnv): WebRoute[] {
         if (type === 'export-zip') {
           data = await readExportZipSource(ref, id, { computeMigratability })
         } else if (type === 'remote-snapshot') {
-          // 用持久化 sync 配置构建引擎，下载快照 → 临时 ZIP → 读取（try/finally 清理）
-          const syncCfg = await prepareSync({})
+          // 用持久化 sync 配置构建引擎，下载快照 → 临时 ZIP → 读取（try/finally 清理）。
+          //
+          // ⚠️ 必须把**请求体**转交给 prepareSync：它解析的是 body（transport + 地址），
+          // 传 {} 会以 `repoUrl is required` 失败（真机反馈：远端快照的「迁移前咨询」不能用）。
+          // 客户端为此带上 transport 与 repoUrl/url（与 /sync/snapshots-list 同一份payload来源）。
+          const syncCfg = await prepareSync({
+            ...(typeof body?.['transport'] === 'string' ? { transport: body['transport'] } : {}),
+            ...(typeof body?.['repoUrl'] === 'string' ? { repoUrl: body['repoUrl'] } : {}),
+            ...(typeof body?.['url'] === 'string' ? { url: body['url'] } : {}),
+          })
           const engine = makeSyncEngine(syncCfg)
           const preview = await engine.preview({ snapshotId: ref.snapshotId ?? id })
           if (!preview.ok || preview.zipPath === '') {

@@ -22,6 +22,15 @@ import type { ImportPlan, ImportResult } from '../core/types.ts';
 export interface ImportNextSteps {
   /** 需要重启 DSH 生效的项（Install 插件 / mcp 变更；description 非敏感计划摘要） */
   restartItems: { id: string; adapter: SectionId; description: string }[];
+  /**
+   * 本次**写入了会话文件** → 必须重启 DSH 才会在会话列表/工作区里出现（T2；count = 写入项数）。
+   *
+   * 为什么要单独一条：插件安装的「需重启生效」是 DSH 侧加载时机决定的，而会话是**启动期**
+   * 读取的（注册表 + 工作区投影），两者不是同一件事，混在一句话里用户会把「重启」理解为
+   * 可选。生态同类插件（dsh-chatsync）同样把这条列为必需提示。
+   * null = 本次没有写入任何会话（不产生提示，避免只导设置时也让人重启）。
+   */
+  sessionsRestart: { count: number } | null;
   /** 仍需手动补录的凭据 ref 名（非值） */
   missingSecrets: string[];
   /** 执行失败 / 用户跳过的项（可重试；含状态与失败原因摘要） */
@@ -48,15 +57,37 @@ export function unresolvedItems(result: ImportResult): { id: string; status: 'fa
     .map((e) => ({ id: e.itemId, status: e.status === 'failed' ? 'failed' as const : 'skipped' as const, message: e.message }));
 }
 
-/** 聚合收尾清单：plan（待重启项）+ result（补录凭据 / 失败跳过项）。 */
+/**
+ * 本次导入是否写入了会话文件（T2）。
+ *
+ * 判据 = 执行结果里**成功**的 sessions 计划项（item id 形如 `sessions:<projectPath>/<file>`）。
+ * 刻意的形状判据而不是再回读盘：结果对象本身就是「这次到底做了什么」的唯一事实，
+ * 回读盘会把「其它来源的会话」也算进来。`:finalize` / `:finalizeImport` 是分区收尾的
+ * 合成行（不表示写入任何文件），必须排除 —— 否则「用户取消了全部会话」也会提示重启。
+ */
+export function sessionsRestartOf(result: ImportResult): { count: number } | null {
+  const count = result.executed.filter(
+    (e) =>
+      e.status === 'ok'
+      && e.itemId.startsWith('sessions:')
+      && !e.itemId.endsWith(':finalize')
+      && !e.itemId.endsWith(':finalizeImport'),
+  ).length;
+  return count > 0 ? { count } : null;
+}
+
+/** 聚合收尾清单：plan（待重启项）+ result（补录凭据 / 失败跳过项 / 会话重启）。 */
 export function importNextSteps(plan: ImportPlan, result: ImportResult): ImportNextSteps {
   const restartItems = restartRequiredItems(plan);
   const missingSecrets = [...result.missingSecrets];
   const unresolved = unresolvedItems(result);
+  const sessionsRestart = sessionsRestartOf(result);
   return {
     restartItems,
+    sessionsRestart,
     missingSecrets,
     unresolved,
-    hasNextSteps: restartItems.length > 0 || missingSecrets.length > 0 || unresolved.length > 0,
+    hasNextSteps:
+      restartItems.length > 0 || sessionsRestart !== null || missingSecrets.length > 0 || unresolved.length > 0,
   };
 }

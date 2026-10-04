@@ -29,10 +29,16 @@ import { useSyncExternalStore } from 'react'
 import { importStepperModel, importStepperSource, type ImportStageKey } from '../../ui/import-stepper.ts'
 import { importNextSteps } from '../../ui/next-steps.ts'
 import {
-  compatibilityBadgeKind, compatibilityLevel, importBasePathNotices, importPreviewStageAfter,
-  isSkippablePluginInstall, pendingSecretRequests, type CompatibilityLevel,
+  compatibilityBadgeKind, compatibilityLevel, compatibilityNotes, importBasePathNotices, importPreviewStageAfter,
+  isSkippablePluginInstall, pendingSecretRequests,
 } from '../../ui/import-wizard.ts'
+import { compatibilityScoreKey } from '../common/compat-label.ts'
 import { pickerSummary, sectionsFromPlan, type Selection } from '../../ui/selection-model.ts'
+import {
+  sessionFormatSkippedItems,
+  type SessionFormatDisposition,
+  type SessionFormatFacts,
+} from '../../ui/session-format-disposition.ts'
 import type { ImportPreviewSummary } from '../../ui/types.ts'
 import type { ImportAnalysis, ImportPlan, ImportResult } from '../../core/types.ts'
 import type { UiT } from '../../ui/i18n.ts'
@@ -52,7 +58,7 @@ import { redact } from '../../security/redaction.ts'
 import { fileSelectModel, shouldRenderSelect } from './import-file-select.ts'
 import {
   AnalyzingStep, ConflictsStage, ConfirmStage, ConsultStage, DecryptArchiveStep,
-  PathMappingStage, SecretsStage, SelectStep,
+  PathMappingStage, SecretsStage, SelectStep, SessionFormatDispositionField,
 } from './import-wizard-steps.tsx'
 import { useImportWizardController } from './use-import-wizard-controller.ts'
 import { ImportLogPanel } from './ImportLogPanel.tsx'
@@ -62,16 +68,8 @@ export interface ImportWizardViewProps {
   t: TranslateNS<'config-manager'>
 }
 
-/**
- * 兼容性等级 → 字典键：src/ui 只产出**等级语义**（可测），客户端字典键留在这一侧
- * —— src/ui 不感知客户端 i18n 字典（分层：user-visible 文案只在 client 侧解析）。
- */
-const COMPATIBILITY_SCORE_KEYS: Record<CompatibilityLevel, Parameters<TranslateNS<'config-manager'>>[0]> = {
-  unsupported: 'import.compatibility.score.unsupported',
-  partial: 'import.compatibility.score.partial',
-  good: 'import.compatibility.score.good',
-  excellent: 'import.compatibility.score.excellent',
-}
+/* 兼容性等级 → 字典键的映射统一在 ../common/compat-label.ts（同步确认页共用同一份，
+ *  此前同步页直接渲染裸枚举 partial/excellent —— 那是给开发者看的机器 token）。 */
 
 
 /**
@@ -110,6 +108,12 @@ function NextStepsCard({ plan, result, t }: {
           </ul>
         </div>
       )}
+      {steps.sessionsRestart !== null && (
+        <div className={css.nextStepsGroup}>
+          <div className={css.groupLabel}>{t('nextSteps.sessionsRestart.title')}</div>
+          <div className={css.hint}>{t('nextSteps.sessionsRestart.hint', { count: String(steps.sessionsRestart.count) })}</div>
+        </div>
+      )}
       {steps.missingSecrets.length > 0 && (
         <div className={css.nextStepsGroup}>
           <div className={css.groupLabel}>{t('nextSteps.secrets.title', { count: String(steps.missingSecrets.length) })}</div>
@@ -142,7 +146,9 @@ function CompatibilityStep(props: {
 }) {
   const { analysis, error, onNext, onReset, apiT, t } = props
   const level = compatibilityLevel(analysis.compatibility)
-  const scoreKey = COMPATIBILITY_SCORE_KEYS[level]
+  const scoreKey = compatibilityScoreKey(level)
+  /** 结构化原因 → 可渲染解释项（老宿主未回传 reasons → 空数组：不编原因，只显示评分） */
+  const notes = compatibilityNotes(analysis.compatibilityReasons)
   return (
     <div className={css.viewBody}>
       <SectionTitle title={t('import.compatibility.title')} />
@@ -161,6 +167,46 @@ function CompatibilityStep(props: {
           {analysis.warnings.map((w, i) => <div key={i}>{redact(w)}</div>)}
         </Banner>
       )}
+      {/* 来源与判定依据（2026-09）：把「为什么是这个评分」摊开 —— 此前只有一档总分，
+          用户看到「部分兼容」也不知道该处理什么。source/target 与 reasons 由 core 同源回传；
+          reasons 里的平台/版本字符串来自**包内**，渲染前必须过 redact()（B1 教训）。 */}
+      {(analysis.source !== undefined || notes.length > 0) && (
+        <Card>
+          <div className={css.groupHeader}>
+            <span className={css.groupLabel}>{t('import.source.title')}</span>
+            <span className={css.statusSpacer} />
+          </div>
+          <div className={css.statRow} style={{ flexWrap: 'wrap', gap: '8px' }}>
+            {analysis.source !== undefined && (
+              <Badge kind="info">
+                {t('import.source.dsh', {
+                  source: analysis.source.dshVersion,
+                  target: analysis.target?.dshVersion ?? '?',
+                })}
+              </Badge>
+            )}
+            {analysis.source !== undefined && analysis.target !== undefined && (
+              <Badge kind={analysis.source.platform === analysis.target.platform ? 'info' : 'warn'}>
+                {t('import.source.platform', { source: analysis.source.platform, target: analysis.target.platform })}
+              </Badge>
+            )}
+            {analysis.source !== undefined && (
+              <Badge kind="info">{t('import.source.schema', { version: String(analysis.source.schemaVersion) })}</Badge>
+            )}
+          </div>
+          {notes.length > 0 && (
+            <>
+              <div className={css.groupLabel}>{t('import.source.reasons')}</div>
+              <ul className={css.reportList}>
+                {notes.map((note, i) => (
+                  <li key={note.key + '-' + String(i)}>{redact(t(note.key, note.params))}</li>
+                ))}
+              </ul>
+            </>
+          )}
+        </Card>
+      )}
+
       {/* 备份包含的分区（两列网格；与总览「分区构成」同模式） */}
       <Card>
         <div className={css.groupHeader}>
@@ -197,7 +243,15 @@ function ContentSelectStage(props: {
   selectionValue: Selection
   onSelectionChange: (next: Selection) => void
   error: string | null
+  /** T1：会话格式处置（选择 / 事实 / 是否已被宿主按 abort 拦下 / 实际跳过的会话条数） */
+  sessionFormatDisposition: SessionFormatDisposition
+  onSessionFormatDispositionChange: (next: SessionFormatDisposition) => void
+  sessionFormatFacts: SessionFormatFacts | null
+  sessionFormatBlocked: boolean
+  sessionFormatSkipped: number
   onNext: () => void
+  /** 阻断后重新生成计划（与「下一步」同一个动作，语义不同所以按钮文案不同） */
+  onRetryPlan: () => void
   onReset: () => void
   apiT: UiT
   t: TranslateNS<'config-manager'>
@@ -205,6 +259,8 @@ function ContentSelectStage(props: {
   const {
     summary, rebaseNotices, isEncrypted, hasPlan, nothingSelected, selectionNodes, selectionValue, onSelectionChange,
     error, onNext, onReset, apiT, t,
+    sessionFormatDisposition, onSessionFormatDispositionChange, sessionFormatFacts, sessionFormatBlocked,
+    sessionFormatSkipped, onRetryPlan,
   } = props
   return (
     <div className={css.viewBody}>
@@ -223,6 +279,17 @@ function ContentSelectStage(props: {
         {isEncrypted && <Badge kind="error">🔒 {t('import.decrypt.badge')}</Badge>}
       </div>
       {isEncrypted && <Banner kind="warn">{t('import.decrypt.previewHint')}</Banner>}
+      {/* T1：会话格式处置 —— 本机读不了的会话必须由用户显式决定（中止 / 跳过 / 仅提示） */}
+      <SessionFormatDispositionField
+        disposition={sessionFormatDisposition}
+        onDispositionChange={onSessionFormatDispositionChange}
+        facts={sessionFormatFacts}
+        blocked={sessionFormatBlocked}
+        t={t}
+      />
+      {sessionFormatSkipped > 0 && (
+        <Banner kind="info">{t('import.sessionFormat.skipped', { count: String(sessionFormatSkipped) })}</Banner>
+      )}
       {/* issue #45：跨机基础路径不同时自动重定基 —— 如实告诉用户「这一步不需要手工映射」 */}
       {rebaseNotices.map((notice) => (
         <Banner key={notice.from} kind="info">
@@ -246,12 +313,14 @@ function ContentSelectStage(props: {
       {nothingSelected && <Banner kind="warn">{t('import.nothingSelected')}</Banner>}
       <div className={css.actionRow}>
         <Button variant="ghost" onClick={onReset}>{t('import.select.reselect')}</Button>
+        {/* 阻断态下「下一步」不再是导航，而是「按新处置重新生成计划」——同一个动作，
+            但按钮文案必须说清楚，否则用户会以为点了它会带着 abort 继续往下走。 */}
         <Button
           variant="primary"
           disabled={nothingSelected}
-          onClick={onNext}
+          onClick={sessionFormatBlocked ? onRetryPlan : onNext}
         >
-          {t('common.next')}
+          {sessionFormatBlocked ? t('import.sessionFormat.retryPlan') : t('common.next')}
         </Button>
       </div>
     </div>
@@ -407,7 +476,21 @@ function ImportWizardBody({ api, t }: ImportWizardViewProps) {
     consultLoading,
     previewStage,
     setPreviewStage,
+    sessionFormatDisposition,
+    setSessionFormatDisposition,
+    sessionFormatFacts,
+    sessionFormatBlocked,
   } = useImportWizardController(api, t)
+
+  /**
+   * T1 的「实际跳过了几条会话」：
+   *  - 只认 skip 处置（guide 下用户自己取消勾选不算「被处置跳过」，不能混为一谈）；
+   *  - 口径与选择模型**同源**（sessionFormatSkippedItems 逐条筛「读不了 且 被排除」），
+   *    所以界面上的数字与真正没导入的条目永远一致。
+   */
+  const sessionFormatSkipped = sessionFormatDisposition === 'skip'
+    ? sessionFormatSkippedItems(imp.plan, selectionValue).length
+    : 0
 
   /* ---------- 各步骤渲染 ---------- */
 
@@ -495,11 +578,17 @@ function ImportWizardBody({ api, t }: ImportWizardViewProps) {
         selectionValue={selectionValue}
         onSelectionChange={applyImportSelection}
         error={error}
+        sessionFormatDisposition={sessionFormatDisposition}
+        onSessionFormatDispositionChange={setSessionFormatDisposition}
+        sessionFormatFacts={sessionFormatFacts}
+        sessionFormatBlocked={sessionFormatBlocked}
+        sessionFormatSkipped={sessionFormatSkipped}
         onNext={() => {
           const next = nextPhase('preview')
           setPhase(next)
           if (next === 'conflicts') enterConflicts()
         }}
+        onRetryPlan={() => { void goPreview() }}
         onReset={resetWizard}
         apiT={api.t}
         t={t}
@@ -594,6 +683,11 @@ function ImportWizardBody({ api, t }: ImportWizardViewProps) {
         running={running}
         nothingSelected={nothingSelected}
         error={error}
+        sessionFormatDisposition={sessionFormatDisposition}
+        onSessionFormatDispositionChange={setSessionFormatDisposition}
+        sessionFormatFacts={sessionFormatFacts}
+        sessionFormatBlocked={sessionFormatBlocked}
+        sessionFormatSkipped={sessionFormatSkipped}
         onBack={() => { setPhase('preview') }}
         onExecute={() => { void execute() }}
         apiT={api.t}

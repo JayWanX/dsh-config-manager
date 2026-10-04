@@ -66,6 +66,14 @@ export interface SessionLogHeader {
   origin?: string;
   /** 子代理会话所属的**父对话** id（origin === 'subagent' 时存在） */
   parentSessionId?: string;
+  /**
+   * 会话日志格式版本（header 的 `version`；DSH 的 SESSION_FORMAT_VERSION）。
+   *
+   * 为什么要读它：DSH 读会话时对**非本 build 的 version 直接拒绝**，而会话列表
+   * （listArtifacts）把这种会话**静默跳过** —— 不报错、不在列表里，用户看到的就是
+   * 「对话消失」。宿主据此在导出/导入/同步的**分析阶段**告警，而不是等用户发现。
+   */
+  version?: number;
 }
 
 /**
@@ -76,6 +84,73 @@ export interface SessionLogHeader {
  * origin !== 'subagent' 的会话，子代理会话挂在父对话之下；导出时只带子会话、不带父对话，
  * 导入后在工作区里就一条都看不见 —— 见 adapters/sessions.ts 的父链连带导出。
  */
+/**
+ * 只读：从会话日志**字节**里取出可用于 DSH codec 的行形态（首帧原始 JSON + 事件行的 JSON.parse 结果）。
+ *
+ * 为什么要「原始行」而不是解码后的字符串行：DSH 读盘时先 `JSON.parse(line)` 再把对象交给 codec
+ * （`dsh-session-persistence-jsonl` 的 `SessionLogScanner.consumeEventLine`），某些代际/打包行的合法形状
+ * 就藏在这个边界上（例如 `sourceEventSeqs` 的区间形态）。把字符串行再 parse 一遍就复刻不了这条边界。
+ *
+ * 读不出的地方一律不猜：容器非法 / 撕裂尾帧 / 首帧不是单行 JSON 对象 → 返回 reason；
+ * 事件行 parse 失败 → 该行记为 null（调用方自行决定是「不可解析事件」还是停止深检）。
+ * **绝不写任何字节**。
+ */
+export type SessionLogShape =
+  | { ok: true; headerValue: unknown; rows: (unknown | null)[] }
+  | { ok: false; reason: 'unavailable' | 'corrupt-container' | 'torn-tail' | 'invalid-header' };
+
+export function readSessionLogShapeFromBytes(bytes: Uint8Array): SessionLogShape {
+  if (!zstdAvailable()) return { ok: false, reason: 'unavailable' };
+  let frames: { start: number; end: number }[];
+  let torn = false;
+  try {
+    const scan = scanZstdFrames(bytes);
+    frames = scan.frames;
+    torn = scan.tornStart !== undefined;
+  } catch {
+    return { ok: false, reason: 'corrupt-container' };
+  }
+  if (frames.length === 0) return { ok: false, reason: 'corrupt-container' };
+  if (torn) return { ok: false, reason: 'torn-tail' };
+  let headerLine: string;
+  try {
+    const first = frames[0]!;
+    headerLine = decodeZstdFrame(bytes.subarray(first.start, first.end)).toString('utf8');
+  } catch {
+    return { ok: false, reason: 'corrupt-container' };
+  }
+  const line = headerLine.endsWith('\n') ? headerLine.slice(0, -1) : headerLine;
+  if (line === '' || line.includes('\n')) return { ok: false, reason: 'invalid-header' };
+  let headerValue: unknown;
+  try {
+    headerValue = JSON.parse(line);
+  } catch {
+    return { ok: false, reason: 'invalid-header' };
+  }
+  if (headerValue === null || typeof headerValue !== 'object' || Array.isArray(headerValue)) {
+    return { ok: false, reason: 'invalid-header' };
+  }
+  const rows: (unknown | null)[] = [];
+  for (let index = 1; index < frames.length; index += 1) {
+    const frame = frames[index]!;
+    let text: string;
+    try {
+      text = decodeZstdFrame(bytes.subarray(frame.start, frame.end)).toString('utf8');
+    } catch {
+      return { ok: false, reason: 'corrupt-container' };
+    }
+    for (const rowLine of text.split('\n')) {
+      if (rowLine.trim() === '') continue;
+      try {
+        rows.push(JSON.parse(rowLine));
+      } catch {
+        rows.push(null);
+      }
+    }
+  }
+  return { ok: true, headerValue, rows };
+}
+
 export function readLogHeaderFromBytes(bytes: Uint8Array): SessionLogHeader | undefined {
   if (!zstdAvailable()) return undefined;
   try {
@@ -99,6 +174,9 @@ export function readLogHeaderFromBytes(bytes: Uint8Array): SessionLogHeader | un
       const value = rec[key];
       if (typeof value === 'string' && value !== '') { out.parentSessionId = value; break; }
     }
+    // 格式版本按 DSH 的判据取：非负安全整数才认，其余（缺字段/浮点/负数/字符串）一律不猜。
+    const version = rec['version'];
+    if (typeof version === 'number' && Number.isSafeInteger(version) && version >= 0) out.version = version;
     return out;
   } catch {
     return undefined;

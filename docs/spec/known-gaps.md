@@ -55,6 +55,12 @@
 | G-20 | 会话删除墓碑**不代本机删除**数据：对端删掉的对话只被「阻止复活」，本机副本仍在 | ⚠️ **有意不修**（删除是不可回滚的用户动作，见 §3.2） |
 | G-21 | 路径映射页把内部枚举当文案渲染：源路径「永远是 missing」（真机反馈） | ✅ 已修复（改用真实判定，见 §1） |
 | G-22 | 加密备份里的凭据「有值却不进计划」+ 本机已配置就被跳过（真机反馈） | ✅ 已修复（判据「值的有无」优先于本机状态，见 §1） |
+| G-23 | 会话日志格式版本跨 DSH 版本**单向**不兼容，且 DSH 对读不出的格式**静默跳过**（不报错、不在工作区列表里 → 「对话消失」） | ✅ 已修复（导入/同步分析期体检 + 档案页版本可见 + **导入/同步的三选一处置开关**，见 §1） |
+| G-24 | 本机**存量**会话损坏（重放族 / 撕裂帧 / 位置错位 / 缺工作区 / 缺父对话）此前既无诊断入口、也无安全修复通道 | ✅ 已修复（只读体检路由 + 事故恢复面板 + 离线 CLI 安全修复 + **应用内零损失修复（T8，重放重复行）**，见 §1） |
+| G-25 | `file:` 指向**已打包 tarball** 的本地插件被打包环节当目录 spawn（`spawn ENOTDIR`），代码静默不进备份而备份仍报成功（issue #57） | ✅ 已修复（stat 判形态 → 文件直读收编 / 目录走 npm pack / 判不出回落并告警，见 §1） |
+| G-26 | 包缺少 git 安装所需的构建入口：`dsh plugin add git+https://...` 必失败（issue #58） | ✅ 已修复（补 `scripts.prepare` + 三条 G-21 打包门禁；**pnpm 11 的 `allowBuilds` 仍须用户逐字授权一次**，见 §3.3） |
+| G-27 | 加密同步快照 >64 MiB 时远端列表恒为空、拉取报「快照损坏」、自动同步恒 `upToDate`，而 push 报成功（issue #59） | ✅ 已修复（读取侧改用自产载荷专用上限 + 读不出来的一律回传可见，见 §1） |
+| G-28 | WebDAV 密码输入框被无关状态更新自动清空（issue #60） | ✅ 已修复（`commit()` 经 `patchSyncPasswords` 把在途输入写回内存；持久化白名单不变，见 §1） |
 
 ---
 
@@ -220,6 +226,69 @@
 | 真机证据（用户报告） | 用户机器 `$DSH_HOME/.credentials.yaml`（5 个 ref：DEEPSEEK / A6API / OPENCODE_GO / 两个同步槽位）mtime 停在导入前，且 `settings.yaml` 只引用其中 2 个（`llm-pi-ai.providers.*.apiKeyEnv`）→ 未被引用的 3 个 ref 无论怎么导入都不会被写回；导出的 `dsh-config-*.zip` 实测是 `DCA1` 容器（走解锁 → secrets.enc 全量 ref）。 |
 | 校验方式的边界 | 计划期解密失败（错密码 / 密文被篡改）时 `/plan` 返回 400（与 `/analyze` 同口径），**不**静默降级为「没有凭据」。 |
 
+### G-23 会话日志格式版本跨 DSH 版本单向不兼容（DSH 静默跳过读不出的会话）
+
+| 项 | 内容 |
+|---|---|
+| 基线问题 | DSH 的会话日志首帧带 `header.version`（= `SESSION_FORMAT_VERSION`）。读会话时 `refuseForeignFormatVersion` 对**非本 build 的版本直接拒绝**（`SessionFormatUnsupportedError`），而会话列表 `listArtifacts()` 对这种错误是 **`catch (e) { if (e instanceof SessionFormatUnsupportedError) continue }`** —— 不报错、不显示。高版本能读低版本（DSH 自带 V0→V4 迁移链），**反向不可读**。 |
+| 实测版本 | 桌面端内置运行时 `@deepseek-ai/dsh` 0.2.0-rc.2 → `SESSION_FORMAT_VERSION = 4`；磁盘 CLI 档案（hoisted）`0.1.5-rc.1` → `3`。本机 `$DSH_HOME/sessions` 抽样 401 个日志的版本分布 `{v0:200, v3:201}` —— 多版本共存是常态，不是边缘情况。 |
+| 后果 | 导出/导入/同步是**逐字节搬运** `.jsonl.zstd`：把 v4 会话搬进 v3 目标机后，文件落盘成功、工作区记录也登记了，但 DSH 不会显示这些会话（真机语义 = 「导入全部成功，对话却没了」）。旧实现只在 semver 维度给出笼统的 `partial` 兼容性分，没有任何一条告警指向会话。 |
+| 修复位置 | ① 宿主侧探针 `src/utils/session-format.ts`：`parseSessionFormatVersion`（从 DSH 源码文本解常量）、`readSessionFormatVersionAt` / `resolveSessionFormatVersion`（候选根与 `resolveDshVersion` 同源同序）、`probeSessionFormats`（每会话只解**首帧**，上限 200 条，读不出如实计入 `unreadable`，未检查计入 `skipped`）。② core 只消费数字：`HostContext.sessionFormatVersion` + `AnalyzerOptions.sessionFormatProbe`（`ImporterOptions` 同名透传），`Analyzer.sessionFormatWarnings` 在「包内版本 > 本机支持版本」时产出 `import.sessionsFormatUnsupported`，抽查有截断时追加 `import.sessionsFormatSampled`。③ 宿主 `src/index.ts` 启动时 best-effort 解析（解析不到 `log.warn`，**绝不猜**），`makeImporter()` 注入探针（导入向导与同步引擎共用同一份）。④ 同步 `pull()` 把 `analysis.warnings` 并进差异报告 message（那条链路只有一个 message 通道，不并入就是静默）。⑤ 档案页展示每个档案的 DSH 版本与会话格式版本，并对「本实例 VS 该档案」的错配给出提示（`profileVersionFacts` / `sessionFormatRisk`）。 |
+| 不变量（未放宽） | 不替 DSH 做格式迁移（多 generation 迁移链与 verifier 在 DSH 内部；AGENTS.md 明令 core 禁止 import 会话日志存储格式）。目标版本解析不到时**既告警也不谎报兼容**：整条体检跳过，只在宿主日志留一行 warn。`readLogHeaderFromBytes` 对非法 `version`（字符串/负数/浮点）一律 `undefined`。 |
+| 验证方式 | `src/utils/session-format.test.ts`（常量解析的正负例 / 候选根含 pnpm 嵌套布局 / 探针去重与截断计数）；`src/utils/session-log.test.ts`（`version` 解析 + 非法值不猜）；`src/core/import-sessions-visibility.test.ts` 三条（v4→v3 必告警 / v3→v4 不告警 / 本机版本未知不猜）；`src/ui/dsh-profiles-view.test.ts`（`profileVersionFacts` / `sessionFormatRisk` 各分支）；`src/profiles/dsh-profile-manager.test.ts`（未装依赖 → null、装了 → 真实版本号）。 |
+| 后续（**已全部落地**） | 「不可读会话的处置开关（中止 / 跳过 / 引导升级）」——设计稿 `docs/design/2026-09-30-session-format-disposition-design.md`。**已落地**：① core 地基（探针 `units[{unitId,version}]`、`Analyzer.resolveSessionFormats` 每份归档只算一次、`PlanItem.formatUnsupported`、`ImportAnalysis.sessionFormats`）；② 判定与展示共用一份纯函数 `src/ui/session-format-disposition.ts`；③ 宿主 `src/routes/session-format.ts`（请求体 > 插件配置项 ui-prefs > 缺省 `abort`）接入 `/plan`、`/execute`、同步 `/sync/sync`、`/sync/apply-items` —— `abort` 时返回 **409 + code=sessionFormatUnsupported**（附 unreadable/target），**零写入**；④ 向导确认页与预览页的三选一（`SessionFormatDispositionField`）+ 阻断态 + 结果回显；⑤ `skip` 复用既有 `Selection`/includeItems 机制（这些单元默认不勾选，用户可手动勾回）。**关键修正**：探针的单元键（`projectKey/会话目录`）与计划项 unitId（带 `sessions:` 前缀）此前**键空间失配**，`formatUnsupported` 一条都打不上 —— 已由 `sessionUnitVersion()` 两种形态都试修掉，并由测试桩改为真实前缀形态钉住。处置只在**计划项层**取舍，仍**不改写会话字节**（下行转换不做，理由见上）。 |
+
+### G-24 本机存量会话损坏既无诊断入口、也无安全修复通道
+
+| 项 | 内容 |
+|---|---|
+| 基线问题 | G-23 解决的是「**导入/同步**时格式版本超前」，但用户机器上**已经躺着**的会话也可能是坏的：重放族（崩溃/强杀/第二个写入者 → 已提交 seq 被重写）、撕裂尾帧、容器非法帧、位置与 `projectKey(header.cwd)` 不一致、缺工作区记录、子代理会话缺父对话。此前插件**没有**任何一个入口能回答「我这台机器上现在哪些对话看不见、为什么」；而写会话字节只能离线（应用内写会让 DSH 起不来），用户更没有安全的修复通道。 |
+| 后果 | ① 用户只能看到「对话消失」，无从判断是格式、损坏、还是工作区问题；② 唯一能碰字节的时机（DSH 起不来时）没有任何工具，只能手工删文件；③ 生态里已经出现「朴素修复把 50 万事件的会话永久毁掉」的事故（社区 postmortem #2257）—— 缺的不只是工具，是**带校验的**工具。 |
+| 修复位置 | **只读侧（应用内）**：① 纯分类器 `src/core/session-health.ts`（严重级 `blocksStartup > unloadable > nextRequestFails > invisible > ok`；「会让 DSH 起不来」最高，因为工作区插件启动期枚举到坏会话时 Web 永远到不了工作区选择页）；② 宿主只读采集器 `src/utils/session-health-scan.ts`（结构档恒做：帧扫描 + 首帧 header；行档限额内做：解压逐行，只做**能从字节证明**的判定 —— 不可解析行 / 字节相同且 seq 相同的重复行 / seq 空洞 / 合成 closer 块）；③ 只读路由 `GET /api/dsh-config-manager/recovery/sessions`（挂在既有 recovery prefix 下，**不新增注册路由条目**，故 71 条快照不变）；④ 事故恢复子 tab 的「会话体检」区块（`src/ui/session-inventory-view.ts` 纯展示模型 + `RecoveryPanel` 装配）。**离线侧（唯一允许写字节的地方）**：⑤ `src/utils/session-log-repair.ts` 的**安全序列** —— 写前重跑「连续性 + 引用完整性」校验（不过即拒绝）→ 时间戳备份（绝不覆盖已有备份）→ 临时文件 + `rename` 原子换入 → 写后复验（不过则用备份还原）；⑥ CLI `sessions list / doctor`（只读）与 `sessions repair [--apply]`（写），写操作前**强制检测 DSH 是否在跑**（`<dataDir>/running/*.json` 心跳，pid 存活且未过期），在跑就拒绝并提示先关 DSH。**应用内修复（T8，2026-10）**：⑦ `src/utils/session-repair-service.ts`（目标解析 / 写入门 / 台账 / 回滚）+ `src/utils/session-log-repair.ts` 的 `rollbackSessionLogFile`；路由 `POST /recovery/sessions/repair`（dry-run 与 apply）与 `/rollback` 挂既有 recovery prefix（**不新增注册路由条目**），修三类：重放重复行 / 可证明的合成收尾块（零损失）与 seq 空洞、不可解析行的**截断**（有损，需显式放行）——dry-run → 确认 → 时间戳备份 → 原子换入 → 复验，回滚只认台账 `repairId`。 |
+| 不变量（未放宽） | ① **应用内只做能从字节证明的修复、且必须过写入门**（T8/T9：core 仍不 import 会话字节工具；写路径只经 `utils/session-repair-service.ts` 的三道写入门 + 预览指纹；有损截断必须显式放行；证明不了怎么修的类别一律零写入）；② **绝不猜**：读不到 = 事实缺省，未做深度校验一律记 `verified: false` 并在界面/CLI 里**显示「未检查 N 条」**（把「没检查」说成「没问题」是本轮明确要消灭的谎报）；③ **检测 ≠ 发明**：缺 message id / 悬空 tool-call / settlement 非法这类需要 DSH codec 才能判定的**本轮不产出结论**（没有真凭实据就不下结论）；④ 修不了的走 `export`（转写保内容）与 `quarantine`（移出 DSH 视野，**不删除**）——本轮 CLI 保留了既有的重复 id 隔离目录语义（`.cm-repair-quarantine-<时间戳>/`）。 |
+| 验证方式 | `src/core/session-health.test.ts`（13 例：每类问题一条 + 严重级排序 + 「读不到一律 unknown」+ 未验证不下结论）；`src/utils/session-health-scan.test.ts`（10 例：结构档四形态 / 行档四类 / 限额与 `untested` 计数 / 非 projectKey 目录跳过 / **只读**：扫描前后字节与 mtime 逐字节不变）；`src/ui/session-inventory-view.test.ts`（7 例：徽章语义、摘要口径、空态/截断/相位、体积格式化、离线命令恒三条）；`src/utils/session-log-repair.test.ts`（7 例：自我校验四形态、重复行判定、预览零写入、**apply 全序列**（备份=原件、原子换入、写后复验、临时文件清理）、**拒绝路径零写入零备份**、备份名冲突加序号）；`src/routes/session-format.test.ts`（处置解析优先级与损坏配置回退）。 |
+| 生态对照 | 只读体检的检查清单采用 `dsh-backup`「零依赖结构体检、明确不修复」的路线；「深度解码作为可选增强」采用 `dsh-chatsync` 的路线（能力探测 + 失败即回退「未验证」）；安全姿态照抄 `dsh-session-rescue` / `dsh-session-surgeon`（先备份、原子换入、要求先关 DSH）。**本轮只实现「能从字节证明」的那部分，DSH codec 深度解码留作后续**（见下方「后续」）。 |
+| 后续（未做，如实登记） | ⓪ **已落地（T8，2026-10）**：应用内修复「重放重复行」（见「修复位置」⑦）。以下仍未做：① DSH codec 深度校验（动态 import 已装 DSH 同树的 `@deepseek-ai/dsh-session-format-catalog`）——本轮的「行档」用零依赖方式覆盖了其中一部分，剩下的类（缺 message id / 悬空 tool-call / settlement 非法）需要真 codec；② header 重建（首帧不可读时按目录名 + 最早可解事件重建）——设计稿 §10.2 列为「低损失」，但**重建 header 等于发明数据**，需要先确定不会与「绝不猜」冲突再落地；③ CLI `sessions export`（转写 Markdown）与 `quarantine` 动作的网络化（目前 quarantine 只在重复 id 场景生效）；④ **同步通道的 UI 三选一**：一键同步的两条路径已**服务端**支持三态并显式传 `guide`（预览发生时尚无决策界面），但同步确认弹窗里还没有三选一控件。 |
+
+### G-25 `file:*.tgz` 的本地插件在导出打包时被跳过（issue #57）
+
+| 项 | 内容 |
+|---|---|
+| 基线问题 | `src/core/local-plugin-pack.ts` 的打包主循环对全部 `isLocalPluginSpec()` 候选一律 `npm pack . --pack-destination <abs>` 且 `cwd = resolveLocalPluginPath(spec)`。而 `file:` 的两种合法形态（目录 / **已打包 tarball**）中，后者会让 `cwd` 落在一个**普通文件**上 → `spawn ENOTDIR`。`classifyPluginSpec` 的注释早已写明「file → 本地 tarball / 目录」，即 tarball 那一半是**声明了但没实现**。 |
+| 后果 | 真机 9 个 `file:/abs/x.tgz` 声明的插件**全部**打包失败（`打包失败：spawn ENOTDIR`），代码不进备份；而打包失败按设计只记 warning、不中断导出 → **备份仍报 ok:true**，用户以为「备份成功 = 备份完整」，恢复时装不回这批插件。同时因导出侧没有 tarball，导入侧「用解包后的绝对路径重写 spec」也无从发生 —— 本模块「让本地源插件真正跨机器迁移」的设计目标对这类 spec 完全没生效。 |
+| 修复位置 | `src/core/local-plugin-pack.ts`：新增 `statKind` 注入（file / dir / unknown，**判不出来必须回落 unknown**）与 `safeTarballFileNameFor`（保留源文件名，只做文件名净化）；打包循环在 `resolveLocalPluginPath` 之后先判形态 —— `file` → **读文件直接收编、跳过 npm pack**（含体积上限校验）、`dir`/`unknown` → 原路径。宿主接线 `src/core/local-plugin-host.ts` 注入 `fsp.stat`，并把 profile 目录改用 `HostContext.profileDir`（不再按 `<home>/profiles/<name>` 硬拼；`src/core/types.ts` 新增可选字段、`src/index.ts` 的 `ConfigManagerHostContext` 提供）。 |
+| 不变量（未放宽） | ① **判不出形态绝不猜成文件**（`stat` 失败/未注入 → `unknown` → 走既有目录流程，产出可读告警）；② 归档内相对路径恒为 `local-plugins/<文件名>`，**不含任何路径分隔符**（`safeTarballFileNameFor` 丢目录 + 折叠非法字符，防穿越）；③ 超上限一律跳过并告警，绝不塞进备份。 |
+| 验证方式 | `src/core/local-plugin-pack.test.ts` 的 5 条 issue #57 用例（`.tgz` 直读收编且 `npm pack` 零调用 / 判不出形态回落目录流程 / 超上限告警 / 目录与 `.tgz` 混合各走各的 / `safeTarballFileNameFor` 的穿越与回退）。 |
+
+### G-26 从 git 源安装必然失败（issue #58）
+
+| 项 | 内容 |
+|---|---|
+| 基线问题 | 本包以 `files: ["lib", ...]` 发布**预构建产物**，npm 安装不需要任何构建步骤；而 `dsh plugin add git+https://...` 拿到的是源码树，pnpm 需要在 clone 里跑一个**构建入口**才能得到 `lib/`。`package.json` 的 `scripts` 里此前**没有任何 pnpm 认的构建入口**（`prepare` 只在 `npm publish` 前校验、不参与安装），于是 git 安装 100% 失败于 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`。 |
+| 后果 | 插件市场把 `dsh plugin --profile web add git+https://github.com/xiajiajun516/dsh-config-manager.git` 这条路径标为不可用；用户看到的是 `dsh: plugin command failed`（真实原因埋在 pnpm.log 里）。 |
+| 修复位置 | ① `package.json` 新增 `prepare: npm run build`；② README（中英）新增「从 GitHub 源码安装」段，写明 pnpm 11 的 `allowBuilds` 白名单必须**逐字照抄 pnpm 打印的那一行**（含完整 git URL + commit sha；只写包名不生效），并给出更省事的替代路径（装 npm 预构建版）；③ `tests/packaging-contract.test.ts` 新增 G-21 三条门禁（`prepare` 存在且真的调 build/bundle、`files` 含 `lib`、`lib` 仍被 gitignore）。 |
+| 剩余边界（诚实登记） | **pnpm 11 默认拦截 git 依赖的构建脚本，这一步无法由包作者免除** —— 用户必须在 profile 的 `pnpm-workspace.yaml` 里授权一次（见 §3.3）。这是 pnpm 的供应链策略，不是本包的缺陷；本包能做的是把构建入口补齐并让失败原因可读。 |
+| 验证方式 | `tests/packaging-contract.test.ts` 的三条 G-21 用例；真机复核（本轮）：把 `prepare` 注入本地 clone 后 `pnpm add git+file:///<repo>` → 首轮按预期报 allowBuilds 且**打印可直接粘贴的键**，加白名单后第二轮 exit 0、`node_modules/dsh-config-manager/lib/index.js` 与 `lib/client.js` **均产出**。 |
+
+### G-27 加密快照 >64 MiB 时远端列表恒为空（issue #59）
+
+| 项 | 内容 |
+|---|---|
+| 基线问题 | 加密单文件布局把整份快照写成一个 JSON（`snapshots-encrypted/<id>.json`），**写入侧没有体积守卫**；读取侧 `deserializeSnapshot()` 走 `parseJsonSafe()` 的**缺省** 64 MiB 上限（`src/utils/json.ts` 的 `DEFAULT_MAX_JSON_BYTES`，那是防**不可信输入**的闸门）。加密载荷经「JSON → base64 → 加密 → 再 base64」约 ×1.78 膨胀，勾上 `sessions` 分区后单文件轻松越界（真机 4 个快照均 ≈66 MiB）。 |
+| 后果 | `list()` 解析失败被静默吞掉（catch 返回 null + continue）→ 远端列表恒为空，而同一响应里 `currentSnapshotId` 却指着那条快照（自相矛盾）；`download()` 报「快照损坏」→ 拉取/一键同步彻底不可用；`hasNewRemoteSnapshot()` 因 `metas.length === 0` 恒 false → 自动同步永远 `skipReason: upToDate`，**永远不拉任何东西**。 |
+| 修复位置 | ① 新增 `src/utils/json.ts` 的 `MAX_OWN_PAYLOAD_JSON_BYTES`（512 MiB，**自产载荷**专用）并让 `deserializeSnapshot` 显式传入 —— 读写两侧口径从此一致（WebDAV 与 git 密文单文件共用同一份解码器，一处修复两处生效）；② 「绝不静默」：`GitTransport` 新增 `unreadableSnapshots`（`readEncryptedSnapshotFile` 的失败原因入账）、`WebDavTransport` 同名字段（index 读取失败入账），`SyncEngine.unreadableSnapshots()` 透出，`POST /sync/snapshots-list` 以 `unreadable[]` 回传，客户端 `SyncApi` 类型 + `ChannelSyncState.unreadableSnapshots` + 同步页常驻 Banner 与 Toast。 |
+| 不变量（未放宽） | ① `DEFAULT_MAX_JSON_BYTES`（64 MiB）仍是**不可信输入**的闸门，未被抬高 —— 抬高的只是「本插件自己写出去、又自己读回来」的那条链路；② 快照读取仍受 `maxDepth` 与形状校验约束；③ 读失败诊断是**远端当下状态**，**不落 sessionStorage**（`PersistedChannelSyncState` 显式剔除，刷新后重新 list）。 |
+| 验证方式 | `src/sync/snapshot-json.test.ts` 两条 issue #59 用例（自产上限 > 缺省上限、>64 MiB 载荷可反序列化且缺省上限仍拒它）；`src/sync/git/git-transport.test.ts` 与 webdav 通道既有用例回归。 |
+
+### G-28 WebDAV 密码输入框被无关状态更新清空（issue #60）
+
+| 项 | 内容 |
+|---|---|
+| 基线问题 | `runStore.patch()` 每次调用都跑持久化白名单（`toPersistedState` → `pickChannel`），而白名单**把密码字段写成空串**（安全不变量：token / webdav 密码 / 加密与解密密码不落盘）。于是任何一次 patch —— 包括与密码**完全无关**的（远端快照列表到货、GitHub 授权轮询结束、自动同步状态刷新）—— 都会把 `state.sync.webdavPassword` 清空，下一次 `toSyncStoreSlice()` 镜像回来时输入框就空了。 |
+| 后果 | 真机表现：在「密码（凭据已配置）」框里**输入几个字符就被自动清空**，**粘贴同样被清空**，输入过程中「保存配置」按钮闪一下（防抖自动保存被反复取消），且**没有任何保存成功提示** —— 用户完全无法修改 WebDAV 密码。 |
+| 修复位置 | `src/client/run-store.ts` 新增 `RunStore.patchSyncPasswords({ token?, webdavPassword? })`：只写**内存**切片（不触发 `save()`）；`src/client/sync/SyncPanel.tsx` 的 `commit()` 在 `runStore.patch(...)` 之后立即用它把**在途输入**写回。 |
+| 不变量（未放宽） | 密码仍**绝不**进 sessionStorage / 磁盘 / 日志（`toPersistedState` 白名单一行未改，回归用例仍断言落盘文本不含密码）；刷新后仍清空（`applyPersisted` 的硬性归零也没动）。 |
+| 验证方式 | `src/client/run-store.test.ts` 的 issue #60 用例：在途密码经「无关 patch」后仍在内存、且落盘文本不含密码、未给出的字段部分更新语义正确；既有的「同步凭据绝不写入 sessionStorage」用例继续绿。 |
 ### G-18 含 vault 的备份里带着凭据原文，导入后仍要求人工重填（issue #39）
 
 | 项 | 内容 |

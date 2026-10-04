@@ -125,6 +125,19 @@ test('readLogFileCwd：从磁盘读首帧 cwd（只读窗口，不整文件进�
   });
 });
 
+test('readLogHeaderFromBytes：读 header.version（DSH 的会话格式版本）；缺字段/非法值一律不猜', () => {
+  const v4 = encodeZstdFrame(Buffer.from(JSON.stringify({ version: 4, id: 'session-a', cwd: 'D:/P' }) + '\n', 'utf8'));
+  assert.equal(readLogHeaderFromBytes(Buffer.from(v4))?.version, 4, '非负安全整数才认');
+
+  const noVersion = encodeZstdFrame(Buffer.from(JSON.stringify({ id: 'session-a' }) + '\n', 'utf8'));
+  assert.equal(readLogHeaderFromBytes(Buffer.from(noVersion))?.version, undefined, '缺 version → undefined（调用方按无法判定处理）');
+
+  for (const bad of ['4', -1, 1.5, null]) {
+    const frame = encodeZstdFrame(Buffer.from(JSON.stringify({ version: bad, id: 'session-a' }) + '\n', 'utf8'));
+    assert.equal(readLogHeaderFromBytes(Buffer.from(frame))?.version, undefined, `非法 version=${String(bad)} 不得猜`);
+  }
+});
+
 test('会话日志文件名判据与 projectKey 形状', () => {
   assert.equal(isSessionLogName('session.v3.jsonl.zstd'), true);
   assert.equal(isSessionLogName('session.jsonl'), true);

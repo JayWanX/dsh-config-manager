@@ -37,8 +37,11 @@ import type { ConsultReport } from '../core/migration-consult.ts';
 import type { Manifest, SectionId } from '../schema/types.ts';
 import type { BackupScheduleStatus, BackupRunResult, BackupScheduleDraft } from '../ui/backup-schedule.ts';
 import type { BackupFileMeta } from '../sync/backup-files.ts';
+import type { DiskUsageCleanupResult, PluginUpdateCheckResult } from '../ui/types.ts';
+import type { DiskUsageReport } from '../core/disk-usage.ts';
 import { zhUiT, type UiT } from '../ui/i18n.ts';
 import { failedSectionsFromResponse } from '../ui/export-flow.ts';
+import type { SessionFormatDisposition } from '../ui/session-format-disposition.ts';
 import { CONFIG_MANAGER_API } from './common/routes.ts';
 import {
   ConfigManagerApiError,
@@ -161,6 +164,8 @@ export interface ExecutePayload {
     rollbackOnError: boolean;
     /** 加密备份的解密密码（仅内存；加密备份必须提供，core 拒绝无密码导入） */
     decryptPassword?: string;
+    /** 会话格式处置（T1；abort 时若计划含本机读不了的会话则拒绝执行，零写入） */
+    sessionFormatDisposition?: SessionFormatDisposition;
   };
 }
 
@@ -505,7 +510,7 @@ export class ConfigManagerApi {
   async createImportPlan(
     zipPath: string,
     decisions: ImportDecisions,
-    opts: { decryptPassword?: string } = {},
+    opts: { decryptPassword?: string; sessionFormatDisposition?: SessionFormatDisposition } = {},
   ): Promise<ImportPlan> {
     return postJson<ImportPlan>(
       CONFIG_MANAGER_API.plan,
@@ -514,6 +519,11 @@ export class ConfigManagerApi {
         decisions,
         ...(opts.decryptPassword !== undefined && opts.decryptPassword !== ''
           ? { decryptPassword: opts.decryptPassword }
+          : {}),
+        // T1 处置：缺省由宿主决定（插件配置项 → abort）。只有调用方显式给了才下发，
+        // 这样旧客户端（不带该字段）的语义完全不变。
+        ...(opts.sessionFormatDisposition !== undefined
+          ? { sessionFormatDisposition: opts.sessionFormatDisposition }
           : {}),
       },
       this.t,
@@ -530,7 +540,13 @@ export class ConfigManagerApi {
   async executeImportPlan(
     zipPath: string,
     plan: ImportPlan,
-    opts: { confirm: boolean; secretInputs?: Record<string, string>; rollbackOnError: boolean; decryptPassword?: string },
+    opts: {
+      confirm: boolean
+      secretInputs?: Record<string, string>
+      rollbackOnError: boolean
+      decryptPassword?: string
+      sessionFormatDisposition?: SessionFormatDisposition
+    },
   ): Promise<ImportResult & { runId: string }> {
     const payload: ExecutePayload = {
       zipPath,
@@ -540,6 +556,7 @@ export class ConfigManagerApi {
         secretInputs: opts.secretInputs ?? {},
         rollbackOnError: opts.rollbackOnError,
         decryptPassword: opts.decryptPassword,
+        sessionFormatDisposition: opts.sessionFormatDisposition,
       },
     };
     return postJson<ImportResult & { runId: string }>(CONFIG_MANAGER_API.execute, payload, this.t, LONG_OPTS);
@@ -732,6 +749,35 @@ export class ConfigManagerApi {
     return postJson<{ ok: boolean; removed: boolean }>(CONFIG_MANAGER_API.backupFilesDelete, { name }, this.t);
   }
 
+  // ------------------------------------------------- 磁盘占用体检（快照 tab）
+  /** 磁盘占用体检（只读）：按子区回传字节/文件数 + 各保留期的「已到期」量。 */
+  async getDiskUsage(): Promise<DiskUsageReport> {
+    const body = await getJson<{ ok: boolean; report: DiskUsageReport }>(CONFIG_MANAGER_API.diskUsage, this.t);
+    return body.report;
+  }
+
+  /**
+   * 手动清理缓存与暂存（走 mutation gate）。
+   * 缺省只清可重建区（tmp + 市场缓存/工作副本）；`categories` 可加入 'expired-exports'
+   * 只删**已超保留期**的导出产物。snapshots / sync 永不在候选集内。
+   */
+  async cleanupDiskUsage(categories: Array<'tmp' | 'expired-exports'>): Promise<DiskUsageCleanupResult> {
+    return postJson<DiskUsageCleanupResult>(CONFIG_MANAGER_API.diskUsageCleanup, { categories }, this.t);
+  }
+
+  // ------------------------------------------------- 插件版本更新检查（关于 tab）
+  /**
+   * 只读检查 npm 上是否有新版本（GET /update-check）。
+   *
+   * `force=false`（缺省）命中宿主 10 分钟内的进程内缓存；`force=true` 绕过缓存重新探测
+   * （用户在「关于」页点「重新检查」）。离线 / registry 不可达时返回 `ok:false` + 原因
+   * —— 界面显示可重试提示，不当作错误横幅。
+   */
+  async checkUpdate(force = false): Promise<PluginUpdateCheckResult> {
+    const url = force ? `${CONFIG_MANAGER_API.updateCheck}?force=1` : CONFIG_MANAGER_API.updateCheck;
+    return getJson<PluginUpdateCheckResult>(url, this.t);
+  }
+
   // ------------------------------------------------- Phase 7 迁移前咨询
   /** 迁移前咨询（只读健康评分 + 建议）：对 4 种可迁移源生成统一咨询报告。 */
   async consult(input: { type: 'export-zip' | 'local-snapshot' | 'remote-snapshot' | 'profile'; id: string; snapshotId?: string }): Promise<ConsultReport> {
@@ -745,12 +791,15 @@ export class ConfigManagerApi {
   async inspectBackup(zipPath: string): Promise<BackupInspectResult> {
     // 1) 只读分析（分区清单 / 兼容性 / 路径 / 密钥数）
     const analysis = await this.analyzeImport(zipPath);
-    // 2) 差异计划（merge 策略，零写入）：将更新的项 / 已一致的项 / 冲突等
+    // 2) 差异计划（merge 策略，零写入）：将更新的项 / 已一致的项 / 冲突等。
+    //    这里显式用 **'guide'** 处置：本方法只做**只读查看**（零写入），没有、也不该有
+    //    「中止 / 跳过 / 引导」的决策界面；若沿用缺省 abort，用户连「看看这个备份里有什么」
+    //    都会被 409 挡住（T1 的阻断只应发生在真正要写盘的导入/同步路径上）。
     const plan = await this.createImportPlan(zipPath, {
       strategy: 'merge',
       resolutions: {},
       pathMappings: [],
-    });
+    }, { sessionFormatDisposition: 'guide' });
     return { analysis, plan };
   }
 }

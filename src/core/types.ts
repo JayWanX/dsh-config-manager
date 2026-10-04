@@ -76,6 +76,15 @@ export interface SectionPreview<T = unknown> {
   sizeBytes: number;
   /** 单元清单（与 `listUnits()` 同口径；文件类的体积来自 stat 而非读盘） */
   items: ExportUnit[];
+  /**
+   * 「homeDir 相对路径 → mtimeMs」：本趟预览**顺带**取到的文件时间（可选）。
+   *
+   * 为什么放在预览结果里：体积与时间都要 stat，而 `ctx.fs.statInfo` 一次 stat 就能同时给出
+   * 两者（见 FileSystemFacade.statInfo）。宿主未实现该门面时这里是 `undefined`，调用方必须
+   * 退回自己的取时间路径（例如 `SessionsAdapter.unitActivityTimes()` 的逐文件 stat），
+   * **绝不假定「没有时间 = 时间不明」以外的含义**。
+   */
+  statTimes?: Map<string, number>;
 }
 
 /**
@@ -338,6 +347,17 @@ export interface FileSystemFacade {
    */
   mtimeMs?(relPath: string): Promise<number | null>;
   /**
+   * 一次性取「字节数 + mtime」（文件不存在 / 读不到 → null）。
+   *
+   * 为什么需要：`/export-preview` 对同一个文件既要体积（`statSize`）又要时间（`mtimeMs`，
+   * sessions 的排序兜底），分两次调用 = 两次 `fs.stat`。本门面一次 stat 同时给出两者，
+   * 预览把时间顺带带回来（`SectionPreview.statTimes`），省掉第二趟逐文件 stat。
+   *
+   * 可选：未实现时两个旧门面各自退回（行为与改造前一致，只多一趟 I/O）。
+   * 非普通文件返回 null（与 `statSize` 同语义：目录的 size 毫无意义）。
+   */
+  statInfo?(relPath: string): Promise<{ size: number; mtimeMs: number } | null>;
+  /**
    * 文件字节数（文件不存在 / 读不到 → null）。
    *
    * 用途：**只读预览**（`/export-preview` 与文件类分区的 `preview()`）—— 选择器只需要
@@ -372,12 +392,49 @@ export interface FileSystemFacade {
   ensureDir?(absPath: string): Promise<string[]>;
 }
 
+/* ---------------- 会话格式体检（core 只编排，不解析 DSH 存储格式） ---------------- */
+
+/**
+ * 宿主注入的会话格式探针产出。
+ *
+ * core **不得**解析会话日志字节（AGENTS.md：只有宿主侧能碰 DSH 存储格式），
+ * 所以宿主把「抽查到了哪些格式版本」以数字形式送进来，core 只负责比对与告警。
+ */
+export interface SessionFormatProbeResult {
+  /** 抽查到的格式版本（每条会话日志一项，可能重复） */
+  versions: number[];
+  /** 真的解出 header 的日志数 */
+  sampled: number;
+  /** 命中会话日志文件名但**解不出** header 的条数（撕裂/损坏/环境缺 zstd）——绝不当作「没问题」 */
+  unreadable: number;
+  /** 因抽样上限没有检查的会话单元数 */
+  skipped: number;
+  /**
+   * 每条已体检会话的「单元 id + 格式版本」（上限内完整）。
+   *
+   * 为什么需要：有了它，core 才能把「本机读不了」**落到具体计划项**（而不是只报一个总数），
+   * UI 也才能对这批单元做「跳过 / 中止 / 引导升级」的处置。
+   */
+  units?: { unitId: string; version: number }[];
+}
+
 /** DSH 运行时门面：m3 只依赖此接口；m5 用真实 ctx.settings/credentials/… 实现 */
 export interface HostContext {
   platform: string;
   arch: string;
   homeDir: string;
   dshVersion: string;
+  /**
+   * 本机 DSH 支持的**会话日志格式版本**（= 运行中 DSH 的 `SESSION_FORMAT_VERSION`）。
+   *
+   * 为什么需要：DSH 的会话日志 header 带 `version`，读不出来的（更高的）格式会被 DSH
+   * **静默跳过** —— 不报错、不在工作区列表里，用户看到的是「对话消失」。导入/同步因此在
+   * 分析阶段就把风险说清楚。
+   *
+   * 宿主 best-effort 解析（桌面端在 app.asar 内）；缺省 = 无法判定，此时调用方**不得**
+   * 猜版本，也不得据此宣称兼容。
+   */
+  sessionFormatVersion?: number;
   log: Logger;
   settings: SettingsFacade;
   credentials: CredentialsFacade;
@@ -393,6 +450,14 @@ export interface HostContext {
   sessions?: SessionStoreFacade;
   /** 当前管理的 DSH profile 名（如 web）；引擎用它定位 profiles/<profile>/cordis.patch.yml。宿主不暴露时缺省 */
   profile?: string;
+  /**
+   * profile 目录的**绝对路径**（宿主解析，缺省 undefined）。
+   *
+   * 为什么不能由调用方拼接 `homeDir + '/profiles/' + profile`：DSH 的档案目录不保证是
+   * 默认布局（issue #57 场景），拼出来的路径可能不存在 —— 于是 `file:./x` 这类
+   * 相对 spec 会被解析到错误位置。缺省时调用方应按既有约定拼接（保持旧行为）。
+   */
+  profileDir?: string;
   /**
    * 消息翻译器（zh/en 目录，见 messages.ts）。由宿主按 DSH 应用语言注入；
    * 缺省 zh（改造前行为）。引擎与适配器用它生成所有用户可见动态文案。
@@ -423,6 +488,16 @@ export type PlanItemKind =
 
 export type ItemResolution = 'keepCurrent' | 'useImported' | 'review';
 export type GlobalConflictStrategy = 'merge' | 'replace' | 'skipExisting';
+
+/**
+ * 会话格式处置（T1）：导入/同步遇到「本机读不了的会话」时怎么办。
+ *
+ * 是 client ↔ host 的**线上契约**（请求体字段 `sessionFormatDisposition`），因此登记在 core
+ * （与 ItemResolution / GlobalConflictStrategy 同级），由 `src/ui/session-format-disposition.ts`
+ * 提供判定与展示逻辑；core 引擎本身不消费它（由路由在计划阶段判定，core 只负责把
+ * 「哪条会话读不了」标到 PlanItem.formatUnsupported 上）。
+ */
+export type SessionFormatDisposition = 'abort' | 'skip' | 'guide';
 
 export interface ConflictDecision { itemId: string; resolution: ItemResolution; }
 
@@ -481,6 +556,13 @@ export interface PlanItem {
   description: string;
   detail?: string;
   severity: 'info' | 'warning' | 'error';
+  /**
+   * 本项对应的会话单元**本机读不了**（格式版本高于本机 DSH 支持的版本）。
+   *
+   * 语义：DSH 读会话时对非本 build 的 `header.version` 直接拒绝，而会话列表静默跳过
+   * → 这一项即使写入成功，用户在 DSH 里也看不到这条对话。UI 据此提供「中止 / 跳过 / 引导升级」。
+   */
+  formatUnsupported?: { version: number; target: number };
   conflict?: ConflictDecision;
   pathMapping?: PathMapping;
   missingDependency?: string;
@@ -498,6 +580,18 @@ export interface ImportAnalysis {
   errors: string[];
   warnings: string[];
   compatibility: 'excellent' | 'good' | 'partial' | 'unsupported';
+  /**
+   * 兼容性判定的**结构化原因**（可选；旧调用方缺省即不展示 —— 界面按原因解释评分，
+   * 见 `CompatibilityReason`）。与 `compatibility` 同源，永不单独维护。
+   */
+  compatibilityReasons?: CompatibilityReason[];
+  /**
+   * 备份侧事实（可选）：来源 DSH 版本 / 平台 / schema 版本。
+   * 界面用它解释「为什么是部分兼容」（例如跨平台、来源更旧/更新）。
+   */
+  source?: { dshVersion: string; platform: string; schemaVersion: number };
+  /** 本机侧对照（可选）：当前 DSH 版本 / 平台。与 `source` 成对展示，缺省则界面不显示对照行。 */
+  target?: { dshVersion: string; platform: string };
   sectionsInZip: SectionId[];
   /**
    * 备份 manifest 声明启用、但**本版本不认识**的分区 id（不在 `SECTION_IDS` 中）。
@@ -526,6 +620,18 @@ export interface ImportAnalysis {
   dependencyIssues: { item: string; dependency: string }[];
   /** 备份是否加密（manifest.security.encrypted）：加密备份的凭据必须用解密密码恢复 */
   encrypted: boolean;
+  /**
+   * 会话格式体检摘要（可选；宿主未注入探针 / 本机版本解析不到时为 undefined）。
+   *
+   * `unreadable` 只含**明确判定读不了**的会话单元（version > 本机支持版本）；
+   * `target` 为 null 表示本机版本无法判定（此时不猜、不判读不了）。
+   */
+  sessionFormats?: {
+    target: number | null;
+    unreadable: { unitId: string; version: number }[];
+    sampled: number;
+    skipped: number;
+  };
   /**
    * 凭据可恢复性摘要（issue #39 Feature 2；**可选字段**，旧调用方零改动）。
    *
@@ -582,6 +688,28 @@ export interface ExecutedItem {
   skippedByUser?: boolean;
 }
 
+/**
+ * 本次导入「没有生效」的计划项（`status: 'warning'`：非致命失败，未触发回滚也不计入失败）。
+ *
+ * 为什么必须单独成一个字段（issue #56 的第二条线）：插件安装失败是**刻意**的 warning
+ * （一个装不上的插件不该拖垮已成功的其余配置，§34.17），但结果对象里只有 `ok: true` 与
+ * 一串 warnings —— 同步/导入的上层据此只报「成功」，用户看到的是「同步完成」，
+ * 而**排在它后面的步骤根本没执行**（真机：插件安装排在凭据之前，于是密钥没导进来，
+ * 用户是靠事后翻日志才发现）。本字段让「哪一项没生效」成为结果的一部分，
+ * 由上层如实展示，而不是埋在告警列表里。
+ *
+ * `adapter` 是自由字符串（**刻意不声明为 SectionId**）：warning 项也可能来自分区收尾
+ * （itemId 形如 `plugins:finalize`），此处只作展示用的分类标签。
+ */
+export interface ImportIneffectiveItem {
+  /** 计划项 id（含收尾项 `<adapter>:finalizeImport`） */
+  itemId: string;
+  /** 分区/步骤分类（展示用） */
+  adapter: string;
+  /** 如实原因（已含可复制的手动修复提示） */
+  message?: string;
+}
+
 export interface ImportResult {
   ok: boolean;
   executed: ExecutedItem[];
@@ -590,6 +718,14 @@ export interface ImportResult {
   warnings: string[];
   rollback: RollbackReport | null;
   snapshotId: string | null;
+  /**
+   * 未生效项（status='warning'；字段只增不改，旧调用方忽略即可）。
+   *
+   * 与 `ok` 的关系：**不改变** ok 语义（warning 仍不算失败、不触发回滚）——
+   * 这里只是把「部分成功」从「一串文字」升级为「可判定的结论」。
+   * 空数组时省略该字段（旧行为逐字节不变）。
+   */
+  ineffective?: ImportIneffectiveItem[];
   /** F4：本次导入被删除墓碑过滤掉的条目（缺省/空 = 无过滤；UI 据此提示用户） */
   skippedTombstoned?: SkippedTombstone[];
   /**
@@ -794,6 +930,24 @@ export interface CompatibilityInput {
 
 export type CompatibilityScore = 'excellent' | 'good' | 'partial' | 'unsupported';
 
+/**
+ * 兼容性判定的**结构化原因**（2026-09：把「为什么是这个评分」暴露给 UI）。
+ *
+ * 为什么需要：此前只有一档总分（excellent/good/partial/unsupported），用户看到
+ * 「部分兼容」却不知道该处理什么；core 里唯一能解释的 `describeCompatibility()`
+ * 是**硬编码中文**的整句（不能进 i18n 字典，界面也不该直接渲染）。
+ *
+ * 约定：这里只产出**语义 + 数据**，文案由界面按 kind 查字典（zh/en 各自解析）；
+ * `sourceDsh`/`targetDsh`/`sourcePlatform`/`targetPlatform` 是给界面填入文案的**原始事实**，
+ * 不是可展示文本。
+ */
+export type CompatibilityReason =
+  | { kind: 'schemaUnsupported'; schemaVersion: number }
+  | { kind: 'crossPlatform'; sourcePlatform: string; targetPlatform: string }
+  | { kind: 'missingSections'; sections: SectionId[] }
+  | { kind: 'sourceNewer'; sourceDsh: string; targetDsh: string }
+  | { kind: 'sourceOlder'; sourceDsh: string; targetDsh: string };
+
 /* ---------------- 导出报告（规范 §21） ---------------- */
 
 export interface ExportReport {
@@ -865,8 +1019,16 @@ export interface ConfigAdapter<TSection = unknown> {
    * 731 个会话目录里 347 个不在缓存内），缺时间的会话会退化成按 uuid 排序、全部堆在组尾。
    * 目前只有 sessions 分区实现（数据源 = 会话日志文件 mtime）；未实现 / 时间未知 → 空 Map，
    * 调用方按「时间未知」处理，绝不猜成 0。
+   *
+   * @param statTimes 预览**顺带**取到的「homeDir 相对路径 → mtime」（`SectionPreview.statTimes`）。
+   *   给了就应当复用它而**不再逐文件 stat**（这正是「体积与时间合并成一次 stat」的落点）；
+   *   缺省 = 旧宿主 / 未实现 `fs.statInfo`，实现方自行取时间。
    */
-  unitActivityTimes?(ctx: HostContext, section: ExportSection<TSection>): Promise<Map<string, number>>;
+  unitActivityTimes?(
+    ctx: HostContext,
+    section: ExportSection<TSection>,
+    statTimes?: ReadonlyMap<string, number>,
+  ): Promise<Map<string, number>>;
 
   /**
    * 可选：枚举本机**全部**单元 id（不是本次勾选的那部分）。

@@ -148,7 +148,7 @@ export function runCards(
     })
 }
 
-/** 状态栏 / 抽屉徽章用的计数。 */
+/** 状态栏 / 面板徽章用的计数。 */
 export function runSummary(runs: readonly RunState[]): { running: number; awaiting: number; total: number } {
   let running = 0
   let awaiting = 0

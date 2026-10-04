@@ -13,7 +13,7 @@
  * 不影响普通 JSON 分区；加密快照（EncryptedSections）本身只含字符串，原样透传。
  */
 import type { FilesSection, SectionData, SectionId } from '../schema/types.ts';
-import { parseJsonSafe, stringifyJsonSafe } from '../utils/json.ts';
+import { MAX_OWN_PAYLOAD_JSON_BYTES, parseJsonSafe, stringifyJsonSafe } from '../utils/json.ts';
 import type { EncryptedCredentials, EncryptedSections, SyncSnapshot } from './transport.ts';
 import { isEncryptedCredentials, isEncryptedSections } from './transport.ts';
 
@@ -108,9 +108,16 @@ export function serializeSnapshot(snapshot: SyncSnapshot): string {
   });
 }
 
-/** 从 JSON 字符串还原快照（形状非法抛错；调用方负责包装成通道错误）。 */
+/**
+ * 从 JSON 字符串还原快照（形状非法抛错；调用方负责包装成通道错误）。
+ *
+ * 体积上限刻意**不同于** parseJsonSafe 的缺省 64 MiB（issue #59）：快照是本插件自己写出的
+ * 载荷（加密单文件布局经 base64 双膨胀后轻易越界），而缺省上限是给**不可信输入**用的。
+ * 读写两侧口径必须一致，否则会产出「自己读不回来」的快照：push 报成功、远端列表为空、
+ * 拉取报「快照损坏」。
+ */
 export function deserializeSnapshot(raw: string): SyncSnapshot {
-  const parsed = parseJsonSafe(raw);
+  const parsed = parseJsonSafe(raw, { maxBytes: MAX_OWN_PAYLOAD_JSON_BYTES });
   const snap = parsed as Partial<SyncSnapshot> | null;
   const okShape =
     snap !== null && typeof snap === 'object' && !Array.isArray(snap)

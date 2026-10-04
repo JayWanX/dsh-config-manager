@@ -15,7 +15,7 @@ import type { PlanItemProgress } from './analyzer.ts';
 import type { BootSafetyReport } from './boot-safety.ts';
 import type {
   ConfigAdapter, HostContext, ImportAnalysis, ImportDecisions, ImportPlan,
-  ImportResult, SnapshotStore, TransactionSnapshotContext,
+  ImportResult, SessionFormatProbeResult, SnapshotStore, TransactionSnapshotContext,
 } from './types.ts';
 import type { SectionId } from '../schema/types.ts';
 
@@ -30,6 +30,8 @@ export interface ImporterOptions {
   parseZipOverride?: (buf: Uint8Array, limits?: ZipSafetyLimits) => ZipArchive;
   /** 消息翻译器（缺省 ctx.msg ?? zh） */
   msg?: MsgFunc;
+  /** 会话格式探针（宿主注入；core 只消费结果，见 types.ts 的 SessionFormatProbeResult） */
+  sessionFormatProbe?: (files: readonly { relativePath: string; data: Uint8Array }[]) => SessionFormatProbeResult;
 }
 
 export interface ExecuteOptions {

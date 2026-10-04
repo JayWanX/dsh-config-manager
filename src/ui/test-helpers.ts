@@ -5,7 +5,7 @@
 import type { Manifest } from '../schema/types.ts';
 import type {
   ExportReport, ImportAnalysis, ImportDecisions, ImportPlan, ImportResult,
-  PlanItem, RollbackReport,
+  PlanItem, RollbackReport, SessionFormatDisposition,
 } from '../core/types.ts';
 import type { ExportPort } from './export-flow.ts';
 import type { ImportPort } from './types.ts';
@@ -149,9 +149,9 @@ export class MockImportPort implements ImportPort {
   result: ImportResult;
   analyzeCalls = 0;
   planCalls: ImportDecisions[] = [];
-  /** 每次 createImportPlan 的附加参数（加密备份的计划期解密密码；仅内存） */
-  planOptsCalls: { decryptPassword?: string }[] = [];
-  executeCalls: { confirm: boolean; secretInputs?: Record<string, string>; rollbackOnError: boolean; decryptPassword?: string; plan?: ImportPlan }[] = [];
+  /** 每次 createImportPlan 的附加参数（解密密码 / 会话格式处置；仅内存） */
+  planOptsCalls: { decryptPassword?: string; sessionFormatDisposition?: SessionFormatDisposition }[] = [];
+  executeCalls: { confirm: boolean; secretInputs?: Record<string, string>; rollbackOnError: boolean; decryptPassword?: string; sessionFormatDisposition?: SessionFormatDisposition; plan?: ImportPlan }[] = [];
 
   constructor(opts: {
     analysis?: ImportAnalysis;
@@ -170,7 +170,7 @@ export class MockImportPort implements ImportPort {
   async createImportPlan(
     _zip: string,
     decisions: ImportDecisions,
-    opts: { decryptPassword?: string } = {},
+    opts: { decryptPassword?: string; sessionFormatDisposition?: SessionFormatDisposition } = {},
   ): Promise<ImportPlan> {
     this.planCalls.push(decisions);
     this.planOptsCalls.push(opts);
@@ -183,7 +183,13 @@ export class MockImportPort implements ImportPort {
   async executeImportPlan(
     _zip: string,
     plan: ImportPlan,
-    opts: { confirm: boolean; secretInputs?: Record<string, string>; rollbackOnError: boolean; decryptPassword?: string },
+    opts: {
+      confirm: boolean
+      secretInputs?: Record<string, string>
+      rollbackOnError: boolean
+      decryptPassword?: string
+      sessionFormatDisposition?: SessionFormatDisposition
+    },
   ): Promise<ImportResult> {
     this.executeCalls.push({ ...opts, plan });
     return this.result;

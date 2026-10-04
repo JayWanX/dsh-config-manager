@@ -8,13 +8,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  ImportWizard, applicablePathIssues, compatibilityBadgeKind, compatibilityLevel, importApplicablePhases,
-  importBasePathNotices, importFlowFlags,
+  ImportWizard, applicablePathIssues, compatibilityBadgeKind, compatibilityLevel, compatibilityNotes,
+  importApplicablePhases, importBasePathNotices, importFlowFlags,
   importPreviewStageAfter, isSkippablePluginInstall, mergeSecretInput, nextImportPhase, pendingSecretRequests,
 } from './import-wizard.ts';
 import { MockImportPort, makeAnalysis, makeImportResult, makePlan, makePlanItem } from './test-helpers.ts';
 import type { ImportPlan, PathIssue } from '../core/types.ts';
 import type { SectionId } from '../schema/types.ts';
+import { ConfigManagerApiError } from '../client/common/http.ts';
+import { buildSelectedPlan, defaultSelectionFromPlan, type Selection } from './selection-model.ts';
+import { sessionFormatSkipUnits, sessionFormatSkippedItems } from './session-format-disposition.ts';
 
 /**
  * UI-06 回归：补录页「看到的值 = 提交的值」。
@@ -116,20 +119,20 @@ test('import-wizard: 加密备份的解密密码同时传给 createImportPlan（
   const wiz = new ImportWizard({ port });
   await wiz.selectZip('x.zip');
   await wiz.confirmCompatibility();
-  assert.deepEqual(port.planOptsCalls[0], {}, '未设密码时不传 decryptPassword（普通备份）');
+  assert.deepEqual(port.planOptsCalls[0], { sessionFormatDisposition: 'abort' }, '未设密码时不传 decryptPassword（普通备份）');
 
   wiz.setDecryptPassword('backup-password-123');
   await wiz.execute({ confirm: true });
   assert.deepEqual(
     port.planOptsCalls[1],
-    { decryptPassword: 'backup-password-123' },
+    { decryptPassword: 'backup-password-123', sessionFormatDisposition: 'abort' },
     'execute 前重建计划必须带上解密密码：计划缺少归档凭据 = 导入时值被静默丢掉',
   );
 
   wiz.reset();
   await wiz.selectZip('y.zip');
   await wiz.confirmCompatibility();
-  assert.deepEqual(port.planOptsCalls[2], {}, 'reset 后不残留密码');
+  assert.deepEqual(port.planOptsCalls[2], { sessionFormatDisposition: 'abort' }, 'reset 后不残留密码（处置也回到缺省）');
 });
 
 test('import-wizard: 加密备份的解密密码经 execute 传给端口（仅内存）', async () => {
@@ -450,4 +453,120 @@ test('importBasePathNotices：有自动重定基规则才产出提示行（null 
     importBasePathNotices({ automaticMappings: [{ oldPrefix: '/opt/dsh/.dsh', newPrefix: 'C:/Users/me/.dsh' }] }),
     [{ from: '/opt/dsh/.dsh', to: 'C:/Users/me/.dsh' }],
   );
+});
+
+/* ---------------- 2026-09：兼容性判定的结构化原因 → 可渲染解释项 ---------------- */
+
+test('compatibilityNotes：五类原因各自映射到字典键与参数', () => {
+  assert.deepEqual(
+    compatibilityNotes([{ kind: 'schemaUnsupported', schemaVersion: 999 }]),
+    [{ key: 'import.reason.schemaUnsupported', params: { version: '999' } }],
+  );
+  assert.deepEqual(
+    compatibilityNotes([{ kind: 'crossPlatform', sourcePlatform: 'win32', targetPlatform: 'darwin' }]),
+    [{ key: 'import.reason.crossPlatform', params: { source: 'win32', target: 'darwin' } }],
+  );
+  assert.deepEqual(
+    compatibilityNotes([{ kind: 'missingSections', sections: ['plugins', 'mcp'] as SectionId[] }]),
+    [{ key: 'import.reason.missingSections', params: { count: '2', sections: 'plugins, mcp' } }],
+  );
+  assert.deepEqual(
+    compatibilityNotes([{ kind: 'sourceNewer', sourceDsh: '0.2.0', targetDsh: '0.1.0' }]),
+    [{ key: 'import.reason.sourceNewer', params: { source: '0.2.0', target: '0.1.0' } }],
+  );
+  assert.deepEqual(
+    compatibilityNotes([{ kind: 'sourceOlder', sourceDsh: '0.0.9', targetDsh: '0.1.0' }]),
+    [{ key: 'import.reason.sourceOlder', params: { source: '0.0.9', target: '0.1.0' } }],
+  );
+});
+
+test('compatibilityNotes：undefined / 空数组 → 空（老宿主不编原因，也不显示空标题）', () => {
+  assert.deepEqual(compatibilityNotes(undefined), []);
+  assert.deepEqual(compatibilityNotes([]), []);
+});
+
+test('compatibilityNotes：顺序与 core 的原因顺序一致（跨平台 → 分区缺失 → 版本方向）', () => {
+  const notes = compatibilityNotes([
+    { kind: 'crossPlatform', sourcePlatform: 'win32', targetPlatform: 'linux' },
+    { kind: 'missingSections', sections: ['plugins'] as SectionId[] },
+    { kind: 'sourceNewer', sourceDsh: '0.2.0', targetDsh: '0.1.0' },
+  ]);
+  assert.deepEqual(notes.map((n) => n.key), [
+    'import.reason.crossPlatform',
+    'import.reason.missingSections',
+    'import.reason.sourceNewer',
+  ]);
+});
+
+
+
+/* ---------------- T1：会话格式处置开关（abort / skip / guide） ---------------- */
+
+/** 一份含「读不了的会话」的计划：一个会话单元两条文件 + 一个普通设置项。 */
+function planWithUnreadableSession(): ImportPlan {
+  return makePlan({
+    items: [
+      makePlanItem({
+        id: 'sessions:--p--/s1/session.jsonl.zstd', unitId: UNIT_ID, adapter: 'sessions', kind: 'Create',
+        formatUnsupported: { version: 4, target: 3 },
+      }),
+      makePlanItem({
+        id: 'sessions:--p--/s1/session.2.jsonl.zstd', unitId: UNIT_ID, adapter: 'sessions', kind: 'Create',
+      }),
+      makePlanItem({ id: 'settings:a', adapter: 'settings', kind: 'Update' }),
+    ],
+  });
+}
+const UNIT_ID = 'sessions:--p--/s1';
+
+test('T1：向导把当前处置随**每一次** plan / execute 下发（缺省 abort）', async () => {
+  const port = new MockImportPort();
+  const wiz = new ImportWizard({ port });
+  await wiz.selectZip('x.zip');
+  await wiz.confirmCompatibility();
+  assert.equal(port.planOptsCalls[0]!.sessionFormatDisposition, 'abort', '缺省 = abort（安全侧）');
+
+  wiz.setSessionFormatDisposition('skip');
+  await wiz.execute({ confirm: true });
+  assert.equal(port.planOptsCalls[1]!.sessionFormatDisposition, 'skip', '执行前重建计划也必须带上当前处置');
+  assert.equal(port.executeCalls[0]!.sessionFormatDisposition, 'skip', '执行请求同样带上（宿主会再判一次）');
+});
+
+test('T1：abort 被宿主拒绝时错误**原样上抛**（控制器据此渲染阻断态，绝不吞掉）', async () => {
+  const port = new MockImportPort();
+  // 宿主在 abort 处置下的真实行为：409 + code=sessionFormatUnsupported（配置在 mock 上模拟）
+  const blocked = new ConfigManagerApiError('包内有 1 条会话是 v4 格式…', 409, 'sessionFormatUnsupported');
+  port.createImportPlan = async () => { throw blocked };
+  const wiz = new ImportWizard({ port });
+  await wiz.selectZip('x.zip');
+  await assert.rejects(() => wiz.confirmCompatibility(), (err: unknown) => err === blocked);
+  assert.equal(wiz.currentStep, 'compatibility', '阻断后停在兼容性步：没有计划、零写入');
+});
+
+test('T1 skip：读不了的会话单元默认不勾选，其余项照常；报告计数与选择模型同源', async () => {
+  const plan = planWithUnreadableSession();
+  const units = sessionFormatSkipUnits({ target: 3, unreadable: [{ unitId: UNIT_ID, version: 4 }] }, 'skip');
+  assert.deepEqual(units, [UNIT_ID]);
+
+  const selection: Selection = { ...defaultSelectionFromPlan(plan), excluded: [...units] };
+  const skipped = sessionFormatSkippedItems(plan, selection);
+  assert.equal(skipped.length, 1, '同一会话的两条文件项只算一次「跳过」');
+  assert.equal(skipped[0]!.unitId, UNIT_ID);
+
+  // 其余分区照常导入：设置项仍在子计划里，只有会话单元被排除
+  const cropped = buildSelectedPlan(plan, selection);
+  assert.deepEqual(cropped.items.map((i) => i.id), ['settings:a']);
+  assert.equal(
+    sessionFormatSkippedItems(plan, { sections: ['sessions', 'settings'], excluded: [] }).length,
+    0,
+    '用户手动勾回来 → 不再算「被处置跳过」（数字与实际导入逐条一致）',
+  );
+});
+
+test('T1 guide：不改动选择与计划，只提供指引（写入行为与改造前逐字一致）', async () => {
+  const plan = planWithUnreadableSession();
+  const selection = defaultSelectionFromPlan(plan);
+  assert.deepEqual(sessionFormatSkipUnits({ target: 3, unreadable: [{ unitId: UNIT_ID, version: 4 }] }, 'guide'), []);
+  assert.equal(sessionFormatSkippedItems(plan, selection).length, 0);
+  assert.equal(buildSelectedPlan(plan, selection).items.length, 3, 'guide 下全部项照常导入');
 });

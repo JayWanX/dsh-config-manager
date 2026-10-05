@@ -46,8 +46,15 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 - 🛟 **备份与回滚记住 patch 行的层**：快照条目记录 `file`，回滚写回**原层**（旧快照缺该字段 ⇒ 用户层）；
   计划项去重键把层算进去，档案层的行不再被 home 层的同名行吞掉；整文件还原接受**任一层**的
   `cordis.patch.yml` 备份。**Snapshots and rollback now record the layer of every patch row.**
+- 🧾 **多行技能字段不再写出非法 YAML**：服务技能的 `description` / `whenToUse` 可能是块标量
+  （真机 `dsh-reverse-skill/skills/binary-diff` 是 4 行 211 字符），重建 frontmatter 按三档编码 ——
+  以恰好一个换行结尾的多行值写块标量 `|`（尾换行交给 clip chomping 还原）、含换行 / 回车 / 控制字符的
+  写双引号 + 转义、其余仍是单引号；解析回来**逐字符相同**。原先只做单引号转义，多行值会跨行 ⇒ 外壳判
+  `invalid YAML frontmatter` 并**丢掉整个技能**（比不备份更糟）。**Multi-line skill fields are now encoded
+  as valid YAML** (block scalar / double-quoted escapes / single-quoted), so the shell can never drop a skill
+  over frontmatter.
 - 🧪 **用例**：新增 `src/core/patch-layers.test.ts`（层优先级 / 写回层解析 / 单层读失败不阻塞），
-  扩充 `src/adapters/files.test.ts`（技能服务合并、磁盘优先、服务缺失、路径安全）、`mcp.test.ts`、
+  扩充 `src/adapters/files.test.ts`（技能服务合并、磁盘优先、服务缺失、路径安全、**多行字段的 YAML 合法性**）、`mcp.test.ts`、
   `prompts.test.ts`、`plugins.test.ts`、`tests/core/patch-file-snapshot.test.ts`（快照记层 + 回滚写回原层）。
 
 ## [0.1.69] - 2026-10-04

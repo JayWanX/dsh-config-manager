@@ -34,6 +34,9 @@ import {
   makePlanItem,
 } from '../ui/test-helpers.ts'
 import type { SyncConfirmItem, SyncStartResponse } from './sync/sync-api.ts'
+import { channelMapOf, defaultChannelSyncState } from './sync/sync-view.ts'
+import type { ChannelSyncState, SyncChannel } from './sync/sync-view.ts'
+import { SYNC_CHANNELS } from '../utils/shared-constants.ts'
 import type { MarketListItem, MarketDownloadResult } from '../market/types.ts'
 
 /* ------------------------------------------------------------- fixtures */
@@ -726,8 +729,19 @@ function makeConfirmSession(): SyncStartResponse {
   }
 }
 
+/**
+ * 同步切片夹具的返回类型。
+ *
+ * `RunStore.patch` 的参数是 DeepPartial，直接用它会让 `patch.byChannel` 变成可选
+ * （新用例要**就地覆写**某条通道的字段，需要它必然存在）。这里显式要求 byChannel 齐全，
+ * 其余字段保持可选（与既有夹具一致）。
+ */
+type SyncPatchFixture = Omit<NonNullable<Parameters<RunStore['patch']>[0]['sync']>, 'byChannel'> & {
+  byChannel: Record<SyncChannel, ChannelSyncState>
+}
+
 /** 同步切片夹具（含敏感字段；token/webdav/加密与解密密码必须被白名单剔除）。 */
-function makeSyncPatch(): Parameters<RunStore['patch']>[0]['sync'] {
+function makeSyncPatch(): SyncPatchFixture {
   return {
     channel: 'webdav',
     repoUrl: 'https://github.com/u/repo.git',
@@ -738,44 +752,26 @@ function makeSyncPatch(): Parameters<RunStore['patch']>[0]['sync'] {
     // 瞬态：进行中推送 + 保存中 —— 切 tab 由模块级单例保留，刷新时白名单剔除
     busy: 'push',
     savingConfig: true,
+    // 键集合由枚举构造（与 run-store 的实现同源）：加通道时这里自动覆盖，
+    // 不再需要手写第二个 { git, webdav } 字面量。只覆写本用例要断言的差异值。
     byChannel: {
+      ...channelMapOf(() => defaultChannelSyncState()),
       git: {
+        ...defaultChannelSyncState(),
         syncMode: 'default',
-        syncSections: [],
-        sessionsLimit: 5,
-        sessionsInclude: [],
-        encrypt: false,
-        includeSecrets: false,
-        encryptPassword: '',
-        encryptPasswordConfirm: '',
-        decryptPassword: '',
         encryptPasswordSaved: true,
         decryptPasswordSaved: true,
-        selectedSnapshotId: '',
-        snapshots: [],
-        unreadableSnapshots: [],
-        autosync: null,
-        autosyncEnabled: false,
-        autosyncInterval: '30m',
       },
       webdav: {
+        ...defaultChannelSyncState(),
         syncMode: 'advanced',
         syncSections: ['settings', 'plugins'],
-        sessionsLimit: 5,
-        sessionsInclude: [],
         encrypt: true,
         includeSecrets: true,
         encryptPassword: 'ENC-PASS-SECRET',
         encryptPasswordConfirm: 'ENC-PASS-SECRET',
         decryptPassword: 'DEC-PASS-SECRET',
-        encryptPasswordSaved: false,
-        decryptPasswordSaved: false,
         selectedSnapshotId: 'snap-xyz',
-        snapshots: [],
-        unreadableSnapshots: [],
-        autosync: null,
-        autosyncEnabled: false,
-        autosyncInterval: '30m',
       },
     },
     pushReport: null,
@@ -847,6 +843,127 @@ test('低频面板: 同步凭据（token/webdav/加密与解密密码）绝不�
   assert.ok(!('decryptPassword' in parsed['sync'].byChannel.webdav), 'byChannel.webdav 不含解密密码')
   assert.equal(parsed['sync'].byChannel.webdav.syncMode, 'advanced', '非敏感通道设置可持久化')
   assert.deepEqual(parsed['sync'].byChannel.webdav.syncSections, ['settings', 'plugins'])
+})
+
+test('t17: byChannel 从 SYNC_CHANNELS 派生 —— s3/gist 的镜像可持久化并跨刷新往返', () => {
+  const { storage, raw } = makeStorage()
+  const first = new RunStore({ storage })
+  const patch = makeSyncPatch()
+  // 给两条云端点通道配上可断言的非敏感设置（密钥类**不在此切片**：见下一条用例的哨兵证明）
+  patch.byChannel.s3 = {
+    ...defaultChannelSyncState(),
+    syncMode: 'advanced',
+    syncSections: ['settings'],
+    sessionsLimit: 7,
+    selectedSnapshotId: 'snap-s3',
+  }
+  patch.byChannel.gist = {
+    ...defaultChannelSyncState(),
+    syncMode: 'advanced',
+    syncSections: ['skills'],
+    selectedSnapshotId: 'snap-gist',
+  }
+  first.patch({ panel: 'sync', sync: patch })
+
+  // ① 运行时切片键集合 == 枚举（不多不少）
+  assert.deepEqual(
+    Object.keys(first.getSnapshot().sync.byChannel).sort(),
+    [...SYNC_CHANNELS].sort(),
+    '运行时切片的通道键集合必须与 SYNC_CHANNELS 逐项一致',
+  )
+  // ② 持久化切片同样覆盖全部通道 —— 这一条正是 t12 报告的缺口（s3/gist 此前被整块丢掉）
+  const persisted = toPersistedState(first.getSnapshot())
+  assert.deepEqual(
+    Object.keys(persisted.sync.byChannel).sort(),
+    [...SYNC_CHANNELS].sort(),
+    '持久化切片的通道键集合也必须与 SYNC_CHANNELS 逐项一致',
+  )
+  // ③ 新通道的**非敏感**设置确实写进了 sessionStorage
+  const text = raw()
+  assert.ok(text !== null, 'patch 后已同步持久化')
+  assert.ok(text.includes('snap-s3'), 's3 通道的选中快照应进入 sessionStorage')
+  assert.ok(text.includes('snap-gist'), 'gist 通道的选中快照应进入 sessionStorage')
+
+  // ④ 跨刷新往返（新实例 + 同存储 = 模拟刷新）
+  const restored = new RunStore({ storage }).getSnapshot().sync.byChannel
+  assert.equal(restored.s3.selectedSnapshotId, 'snap-s3', 's3 通道的镜像刷新后恢复')
+  assert.equal(restored.s3.sessionsLimit, 7, 's3 通道的会话上限刷新后恢复')
+  assert.deepEqual(restored.s3.syncSections, ['settings'], 's3 通道的勾选刷新后恢复')
+  assert.equal(restored.gist.selectedSnapshotId, 'snap-gist', 'gist 通道的镜像刷新后恢复')
+  assert.deepEqual(restored.gist.syncSections, ['skills'], 'gist 通道的勾选刷新后恢复')
+})
+
+test('t17: 持久化产物经哨兵搜索证明不含任何密钥（含云端点密钥字段）', () => {
+  const { storage, raw } = makeStorage()
+  const store = new RunStore({ storage })
+  const patch = makeSyncPatch()
+  // ① 真实敏感字段全部注入哨兵值（git token / webdav 口令 / 加密与解密密码）
+  patch.token = 'SENTINEL-GIT-TOKEN-8f3a'
+  patch.webdavPassword = 'SENTINEL-WEBDAV-PASS-1c9d'
+  patch.byChannel.git.encryptPassword = 'SENTINEL-ENC-PASS-77bd'
+  patch.byChannel.git.encryptPasswordConfirm = 'SENTINEL-ENC-PASS-77bd'
+  patch.byChannel.webdav.decryptPassword = 'SENTINEL-DEC-PASS-4e21'
+
+  // ② 模拟「未来把云端点密钥放进切片」：**值与字段名**都注入（顶层 + byChannel.s3 各一份）。
+  //    放行清单之外的字段默认拒绝，所以它们既不该落盘、也不该出现在 toPersistedState() 里。
+  const S3_SECRET = 'SENTINEL-S3-SECRET-a5f0'
+  const GIST_TOKEN = 'SENTINEL-GIST-TOKEN-2b6c'
+  const ACCESS_KEY_ID = 'SENTINEL-ACCESSKEY-ID-93aa'
+  const snap = store.getSnapshot() as unknown as {
+    sync: Record<string, unknown> & { byChannel: Record<SyncChannel, Record<string, unknown>> }
+  }
+  snap.sync['s3Secret'] = S3_SECRET
+  snap.sync['gistToken'] = GIST_TOKEN
+  snap.sync['accessKeyId'] = ACCESS_KEY_ID
+  snap.sync.byChannel.s3['s3Secret'] = S3_SECRET
+  snap.sync.byChannel.s3['gistToken'] = GIST_TOKEN
+  snap.sync.byChannel.s3['accessKeyId'] = ACCESS_KEY_ID
+
+  store.patch({ sync: patch })
+  store.save()
+
+  // ③ 落盘字节 + toPersistedState() 的字节里都不得出现任何哨兵**值**
+  const text = raw()
+  assert.ok(text !== null, 'patch 后已同步持久化')
+  const persistedJson = JSON.stringify(toPersistedState(store.getSnapshot()))
+  const sentinels: [string, string][] = [
+    ['git token', 'SENTINEL-GIT-TOKEN-8f3a'],
+    ['webdav 口令', 'SENTINEL-WEBDAV-PASS-1c9d'],
+    ['加密密码', 'SENTINEL-ENC-PASS-77bd'],
+    ['解密密码', 'SENTINEL-DEC-PASS-4e21'],
+    ['s3 Secret', S3_SECRET],
+    ['gist token', GIST_TOKEN],
+    ['s3 accessKeyId', ACCESS_KEY_ID],
+  ]
+  for (const [label, value] of sentinels) {
+    assert.ok(!text.includes(value), label + ' 的值不得落入 sessionStorage')
+    assert.ok(!persistedJson.includes(value), label + ' 的值不得出现在 toPersistedState()')
+  }
+
+  // ④ 字段名同样不得出现（sync 顶层与每条通道的状态里都不允许）
+  const persisted = toPersistedState(store.getSnapshot())
+  const forbiddenNames = ['s3Secret', 'gistToken', 'accessKeyId', 'token', 'webdavPassword', 'encryptPassword', 'decryptPassword', 'encryptPasswordConfirm']
+  for (const key of forbiddenNames) {
+    assert.ok(!Object.keys(persisted.sync).includes(key), 'sync 顶层不得含字段 ' + key)
+  }
+  for (const ch of SYNC_CHANNELS) {
+    const keys = Object.keys(persisted.sync.byChannel[ch])
+    for (const key of forbiddenNames) {
+      assert.ok(!keys.includes(key), 'byChannel.' + ch + ' 不得含字段 ' + key)
+    }
+    // 兜底：名字里带 secret/password/token/accesskey 的字段一律不应出现（防未来新增漏放行）。
+    // 唯一豁免 = includeSecrets：它是「是否导出真实凭据值」的**开关**（布尔，本身不带值），
+    // 按设计就是要持久化的用户偏好（见 SyncChannelState 的注释）。
+    for (const key of keys) {
+      assert.ok(
+        key === 'includeSecrets' || !/secret|password|token|accesskey/i.test(key),
+        'byChannel.' + ch + ' 含可疑字段 ' + key,
+      )
+    }
+  }
+
+  // ⑤ 正向对照：同一通道的**非敏感**设置确实落盘（证明本用例不是空转）
+  assert.ok(persistedJson.includes('snap-xyz'), '非敏感通道设置仍照常持久化')
 })
 
 test('低频面板: 同步/市场/快照切片与当前面板刷新往返恢复（敏感字段清空）', () => {

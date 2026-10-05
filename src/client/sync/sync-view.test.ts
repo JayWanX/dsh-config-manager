@@ -9,7 +9,7 @@ import type { PullChange, SyncPullReport, SyncPushReport } from '../../sync/sync
 import type { SectionId } from '../../schema/types.ts'
 import type { GithubPollResponse, SyncSectionInfo, SyncStatusResponse } from './sync-api.ts'
 import {
-  autosyncIntervalMs, computeAutosyncCountdown, computeGithubLoginView, computeRemoteReady, computeSyncButtons, computeSyncStatus,
+  autosyncIntervalMs, computeAutosyncCountdown, computeGithubLoginView, computeSyncButtons, computeSyncStatus,
   DEFAULT_SYNC_SESSIONS_LIMIT, defaultChannelSyncState, formatDateTime, formatIntervalDuration, formatLastSync,
   githubPollMessage, initialSyncSections, kindLabel, normalizeSessionsLimit, privateRepoHint,
   pullReportView, pushReportView, presetById, presetIdForUrl, readStoredChannel, recommendedSyncSections,
@@ -148,13 +148,8 @@ test('sync-view: pull 进行中 → 两个按钮都禁用，pull 文案切换', 
   assert.equal(b.pullLabel, '正在拉取…')
 })
 
-test('sync-view: computeRemoteReady 按活动通道判断地址就绪（git=repoUrl，webdav=url）', () => {
-  assert.equal(computeRemoteReady('git', 'https://github.com/u/r.git', ''), true)
-  assert.equal(computeRemoteReady('git', '  ', 'https://dav.example.com/dav'), false, 'git 通道不看 webdav 地址')
-  assert.equal(computeRemoteReady('webdav', '', 'https://dav.example.com/dav'), true)
-  assert.equal(computeRemoteReady('webdav', 'https://github.com/u/r.git', ''), false, 'webdav 通道不看 git 地址')
-  assert.equal(computeRemoteReady('webdav', '', '   '), false)
-})
+// 「远端是否就绪」的判定已迁到 src/ui/sync-settings-view.ts 的 channelRemoteReady(form)（四通道统一），
+// 用例随之移到 src/ui/sync-settings-view.test.ts —— 这里不再保留第二份实现与第二份用例。
 
 /* ---------------------------------------------------------------- 变更摘要 */
 

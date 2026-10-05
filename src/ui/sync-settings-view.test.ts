@@ -18,6 +18,10 @@ import {
   initialSessionPicks, pickedSessionIds, sessionPickerSelection,
   isGithubFlowInFlight, resolveInitialChannel, saveQueueOnFlush, saveQueueOnRequest, saveQueueOnSettled,
   toggleSectionSelection, SYNC_CONFIG_SAVE_DEBOUNCE_MS,
+  // 云端点通道（t12）：表单校验与请求体组装
+  channelRemoteReady, cloudFieldIssues, cloudFormFromStatus, validateCloudApiBaseUrl, validateCloudBucket,
+  validateCloudEndpoint, validateCloudForm, validateCloudPrefix, validateCloudRegion, validateGistForm,
+  validateGistId, validateS3Form, DEFAULT_S3_PROVIDER, S3_PROVIDERS,
   type SaveQueueState, type SyncChannelSettings, type SyncFormSnapshot,
 } from './sync-settings-view.ts'
 
@@ -31,6 +35,19 @@ function form(overrides: Partial<SyncFormSnapshot> = {}): SyncFormSnapshot {
     webdavUrl: '  https://dav.example.com/dav  ',
     webdavUsername: '  alice  ',
     webdavPassword: 'WEBDAV-PASS',
+    // 云端点两组字段的缺省值（合法但不完整；按通道覆写后再断言）
+    s3Provider: 's3',
+    s3Endpoint: '',
+    s3Region: '',
+    s3Bucket: '',
+    s3Prefix: '',
+    s3AccessKeyId: '',
+    s3PathStyle: false,
+    s3Secret: '',
+    gistId: '',
+    gistApiBaseUrl: '',
+    gistFilePrefix: '',
+    gistToken: '',
     ...overrides,
   }
 }
@@ -345,4 +362,153 @@ test('sync-settings-view: 上次同步时间格式化与远端地址预览', () 
   assert.equal(formatSyncUrlPreview('https://x.example.com/dav'), 'https://x.example.com/dav')
   assert.equal(formatSyncUrlPreview('a'.repeat(80)).length, 60, '超长地址截断到 60 字符（既有展示）')
   assert.equal(formatSyncUrlPreview('a'.repeat(80), 10), 'a'.repeat(10))
+})
+
+/* ------------------------------------------------ 云端点通道（t12：s3 / gist） */
+
+test('云端点：兼容商清单与缺省值（清单镜像宿主，穷尽检查在编译期保证不漂移）', () => {
+  assert.deepEqual([...S3_PROVIDERS], ['s3', 'oss', 'cos', 'minio', 'kodo'])
+  assert.equal(DEFAULT_S3_PROVIDER, 's3')
+})
+
+test('云端点：端点校验（必填 / http(s) / 无 userinfo / 无 query·hash）', () => {
+  assert.equal(validateCloudEndpoint(''), 'cloud.endpointRequired')
+  assert.equal(validateCloudEndpoint('   '), 'cloud.endpointRequired')
+  assert.equal(validateCloudEndpoint('ftp://x.example.com'), 'cloud.endpointInvalid')
+  assert.equal(validateCloudEndpoint('not a url'), 'cloud.endpointInvalid')
+  assert.equal(validateCloudEndpoint('https://user:pass@x.example.com'), 'cloud.endpointUserinfo')
+  assert.equal(validateCloudEndpoint('https://x.example.com/?a=1'), 'cloud.endpointInvalid')
+  assert.equal(validateCloudEndpoint('https://s3.us-east-1.amazonaws.com'), null)
+})
+
+test('云端点：region / bucket / prefix 校验（与宿主同口径）', () => {
+  assert.equal(validateCloudRegion(''), 'cloud.regionRequired')
+  assert.equal(validateCloudRegion('us east 1'), 'cloud.regionRequired')
+  assert.equal(validateCloudRegion('us-east-1'), null)
+
+  assert.equal(validateCloudBucket(''), 'cloud.bucketRequired')
+  assert.equal(validateCloudBucket('ab'), 'cloud.bucketInvalid', '桶名至少 3 位')
+  assert.equal(validateCloudBucket('My-Bucket'), 'cloud.bucketInvalid', '必须小写')
+  assert.equal(validateCloudBucket('my..bucket'), 'cloud.bucketInvalid')
+  assert.equal(validateCloudBucket('my-bucket.1'), null)
+
+  assert.equal(validateCloudPrefix(''), null, '空前缀 = 根前缀（合法）')
+  assert.equal(validateCloudPrefix('/a/b/'), null, '首尾斜杠是书写噪声，归一后合法')
+  assert.equal(validateCloudPrefix('a//b'), 'cloud.prefixInvalid')
+  assert.equal(validateCloudPrefix('a/../b'), 'cloud.prefixInvalid')
+})
+
+test('云端点：gistId 与 API 根校验', () => {
+  assert.equal(validateGistId(''), 'cloud.gistIdRequired')
+  assert.equal(validateGistId('zzz'), 'cloud.gistIdInvalid')
+  assert.equal(validateGistId('0123456789abcdef'), null)
+
+  assert.equal(validateCloudApiBaseUrl(''), 'cloud.apiBaseUrlInvalid')
+  assert.equal(validateCloudApiBaseUrl('ftp://host'), 'cloud.apiBaseUrlInvalid')
+  assert.equal(validateCloudApiBaseUrl('https://user@host'), 'cloud.apiBaseUrlInvalid')
+  assert.equal(validateCloudApiBaseUrl('https://api.github.com'), null)
+})
+
+test('云端点：s3 表单逐字段定位问题（缺什么报什么，无重复字段）', () => {
+  const empty = validateS3Form(form({ channel: 's3', s3Endpoint: '', s3Region: '', s3Bucket: '', s3AccessKeyId: '' }))
+  assert.deepEqual(
+    empty.map((i) => i.code),
+    ['cloud.endpointRequired', 'cloud.regionRequired', 'cloud.bucketRequired', 'cloud.accessKeyIdRequired'],
+  )
+  const fields = cloudFieldIssues(form({
+    channel: 's3', s3Endpoint: 'ftp://x.example.com', s3Region: 'r', s3Bucket: 'bucket1', s3AccessKeyId: 'AKIA',
+  }))
+  assert.deepEqual(Object.keys(fields), ['endpoint'], '其余字段合法 → 只留端点这一条')
+  assert.equal(fields.endpoint, 'cloud.endpointInvalid')
+})
+
+test('云端点：gist 表单必填 + 可选字段（空 = 用缺省，不报错）', () => {
+  assert.deepEqual(validateGistForm(form({ channel: 'gist', gistId: '' })).map((i) => i.code), ['cloud.gistIdRequired'])
+  assert.deepEqual(validateGistForm(form({ channel: 'gist', gistId: 'abcdef' })), [], '两个可选字段留空即缺省')
+  assert.deepEqual(
+    validateGistForm(form({ channel: 'gist', gistId: 'abcdef', gistApiBaseUrl: 'ftp://x' })).map((i) => i.code),
+    ['cloud.apiBaseUrlInvalid'],
+  )
+  assert.deepEqual(validateCloudForm(form({ channel: 'git' })), [], 'git / webdav 不走云端点校验')
+})
+
+test('云端点：channelRemoteReady 是四通道唯一判据（git/webdav 行为与拆分前逐字一致）', () => {
+  assert.equal(channelRemoteReady(form({ channel: 'git', repoUrl: 'https://github.com/u/r.git' })), true)
+  assert.equal(channelRemoteReady(form({ channel: 'git', repoUrl: '   ' })), false)
+  assert.equal(channelRemoteReady(form({ channel: 'webdav', webdavUrl: 'https://dav.example.com/dav' })), true)
+  assert.equal(channelRemoteReady(form({ channel: 'webdav', webdavUrl: '   ' })), false)
+
+  assert.equal(channelRemoteReady(form({ channel: 's3' })), false, '半截 s3 配置不就绪（按钮禁用 + 不自动保存）')
+  assert.equal(
+    channelRemoteReady(form({
+      channel: 's3', s3Endpoint: 'https://s3.us-east-1.amazonaws.com', s3Region: 'us-east-1',
+      s3Bucket: 'my-bucket', s3AccessKeyId: 'AKIA',
+    })),
+    true,
+  )
+  assert.equal(channelRemoteReady(form({ channel: 'gist', gistId: '0123456789abcdef' })), true)
+  assert.equal(channelRemoteReady(form({ channel: 'gist', gistId: '' })), false)
+})
+
+test('云端点：s3 请求体只带非密字段 + 非空密钥，并归一化粘贴噪声', () => {
+  const body = buildSyncChannelBody(form({
+    channel: 's3', s3Provider: 'oss', s3Endpoint: ' https://oss-cn-hangzhou.aliyuncs.com/ ',
+    s3Region: ' cn-hangzhou ', s3Bucket: ' my-bucket ', s3Prefix: '/dsh/', s3AccessKeyId: ' AK ',
+    s3PathStyle: false, s3Secret: '',
+  }))
+  assert.deepEqual(body, {
+    transport: 's3',
+    provider: 'oss',
+    endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+    region: 'cn-hangzhou',
+    bucket: 'my-bucket',
+    accessKeyId: 'AK',
+    prefix: 'dsh',
+  }, '端点去尾斜杠、前缀去首尾斜杠；pathStyle=false 与空密钥都不携带')
+
+  assert.equal(buildSyncChannelBody(form({ channel: 's3', s3Secret: ' SECRET ' })).secret, 'SECRET',
+    'push 路径沿用输入原值（与 git token 的既有差异一致）')
+  assert.equal(buildSyncChannelBody(form({ channel: 's3', s3PathStyle: true })).pathStyle, true,
+    '只有显式勾选才携带 pathStyle（缺省 = 跟随兼容商变体）')
+})
+
+test('云端点：gist 请求体用 secret 字段承载 token（与 s3 同一口径）', () => {
+  assert.deepEqual(buildSyncChannelBody(form({ channel: 'gist', gistId: ' abcdef ', gistToken: ' tok ' })), {
+    transport: 'gist', gistId: 'abcdef', secret: 'tok',
+  })
+  assert.equal(buildSyncChannelBody(form({ channel: 'gist', gistId: 'abcdef', gistToken: '' })).secret, undefined,
+    '空 token 不携带（= 沿用已保存的）')
+})
+
+test('云端点：自动保存只在表单全部校验通过时发出（否则每敲一个字吃一条失败提示）', () => {
+  assert.equal(buildSyncConfigBody(form({ channel: 's3' })), null)
+  assert.equal(buildSyncConfigBody(form({ channel: 'gist', gistId: 'zzz' })), null, '格式非法同样不自动保存')
+
+  const ok = buildSyncConfigBody(form({
+    channel: 's3', s3Provider: 's3', s3Endpoint: 'https://s3.us-east-1.amazonaws.com',
+    s3Region: 'us-east-1', s3Bucket: 'my-bucket', s3AccessKeyId: 'AKIA', s3Secret: ' SEC ',
+  }))
+  assert.equal(ok?.transport, 's3')
+  assert.equal(ok?.secret, 'SEC', '配置保存路径 trim 密钥（与 git token 同口径）')
+})
+
+test('云端点：/sync/status 视图只回填非密字段（密钥永不映射成表单值）', () => {
+  const backfill = cloudFormFromStatus({
+    s3: {
+      provider: 'minio', endpoint: 'https://minio.local', region: 'us-east-1', bucket: 'b1',
+      accessKeyId: 'AK', pathStyle: true,
+    },
+    gist: { gistId: 'abc123', apiBaseUrl: 'https://ghe.local/api', filePrefix: 'p' },
+  })
+  assert.deepEqual(backfill, {
+    s3Provider: 'minio', s3Endpoint: 'https://minio.local', s3Region: 'us-east-1', s3Bucket: 'b1',
+    s3Prefix: '', s3AccessKeyId: 'AK', s3PathStyle: true,
+    gistId: 'abc123', gistApiBaseUrl: 'https://ghe.local/api', gistFilePrefix: 'p',
+  })
+
+  const empty = cloudFormFromStatus({})
+  assert.equal(empty.s3Provider, DEFAULT_S3_PROVIDER, '未配置 → 兼容商回落缺省')
+  assert.equal(empty.s3Endpoint, '')
+  assert.equal(Object.prototype.hasOwnProperty.call(empty, 's3Secret'), false, '回填里没有任何密钥字段')
+  assert.equal(Object.prototype.hasOwnProperty.call(empty, 'gistToken'), false)
 })

@@ -28,6 +28,9 @@
  */
 import type { SyncPullReport, SyncPushPreview, SyncPushReport } from '../../sync/sync-engine.ts';
 import type { SyncTransportType as HostSyncTransportType } from '../../sync/sync-config.ts';
+// 云端点通道的**回传视图**（只带 secretStored 布尔，绝无密钥值）：类型直接取宿主声明处，
+// type-only 引用打包时被擦除，不会把 sync-config.ts 的 node:fs 带进浏览器产物。
+import type { CloudGistChannelView, CloudS3ChannelView } from '../../sync/sync-config.ts';
 import type { PlanItemKind, SessionFormatDisposition } from '../../core/types.ts';
 import type { SectionId } from '../../schema/types.ts';
 import type { ConsultReport } from '../../core/migration-consult.ts';
@@ -66,6 +69,15 @@ export interface SyncStatusResponse {
   /** webdav 通道：配置状态（url 可回显，username 非敏感；password 值永不返回；
    *  与当前通道无关，配置过即返回，供 git ↔ webdav 切换时回填表单） */
   webdav?: WebDavStatusResponse;
+  /**
+   * 云端点通道 s3 的非密配置视图（**只有 secretStored 布尔，绝无 AccessKey Secret 值**）。
+   * 配置过即返回（与当前活动通道无关），供表单在各通道间切换时回填。
+   */
+  s3?: CloudS3ChannelView;
+  /** 云端点通道 gist 的非密配置视图（**只有 secretStored 布尔，绝无 token 值**）。 */
+  gist?: CloudGistChannelView;
+  /** 已保存的云端点 provider 清单（只有名字；切换 provider 时回填用） */
+  cloudSavedProviders?: string[];
   /** sync-state.lastSyncAt；'' = 从未同步 */
   lastSyncAt?: string;
   /** sync-state.sections 条目数 */
@@ -154,6 +166,9 @@ export interface SyncConfigSaveResponse {
     usernameConfigured: boolean;
     passwordConfigured: boolean;
   };
+  /** 云端点通道保存后的非密视图（只带 secretStored 布尔，绝无密钥值） */
+  s3?: CloudS3ChannelView;
+  gist?: CloudGistChannelView;
 }
 
 /** POST /sync/config 且 clear:true 的响应：断开一条通道配置后的轻量事实（无任何 secret 值）。 */
@@ -210,6 +225,32 @@ export interface SyncPushPayload {
   encryptPassword?: string;
   /** 导出真实凭据值（必须同时 encrypt=true，否则 Host 拒绝：密钥绝不明文进同步通道） */
   includeSecrets?: boolean;
+  /* ---------------- 云端点通道（s3 / gist）字段：与宿主 parseSyncBody 的扁平形状一致 ---------------- */
+  /** s3：具体兼容商（s3 / oss / cos / minio / kodo） */
+  provider?: string;
+  endpoint?: string;
+  region?: string;
+  bucket?: string;
+  /** 对象键前缀（缺省 = 根前缀） */
+  prefix?: string;
+  /** AccessKey ID（标识符，可回显；不是密钥） */
+  accessKeyId?: string;
+  /** path-style 寻址（缺省跟随兼容商变体） */
+  pathStyle?: boolean;
+  /** 显式覆盖签名方言（高级覆盖；宿主忽略非法值） */
+  dialectId?: 'aws4' | 'oss4';
+  /** gist：目标 gist id */
+  gistId?: string;
+  /** gist：GitHub API 根（缺省 https://api.github.com） */
+  apiBaseUrl?: string;
+  /** gist：文件名前缀（缺省 dsh-sync） */
+  filePrefix?: string;
+  /**
+   * 云端点密钥（s3 的 AccessKey Secret / gist 的 token）：**只写**。
+   * 仅请求体内存传输；宿主写入 DSH credentials 槽位（cloudSecretRef）后即丢弃。
+   * 响应、配置文件与日志里永远只有 `secretStored` 布尔。
+   */
+  secret?: string;
 }
 
 /** pull 请求体（strategy 缺省 merge：冲突保留待决策；snapshotId 缺省 = 最新；

@@ -6,14 +6,16 @@
 >
 > 实现锚点：`src/sync/layout.ts`（散文件布局）、`src/sync/snapshot-json.ts`（JSON 载荷）、
 > `src/sync/blob-store.ts`（内容寻址外置）、`src/sync/session-tombstones.ts`（删除墓碑）、
-> `src/sync/git/git-transport.ts` / `src/sync/webdav/webdav-transport.ts`。
+> `src/sync/git/git-transport.ts` / `src/sync/webdav/webdav-transport.ts` / `src/sync/s3/s3-transport.ts` / `src/sync/gist/gist-transport.ts`。
 
-## 1. 两种落地形态
+## 1. 各通道的落地形态
 
 | 通道 | 快照位置 | 形态 |
 |---|---|---|
 | git | `snapshots/<snapshotId>/`（加密快照：`snapshots-encrypted/<snapshotId>.json`） | 散文件目录（`manifest.json` + 按分区平铺） |
 | webdav | `<base>/dsh-config-manager/<snapshotId>.json` + 集合索引 `index.json` | 单文件 JSON 载荷 |
+| s3（含 oss / cos / minio / kodo） | `<prefix>/<snapshotId>.json` + 总索引 `<prefix>/index.json`（blob：`<prefix>/blobs/<sha256>` + `<prefix>/blobs-index.json`；`prefix` 缺省 `dsh-config-manager`） | 单文件 JSON 载荷（与 WebDAV 同构，便于跨通道迁移与排障） |
+| gist | `<filePrefix>-<snapshotId>.json` + 索引 `<filePrefix>-index.json`（`filePrefix` 缺省 `dsh-sync`） | 单文件 JSON 载荷（gist 是**扁平文件名**命名空间，故用前缀隔离；**不外置 blob**，见 §3） |
 
 散文件目录布局与 `layout.ts` 一致：JSON 分区按 `SECTION_JSON_PATHS` 平铺，
 文件类分区按 `SECTION_FILE_PREFIXES` 建目录放真实文件，`manifest.json` 记录
@@ -25,7 +27,7 @@
 
 | 字段 | 类型 | 缺省 | 语义 |
 |---|---|---|---|
-| `transport` | `string?` | 无 | 产生该快照的通道（`git` / `webdav`）；仅供同步历史展示 |
+| `transport` | `string?` | 无 | 产生该快照的通道（`git` / `webdav` / `s3` / `gist`）；仅供同步历史展示 |
 | `encrypted` | `boolean?` | false | `sections` 为 `EncryptedSections` 密文载荷 |
 | `sourceHome` | `string?` | 无 | **导出机的 DSH home**。拉取侧与**本机** home 比较后由 Importer 生成自动重定基规则（工作区 `path` + 会话日志首帧 cwd 一并改写）。缺字段 = 不猜（行为与改造前一致） |
 | `deletedSessions` | `string[]?` | 无 | **会话删除墓碑**（见 §4）。缺字段 = 旧快照，无墓碑信息 |
@@ -41,6 +43,9 @@
 |---|---|---|
 | git | `blobs/<sha256>`（与 `snapshots/` 同级，同一次 commit） | 无（目录即索引） |
 | webdav | `<col>/blobs/<sha256>` | `<col>/blobs-index.json`（`{ "<sha256>": <mtimeMs> }`） |
+| s3（五家兼容商） | `<prefix>/blobs/<sha256>` | `<prefix>/blobs-index.json`（`{ "<sha256>": <mtimeMs> }`） |
+
+> **gist 通道刻意不做外置**：GitHub Gist 一次 GET 返回**全部文件内容**、单文件内容超限会被**截断**、文件数有上限 —— 三条都会撞上「逐文件外置大分区」的做法。因此 gist 定位是「**配置类分区的低门槛远端**」，会话这类大分区请走 git / webdav / s3（能力边界登记于 `known-gaps.md` **G-34**）。
 
 **载荷形态**：走外置的分区（当前只有 `sessions`）在快照里不再是
 `{ version: 1, files: [{ relativePath, data }] }`，而是引用形态：
@@ -111,3 +116,37 @@
 | `sessionsLimit` | `sessions` 勾选时只带「最新 N 个」（按会话日志 mtime 倒序；0 = 不带） |
 | `sessionsInclude` | **显式点名的会话单元**；非空时**优先于 `sessionsLimit`**（用户点名的必须赢） |
 | `retention`（远端保留） | 来自 `backup-schedule.json`：远端快照裁剪走 GFS（keepLast/keepMonthly/keepYearly），缺省 = 最近 10 个（与旧硬编码 FIFO 逐字等价） |
+
+## 6. 云端点通道（s3 / gist）的配置形状与密钥纪律
+
+> **性质**：本节描述**通道配置**（不是远端快照载荷）。git / webdav 的配置住在 `sync-config.json`；
+> 云端点通道的**非密字段**住在独立文件 `sync-cloud-config.json`（`CLOUD_SYNC_CONFIG_FILE`，`schemaVersion: 1`；
+> `active` 记录每条通道当前选用的 provider —— 缺省时读侧按「唯一已保存者」推断，**多家并存不猜**）。
+> 通道枚举 = `SYNC_CHANNELS = ['git', 'webdav', 's3', 'gist']`（声明处 = 零依赖 `src/utils/shared-constants.ts`，
+> 宿主 `sync-config.ts` re-export，客户端运行时 import 同一常量）。
+
+**非密字段（会落盘、可回显）**：
+
+| 通道 | 字段 | 语义 |
+|---|---|---|
+| s3 | `provider` | `s3` / `oss` / `cos` / `minio` / `kodo`（五家共用同一份 SigV4 实现，差异在 endpoint / region / 寻址风格 / 签名方言） |
+| s3 | `endpoint` | 对象存储端点（http(s)，**不含凭据、不含桶名**），如 `https://s3.us-east-1.amazonaws.com` |
+| s3 | `region` | 签名作用域里的 region（如 `us-east-1` / `cn-hangzhou` / `ap-guangzhou`） |
+| s3 | `bucket` | 桶名 |
+| s3 | `prefix` | 对象键前缀（缺省 `dsh-config-manager`） |
+| s3 | `accessKeyId` | AccessKey **ID**（标识符，可回显；**不是**密钥） |
+| s3 | `pathStyle` | path-style 寻址开关（缺省取变体默认：MinIO `true`，其余 `false`） |
+| s3 | `dialectId` | 可选：显式覆盖签名方言（`aws4` / `oss4`）；非法值在解析期被忽略（回落变体默认） |
+| gist | `gistId` | 目标 gist id（十六进制串） |
+| gist | `apiBaseUrl` | GitHub API 根（缺省 `https://api.github.com`；GitHub Enterprise 可改） |
+| gist | `filePrefix` | gist 内文件名前缀（缺省 `dsh-sync`；改前缀 = 同一 gist 里换一套互不干扰的同步数据） |
+| 两者 | `secretStored` | **布尔标记**：密钥是否已在 DSH 凭据槽位。**只回标记，绝不回值** |
+
+**密钥纪律（硬约束，第三方实现者请照抄）**：
+
+1. **值只在 DSH 凭据槽位**：AccessKey **Secret** / Gist **Token 的值**绝不写进 `sync-cloud-config.json`、快照、日志或任何响应。槽位引用 = `cloudSecretRef(provider)`：`DSH_CONFIG_MANAGER_SYNC_S3_SECRET_ACCESS_KEY` / `..._OSS_...` / `..._COS_...` / `..._MINIO_...` / `..._KODO_...` / `DSH_CONFIG_MANAGER_SYNC_GIST_TOKEN`。
+2. **只写不回读**：写入经 `CloudSecretWriter` 的 `set(ref, value)` / `has(ref)` —— 该端口**故意没有 `get()`**（结构性保证，不靠纪律）；回传 UI 的 `CloudChannelView` 只带 `secretStored` 布尔。
+3. **读侧丢弃手写密钥字段**：即使有人把 secret / token 直接写进 `sync-cloud-config.json`，读侧也一律**丢弃**（绝不回读、绝不回传）。
+4. **加解密密码同族**：`syncPasswordRef('ENCRYPT'|'DECRYPT', 's3'|'gist')` → `DSH_CONFIG_MANAGER_SYNC_{ENCRYPT|DECRYPT}_PASSWORD_{S3|GIST}`，值只在进程内存 / DSH 凭据槽位，**永不落盘**。
+5. **断开通道即清槽位**：`/sync/config` 的 clear 分支 unset 该通道的密钥槽位（s3 → 五家全清）与加解密密码槽位，并关 autosync。
+6. **gist 不做内容寻址外置**（§3 的例外）：会话这类大分区请走 git / webdav / s3（能力边界见 `known-gaps.md` G-34）。

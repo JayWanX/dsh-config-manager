@@ -11,19 +11,28 @@
  */
 import type { SectionId } from '../schema/types.ts'
 import type { Selection } from './selection-model.ts'
-import type { SyncTransportType } from '../sync/sync-config.ts'
+// 通道枚举：唯一声明处是**零依赖**的 utils/shared-constants.ts（宿主 sync-config.ts 只是 re-export）。
+import { SYNC_CHANNELS } from '../utils/shared-constants.ts'
+// 仅取**类型**：宿主错误码 / 兼容商枚举是唯一声明处，客户端镜像它们并按穷尽检查钉住漂移。
+// type-only 引用打包时被完全擦除，不会把 sync-config.ts 的 node:fs 带进浏览器产物。
+import type { CloudConfigIssueCode, S3CompatProvider, SyncTransportType } from '../sync/sync-config.ts'
+
+/**
+ * 转出宿主错误码联合（客户端要按它建「码 → 字典键」的全量 Record）。
+ * 仅类型转出：不在本模块产生任何运行期依赖。
+ */
+export type { CloudConfigIssueCode }
 
 /* ---------------------------------------------------------------- 基础类型 */
 
 /**
- * 通道名（客户端**已接线**的通道：`git | webdav`）。
+ * 通道名（**由 `SYNC_CHANNELS` 单一事实源派生**：git | webdav | s3 | gist）。
  *
- * 与 `src/client/sync/sync-view.ts` 的 `SyncChannel`（= `CLIENT_SYNC_CHANNELS`）同集合：
- * 宿主 `SYNC_CHANNELS` 已是 4 条（+ s3 / gist），但那两条的界面接线是另一个任务 ——
- * 在此之前 UI 状态机只操作已接线通道。若在此放宽成 `SyncTransportType`，
- * `SyncUiState.channel`（窄）就会被宽值写入而编译报错。
+ * 与 `src/client/sync/sync-view.ts` 的 `SyncChannel` 同集合（两者都派生自同一常量）。
+ * 历史：本类型曾与 `SyncUiState.channel` 一起被**故意收窄**成 `'git' | 'webdav'`（s3/gist 界面
+ * 未接线时），t12 接线后两处一起放宽 —— 放宽是成对的，只改一处会立刻编译报错。
  */
-export type SyncChannelName = 'git' | 'webdav'
+export type SyncChannelName = (typeof SYNC_CHANNELS)[number]
 
 /** 自动同步间隔（与 client 的 AutosyncInterval 同形）。 */
 export type SyncAutosyncInterval = '5m' | '15m' | '30m' | '60m' | '6h' | '12h' | '24h'
@@ -38,6 +47,28 @@ export interface SyncFormSnapshot {
   webdavUsername: string
   /** 仅内存；成功后由组件清空 */
   webdavPassword: string
+  /* ---- s3 通道表单（S3 兼容系五家共用同一条通道，provider 决定 endpoint 的默认形态） ---- */
+  /** 具体兼容商（s3 / oss / cos / minio / kodo） */
+  s3Provider: string
+  s3Endpoint: string
+  s3Region: string
+  s3Bucket: string
+  /** 对象键前缀（空 = 根前缀） */
+  s3Prefix: string
+  /** AccessKey ID（标识符，可回显；**不是**密钥） */
+  s3AccessKeyId: string
+  /** path-style 寻址（MinIO 常需 true；缺省跟随兼容商变体） */
+  s3PathStyle: boolean
+  /** 仅内存；成功后由组件清空（已写入 DSH credentials 的 cloudSecretRef 槽位） */
+  s3Secret: string
+  /* ---- gist 通道表单 ---- */
+  gistId: string
+  /** GitHub API 根（空 = 缺省 https://api.github.com；GitHub Enterprise 可改） */
+  gistApiBaseUrl: string
+  /** gist 内文件名前缀（空 = 缺省 dsh-sync） */
+  gistFilePrefix: string
+  /** 仅内存；成功后由组件清空（已写入 DSH credentials 的 gist token 槽位） */
+  gistToken: string
 }
 
 /** 当前通道的设置快照（组件 state.byChannel[channel] 中与本模块相关的那部分）。 */
@@ -81,6 +112,27 @@ export interface SyncPushBody {
    * （Host 侧安全默认：未提供则按非 portable 分区跳过）。绝不悄悄携带。
    */
   sessions?: { limit?: number; include?: string[] }
+  /* ---- 云端点通道（s3 / gist）的扁平字段：与宿主 parseSyncBody / parseCloudS3Body 同形 ---- */
+  /** s3：具体兼容商 */
+  provider?: string
+  endpoint?: string
+  region?: string
+  bucket?: string
+  prefix?: string
+  accessKeyId?: string
+  pathStyle?: boolean
+  /** 显式覆盖签名方言（高级覆盖；宿主忽略非法值，回落兼容商变体默认） */
+  dialectId?: 'aws4' | 'oss4'
+  /** gist：目标 gist id */
+  gistId?: string
+  apiBaseUrl?: string
+  filePrefix?: string
+  /**
+   * 云端点密钥（s3 的 AccessKey Secret / gist 的 token）：**只写**。
+   * 仅请求体内存传输 → 宿主写入 DSH credentials 槽位（cloudSecretRef）后即丢弃；
+   * 绝不落配置文件 / 日志 / 响应（凭据铁律）。
+   */
+  secret?: string
   encrypt?: boolean
   encryptPassword?: string
   includeSecrets?: boolean
@@ -185,12 +237,20 @@ export const SYNC_CONFIG_SAVE_DEBOUNCE_MS = 600
 /* ------------------------------------------------------------ 请求体组装 */
 
 /**
- * 组装通道鉴权字段（git：repoUrl/token；webdav：url/username/password；扁平顶层）。
+ * 组装通道鉴权字段（git：repoUrl/token；webdav：url/username/password；s3 / gist：云端点非密字段
+ * + 仅内存的密钥；全部扁平顶层，与宿主 parseSyncBody 同形）。
  *
  * `trimToken` 是搬家前就存在的**既有差异**，本次只做搬迁、保持行为完全一致：
- * - push / 一键同步 路径沿用输入原值（不 trim）；
- * - 「保存配置」路径对 token 做 trim。
+ * - git 的 push / 一键同步路径沿用输入原值（不 trim）；
+ * - git 的「保存配置」路径对 token 做 trim。
  * 用显式参数把差异固定下来，避免以后有人「顺手统一」而改变行为。
+ *
+ * **云端点密钥（s3 Secret / gist token）不受这条历史差异影响，两条路径一律 trim**：
+ * 它们是本次新增的通道（没有兼容包袱），而密钥里夹带粘贴来的空白/换行会直接让签名校验失败 ——
+ * 那种失败在界面上只会显示成「远端拒绝」，用户无从自查。
+ *
+ * 凭据铁律：密钥只以 `secret` 字段出现在**本次请求体内**；空串一律不携带（= 沿用已保存的密钥，
+ * 绝不覆盖）。响应与配置文件里只有 `secretStored` 布尔。
  */
 function channelAuthBody(form: SyncFormSnapshot, opts: { trimToken: boolean }): SyncPushBody {
   if (form.channel === 'webdav') {
@@ -200,6 +260,37 @@ function channelAuthBody(form: SyncFormSnapshot, opts: { trimToken: boolean }): 
       url: url !== '' ? url : undefined,
       username: form.webdavUsername.trim() !== '' ? form.webdavUsername.trim() : undefined,
       password: form.webdavPassword !== '' ? form.webdavPassword : undefined,
+    }
+  }
+  if (form.channel === 's3') {
+    // 前缀与端点尾部斜杠先归一（与宿主 parseCloudS3Body 的 normalize 同口径）：粘贴噪声不算错误
+    const prefix = form.s3Prefix.trim().replace(/^\/+/, '').replace(/\/+$/, '')
+    const secret = form.s3Secret.trim()
+    return {
+      transport: 's3',
+      provider: form.s3Provider,
+      endpoint: form.s3Endpoint.trim().replace(/\/+$/, ''),
+      region: form.s3Region.trim(),
+      bucket: form.s3Bucket.trim(),
+      accessKeyId: form.s3AccessKeyId.trim(),
+      ...(prefix === '' ? {} : { prefix }),
+      // pathStyle 只在用户**显式勾选**时携带 true；不勾 = 不携带（跟随兼容商变体默认，宿主语义）
+      ...(form.s3PathStyle ? { pathStyle: true } : {}),
+      // 密钥一律用 trim 后的值（见函数头：云端点是新通道，没有 git 那条历史差异）
+      ...(secret === '' ? {} : { secret }),
+    }
+  }
+  if (form.channel === 'gist') {
+    const apiBaseUrl = form.gistApiBaseUrl.trim()
+    const filePrefix = form.gistFilePrefix.trim().replace(/^\/+/, '').replace(/\/+$/, '')
+    const token = form.gistToken.trim()
+    return {
+      transport: 'gist',
+      gistId: form.gistId.trim(),
+      ...(apiBaseUrl === '' ? {} : { apiBaseUrl }),
+      ...(filePrefix === '' ? {} : { filePrefix }),
+      // 宿主 gist 分支接受 token 或 secret 两个字段名，这里统一用 secret（与 s3 同一口径、同样 trim）
+      ...(token === '' ? {} : { secret: token }),
     }
   }
   return {
@@ -214,11 +305,211 @@ export function buildSyncChannelBody(form: SyncFormSnapshot): SyncPushBody {
   return channelAuthBody(form, { trimToken: false })
 }
 
-/** 「保存配置」请求体：当前通道远端地址未就绪（webdav url / git repoUrl 为空）→ null（自动保存跳过）。 */
+/**
+ * 「保存配置」请求体：该通道远端**未就绪** → null（自动保存跳过）。
+ *
+ * 四通道共用 `channelRemoteReady` 一条判据（git/webdav = 地址非空；s3/gist = 表单全部校验通过）——
+ * 拿一个必然被宿主 400 的载荷去自动保存，只会让用户每敲一个字符就吃一条失败提示。
+ */
 export function buildSyncConfigBody(form: SyncFormSnapshot): SyncPushBody | null {
-  if (form.channel === 'webdav' && form.webdavUrl.trim() === '') return null
-  if (form.channel === 'git' && form.repoUrl.trim() === '') return null
+  if (!channelRemoteReady(form)) return null
   return channelAuthBody(form, { trimToken: true })
+}
+
+/* ------------------------------------------------ 云端点通道（s3 / gist）表单逻辑 */
+
+/**
+ * S3 兼容商清单（**客户端镜像**；声明处 = 宿主 `S3_COMPAT_PROVIDERS`）。
+ * 下面的穷尽检查保证宿主新增 / 改名兼容商时这里编译失败，而不是界面上少一个选项。
+ */
+export const S3_PROVIDERS = ['s3', 'oss', 'cos', 'minio', 'kodo'] as const satisfies readonly S3CompatProvider[]
+type MissingProvider = Exclude<S3CompatProvider, (typeof S3_PROVIDERS)[number]>
+const s3ProvidersAreExhaustive: MissingProvider extends never ? true : never = true
+void s3ProvidersAreExhaustive
+
+/** 缺省兼容商（AWS S3）。 */
+export const DEFAULT_S3_PROVIDER: S3CompatProvider = 's3'
+
+/** 桶名（与宿主同口径）：3-63 位小写字母/数字/点/连字符，首尾为字母或数字。 */
+const BUCKET_NAME_RE = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/
+/** gist id（与宿主同口径）：GitHub 的十六进制串。 */
+const GIST_ID_RE = /^[0-9a-f]{5,64}$/i
+
+/** 云端点表单里会出错、且能内联定位的字段。 */
+export type CloudFormField =
+  | 'provider' | 'endpoint' | 'region' | 'bucket' | 'prefix' | 'accessKeyId'
+  | 'gistId' | 'apiBaseUrl' | 'filePrefix'
+
+/** 一条表单问题：字段 + 稳定码（码与宿主一致，字典键 = 码本身）。 */
+export interface CloudFormIssue {
+  readonly field: CloudFormField
+  readonly code: CloudConfigIssueCode
+}
+
+/**
+ * 端点校验（http(s)、无空白、无 userinfo、无 query/hash）→ 码或 null。
+ * 与宿主 `validateCloudEndpoint` **同口径**：客户端先校验只为「填错立刻可见 + 不拿必然 400 的
+ * 载荷去打宿主」；宿主仍是最终权威，拒绝时回同一个码，UI 映射同一条文案。
+ */
+export function validateCloudEndpoint(endpoint: string): CloudConfigIssueCode | null {
+  if (endpoint.trim() === '') return 'cloud.endpointRequired'
+  const raw = endpoint.trim()
+  if (/\s/.test(raw)) return 'cloud.endpointInvalid'
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return 'cloud.endpointInvalid'
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return 'cloud.endpointInvalid'
+  if (parsed.username !== '' || parsed.password !== '') return 'cloud.endpointUserinfo'
+  if (parsed.search !== '' || parsed.hash !== '') return 'cloud.endpointInvalid'
+  return null
+}
+
+/** region 校验：非空、无空白。 */
+export function validateCloudRegion(region: string): CloudConfigIssueCode | null {
+  if (region.trim() === '' || /\s/.test(region.trim())) return 'cloud.regionRequired'
+  return null
+}
+
+/** 桶名校验（同宿主规则）。 */
+export function validateCloudBucket(bucket: string): CloudConfigIssueCode | null {
+  if (bucket.trim() === '') return 'cloud.bucketRequired'
+  const b = bucket.trim()
+  if (!BUCKET_NAME_RE.test(b) || b.includes('..')) return 'cloud.bucketInvalid'
+  return null
+}
+
+/** 对象键前缀校验（首尾斜杠先归一，再判非法形态；空 = 根前缀，合法）。 */
+export function validateCloudPrefix(prefix: string): CloudConfigIssueCode | null {
+  const p = prefix.trim().replace(/^\/+/, '').replace(/\/+$/, '')
+  if (p === '') return null
+  if (p.includes('\\') || p.includes('//') || p.includes('..')) return 'cloud.prefixInvalid'
+  if (/[\u0000-\u001f\u007f]/.test(p)) return 'cloud.prefixInvalid'
+  return null
+}
+
+/** gist id 校验（同宿主规则）。 */
+export function validateGistId(gistId: string): CloudConfigIssueCode | null {
+  if (gistId.trim() === '') return 'cloud.gistIdRequired'
+  if (!GIST_ID_RE.test(gistId.trim())) return 'cloud.gistIdInvalid'
+  return null
+}
+
+/** GitHub API 根校验（http(s)、无 userinfo）。 */
+export function validateCloudApiBaseUrl(url: string): CloudConfigIssueCode | null {
+  if (url.trim() === '') return 'cloud.apiBaseUrlInvalid'
+  let parsed: URL
+  try {
+    parsed = new URL(url.trim())
+  } catch {
+    return 'cloud.apiBaseUrlInvalid'
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return 'cloud.apiBaseUrlInvalid'
+  if (parsed.username !== '' || parsed.password !== '') return 'cloud.apiBaseUrlInvalid'
+  return null
+}
+
+/** s3 表单的全部问题（顺序 = 字段出现顺序：provider → endpoint → region → bucket → prefix → accessKeyId）。 */
+export function validateS3Form(form: SyncFormSnapshot): CloudFormIssue[] {
+  const issues: CloudFormIssue[] = []
+  if (!(S3_PROVIDERS as readonly string[]).includes(form.s3Provider)) {
+    issues.push({ field: 'provider', code: 'cloud.providerUnknown' })
+  }
+  const endpoint = validateCloudEndpoint(form.s3Endpoint)
+  if (endpoint !== null) issues.push({ field: 'endpoint', code: endpoint })
+  const region = validateCloudRegion(form.s3Region)
+  if (region !== null) issues.push({ field: 'region', code: region })
+  const bucket = validateCloudBucket(form.s3Bucket)
+  if (bucket !== null) issues.push({ field: 'bucket', code: bucket })
+  const prefix = validateCloudPrefix(form.s3Prefix)
+  if (prefix !== null) issues.push({ field: 'prefix', code: prefix })
+  if (form.s3AccessKeyId.trim() === '') issues.push({ field: 'accessKeyId', code: 'cloud.accessKeyIdRequired' })
+  return issues
+}
+
+/** gist 表单的全部问题（gistId 必填；两个可选字段**填了才校验**，空 = 用缺省）。 */
+export function validateGistForm(form: SyncFormSnapshot): CloudFormIssue[] {
+  const issues: CloudFormIssue[] = []
+  const gistId = validateGistId(form.gistId)
+  if (gistId !== null) issues.push({ field: 'gistId', code: gistId })
+  if (form.gistApiBaseUrl.trim() !== '') {
+    const api = validateCloudApiBaseUrl(form.gistApiBaseUrl)
+    if (api !== null) issues.push({ field: 'apiBaseUrl', code: api })
+  }
+  const filePrefix = validateCloudPrefix(form.gistFilePrefix)
+  if (filePrefix !== null) issues.push({ field: 'filePrefix', code: filePrefix })
+  return issues
+}
+
+/** 按通道校验表单；git / webdav 走「地址非空」一条规则（见 channelRemoteReady），故返回空表。 */
+export function validateCloudForm(form: SyncFormSnapshot): CloudFormIssue[] {
+  if (form.channel === 's3') return validateS3Form(form)
+  if (form.channel === 'gist') return validateGistForm(form)
+  return []
+}
+
+/** 每个字段的首条问题（内联提示用；字段顺序稳定 = 上面的问题顺序）。 */
+export function cloudFieldIssues(form: SyncFormSnapshot): Partial<Record<CloudFormField, CloudConfigIssueCode>> {
+  const out: Partial<Record<CloudFormField, CloudConfigIssueCode>> = {}
+  for (const issue of validateCloudForm(form)) {
+    if (out[issue.field] === undefined) out[issue.field] = issue.code
+  }
+  return out
+}
+
+/** /sync/status 的 s3 / gist 非密视图（结构类型：只含可回显字段，**没有任何密钥值**）。 */
+export interface CloudStatusLike {
+  s3?: {
+    provider?: string
+    endpoint?: string
+    region?: string
+    bucket?: string
+    prefix?: string
+    accessKeyId?: string
+    pathStyle?: boolean
+  }
+  gist?: { gistId?: string; apiBaseUrl?: string; filePrefix?: string }
+}
+
+/** 云端点表单里可回填的字段（= 非密字段；密钥**永不回传**，故不在其中）。 */
+export type CloudFormBackfill = Pick<
+  SyncFormSnapshot,
+  | 's3Provider' | 's3Endpoint' | 's3Region' | 's3Bucket' | 's3Prefix' | 's3AccessKeyId' | 's3PathStyle'
+  | 'gistId' | 'gistApiBaseUrl' | 'gistFilePrefix'
+>
+
+/**
+ * /sync/status 的云端点视图 → 表单字段（**只回填非密字段**）。
+ *
+ * 密钥（AccessKey Secret / gist token）永远不在响应里：宿主只回 `secretStored` 布尔，
+ * 该布尔供界面显示「密钥已保存」徽章（由组件直接读 statusInfo），不映射成任何表单值。
+ */
+export function cloudFormFromStatus(info: CloudStatusLike): CloudFormBackfill {
+  return {
+    s3Provider: info.s3?.provider ?? DEFAULT_S3_PROVIDER,
+    s3Endpoint: info.s3?.endpoint ?? '',
+    s3Region: info.s3?.region ?? '',
+    s3Bucket: info.s3?.bucket ?? '',
+    s3Prefix: info.s3?.prefix ?? '',
+    s3AccessKeyId: info.s3?.accessKeyId ?? '',
+    s3PathStyle: info.s3?.pathStyle ?? false,
+    gistId: info.gist?.gistId ?? '',
+    gistApiBaseUrl: info.gist?.apiBaseUrl ?? '',
+    gistFilePrefix: info.gist?.filePrefix ?? '',
+  }
+}
+
+/**
+ * 通道「远端是否就绪」（四通道**唯一**判定；按钮可用性与自动保存共用同一条规则）：
+ * - git = repoUrl 非空；webdav = url 非空（与拆分前逐字一致）；
+ * - s3 / gist = 表单**全部校验通过**（必填 + 格式）—— 半截的云端点配置没有任何可用动作。
+ */
+export function channelRemoteReady(form: SyncFormSnapshot): boolean {
+  if (form.channel === 'webdav') return form.webdavUrl.trim() !== ''
+  if (form.channel === 'git') return form.repoUrl.trim() !== ''
+  return validateCloudForm(form).length === 0
 }
 
 /**

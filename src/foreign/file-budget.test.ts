@@ -80,8 +80,8 @@ test('A 行数闸门：手维护模块逐档限额，超线即红（失败消息
     if (lines > limit) {
       violations.push(
         name + ' —— ' + String(lines) + ' 行 / 上限 ' + String(limit) + ' 行（超出 ' + String(lines - limit) + ' 行）。\n' +
-        '    拆法：① 纯函数部分搬进一个新的共享模块（\`session-ir.ts\` 就是为此而生的 IR 层）；\n' +
-        '    ② 该来源特有的部分留在本源文件（\`<id>.ts\`）；③ 读盘/路径真值表留在 \`read-<id>.ts\`。\n' +
+        '    拆法：① 纯函数部分搬进一个新的共享模块（`session-ir.ts` 就是为此而生的 IR 层）；\n' +
+        '    ② 该来源特有的部分留在本源文件（`<id>.ts`）；③ 读盘/路径真值表留在 `read-<id>.ts`。\n' +
         '    若确需暂时超线：把文件名加进本文件的 FOREIGN_LINE_EXEMPT 并写明理由（评审可见）。',
       );
     }
@@ -194,7 +194,7 @@ test('B 分层白名单：实现模块里 import node:fs 的集合恰好等于�
   );
 });
 
-test('B 分层白名单：IR 层与真值表模块绝不读盘（\`session-ir.ts\` 只允许纯计算内建）', async () => {
+test('B 分层白名单：IR 层与真值表模块绝不读盘（`session-ir.ts` 只允许纯计算内建）', async () => {
   // 这一条是白名单的**语义补强**：即便有人把 session-ir.ts 加进白名单也必须先红一次 ——
   // IR 是所有会话类来源共用的地基，掺进 I/O 就等于把「解析 → IR → 合成」三段式毁掉。
   for (const name of ['session-ir.ts', 'types.ts', 'kernel.ts', 'source-modules.ts']) {
@@ -206,7 +206,7 @@ test('B 分层白名单：IR 层与真值表模块绝不读盘（\`session-ir.ts
 
 /* ---------------- C. 来源形状枚举 ---------------- */
 
-test('C 来源形状：每个来源 id 恰好 \`read-<id>.ts\` + \`<id>.ts\`，多一个少一个都红', async () => {
+test('C 来源形状：每个来源 id 恰好 `read-<id>.ts` + `<id>.ts`，多一个少一个都红', async () => {
   const all = await listForeignImplementationTs();
   const modules = new Set(all.filter((f) => !f.includes('/')));
 

@@ -60,7 +60,7 @@ import type {
   AutosyncInterval, SyncApi, SyncPushPayload, SyncStartResponse, SyncStatusResponse,
 } from './sync-api.ts'
 import {
-  computeGithubLoginView, computeRemoteReady, computeSyncButtons, defaultChannelSyncState,
+  channelMapOf, channelStateMap, computeGithubLoginView, computeSyncButtons, defaultChannelSyncState,
   githubPollMessage, isClientChannel, kindLabel, pullReportView, pushPreviewView, pushReportView, readStoredChannel,
   initialSyncSections, normalizeSessionsLimit, severityLabel, syncSectionOptions, writeStoredChannel,
 } from './sync-view.ts'
@@ -70,12 +70,13 @@ import type {
 // t42：可测纯逻辑下沉到 src/ui（框架无关、node 可测）；本组件只做装配。
 import {
   buildSelectionRequest, buildSyncChannelBody, buildSyncConfigBody, buildSyncPushBody,
-  channelBackfillFromStatus, computeEncryptInvalid, encryptToggle, githubPollDecision,
-  hasSelectedSections, includeSecretsToggle, isGithubFlowInFlight, resolveInitialChannel,
+  channelBackfillFromStatus, channelRemoteReady, cloudFormFromStatus, computeEncryptInvalid, encryptToggle,
+  githubPollDecision, hasSelectedSections, includeSecretsToggle, isGithubFlowInFlight, resolveInitialChannel,
   needsSessionInventory, saveQueueOnFlush, saveQueueOnRequest, saveQueueOnSettled, toggleSectionSelection,
+  validateCloudForm, DEFAULT_S3_PROVIDER,
   SYNC_CONFIG_SAVE_DEBOUNCE_MS,
 } from '../../ui/sync-settings-view.ts'
-import type { SaveQueueState, SyncFormSnapshot } from '../../ui/sync-settings-view.ts'
+import type { CloudFormIssue, SaveQueueState, SyncFormSnapshot } from '../../ui/sync-settings-view.ts'
 // t42 物理拆分：渲染段各自成文件（本领域目录平铺，不新增子目录），主文件只做装配
 import { SyncChannelEntryCard } from './SyncChannelEntryCard.tsx'
 import { ChannelConfigDialog } from './ChannelConfigDialog.tsx'
@@ -143,11 +144,24 @@ interface SyncUiState {
   webdavUsername: string
   /** 仅内存：成功后清空（已写入 DSH credentials），绝不持久化/回显 */
   webdavPassword: string
-  /** git/webdav 各自独立的设置状态（自动同步 / 同步模式 / 加密 / 快照） */
-  byChannel: {
-    git: ChannelSyncState
-    webdav: ChannelSyncState
-  }
+  /* ---- s3 通道表单（S3 兼容系五家） ---- */
+  s3Provider: string
+  s3Endpoint: string
+  s3Region: string
+  s3Bucket: string
+  s3Prefix: string
+  s3AccessKeyId: string
+  s3PathStyle: boolean
+  /** 仅内存：成功后清空（已写入 DSH credentials 的 cloudSecretRef 槽位） */
+  s3Secret: string
+  /* ---- gist 通道表单 ---- */
+  gistId: string
+  gistApiBaseUrl: string
+  gistFilePrefix: string
+  /** 仅内存：成功后清空（已写入 DSH credentials 的 gist token 槽位） */
+  gistToken: string
+  /** 每条通道各自独立的设置状态（自动同步 / 同步模式 / 加密 / 快照）；四通道由枚举构造 */
+  byChannel: Record<SyncChannel, ChannelSyncState>
   /** 可同步分区目录（status.syncSections 回填；高级模式勾选列表数据源；两通道共用目录） */
   catalog: SyncSectionOption[]
   /** 通道配置保存中（「保存配置」按钮 spinner；自动保存同用） */
@@ -206,10 +220,19 @@ const initial: SyncUiState = {
   webdavUrl: '',
   webdavUsername: '',
   webdavPassword: '',
-  byChannel: {
-    git: defaultChannelSyncState(),
-    webdav: defaultChannelSyncState(),
-  },
+  s3Provider: DEFAULT_S3_PROVIDER,
+  s3Endpoint: '',
+  s3Region: '',
+  s3Bucket: '',
+  s3Prefix: '',
+  s3AccessKeyId: '',
+  s3PathStyle: false,
+  s3Secret: '',
+  gistId: '',
+  gistApiBaseUrl: '',
+  gistFilePrefix: '',
+  gistToken: '',
+  byChannel: channelStateMap(),
   catalog: [],
   savingConfig: false,
   busy: null,
@@ -231,6 +254,18 @@ const initial: SyncUiState = {
  * busy/savingConfig 为瞬态：切 tab 由模块级单例保留（切回仍显示进行中）；
  * 刷新后白名单剔除 → 回复空闲。
  */
+/**
+ * 从 store 切片取某通道的持久化状态。
+ * 切片类型只声明 git / webdav（run-store 的持久化白名单），其余通道返回 undefined = 用缺省，
+ * 由 /sync/status 回填 —— 这里**不做** `as any`，用 Partial 显式表达「可能没有」。
+ */
+function storedChannelState(
+  byChannel: SyncStoreSlice['byChannel'],
+  channel: SyncChannel,
+): Partial<ChannelSyncState> | undefined {
+  return (byChannel as Partial<Record<SyncChannel, Partial<ChannelSyncState>>>)[channel]
+}
+
 function initFromStore(): SyncUiState {
   const s: SyncStoreSlice = runStore.getSnapshot().sync
   return {
@@ -244,10 +279,9 @@ function initFromStore(): SyncUiState {
     webdavUrl: s.webdavUrl,
     webdavUsername: s.webdavUsername,
     webdavPassword: s.webdavPassword,
-    byChannel: {
-      git: { ...defaultChannelSyncState(), ...s.byChannel.git },
-      webdav: { ...defaultChannelSyncState(), ...s.byChannel.webdav },
-    },
+    // 持久化切片（run-store）当前只覆盖 git / webdav（run-store.ts 不在本任务 inScope）；
+    // 云端点两条通道由 /sync/status 的 s3 / gist 非密视图在 loadStatus 里回填 —— 宿主是它们的事实源。
+    byChannel: channelMapOf((ch) => ({ ...defaultChannelSyncState(), ...storedChannelState(s.byChannel, ch) })),
     busy: s.busy,
     savingConfig: s.savingConfig,
     pushReport: s.pushReport,
@@ -393,7 +427,7 @@ export function SyncPanel({ api, t, cmT }: SyncPanelProps) {
   /** 保存防重入状态机的纯数据（在途标记 + 待发改动；t42 起由 ui/sync-settings-view.ts 决策） */
   const saveQueueRef = useRef<SaveQueueState>({ inFlight: false, pending: null })
   /** 正在拉取远端快照列表（按通道独立防抖/防并发） */
-  const loadingSnapshotsRef = useRef<Record<SyncChannel, boolean>>({ git: false, webdav: false })
+  const loadingSnapshotsRef = useRef<Record<SyncChannel, boolean>>(channelMapOf(() => false))
 
   /** 挂载时读取同步状态（配置回填 + 上次同步时间 + 凭据状态 + 两通道 autosync/selection） */
   const loadStatus = async (): Promise<void> => {
@@ -402,7 +436,9 @@ export function SyncPanel({ api, t, cmT }: SyncPanelProps) {
       const info = await api.status()
       // 通道回填：优先磁盘持久化的选择（status.lastSyncChannel，ui-prefs.json）；未记录过则
       // 回退 localStorage 记忆（升级前遗留）→ 最后按配置（sync-config.transport）
-      const savedChannel: SyncChannel = info.transport?.type === 'webdav' ? 'webdav' : 'git'
+      // 宿主 transport 是四通道枚举（isClientChannel 收窄；未知/缺省回落 git）
+      const savedTransport = info.transport?.type
+      const savedChannel: SyncChannel = isClientChannel(savedTransport) ? savedTransport : 'git'
       // 宿主 ui-prefs 可能记录**客户端尚未接线**的云端通道（s3/gist）：UI 只认已接线通道，
   // 未接线的值一律按「无记录」处理并回落 localStorage 记忆 —— 不把未接线通道混进 UI 状态机。
   const remembered: SyncChannel | null = isClientChannel(info.lastSyncChannel) ? info.lastSyncChannel : readStoredChannel()
@@ -433,10 +469,9 @@ export function SyncPanel({ api, t, cmT }: SyncPanelProps) {
         webdavUrl: info.webdav?.url ?? '',
         webdavUsername: info.webdav?.username ?? '',
         catalog,
-        byChannel: {
-          git: { ...stateRef.current.byChannel.git, ...backfill('git') },
-          webdav: { ...stateRef.current.byChannel.webdav, ...backfill('webdav') },
-        },
+        byChannel: channelMapOf((ch) => ({ ...stateRef.current.byChannel[ch], ...backfill(ch) })),
+        // 云端点非密字段回填（s3/gist 的密钥值永不回传：只回 secretStored 布尔，供徽章显示）
+        ...cloudFormFromStatus(info),
       })
       // 独立拉取 autosync（若 status 未带按通道状态则补一次）
       if (autoByCh === undefined) {
@@ -445,9 +480,10 @@ export function SyncPanel({ api, t, cmT }: SyncPanelProps) {
       // 当前激活通道已配置且远端地址就绪时，自动拉取远端快照填充下拉（无需先点一键同步）；
       // 直接传 info 的地址（state.patch 尚未生效），避免竞态
       const activeCh = remembered ?? savedChannel
-      const preset = activeCh === 'webdav' ? (info.webdav?.url ?? '') : (info.repoUrl ?? '')
-      if (info.configured && preset.trim() !== '') {
-        void loadSnapshots(preset, activeCh)
+      // 就绪判定统一走 channelRemoteReady（git/webdav = 地址非空；s3/gist = 表单校验通过）。
+      // patch 已同步更新 stateRef，故 loadSnapshots 内部读到的是刚回填的表单值。
+      if (info.configured && channelRemoteReady({ ...formOf(stateRef.current), channel: activeCh })) {
+        void loadSnapshots(undefined, activeCh)
       }
       // 校验 GitHub token 有效性：已登录（有效）→ 隐藏 GitHub 登录块；未配置/失效 → 显示
       void validateGithub()
@@ -496,29 +532,15 @@ export function SyncPanel({ api, t, cmT }: SyncPanelProps) {
     patchChannelState(ch, { loadingSnapshots: true })
     try {
       const s = stateRef.current
-      if (ch === 'webdav') {
-        const url = urlOverride ?? s.webdavUrl
-        if (url.trim() === '') return
-        // 带 username/password（非空时）：挂载早期 state 未回填 → undefined，Host 端回退持久化配置补 username
-        const res = await api.snapshotsList({
-          transport: 'webdav',
-          url: url.trim(),
-          username: s.webdavUsername.trim() !== '' ? s.webdavUsername.trim() : undefined,
-          password: s.webdavPassword !== '' ? s.webdavPassword : undefined,
-        })
-        patchChannelState('webdav', { snapshots: res.snapshots, unreadableSnapshots: res.unreadable ?? [] })
-        announceUnreadable(res.unreadable)
-      } else {
-        const repo = urlOverride ?? s.repoUrl
-        if (repo.trim() === '') return
-        const res = await api.snapshotsList({
-          transport: 'git',
-          repoUrl: repo.trim(),
-          token: s.token.trim() !== '' ? s.token.trim() : undefined,
-        })
-        patchChannelState('git', { snapshots: res.snapshots, unreadableSnapshots: res.unreadable ?? [] })
-        announceUnreadable(res.unreadable)
-      }
+      // 四通道统一：判据（channelRemoteReady）与载荷组装（buildSyncChannelBody）都在 ui 层。
+      // urlOverride 只对 webdav 有意义（预设下拉在 state 回填前就要用新地址去列远端快照）。
+      const form: SyncFormSnapshot = ch === 'webdav' && urlOverride !== undefined
+        ? { ...formOf(s), channel: 'webdav', webdavUrl: urlOverride }
+        : { ...formOf(s), channel: ch }
+      if (!channelRemoteReady(form)) return
+      const res = await api.snapshotsList(buildSyncChannelBody(form))
+      patchChannelState(ch, { snapshots: res.snapshots, unreadableSnapshots: res.unreadable ?? [] })
+      announceUnreadable(res.unreadable)
       // M-18：用户主动点「刷新快照」成功后的回执（自动拉取/切换通道时不打扰）
       if (announce) toast.ok(t('toast.snapshotsRefreshed'))
     } catch (err) {
@@ -564,6 +586,18 @@ export function SyncPanel({ api, t, cmT }: SyncPanelProps) {
     webdavUrl: s.webdavUrl,
     webdavUsername: s.webdavUsername,
     webdavPassword: s.webdavPassword,
+    s3Provider: s.s3Provider,
+    s3Endpoint: s.s3Endpoint,
+    s3Region: s.s3Region,
+    s3Bucket: s.s3Bucket,
+    s3Prefix: s.s3Prefix,
+    s3AccessKeyId: s.s3AccessKeyId,
+    s3PathStyle: s.s3PathStyle,
+    s3Secret: s.s3Secret,
+    gistId: s.gistId,
+    gistApiBaseUrl: s.gistApiBaseUrl,
+    gistFilePrefix: s.gistFilePrefix,
+    gistToken: s.gistToken,
   })
 
   /** 表单快照 → 请求体（t42 起组装逻辑在 ui/sync-settings-view.ts，组件只装配） */
@@ -596,6 +630,9 @@ export function SyncPanel({ api, t, cmT }: SyncPanelProps) {
         ? s.webdavPassword
         : ''
       next.token = s.token !== '' && s.token !== payloadToSave.token ? s.token : ''
+      // 云端点密钥同一口径：只清「本次确实写出去的」那个；保存期间用户又改了输入则保留新值
+      next.s3Secret = s.s3Secret !== '' && s.s3Secret !== payloadToSave.secret ? s.s3Secret : ''
+      next.gistToken = s.gistToken !== '' && s.gistToken !== payloadToSave.secret ? s.gistToken : ''
       // 凭据徽章合并（响应只含布尔，无 secret 值）
       if (s.statusInfo !== null) {
         const info: SyncStatusResponse = {
@@ -611,13 +648,17 @@ export function SyncPanel({ api, t, cmT }: SyncPanelProps) {
             passwordConfigured: saved.webdav.passwordConfigured,
           }
         }
+        // 云端点：响应只回非密视图 + secretStored 布尔（值永不回传），直接合并供徽章刷新
+        if (saved.s3 !== undefined) info.s3 = saved.s3
+        if (saved.gist !== undefined) info.gist = saved.gist
         next.statusInfo = info
       }
       commit(next)
       // M-17：手动保存成功给出回执（自动保存静默，避免输入防抖刷屏）
       if (announce) toast.ok(t('toast.configSaved'))
-      // 手动填入的 git token 保存成功 → 校验有效性（有效则隐藏 GitHub 登录块）
-      if (payloadToSave.transport !== 'webdav' && saved.credentialConfigured) {
+      // 手动填入的 git token 保存成功 → 校验有效性（有效则隐藏 GitHub 登录块）。
+      // 只有 git 通道用 SYNC_CREDENTIAL_REF：云端点通道的密钥走各自的槽位，与 GitHub 登录无关。
+      if (payloadToSave.transport === 'git' && saved.credentialConfigured) {
         void validateGithub()
       }
     } catch (err) {
@@ -682,7 +723,16 @@ export function SyncPanel({ api, t, cmT }: SyncPanelProps) {
     }
     patch({
       ...(channel === 'git' ? { githubSignedIn: false, github: initialGithub } : {}),
-      ...(channel === 'webdav' ? { webdavUrl: '', webdavUsername: '', webdavPassword: '' } : { repoUrl: '', token: '' }),
+      ...(channel === 'webdav'
+        ? { webdavUrl: '', webdavUsername: '', webdavPassword: '' }
+        : channel === 's3'
+          ? {
+              s3Endpoint: '', s3Region: '', s3Bucket: '', s3Prefix: '', s3AccessKeyId: '',
+              s3Secret: '', s3PathStyle: false, s3Provider: DEFAULT_S3_PROVIDER,
+            }
+          : channel === 'gist'
+            ? { gistId: '', gistApiBaseUrl: '', gistFilePrefix: '', gistToken: '' }
+            : { repoUrl: '', token: '' }),
     })
     patchChannelOf(channel, { snapshots: [], selectedSnapshotId: '' })
     void loadStatus()
@@ -1045,8 +1095,10 @@ export function SyncPanel({ api, t, cmT }: SyncPanelProps) {
     }
   }
 
-  /** 远端地址是否就绪（git=repoUrl 非空；webdav=webdavUrl 非空）。按通道取值 —— 两张卡各有各的。 */
-  const remoteReadyOf = (channel: SyncChannel): boolean => computeRemoteReady(channel, state.repoUrl, state.webdavUrl)
+  /** 远端是否就绪（四通道统一判据在 ui 层：git/webdav=地址非空，s3/gist=表单校验通过）。 */
+  const remoteReadyOf = (channel: SyncChannel): boolean => channelRemoteReady({ ...formOf(state), channel })
+  /** 云端点表单的校验问题（对话框内联提示用；git/webdav 恒为空表）。 */
+  const cloudIssues: CloudFormIssue[] = validateCloudForm(formOf(state))
   /** 激活通道的远端就绪态（弹窗 / 页面级判断用） */
   const remoteReady = remoteReadyOf(state.channel)
   const pushView = pushReportView(state.pushReport, uiT)
@@ -1089,6 +1141,8 @@ export function SyncPanel({ api, t, cmT }: SyncPanelProps) {
           remoteReady={ready}
           repoUrl={state.repoUrl}
           webdavUrl={state.webdavUrl}
+          s3Endpoint={state.s3Endpoint}
+          gistId={state.gistId}
           onOpen={() => { openChannelDialogFor(channel) }}
           onClear={() => { setClearTarget(channel) }}
         />
@@ -1210,21 +1264,19 @@ export function SyncPanel({ api, t, cmT }: SyncPanelProps) {
               随状态变化的页面结构（配完 Git 回来看不到 WebDAV 只会被当成 bug）。 */}
           {renderChannelCard('git')}
           {renderChannelCard('webdav')}
+          {renderChannelCard('s3')}
+          {renderChannelCard('gist')}
           {/* 通道配置弹窗（渲染段拆到 ChannelConfigDialog，t42）：只配置**打开它的那条通道**，弹窗内不提供切换 */}
           <ChannelConfigDialog
             open={channelOpen}
             api={api}
             t={t}
             uiT={uiT}
-            channel={state.channel}
+            form={formOf(state)}
+            cloudIssues={cloudIssues}
             busy={state.busy !== null}
             savingConfig={state.savingConfig}
             remoteReady={remoteReady}
-            repoUrl={state.repoUrl}
-            token={state.token}
-            webdavUrl={state.webdavUrl}
-            webdavUsername={state.webdavUsername}
-            webdavPassword={state.webdavPassword}
             statusInfo={state.statusInfo}
             githubSignedIn={state.githubSignedIn}
             githubView={githubView}

@@ -8,13 +8,17 @@
 import type { PlanItem, PlanItemKind } from '../../core/types.ts';
 import type { SectionId } from '../../schema/types.ts';
 import type { PullChange, SyncPullReport, SyncPushPreview, SyncPushReport } from '../../sync/sync-engine.ts';
-import type { SyncTransportType } from '../../sync/sync-config.ts';
 import { DEFAULT_CATEGORIES } from '../../ui/export-flow.ts';
 import { EXPORT_GROUPS, type ExportGroup } from '../../ui/types.ts';
 import type {
   ApplyItemsResponse, AutosyncInterval, AutosyncStatusResponse, GithubPollResponse, SyncConfirmItem, SyncSelectionPayload,
   SyncItemAdoption, SyncSectionInfo, SyncSnapshotLite, SyncStatusResponse,
 } from './sync-api.ts';
+// 通道枚举的唯一声明处（**零依赖**，可被浏览器半运行时 import）：加一条通道只改这里一处。
+import { SYNC_CHANNELS } from '../../utils/shared-constants.ts';
+import type { SyncKey } from './sync-locales.ts';
+import type { CloudConfigIssueCode } from '../../ui/sync-settings-view.ts';
+import type { S3CompatProvider } from '../../sync/sync-config.ts';
 import { zhUiT, type UiT } from '../../ui/i18n.ts';
 
 /* ---------------------------------------------------------------- 私有仓库提示 */
@@ -191,41 +195,110 @@ export function severityLabel(severity: PlanItem['severity'], t: UiT = zhUiT): s
 /* ---------------------------------------------------------------- 按钮状态 */
 
 /**
- * 远程同步通道类型（客户端**已接线**的通道：git / webdav）。
+ * 远程同步通道类型（**由 SYNC_CHANNELS 单一事实源派生**：git | webdav | s3 | gist）。
  *
- * 宿主 SYNC_CHANNELS 已是 4 条（+ s3 / gist），但这两条的界面接线由 t12 负责；
- * 在此之前客户端只操作已接线的两条 —— 类型收窄到 CLIENT_SYNC_CHANNELS，避免把
- * 未接线通道混进 UI 状态机（Record<SyncChannel, …> 全按已接线集合构造）。
- */
-export type SyncChannel = (typeof CLIENT_SYNC_CHANNELS)[number];
-
-/**
- * 客户端侧通道清单（**唯一一份运行期镜像**）。
+ * 通道枚举的声明处 = `src/utils/shared-constants.ts`（**零依赖**：浏览器半可运行时 import，
+ * 打包后就是内联字符串，不会把 node:fs / node:path 带进 client bundle —— bundle 自包含铁律）。
+ * 宿主 `sync-config.ts` 只是 re-export 它，因此「加一条通道」只改声明处一处。
  *
- * 为什么不能直接 import 宿主的 SYNC_CHANNELS：宿主 src/sync/sync-config.ts 依赖 node:fs / node:path，
- * 而 client bundle 必须自包含（不得 import node 模块）——值导入会把 node:fs 带进浏览器产物。
- * 因此这里镜像一份运行期值，并用下面的**编译期穷尽检查**钉住：宿主新增通道而此处没跟上时，
- * typecheck 会直接失败，而不是静默漏掉一个通道（t32：通道枚举收口）。
+ * 历史：本文件曾维护 `CLIENT_SYNC_CHANNELS`（已接线）+ `PENDING_CLIENT_SYNC_CHANNELS`（待接线）
+ * 两份手维护清单，并靠 `UncoveredChannel` 穷尽检查防漂移；t12 把 s3 / gist 接线后两份清单都不再
+ * 需要 —— 直接派生既没有漂移面，也不必再维护镜像（下一句注释曾经的理由也已随枚举搬迁而失效）。
  */
-const CLIENT_SYNC_CHANNELS = ['git', 'webdav'] as const satisfies readonly SyncTransportType[];
+export type SyncChannel = (typeof SYNC_CHANNELS)[number];
 
-/**
- * 宿主已并入、但客户端界面**尚未接线**的通道（t12 落地时把它们并入 CLIENT_SYNC_CHANNELS 并删除本行）。
- * 单独列出来是为了保住下面的穷尽检查：宿主新增通道时仍然编译报错，而不是静默漏掉一个通道。
- */
-const PENDING_CLIENT_SYNC_CHANNELS = ['s3', 'gist'] as const satisfies readonly SyncTransportType[];
+/** 客户端通道清单（= 共享常量本身；UI 构造 Record / 遍历时取它，避免各处再写一遍数组） */
+export const SYNC_CHANNEL_ORDER: readonly SyncChannel[] = SYNC_CHANNELS;
 
-type UncoveredChannel = Exclude<
-  SyncTransportType,
-  (typeof CLIENT_SYNC_CHANNELS)[number] | (typeof PENDING_CLIENT_SYNC_CHANNELS)[number]
->;
-/** 穷尽检查：UncoveredChannel 非 never（宿主加了通道、镜像与待办清单都没跟）时该行类型不成立 → 编译报错。 */
-const clientChannelsAreExhaustive: UncoveredChannel extends never ? true : never = true;
-void clientChannelsAreExhaustive;
-
-/** 通道值守卫（localStorage 等原始输入）。 */
+/** 通道值守卫（localStorage / 宿主原值等原始输入）。 */
 export function isClientChannel(value: unknown): value is SyncChannel {
-  return typeof value === 'string' && (CLIENT_SYNC_CHANNELS as readonly string[]).includes(value);
+  return typeof value === 'string' && (SYNC_CHANNELS as readonly string[]).includes(value);
+}
+
+/**
+ * 通道显示名 → 字典键。全量 `Record<SyncChannel, SyncKey>`：新增通道而漏配文案 = **编译期错误**
+ * （而不是界面上冒出一个裸键）。
+ */
+export const SYNC_CHANNEL_LABEL_KEY: Record<SyncChannel, SyncKey> = {
+  git: 'channel.git',
+  webdav: 'channel.webdav',
+  s3: 'channel.s3',
+  gist: 'channel.gist',
+};
+
+/**
+ * S3 兼容商 → 显示名字典键（全量 Record：宿主新增兼容商而这里漏配 = 编译期错误；
+ * 兼容商清单的穷尽检查在 `src/ui/sync-settings-view.ts` 的 `S3_PROVIDERS`）。
+ */
+export const S3_PROVIDER_LABEL_KEY: Record<S3CompatProvider, SyncKey> = {
+  s3: 'cloud.provider.s3',
+  oss: 'cloud.provider.oss',
+  cos: 'cloud.provider.cos',
+  minio: 'cloud.provider.minio',
+  kodo: 'cloud.provider.kodo',
+};
+
+/**
+ * 云端点密钥槽位引用名（**仅供提示文案显示**；值的读写全在宿主）。
+ *
+ * 与宿主 `sync-config.ts` 的 `cloudSecretRef()` **同构**：`DSH_CONFIG_MANAGER_SYNC_<PROVIDER>_SECRET_ACCESS_KEY`，
+ * gist 为 `DSH_CONFIG_MANAGER_SYNC_GIST_TOKEN`。这里镜像一份是既有做法（见 sync-api.ts 的
+ * SYNC_CREDENTIAL_REF）：client 不能运行时 import 宿主模块（会把 node:fs 带进产物）。
+ */
+export function cloudSecretRefName(provider: string): string {
+  return provider === 'gist'
+    ? 'DSH_CONFIG_MANAGER_SYNC_GIST_TOKEN'
+    : 'DSH_CONFIG_MANAGER_SYNC_' + provider.toUpperCase() + '_SECRET_ACCESS_KEY';
+}
+
+/**
+ * 云端点校验码 → 字典键（键名与码同名，形如 `cloud.endpointRequired`）。
+ *
+ * 码的声明处是宿主 `sync-config.ts` 的 `CloudConfigIssueCode`（类型透传到 ui 模块）。本表是
+ * **全量 Record**：宿主新增码而这里漏配文案即编译失败；宿主 400 响应里的 `body.code` 也经
+ * `cloudIssueKey()` 查到同一条文案，绝不把裸码渲染给用户。
+ */
+/**
+ * 类型化码之外的**运行期码**：路由层 `cloudCredentialWriteError` 用 `cloud.credentialsWriteFailed`
+ * 表达「密钥写进 DSH 凭据失败」，但它不在宿主 `CloudConfigIssueCode` 联合里（那是配置校验码）。
+ * 单独并进来，既不削弱对类型化码的穷尽检查，也不让界面渲染出裸码。
+ */
+type ExtraCloudIssueCode = 'cloud.credentialsWriteFailed'
+
+export const SYNC_CLOUD_ISSUE_KEY: Record<CloudConfigIssueCode | ExtraCloudIssueCode, SyncKey> = {
+  'cloud.providerUnknown': 'cloud.providerUnknown',
+  'cloud.endpointRequired': 'cloud.endpointRequired',
+  'cloud.endpointInvalid': 'cloud.endpointInvalid',
+  'cloud.endpointUserinfo': 'cloud.endpointUserinfo',
+  'cloud.regionRequired': 'cloud.regionRequired',
+  'cloud.bucketRequired': 'cloud.bucketRequired',
+  'cloud.bucketInvalid': 'cloud.bucketInvalid',
+  'cloud.prefixInvalid': 'cloud.prefixInvalid',
+  'cloud.accessKeyIdRequired': 'cloud.accessKeyIdRequired',
+  'cloud.gistIdRequired': 'cloud.gistIdRequired',
+  'cloud.gistIdInvalid': 'cloud.gistIdInvalid',
+  'cloud.apiBaseUrlInvalid': 'cloud.apiBaseUrlInvalid',
+  'cloud.secretWriterRequired': 'cloud.secretWriterRequired',
+  'cloud.credentialsWriteFailed': 'cloud.credentialsWriteFailed',
+};
+
+/** 宿主错误码 → 字典键；未知码（未来版本 / 第三方宿主）→ null，调用方回退展示原始码。 */
+export function cloudIssueKey(code: string): SyncKey | null {
+  return Object.prototype.hasOwnProperty.call(SYNC_CLOUD_ISSUE_KEY, code)
+    ? (SYNC_CLOUD_ISSUE_KEY[code as CloudConfigIssueCode | ExtraCloudIssueCode] ?? null)
+    : null;
+}
+
+/**
+ * 按通道构造 `Record<SyncChannel, T>`（缺省值由 `make` 给出）。
+ *
+ * 为什么要有它：`{ git: …, webdav: … }` 这种手写字面量在加通道时会**静默少一项**
+ * （索引到 undefined 才炸，且往往炸在很远的地方）。遍历枚举构造则天然覆盖全部通道。
+ */
+export function channelMapOf<T>(make: (channel: SyncChannel) => T): Record<SyncChannel, T> {
+  const out = {} as Record<SyncChannel, T>
+  for (const channel of SYNC_CHANNEL_ORDER) out[channel] = make(channel)
+  return out
 }
 
 /* ---------------------------------------------------------------- 每通道独立状态 */
@@ -283,6 +356,11 @@ export interface ChannelSyncState {
   autosyncEnabled: boolean
   /** 该通道自动同步间隔（回填自 autosync） */
   autosyncInterval: AutosyncInterval
+}
+
+/** 四通道的缺省状态表（`Record<SyncChannel, ChannelSyncState>`；组件 state 与快照复制共用）。 */
+export function channelStateMap(): Record<SyncChannel, ChannelSyncState> {
+  return channelMapOf(() => defaultChannelSyncState())
 }
 
 /** 缺省每通道状态（未配置时各字段默认值）。 */
@@ -397,11 +475,11 @@ export interface SyncButtons {
   pullLabel: string;
 }
 
-/** 活动通道的远端地址是否就绪（git=repoUrl，webdav=webdavUrl）。 */
-export function computeRemoteReady(channel: SyncChannel, gitUrl: string, webdavUrl: string): boolean {
-  const url = channel === 'webdav' ? webdavUrl : gitUrl;
-  return url.trim() !== '';
-}
+/**
+ * 通道「远端是否就绪」的唯一定义在 `src/ui/sync-settings-view.ts` 的 `channelRemoteReady(form)`：
+ * 四条通道各自看哪些字段（git=repoUrl、webdav=url、s3=四必填、gist=gistId）属于业务判断，
+ * 且云端点还要过格式校验 —— 这里**不再保留只覆盖 git/webdav 的第二份实现**（两份必然漂移）。
+ */
 
 /**
  * 按钮可用性与文案：

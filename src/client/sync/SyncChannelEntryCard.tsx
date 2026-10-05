@@ -10,26 +10,38 @@ import { InfoHint } from '../common/InfoHint.tsx'
 import type { SyncStatusResponse } from './sync-api.ts'
 import type { SyncChannel } from './sync-view.ts'
 import { formatSyncStatusTimestamp, formatSyncUrlPreview } from '../../ui/sync-settings-view.ts'
-import { needsGitToken } from './sync-view.ts'
+import { needsGitToken, SYNC_CHANNEL_LABEL_KEY } from './sync-view.ts'
 import css from '../config-manager.module.css'
 
 /** 同步通道入口卡：通道徽章 + 配置状态 + 状态事实行 + 打开配置弹窗 + 断开该通道配置。 */
-export function SyncChannelEntryCard({ t, channel, statusInfo, remoteReady, repoUrl, webdavUrl, onOpen, onClear }: {
+export function SyncChannelEntryCard({ t, channel, statusInfo, remoteReady, repoUrl, webdavUrl, s3Endpoint, gistId, onOpen, onClear }: {
   t: TranslateNS<'config-manager-sync'>
   channel: SyncChannel
   statusInfo: SyncStatusResponse | null
   remoteReady: boolean
   repoUrl: string
   webdavUrl: string
+  /** s3 通道的端点（预览用；非密字段，可回显） */
+  s3Endpoint: string
+  /** gist 通道的 gist id（预览用；非密字段，可回显） */
+  gistId: string
   onOpen: () => void
   /** 请求断开该通道（未配置时按钮不渲染）；确认与执行由壳层负责（本卡不发请求） */
   onClear: () => void
 }) {
+  /** 事实行里的「当前远端」预览：按通道取那个真正标识远端的字段（gist 用 id，没有 URL） */
+  const previewRemote = channel === 'webdav'
+    ? webdavUrl
+    : channel === 's3'
+      ? s3Endpoint
+      : channel === 'gist'
+        ? gistId
+        : repoUrl
   return (
     <Card>
       <span className={css.groupLabel}>{t('channel.title')} <InfoHint text={t('channel.openHint')} label={t('common.infoHint')} /></span>
       <div className={css.statRow}>
-        <Badge kind="info">{channel === 'webdav' ? t('channel.webdav') : t('channel.git')}</Badge>
+        <Badge kind="info">{t(SYNC_CHANNEL_LABEL_KEY[channel])}</Badge>
         <Badge kind={remoteReady ? 'ok' : 'warn'}>
           {remoteReady ? t('channel.configured') : t('channel.notConfigured')}
         </Badge>
@@ -44,6 +56,13 @@ export function SyncChannelEntryCard({ t, channel, statusInfo, remoteReady, repo
         )}
         {channel === 'webdav' && statusInfo?.webdav?.passwordConfigured === true && (
           <Badge kind="ok">{t('webdav.passwordSaved')}</Badge>
+        )}
+        {/* 云端点通道：只回 secretStored 布尔（密钥值永不回传），据此显示「已保存」徽章 */}
+        {channel === 's3' && statusInfo?.s3?.secretStored === true && (
+          <Badge kind="ok">{t('cloud.secretSaved')}</Badge>
+        )}
+        {channel === 'gist' && statusInfo?.gist?.secretStored === true && (
+          <Badge kind="ok">{t('cloud.tokenSaved')}</Badge>
         )}
       </div>
       {/* 状态事实行（Workbench：配置状态/上次同步/可同步分区——未配置时也要给硬事实） */}
@@ -71,7 +90,7 @@ export function SyncChannelEntryCard({ t, channel, statusInfo, remoteReady, repo
             <span className={css.factLabel}>{t('channel.currentUrl')}</span>
             <span className={css.factValue}>
               <span className={css.mono}>
-                {formatSyncUrlPreview(channel === 'webdav' ? webdavUrl : repoUrl)}
+                {formatSyncUrlPreview(previewRemote)}
               </span>
             </span>
           </div>

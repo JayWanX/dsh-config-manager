@@ -62,7 +62,7 @@ import type { MarketListItem, MarketDownloadResult } from '../market/types.ts'
 import type { SyncPushReport, SyncPullReport, SyncPushPreview } from '../sync/sync-engine.ts'
 import type { SyncStartResponse } from './sync/sync-api.ts'
 import type { ChannelSyncState, SyncChannel } from './sync/sync-view.ts'
-import { DEFAULT_SYNC_SESSIONS_LIMIT, defaultChannelSyncState } from './sync/sync-view.ts'
+import { channelMapOf, DEFAULT_SYNC_SESSIONS_LIMIT, defaultChannelSyncState } from './sync/sync-view.ts'
 import { REDACTED, redact } from '../security/redaction.ts'
 import { isRecord } from '../utils/guards.ts'
 
@@ -140,11 +140,14 @@ export interface SyncStoreSlice {
   webdavUsername: string
   /** 仅内存：成功后清空，绝不持久化/回显 */
   webdavPassword: string
-  /** git/webdav 通道各自独立的设置状态（自动同步、同步模式、加密、快照） */
-  byChannel: {
-    git: ChannelSyncState
-    webdav: ChannelSyncState
-  }
+  /**
+   * **每条通道**各自独立的设置状态（自动同步、同步模式、加密、快照）。
+   *
+   * 键集合从 `SYNC_CHANNELS` 派生（`SyncChannel` 类型 + `channelMapOf` 构造）—— 这里曾是全仓
+   * 最后一处手维护的通道清单；手写 `{ git, webdav }` 的表现是加通道时**静默漏一项**，
+   * 而漏掉的那一项要等到某人索引它时才会炸，离现场往往很远。
+   */
+  byChannel: Record<SyncChannel, ChannelSyncState>
   /**
    * 进行中的同步操作（瞬态：切 tab 由模块级单例保留 → 切回仍显示进行中；
    * 刷新时被白名单剔除 → 回复空闲，异步请求结果经 /runs 等宿主侧恢复）。
@@ -194,10 +197,8 @@ export type PersistedChannelSyncState = Omit<
 
 /** 同步面板的持久化切片 = 运行时切片剔除敏感字段（顶层凭据 + byChannel 密码类）与瞬态字段。 */
 export type PersistedSyncState = Omit<SyncStoreSlice, 'token' | 'webdavPassword' | 'busy' | 'savingConfig' | 'byChannel'> & {
-  byChannel: {
-    git: PersistedChannelSyncState
-    webdav: PersistedChannelSyncState
-  }
+  /** 每条通道的持久化状态（键集合同样从 `SyncChannel` 派生 = `SYNC_CHANNELS`） */
+  byChannel: Record<SyncChannel, PersistedChannelSyncState>
 }
 
 /**
@@ -602,10 +603,7 @@ function defaultSyncState(): SyncStoreSlice {
     webdavUrl: '',
     webdavUsername: '',
     webdavPassword: '',
-    byChannel: {
-      git: defaultChannelSyncState(),
-      webdav: defaultChannelSyncState(),
-    },
+    byChannel: channelMapOf(() => defaultChannelSyncState()),
     busy: null,
     savingConfig: false,
     pushReport: null,
@@ -776,10 +774,9 @@ export function toSyncStoreSlice(s: SyncStoreSlice): SyncStoreSlice {
     webdavUrl: s.webdavUrl,
     webdavUsername: s.webdavUsername,
     webdavPassword: s.webdavPassword,
-    byChannel: {
-      git: { ...s.byChannel.git, snapshots: [...s.byChannel.git.snapshots] },
-      webdav: { ...s.byChannel.webdav, snapshots: [...s.byChannel.webdav.snapshots] },
-    },
+    // 每条通道都要复制快照数组引用（避免跨切片共享可变数组）；键集合由枚举遍历得来，
+    // 加通道时自动覆盖，不需要在这里再补一行。
+    byChannel: channelMapOf((ch) => ({ ...s.byChannel[ch], snapshots: [...s.byChannel[ch].snapshots] })),
     busy: s.busy,
     savingConfig: s.savingConfig,
     pushReport: s.pushReport,
@@ -1081,10 +1078,7 @@ export function toPersistedState(state: StoreState): PersistedState {
       repoUrl: sync.repoUrl,
       webdavUrl: sync.webdavUrl,
       webdavUsername: sync.webdavUsername,
-      byChannel: {
-        git: pickChannel(sync.byChannel.git),
-        webdav: pickChannel(sync.byChannel.webdav),
-      },
+      byChannel: channelMapOf((ch) => pickChannel(sync.byChannel[ch])),
       pushReport: sync.pushReport,
       pullReport: sync.pullReport,
       pushPreview: sync.pushPreview,
@@ -1621,27 +1615,25 @@ export class RunStore {
           // 异步请求进行中由宿主 /runs 等恢复，不依赖 UI 瞬态）
           busy: null,
           savingConfig: false,
-          byChannel: {
-            git: {
+          // 每条通道都套同一套恢复规则（枚举遍历 → 加通道自动覆盖）：
+          //  · 旧版顶层形状（升级前没有 byChannel）只归到 git 通道；
+          //  · 密码类字段一律强制归零（持久化切片本来已剔除，这里是第二道锁）：
+          //    同步凭据（含云端点密钥）绝不从 sessionStorage 恢复，刷新后必须重新输入。
+          byChannel: channelMapOf((ch): ChannelSyncState => {
+            const persisted = ch === 'git'
+              ? (legacyGit ?? parsed.sync.byChannel?.[ch])
+              : parsed.sync.byChannel?.[ch]
+            return {
               ...defaultChannelSyncState(),
-              ...(legacyGit ?? parsed.sync.byChannel?.git),
+              ...persisted,
               encryptPassword: '',
               encryptPasswordConfirm: '',
               decryptPassword: '',
               // 「已保存」只由 /sync/status 回填（持久化切片已剔除）
               encryptPasswordSaved: false,
               decryptPasswordSaved: false,
-            } as ChannelSyncState,
-            webdav: {
-              ...defaultChannelSyncState(),
-              ...parsed.sync.byChannel?.webdav,
-              encryptPassword: '',
-              encryptPasswordConfirm: '',
-              decryptPassword: '',
-              encryptPasswordSaved: false,
-              decryptPasswordSaved: false,
-            } as ChannelSyncState,
-          },
+            }
+          }),
         }
       })(),
       market: { ...defaultMarketState(), ...parsed.market },

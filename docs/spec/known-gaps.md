@@ -63,9 +63,10 @@
 | G-28 | WebDAV 密码输入框被无关状态更新自动清空（issue #60） | ✅ 已修复（`commit()` 经 `patchSyncPasswords` 把在途输入写回内存；持久化白名单不变，见 §1） |
 | G-29 | 会话在应用内**读不出来**：官方 `session.export` 通道（原样 ZIP，含子会话与附件）此前**从未接入** | ✅ 已修复（只读探测/流式代理路由 + 体检弹窗逐行下载入口；判据按 **500** 而非过时的 501，见 §1） |
 | G-30 | checkpoint（会话 / 工作区 / 配置三态同点检查点）：宿主能力已交付（引擎 + 7 条子路径），但 **`src/client/**` 零消费者** → 用户点不到 | ⚠️ **部分交付：宿主能力已可用，界面未接线**（见 §3） |
-| G-31 | 云端点同步通道（S3 兼容系 ×5 / GitHub Gist）：transport 已交付（52 条单测），但**未接线进 `SYNC_CHANNELS` / 路由 / UI** → 用户点不到 | ⚠️ **部分交付：宿主能力已可用，界面未接线**（见 §3） |
+| G-31 | 云端点同步通道（S3 兼容系 ×5 / GitHub Gist）：**已接线可用**（通道枚举 / 路由 / UI / 引擎全路径） | ✅ 已交付（`SYNC_CHANNELS = ['git','webdav','s3','gist']`，声明处 = 零依赖 `src/utils/shared-constants.ts`；s3/oss/cos/minio/kodo/gist 六类端点可用。**未对真实云端点做端到端验证**（本批无真实凭据）；gist 刻意不外置 blob 见 **G-34**） |
 | G-32 | SQLite 只读探测的**写副作用**（WAL 库被就地打开会新建 `<db>-shm`/`<db>-wal`）与 `immutable=1` 在 `-wal` 非空时**静默丢数据** | ✅ 已处置（`sqlite.ts` 三态打开计划 direct / immutable / copy + 1 GiB 上限 + **绝不退回就地打开**；四条残余风险见 §3） |
 | G-33 | 备份不到外壳的 MCP 与技能：patch 只读 home 层、技能不落目录（issue #71） | ✅ 已修复（patch 行按层读取并写回原层、技能经 `ctx.skills` 服务收编、快照与回滚记录层，见 §1） |
+| G-34 | GitHub Gist 通道**刻意不外置 blob**（一次 GET 全量返回 / 单文件超限截断 / 文件数上限三条限制）→ 大分区（会话）不适合走 gist | ⚠️ **刻意设计的能力边界，不是缺陷**（gist 定位 = 配置类分区的低门槛远端；界面缺「gist 不适合大分区」提示，建议见 §3） |
 
 ---
 
@@ -480,15 +481,17 @@
 | 验证方式 | 引擎：`src/core/checkpoint.test.ts`（**18** 条：真实磁盘三态捕获、同点/跨度判定、保护点与 guard 点、分叉门、篡改记录、存储降级）；路由接口面：`tests/route/recovery-checkpoints.test.ts`（**5** 条，真 http server：七形态可达 / 409+denied+零写入 / 404/405/400 / 503+guidance / 保护点 / SAFE MODE）。**界面侧零测试** —— 没有任何自动化证据表明用户能用上它，这正是本条登记的意义。 |
 | 已知限制 | 见 §4.1（T14-F3 / T14-F4）。 |
 
-### G-31 云端点同步通道（S3 兼容系 ×5 / GitHub Gist）：transport 已交付，但**未接线**
+### G-31 云端点同步通道（S3 兼容系 ×5 / GitHub Gist）：**已接线可用**
 
 | 项 | 内容 |
 |---|---|
 | 背景 | 批次 3 交付了两个完整的 `SyncTransport` 实现：`src/sync/s3/`（AWS S3 以及 oss / cos / minio / kodo 五家兼容商，共用 `sigv4.ts` 签名 + `s3-providers.ts` 变体表）与 `src/sync/gist/`（GitHub Gist REST）。两者自带通道枚举与配置读取（`src/sync/sync-config.ts` 的 `S3_COMPAT_PROVIDERS` / `CLOUD_SYNC_PROVIDERS`，非密字段存独立的 `sync-cloud-config.json`），密钥纪律与既有通道同档：文件里只有非密字段 + `secretStored` 标记，AccessKey Secret / Gist Token 的**值**只在 DSH credentials 槽位（`cloudSecretRef()`），回传 UI 只走 `CloudChannelView`（带标记不带值）。 |
-| **当前状态** | **⚠️ 部分交付：宿主能力已可用，界面未接线** —— 全仓唯一通道事实源仍是 `SYNC_CHANNELS = ['git', 'webdav']`（`src/sync/sync-config.ts`），**不含 s3 / gist**；云端点段是**与主枚举解耦的独立枚举**，源码注释明写「批次 3 的写作用域不含那些文件，因此新增通道**不得**扩 `SYNC_CHANNELS`…将来并入 `SYNC_CHANNELS` 时只需删掉这里的枚举并补 Record 分支」。于是 `channelOf` / `channelMap` / 自动同步排期（`autosync-scheduler` 遍历 `SYNC_CHANNELS`）/ `makeSyncEngine` 的 transport 工厂（`src/index.ts` 只有 WebDav 与 Git 两个分支）/ `/sync/*` 路由（`prepareSync` 只认 git / webdav）/ 客户端 `CLIENT_SYNC_CHANNELS = ['git', 'webdav']` 与同步设置 UI 全都不认这两个通道 → 用户点不到。 |
-| 缺什么才能用 | ① 把 s3（含五家兼容商）与 gist 并入 `SYNC_CHANNELS`，并补齐 `channelOf` / `channelMap` / `parseSyncChannel` 的 `Record` 分支（typecheck 会逐处点名，**不得只手改一处**，尤其 `Record<SyncTransportType, T>` 的构造处与客户端镜像）；② `src/index.ts` 的 `makeSyncEngine` 增 `S3Transport` / `GistTransport` 构造分支（接到 DSH credentials 的 `getToken` / AccessKey Secret 端口）；③ `/sync/*` 与 `prepareSync` 接受新通道的非密字段（bucket / region / endpoint / pathStyle / gistId / 前缀）并只回传 `CloudChannelView`；④ 客户端补 `CLIENT_SYNC_CHANNELS` 成员、同步设置 / 状态切片与 zh/en 文案；⑤ 若新增通道路由，必须同步 `tests/route/route-parity.test.ts` 与 `route-fence.test.ts` 的计数；⑥ 新通道的快照布局必须与既有「内容寻址 blob 仓 + 删除墓碑」兼容（`blobRefs` / `blobs/<sha256>`）。 |
-| 验证方式 | `src/sync/s3/s3-transport.test.ts` + `sigv4.test.ts` + `cloud-config.test.ts` + `src/sync/gist/gist-transport.test.ts` 共 **52** 条（按 `^test(` 计数）。**通道面零测试**：`src/sync/sync-config.test.ts` 仍断言 `SYNC_CHANNELS` 恰为 `['git', 'webdav']`，没有任何用例覆盖「用 s3 / gist 真的同步一次」—— 这正是本条登记的意义。 |
-| 接入时不得放宽 | 凭据值绝不进日志 / 产物 / 回传；加密与解密密码仍只在进程内存；S3 签名与 Gist token 只经注入的 credentials 端口；`includeSecrets ⇒ encrypt`、非加密快照声明 `containsSecrets` 即拒绝等既有同步不变量对每个通道同等适用。 |
+| **当前状态（t11 + t12 后，2026-10-05）** | ✅ **已交付**：`SYNC_CHANNELS = ['git', 'webdav', 's3', 'gist']`（**声明处 = 零依赖 `src/utils/shared-constants.ts`**，宿主 `src/sync/sync-config.ts` re-export，客户端运行时 import 同一常量）；host 侧 `SyncConfig` 增 s3/gist 变体、`/sync/*` 读/写/清、`makeSyncEngine` 走**同一条引擎路径**（GFS 远端保留 / 会话删除墓碑 / 内容寻址 blob 仓 / `includeOptInSections`「会话绝不悄悄下行」/ `includeSecrets ⇒ encrypt` 全部继承，无旁路），autosync 对未配置的云端点**安静跳过**（不抛错、不构造引擎）；UI 侧 4 张通道卡 + 云端点表单（provider / endpoint / region / bucket / pathStyle / prefix / gistId / apiBaseUrl / filePrefix）+ zh/en 字典齐全。 |
+| 六类端点 | **s3 / oss / cos / minio / kodo / gist** —— 前五家走同一份 SigV4 实现（方言表区分 `aws4` / `oss4`），gist 走 GitHub REST。配置形状与密钥纪律见 `docs/spec/sync-channel-v1.md` §6。 |
+| **残余边界（如实登记，不得夸大）** | ① **未对真实云端点做端到端验证**：本批**没有真实云端凭据**，全部证据是模块单测 + 路由单测 + 客户端单测 + 全量 `npm test`；**没有**任何「对着真实 S3 / OSS / COS / MinIO / Kodo / Gist 跑通一次 push → pull」的记录 —— 不得声称端到端通过。② **gist 通道刻意不外置 blob**（能力边界见 **G-34**，是刻意设计不是缺陷）。③ 跨版本仍不做协议协商（G-19）、墓碑不代本机删除（G-20），两条边界对云端点通道同等适用。 |
+| 验证方式 | `src/sync/s3/{s3-transport,sigv4,cloud-config}.test.ts` + `src/sync/gist/gist-transport.test.ts`（52 条）+ `src/sync/sync-config.test.ts` 云端点往返 4 条 + `src/sync/autosync-scheduler.test.ts` 2 条（未配置安静跳过 / `syncIsConfigured` 口径）+ `src/ui/sync-settings-view.test.ts` 与 `src/client/sync/*.test.ts`（四通道表单 / 就绪判据 / 凭据只写端口）+ 本批全量 `npm test`。 |
+| 不变量（不得放宽） | 凭据值绝不进日志 / 产物 / 回传；S3 Secret / Gist Token 只经注入的 credentials 端口（`cloudSecretRef()` 槽位，**只写不回读**）；加解密密码仍只在进程内存 / DSH 凭据槽位（`syncPasswordRef` → `..._PASSWORD_S3` / `..._PASSWORD_GIST`）；非密配置只落 `sync-cloud-config.json`；`includeSecrets ⇒ encrypt`、非加密快照声明 `containsSecrets` 即拒绝等既有同步不变量对每个通道同等适用。 |
+
 ### G-32 SQLite 只读探测的写副作用与 `immutable` 前提（t9，2026-10）
 
 | 项 | 内容 |
@@ -500,6 +503,15 @@
 | 判负层次（同一处收口） | 非 SQLite 文本文件的**构造是「惰性成功」**（`new DatabaseSync(垃圾文本, {readOnly:true})` 不抛），**判负必须落在表探测处**：`sqlite.ts` 的签名判定（表 + 关键列，`PRAGMA table_info` 自适应）不符 → 关闭句柄返回 null，8 个来源的 `readFindings` 报 `shape-mismatch`（**不是** `open-failed`）。 |
 | 验证方式 | `src/foreign/sqlite.test.ts`（9 条）：direct / copy-WAL / immutable-干净 WAL 三组形态对「读一遍后的源目录」按**名字 + 大小 + mtime 逐字比较**，全部断言**零新增零改动**（干净 WAL 那条正是旧实现会红的用例）；另有 `copy-too-large` 用例断言「拒绝复制时也**绝不**就地打开」；8 个 SQLite 家族来源逐源注入垃圾库断言 `shape-mismatch`。 |
 | 关联 | trae 的 VS Code `state.vscdb` 走同一个 `openSqliteIfShape` → 自动获得零写入。`file-budget.test.ts` 的 fs 白名单已据此登记 `sqlite.ts`（它现在 import `node:fs`/`node:os`/`node:path`，复制路线必需）。 |
+
+### G-34 GitHub Gist 通道**刻意不外置 blob**：大分区（会话）不适合走 gist
+
+| 项 | 内容 |
+|---|---|
+| 事实 | `GistTransport`（`src/sync/gist/gist-transport.ts` 文件头明写）**不做**内容寻址外置 —— 与 git / webdav / s3 三条通道的差别是**刻意为之**，三条理由：① gist 一次 GET 就把**全部文件内容**吐回来（没有按文件取）；② **单文件内容超限会被 GitHub 截断**（截断时才回落 `raw_url`）；③ gist 的**文件数有上限**。把会话这类「大且数量多」的分区逐文件外置到 gist 会同时撞上这三条。 |
+| 定位 | gist 通道 = 「**配置类分区的低门槛远端**」（一个 token + 一个 `gistId` 即可用，适合本机没有 git 二进制 / 只有一个 GitHub 账号的用户）。**会话这类大分区请走 git / webdav / s3**。 |
+| 影响与现状 | ① 这是**能力边界不是缺陷**：不外置不会让 gist 通道坏掉，只是推送体积 / 文件数受 GitHub 限制，超限时的表现是**截断**（不是静默成功）。② **UI 目前没有「gist 不适合大分区 / 会话」的提示**（表单只做字段校验与「密钥只写凭据槽位」说明）—— **建议**在 gist 表单加一条提示（zh/en 字典），并在「通道 = gist 且勾选 `sessions`」时给出风险提示；**本条目只登记建议，表单改动不在本任务的 inScope（未动 `src/**`）**。 |
+| 验证方式 | `src/sync/gist/gist-transport.test.ts`（含 `truncated: true` 回落 `raw_url` 的用例）；`src/sync/blob-store.test.ts`（外置只在 transport 传了 BlobSink 时启用 —— gist 不传，引擎看到的仍是普通 `FilesSection`）。 |
 
 ---
 

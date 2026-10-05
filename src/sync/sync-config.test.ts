@@ -21,8 +21,9 @@ import { fileURLToPath } from 'node:url';
 import { stripJsComments } from '../utils/bundle-scan.ts';
 
 import {
-  readSyncConfig, readFullSyncConfig, writeSyncConfig, isGitConfig, isWebDavConfig,
-  SYNC_CONFIG_FILE, SYNC_CONFIG_SCHEMA_VERSION, SYNC_CONFIG_SUPPORTED_VERSIONS,
+  readSyncConfig, readFullSyncConfig, readSyncConfigFor, writeSyncConfig, isGitConfig, isWebDavConfig,
+  isS3Config, isGistConfig, listConfiguredChannels, readActiveS3Provider,
+  SYNC_CONFIG_FILE, SYNC_CONFIG_SCHEMA_VERSION, SYNC_CONFIG_SUPPORTED_VERSIONS, CLOUD_SYNC_CONFIG_FILE,
   validateWebDavUrl, type SyncConfig,
   SYNC_CHANNELS, channelOf, channelMap, isSyncTransportType, parseSyncChannel, clearSyncChannel,
 } from './sync-config.ts';
@@ -315,7 +316,9 @@ test('validateWebDavUrl：合法 http(s) 地址 → 返回 null（合法）', ()
 /* ---------------- t32：通道枚举唯一来源（SYNC_CHANNELS / channelOf / channelMap） ---------------- */
 
 test('t32：SYNC_CHANNELS 是通道枚举唯一来源；isSyncTransportType / parseSyncChannel 同源', () => {
-  assert.deepEqual([...SYNC_CHANNELS], ['git', 'webdav']);
+  // 预期值从枚举自身派生（不再手抄字面量：新增通道只改声明处，避免两处不同步）
+  assert.ok(SYNC_CHANNELS.length > 0, '通道清单非空');
+  assert.deepEqual([...new Set(SYNC_CHANNELS)], [...SYNC_CHANNELS], '通道清单无重复');
   for (const ch of SYNC_CHANNELS) {
     assert.equal(isSyncTransportType(ch), true);
     assert.equal(parseSyncChannel(ch), ch);
@@ -327,6 +330,9 @@ test('t32：SYNC_CHANNELS 是通道枚举唯一来源；isSyncTransportType / pa
   assert.equal(isSyncTransportType(1), false);
   assert.equal(parseSyncChannel('ftp'), undefined);
   assert.equal(parseSyncChannel(undefined), undefined);
+  // 云端点两条通道已并入（s3 承载五家兼容商 / gist）：漏并会让用户点不到云端点同步
+  assert.equal(isSyncTransportType('s3'), true);
+  assert.equal(isSyncTransportType('gist'), true);
 });
 
 test('t32：channelOf 是「配置 → 通道」的唯一判定口径（等价于原 isWebDavConfig ? webdav : git）', () => {
@@ -346,7 +352,10 @@ test('t32：channelMap 覆盖 SYNC_CHANNELS 全通道（Record 构造不再逐�
     return channel + '!';
   });
   assert.deepEqual([...seen], [...SYNC_CHANNELS], '回调按 SYNC_CHANNELS 顺序对每个通道各调用一次');
-  assert.deepEqual(out, { git: 'git!', webdav: 'webdav!' });
+  // 预期值同样从枚举派生（不手抄字面量）
+  const expected: Record<string, string> = {};
+  for (const ch of SYNC_CHANNELS) expected[ch] = ch + '!';
+  assert.deepEqual(out, expected);
 });
 
 /** 递归收集 src 下的地面代码（*.ts / *.tsx，排除 *.test.ts 与 *.d.ts） */
@@ -370,6 +379,10 @@ async function collectSourceFiles(dir: string): Promise<string[]> {
  * （历史上 autosync-scheduler 把同一个数组写了两遍，漏改一处即某通道永不排期）。
  */
 test('t32 源码守卫：地面代码里通道数组只有一处声明（其余只允许被守卫的客户端镜像）', async () => {
+  // 声明处已迁到**零依赖**的 utils/shared-constants.ts（client 半必须能运行时 import；
+  // sync/sync-config.ts 依赖 node:fs，不能被浏览器半 import）——本守卫的意图不变：
+  // 通道数组全仓只允许一处声明，其余只允许带穷尽检查标记的镜像。
+
   const srcRoot = fileURLToPath(new URL('..', import.meta.url));
   const files = await collectSourceFiles(srcRoot);
   const needle = "'git', 'webdav'";
@@ -383,7 +396,26 @@ test('t32 源码守卫：地面代码里通道数组只有一处声明（其余�
   }
   const canonical = hits.filter((h) => h.text.includes('export const SYNC_CHANNELS'));
   assert.equal(canonical.length, 1, 'SYNC_CHANNELS 必须且只能声明一次: ' + JSON.stringify(hits));
-  assert.equal(canonical[0]!.file, 'sync/sync-config.ts', '唯一声明处必须是 src/sync/sync-config.ts');
+  assert.equal(
+    canonical[0]!.file,
+    'utils/shared-constants.ts',
+    '唯一声明处必须是零依赖的 src/utils/shared-constants.ts（client 半可运行时 import）',
+  );
+  // 宿主侧 sync-config.ts 只做 re-export，不得再声明一份（两处声明 = 漏改一处即静默失配）
+  const syncConfigSrc = await fs.readFile(path.join(srcRoot, 'sync', 'sync-config.ts'), 'utf8');
+  assert.ok(
+    syncConfigSrc.includes("import { SYNC_CHANNELS } from '../utils/shared-constants.ts'"),
+    'sync-config.ts 必须从零依赖模块导入通道清单',
+  );
+  assert.ok(
+    syncConfigSrc.includes('export { SYNC_CHANNELS }'),
+    'sync-config.ts 必须 re-export 通道清单（宿主沿用既有 import 路径）',
+  );
+  assert.equal(
+    syncConfigSrc.includes("= ['git', 'webdav'"),
+    false,
+    'sync-config.ts 不得再自己声明通道数组',
+  );
   const others = hits.filter((h) => h.text !== canonical[0]!.text || h.file !== canonical[0]!.file);
   for (const h of others) {
     assert.ok(
@@ -507,3 +539,130 @@ test('clearSyncChannel：文件不存在 → 幂等成功且不创建文件', as
     await assert.rejects(fs.stat(path.join(dir, SYNC_CONFIG_FILE)), '不得因幂等清空而凭空创建配置文件');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
+
+
+/* ------------------------------- 云端点通道（s3 / gist）：写 / 读 / 清 往返 */
+
+test('云端点 s3 通道：writeSyncConfig → readSyncConfigFor 往返（只写非密字段，文件无密钥值）', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-sync-cfg-s3-'));
+  try {
+    await writeSyncConfig(dir, {
+      schemaVersion: 2,
+      transport: 's3',
+      s3: {
+        provider: 'oss',
+        endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+        region: 'cn-hangzhou',
+        bucket: 'demo-bucket',
+        accessKeyId: 'AKIA-FAKE-ID',
+        prefix: 'team',
+        pathStyle: true,
+      },
+    });
+    const cfg = await readSyncConfigFor(dir, 's3');
+    assert.ok(cfg !== null && isS3Config(cfg), 's3 通道必须可回读');
+    assert.equal(cfg.s3.provider, 'oss');
+    assert.equal(cfg.s3.bucket, 'demo-bucket');
+    assert.equal(cfg.s3.pathStyle, true);
+    assert.equal(cfg.s3.prefix, 'team');
+    assert.equal(channelOf(cfg), 's3');
+    // 「保存即选定」：活动 provider 与活动通道指针都指向刚保存的这条
+    assert.equal(await readActiveS3Provider(dir), 'oss');
+    assert.equal((await readFullSyncConfig(dir))?.transport, 's3');
+    assert.equal((await readFullSyncConfig(dir))?.s3?.provider, 'oss');
+    // 未配置的 gist 通道 → null（autosync 安静跳过的判据）
+    assert.equal(await readSyncConfigFor(dir, 'gist'), null);
+    const active = await readSyncConfig(dir);
+    assert.ok(active !== null && isS3Config(active), '活动通道 = s3（sync-config.json 的 transport 指针）');
+    // 配置文件里只有非密白名单字段，绝无任何密钥值
+    const raw = await fs.readFile(path.join(dir, CLOUD_SYNC_CONFIG_FILE), 'utf8');
+    const parsed = JSON.parse(raw) as { savedProviders: { oss: Record<string, unknown> } };
+    assert.deepEqual(
+      Object.keys(parsed.savedProviders.oss).sort(),
+      ['accessKeyId', 'bucket', 'endpoint', 'pathStyle', 'prefix', 'region'],
+    );
+    for (const key of ['secret', 'secretAccessKey', 'token', 'password']) {
+      assert.equal(raw.includes(key), false, '配置文件不得出现密钥字段: ' + key);
+    }
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('云端点 gist 通道：往返 + 断开（同时收回活动指针）；s3 与 gist 互相独立', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-sync-cfg-cloud-'));
+  try {
+    await writeSyncConfig(dir, {
+      schemaVersion: 2,
+      transport: 'gist',
+      gist: { gistId: 'aa5a315d61ae9438b18d', filePrefix: 'team-sync' },
+    });
+    await writeSyncConfig(dir, {
+      schemaVersion: 2,
+      transport: 's3',
+      s3: {
+        provider: 'minio',
+        endpoint: 'https://minio.example.com:9000',
+        region: 'us-east-1',
+        bucket: 'team-bucket',
+        accessKeyId: 'MINIO-KEY-ID',
+      },
+    });
+    // 两条云端点通道可同时配置（各自独立，互不覆盖）
+    assert.deepEqual(await listConfiguredChannels(dir), ['s3', 'gist']);
+    const gist = await readSyncConfigFor(dir, 'gist');
+    assert.ok(gist !== null && isGistConfig(gist));
+    assert.equal(gist.gist.gistId, 'aa5a315d61ae9438b18d');
+    assert.ok((await readSyncConfigFor(dir, 's3')) !== null);
+
+    // 断 gist → s3 仍在，活动通道自动切回仍配置的那条
+    const res = await clearSyncChannel(dir, 'gist');
+    assert.deepEqual(res, { removed: true, hasRemaining: true, transport: 's3' });
+    assert.equal(await readSyncConfigFor(dir, 'gist'), null);
+    assert.ok((await readSyncConfigFor(dir, 's3')) !== null);
+    assert.equal((await readFullSyncConfig(dir))?.transport, 's3');
+
+    // 断 s3 → 一条不剩 → sync-config.json 整个删除（如实回落「未配置」）
+    const res2 = await clearSyncChannel(dir, 's3');
+    assert.deepEqual(res2, { removed: true, hasRemaining: false, transport: 's3' });
+    assert.equal(await readFullSyncConfig(dir), null);
+    await assert.rejects(fs.stat(path.join(dir, SYNC_CONFIG_FILE)), '一条不剩必须删掉配置文件');
+    await assert.rejects(fs.stat(path.join(dir, CLOUD_SYNC_CONFIG_FILE)), '云端点一条不剩时同样删除云配置文件');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('未配置的云端点通道 → readSyncConfigFor 返回 null（autosync 安静跳过 + status 不显示已配置）', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-sync-cfg-cloud-none-'));
+  try {
+    assert.equal(await readSyncConfigFor(dir, 's3'), null);
+    assert.equal(await readSyncConfigFor(dir, 'gist'), null);
+    assert.deepEqual(await listConfiguredChannels(dir), []);
+    // 幂等断开：本来没配置 → 不创建任何文件
+    assert.deepEqual(await clearSyncChannel(dir, 's3'), { removed: false, hasRemaining: false, transport: 'git' });
+    await assert.rejects(fs.stat(path.join(dir, SYNC_CONFIG_FILE)));
+    await assert.rejects(fs.stat(path.join(dir, CLOUD_SYNC_CONFIG_FILE)));
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('旧云端点文件（无 active）：唯一已保存的 S3 兼容商可推断；多家并存不猜（回落未配置）', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-sync-cfg-cloud-legacy-'));
+  const base = { endpoint: 'https://oss-cn-hangzhou.aliyuncs.com', region: 'cn-hangzhou', bucket: 'demo-bucket', accessKeyId: 'AK' };
+  try {
+    await fs.writeFile(
+      path.join(dir, CLOUD_SYNC_CONFIG_FILE),
+      JSON.stringify({ schemaVersion: 1, savedProviders: { oss: base } }),
+      'utf8',
+    );
+    assert.equal(await readActiveS3Provider(dir), 'oss');
+    assert.ok((await readSyncConfigFor(dir, 's3')) !== null);
+
+    // 两家并存且无 active → 不猜（s3 通道视为未配置，绝不随便挑一家同步）
+    await fs.writeFile(
+      path.join(dir, CLOUD_SYNC_CONFIG_FILE),
+      JSON.stringify({ schemaVersion: 1, savedProviders: { oss: base, cos: base } }),
+      'utf8',
+    );
+    assert.equal(await readActiveS3Provider(dir), null);
+    assert.equal(await readSyncConfigFor(dir, 's3'), null);
+    assert.deepEqual(await listConfiguredChannels(dir), ['s3'], '已保存 provider 仍表明该通道有配置残留');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+

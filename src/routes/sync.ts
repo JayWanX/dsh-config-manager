@@ -47,8 +47,8 @@ import { redact } from '../security/redaction.ts'
 import { readAutosyncConfig, writeAutosyncConfig } from '../sync/autosync-config.ts'
 import { isValidExportFileName } from '../sync/backup-files.ts'
 import { DeviceFlowStore } from '../sync/github-auth.ts'
-import { channelOf, clearSyncChannel, isWebDavConfig, parseSyncChannel, readFullSyncConfig, writeSyncConfig } from '../sync/sync-config.ts'
-import type { SyncConfig, SyncTransportType } from '../sync/sync-config.ts'
+import { channelOf, clearSyncChannel, isWebDavConfig, listCloudConfiguredProviders, parseSyncChannel, readFullSyncConfig, writeSyncConfig, gistChannelView, s3ChannelView, cloudSecretRef, S3_COMPAT_PROVIDERS, GIST_PROVIDER } from '../sync/sync-config.ts'
+import type { CloudS3ChannelView, CloudGistChannelView, CloudSecretWriter, FullSyncConfig, SyncConfig, SyncTransportType } from '../sync/sync-config.ts'
 import { SyncEngine } from '../sync/sync-engine.ts'
 import type { ApplyItemsReport } from '../sync/sync-engine.ts'
 import { readSyncHistory } from '../sync/sync-history.ts'
@@ -67,6 +67,31 @@ import { dirname, join } from 'node:path'
  * 通道判定在**调用点**消费 channelOf（B7 单一来源）；本函数只用类型守卫做可辨识联合的收窄与字段读取
  * —— 原先的写法是 `isWebDavConfig(cfg) ? {...} : undefined`，把「通道判定」与「类型收窄」混成一处。
  */
+/** 凭据只读面（结构类型：只用到 describe，避免 routes 依赖 DSH 具体类型）。 */
+interface CredentialDescriber {
+  describe(ref: string): Promise<{ configured: boolean }>
+}
+
+/**
+ * 云端点通道回传视图（s3 / gist）：**只带 secretStored 布尔，绝不带任何密钥值**。
+ * 配置过即返回（与当前活动通道无关），供表单在各通道间切换时回填。
+ */
+async function cloudChannelViews(
+  full: FullSyncConfig | null,
+  credentials: CredentialDescriber,
+): Promise<{ s3?: CloudS3ChannelView; gist?: CloudGistChannelView }> {
+  const out: { s3?: CloudS3ChannelView; gist?: CloudGistChannelView } = {}
+  if (full?.s3 !== undefined) {
+    const info = await credentials.describe(credentialRef(cloudSecretRef(full.s3.provider)))
+    out.s3 = s3ChannelView(full.s3.provider, full.s3, info.configured)
+  }
+  if (full?.gist !== undefined) {
+    const info = await credentials.describe(credentialRef(cloudSecretRef(GIST_PROVIDER)))
+    out.gist = gistChannelView(full.gist, info.configured)
+  }
+  return out
+}
+
 function describeWebDavSlot(cfg: SyncConfig, passwordConfigured: boolean): { usernameConfigured: boolean; passwordConfigured: boolean } | undefined {
   if (!isWebDavConfig(cfg)) return undefined
   return {
@@ -105,6 +130,11 @@ export function syncRoutes(env: RoutesEnv): WebRoute[] {
     tryAppendHistory,
     withMutationGate,
   } = env
+  /** 云端点密钥「只写」端口：值只进 DSH credentials，绝不落盘 / 日志 / 回传（cloudSecretRef 槽位）。 */
+  const cloudSecrets: CloudSecretWriter = {
+    set: async (ref, value) => { await credentials.set(credentialRef(ref), value) },
+    has: async (ref) => (await credentials.describe(credentialRef(ref))).configured,
+  }
   return [
     // ------------------------------------------------------ sync/status
     // m-sync-ui：同步状态（通道配置 / 凭据状态 / 上次同步 / 分区数）。只读，无 secret 值。
@@ -131,6 +161,8 @@ export function syncRoutes(env: RoutesEnv): WebRoute[] {
               passwordConfigured: webdavCred.configured,
             }
           : undefined
+        // 云端点配置视图（只回 secretStored 布尔；与当前通道无关，配置过即回填）
+        const cloud = await cloudChannelViews(full, credentials)
         writeJson(res, 200, {
           ok: true,
           configured: full !== null,
@@ -140,6 +172,11 @@ export function syncRoutes(env: RoutesEnv): WebRoute[] {
           credentialWritable: cred.writable === true,
           // webdav 配置状态（无 secret 值：口令用 passwordConfigured 布尔标记）
           ...(webdav !== undefined ? { webdav } : {}),
+          // 云端点：当前活动 s3 兼容商 / gist 的非密配置（无任何密钥值）
+          ...(cloud.s3 === undefined ? {} : { s3: cloud.s3 }),
+          ...(cloud.gist === undefined ? {} : { gist: cloud.gist }),
+          // 已保存的云端点 provider 清单（切换 provider 时回填用；只有名字，无任何值）
+          cloudSavedProviders: await listCloudConfiguredProviders(syncDir),
           lastSyncAt: state.lastSyncAt === '' ? undefined : state.lastSyncAt,
           sectionCount: Object.keys(state.sections).length,
           lastTransport: state.transport,
@@ -184,7 +221,16 @@ export function syncRoutes(env: RoutesEnv): WebRoute[] {
           }
           const cleared = await clearSyncChannel(syncDir, channel)
           // 凭据值永不回传；unset 幂等（本来就没配也不报错）
-          await credentials.unset(credentialRef(channel === 'git' ? SYNC_CREDENTIAL_REF : SYNC_WEBDAV_CREDENTIAL_REF))
+          if (channel === 's3') {
+            // s3 通道断开 → 清掉**全部**兼容商的密钥槽位（该通道不再指向任何一家；幂等）
+            for (const provider of S3_COMPAT_PROVIDERS) {
+              await credentials.unset(credentialRef(cloudSecretRef(provider)))
+            }
+          } else if (channel === 'gist') {
+            await credentials.unset(credentialRef(cloudSecretRef(GIST_PROVIDER)))
+          } else {
+            await credentials.unset(credentialRef(channel === 'git' ? SYNC_CREDENTIAL_REF : SYNC_WEBDAV_CREDENTIAL_REF))
+          }
           await credentials.unset(credentialRef(syncPasswordRef('ENCRYPT', channel)))
           await credentials.unset(credentialRef(syncPasswordRef('DECRYPT', channel)))
           const auto = await readAutosyncConfig(syncDir, channel)
@@ -206,11 +252,13 @@ export function syncRoutes(env: RoutesEnv): WebRoute[] {
           return
         }
         const syncCfg = await prepareSync(body)
-        await writeSyncConfig(syncDir, syncCfg)
+        // 云端点通道经 CloudSecretWriter 只写端口落库（值绝不进 sync-cloud-config.json / 日志 / 回传）
+        await writeSyncConfig(syncDir, syncCfg, cloudSecrets)
         const [cred, webdavCred] = await Promise.all([
           credentials.describe(credentialRef(SYNC_CREDENTIAL_REF)),
           credentials.describe(credentialRef(SYNC_WEBDAV_CREDENTIAL_REF)),
         ])
+        const cloud = await cloudChannelViews(await readFullSyncConfig(syncDir), credentials)
         writeJson(res, 200, {
           ok: true,
           configured: true,
@@ -218,6 +266,8 @@ export function syncRoutes(env: RoutesEnv): WebRoute[] {
           credentialConfigured: cred.configured,
           // 通道判定消费单一来源 channelOf（B7 守卫扩到覆盖该谓词形态；此前是裸 isWebDavConfig 分支）
           webdav: channelOf(syncCfg) === 'webdav' ? describeWebDavSlot(syncCfg, webdavCred.configured) : undefined,
+          ...(cloud.s3 === undefined ? {} : { s3: cloud.s3 }),
+          ...(cloud.gist === undefined ? {} : { gist: cloud.gist }),
         })
       } catch (error) {
         writeSyncRouteError(res, error)
@@ -289,7 +339,7 @@ export function syncRoutes(env: RoutesEnv): WebRoute[] {
               ROUTE_TIMEOUT_MS,
               msg('host.syncPushTimeout'),
             )
-        await writeSyncConfig(syncDir, syncCfg)
+        await writeSyncConfig(syncDir, syncCfg, cloudSecrets)
         writeJson(res, 200, report)
       } catch (error) {
         writeSyncRouteError(res, error)
@@ -328,7 +378,7 @@ export function syncRoutes(env: RoutesEnv): WebRoute[] {
           ROUTE_TIMEOUT_MS,
           msg('host.syncPullTimeout'),
         )
-        await writeSyncConfig(syncDir, syncCfg)
+        await writeSyncConfig(syncDir, syncCfg, cloudSecrets)
         writeJson(res, 200, report)
       } catch (error) {
         writeSyncRouteError(res, error)

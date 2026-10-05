@@ -19,7 +19,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { syncRoutes } from '../../src/routes/sync.ts'
 import { routeSpecOf, type WebRoute } from '../../src/routes/kit.ts'
 import { readAutosyncConfig, writeAutosyncConfig } from '../../src/sync/autosync-config.ts'
-import { readFullSyncConfig, writeSyncConfig } from '../../src/sync/sync-config.ts'
+import { CLOUD_SYNC_CONFIG_FILE, S3_COMPAT_PROVIDERS, cloudSecretRef, readFullSyncConfig, readSyncConfigFor, writeSyncConfig } from '../../src/sync/sync-config.ts'
+import type { SyncConfig } from '../../src/sync/sync-config.ts'
 import { readUiPrefs, updateUiPrefs } from '../../src/sync/ui-prefs.ts'
 
 interface Probes {
@@ -145,3 +146,108 @@ test('clear 不为 true → 照旧走保存分支（清空分支不得截走普�
     assert.equal((await readFullSyncConfig(dir))?.git?.repoUrl, 'https://example.com/repo.git')
   } finally { await fs.rm(dir, { recursive: true, force: true }) }
 })
+
+
+/* ---------------- 云端点通道（s3 / gist）：保存 / 清除 的路由级往返 ---------------- */
+
+/** 云端点保存所需的 env：prepareSync 直接返回给定 cfg；credentials 记录 set/describe。 */
+function envForCloudSave(
+  p: { set: Array<[string, string]>; prepared: number },
+  syncDir: string,
+  cfg: SyncConfig,
+): never {
+  const env = {
+    syncDir,
+    msg: (key: string) => key,
+    credentials: {
+      set: async (ref: unknown, value: unknown) => { p.set.push([String(ref), String(value)]) },
+      describe: async (ref: unknown) => ({ configured: p.set.some(([r]) => r === String(ref)), writable: true }),
+      unset: async () => {},
+    },
+    prepareSync: async () => {
+      p.prepared += 1
+      return cfg
+    },
+    withMutationGate: (_op: string, handler: unknown) => handler,
+    scheduler: { reload: async () => {} },
+  }
+  return env as never
+}
+
+test('云端点 s3：保存分支把非密字段写进 sync-cloud-config.json，回传视图只带 secretStored（无值）', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-sync-cloud-save-'))
+  try {
+    const probes = { set: [] as Array<[string, string]>, prepared: 0 }
+    const cfg: SyncConfig = {
+      schemaVersion: 2,
+      transport: 's3',
+      s3: {
+        provider: 'oss',
+        endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+        region: 'cn-hangzhou',
+        bucket: 'demo-bucket',
+        accessKeyId: 'AKIA-FAKE-ID',
+      },
+    }
+    const route = routeByPath(syncRoutes(envForCloudSave(probes, dir, cfg)), PATH)
+    const res = fakeResponse()
+    await route.handler(fakeRequest('{"transport":"s3"}'), res.res)
+    assert.equal(res.status(), 200)
+    const body = res.json() as { transport?: string; s3?: { provider?: string; bucket?: string; secretStored?: boolean } }
+    assert.equal(body.transport, 's3')
+    assert.equal(body.s3?.provider, 'oss')
+    assert.equal(body.s3?.bucket, 'demo-bucket')
+    assert.equal(body.s3?.secretStored, false)
+    assert.equal(JSON.stringify(body).includes('AKIA-FAKE-ID'), true, 'accessKeyId 是可回显标识符')
+    // 落盘只有非密字段；密钥值一个字节都不进文件
+    const raw = await fs.readFile(path.join(dir, CLOUD_SYNC_CONFIG_FILE), 'utf8')
+    for (const [, value] of probes.set) assert.equal(raw.includes(value), false, '凭据值绝不落文件')
+    assert.ok((await readSyncConfigFor(dir, 's3')) !== null, '保存后该通道可被回读（引擎据此构造 S3Transport）')
+  } finally { await fs.rm(dir, { recursive: true, force: true }) }
+})
+
+test('云端点 s3 清除：清配置 + 五家密钥槽位 + 加解密密码槽位；另一条云端点通道不受牵连', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-sync-cloud-clear-'))
+  try {
+    await writeSyncConfig(dir, {
+      schemaVersion: 2,
+      transport: 's3',
+      s3: { provider: 'oss', endpoint: 'https://oss-cn-hangzhou.aliyuncs.com', region: 'cn-hangzhou', bucket: 'demo-bucket', accessKeyId: 'AK' },
+    })
+    await writeSyncConfig(dir, { schemaVersion: 2, transport: 'gist', gist: { gistId: 'aa5a315d61ae9438b18d' } })
+    const probes: Probes = { unset: [], prepared: 0, reloads: 0 }
+    const route = routeByPath(syncRoutes(envFor(probes, dir)), PATH)
+    const res = fakeResponse()
+    await route.handler(fakeRequest('{"transport":"s3","clear":true}'), res.res)
+
+    assert.equal(res.status(), 200)
+    assert.equal(probes.prepared, 0, '清空分支不得走 prepareSync')
+    for (const provider of S3_COMPAT_PROVIDERS) {
+      assert.ok(probes.unset.includes(cloudSecretRef(provider)), '必须 unset ' + cloudSecretRef(provider))
+    }
+    assert.ok(probes.unset.includes('DSH_CONFIG_MANAGER_SYNC_ENCRYPT_PASSWORD_S3'), '必须 unset 该通道加密密码槽')
+    assert.ok(probes.unset.includes('DSH_CONFIG_MANAGER_SYNC_DECRYPT_PASSWORD_S3'), '必须 unset 该通道解密密码槽')
+    assert.equal(probes.reloads, 1, '必须让调度器重载丢掉该通道排期')
+
+    assert.equal(await readSyncConfigFor(dir, 's3'), null, 's3 配置必须被清掉')
+    assert.ok((await readSyncConfigFor(dir, 'gist')) !== null, '另一条云端点通道不得被牵连')
+  } finally { await fs.rm(dir, { recursive: true, force: true }) }
+})
+
+test('云端点 gist 清除：清 gist 配置与 token 槽位（不碰 s3 五家槽位）', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-sync-cloud-clear-gist-'))
+  try {
+    await writeSyncConfig(dir, { schemaVersion: 2, transport: 'gist', gist: { gistId: 'aa5a315d61ae9438b18d' } })
+    const probes: Probes = { unset: [], prepared: 0, reloads: 0 }
+    const route = routeByPath(syncRoutes(envFor(probes, dir)), PATH)
+    const res = fakeResponse()
+    await route.handler(fakeRequest('{"transport":"gist","clear":true}'), res.res)
+    assert.equal(res.status(), 200)
+    assert.ok(probes.unset.includes(cloudSecretRef('gist')), '必须 unset gist token 槽位')
+    for (const provider of S3_COMPAT_PROVIDERS) {
+      assert.equal(probes.unset.includes(cloudSecretRef(provider)), false, '清 gist 不得动 s3 的密钥槽位')
+    }
+    assert.equal(await readSyncConfigFor(dir, 'gist'), null)
+  } finally { await fs.rm(dir, { recursive: true, force: true }) }
+})
+

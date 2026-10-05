@@ -104,6 +104,47 @@ test('runOnce: enabled=false → skipped(disabled)，不写历史', async () => 
   assert.equal(getConfig().consecutiveFailures, 0);
 });
 
+test('runOnce: 未配置的云端点通道（s3/gist）→ skipped(unconfigured)，不抛错、不构造引擎（安静跳过）', async () => {
+  const cfg: AutosyncConfig = { enabled: true, interval: '30m', startupMinIntervalMs: 300000, consecutiveFailures: 0 };
+  let engineBuilt = false;
+  for (const channel of ['s3', 'gist'] as const) {
+    const scheduler = new AutoSyncScheduler({
+      syncDir: '/tmp',
+      host: { log: nullLogger() },
+      makeSyncEngine: () => { engineBuilt = true; return {} as SyncEngine },
+      msg: (k: string) => k,
+      runs: new RunRegistry(),
+      now: () => new Date(1_000_000_000_000),
+      readConfig: async () => cfg,
+      writeConfig: async () => {},
+      // 云端点通道未配置：host 的 readSyncConfigFor 返回 null（配置住在 sync-cloud-config.json）
+      readSyncConfigFn: async () => null,
+      readHistoryFn: async () => ({ schemaVersion: 1, autosyncEntries: [], updatedAt: '' }),
+      appendHistoryFn: async () => {},
+    });
+    const result = await scheduler.runOnce(channel);
+    assert.equal(result.status, 'skipped', channel + '：未配置必须安静跳过而不是报错');
+    assert.equal(result.skipReason, 'unconfigured');
+  }
+  assert.equal(engineBuilt, false, '未配置通道绝不构造同步引擎（不空转、不抛错）');
+});
+
+test('syncIsConfigured：云端点通道按必填字段判定（缺项 = 未配置）；git/webdav 口径不变', () => {
+  assert.equal(syncIsConfigured(null), false);
+  // s3：桶 + AccessKey ID 必填
+  assert.equal(syncIsConfigured({
+    schemaVersion: 2, transport: 's3',
+    s3: { provider: 's3', endpoint: '', region: '', bucket: '', accessKeyId: '' },
+  }), false);
+  assert.equal(syncIsConfigured({
+    schemaVersion: 2, transport: 's3',
+    s3: { provider: 'oss', endpoint: 'https://oss-cn-hangzhou.aliyuncs.com', region: 'cn-hangzhou', bucket: 'b', accessKeyId: 'k' },
+  }), true);
+  // gist：gistId 必填
+  assert.equal(syncIsConfigured({ schemaVersion: 2, transport: 'gist', gist: { gistId: '' } }), false);
+  assert.equal(syncIsConfigured({ schemaVersion: 2, transport: 'gist', gist: { gistId: 'aa5a315d61ae9438b18d' } }), true);
+});
+
 // ---------- issue #31：被锁挡下必须留痕（历史 + 指引），不能静默 ----------
 
 test('runOnce: 残留锁挡住 → skipped(mutation-locked) 且**写历史**（issue #31：此前连历史都不写）', async () => {

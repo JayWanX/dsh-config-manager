@@ -4,6 +4,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import * as yaml from 'js-yaml';
 import { SkillsAdapter } from './skills.ts';
 import { AgentPresetsAdapter } from './agent-presets.ts';
 import { AgentInstructionsAdapter } from './agent-instructions.ts';
@@ -159,6 +160,50 @@ test('issue #71: 技能服务里的非法技能名不得逃出 skills/ 目录（
   };
   const out = await new SkillsAdapter().export(src, { includeSecrets: false });
   assert.deepEqual(out.data.files.map((f) => f.relativePath), ['ok/SKILL.md'], '越界技能名一律跳过');
+});
+
+test('issue #71: 多行技能字段必须编码成合法 YAML（真机 binary-diff 形态）', async () => {
+  const src = makeContext('win32', 'C:\\Users\\alice');
+  // 真机 dsh-reverse-skill 的 binary-diff：description 是块标量，解析后含换行（211 字符 / 5 行）
+  const description = '跨版本符号迁移与二进制差分。\n适用场景：内核缺 PDB 用旧版符号推导。\n核心方法：用 LLM 做结构化差异比对。\n';
+  const whenToUse = '旧版本符号迁移到新版本时\n内核缺 PDB 时\n';
+  src.skills = {
+    list: async () => [{ name: 'binary-diff', description }],
+    get: async (name) => ({ name, description, whenToUse, content: '# body\n' }),
+  };
+  const out = await new SkillsAdapter().export(src, { includeSecrets: false });
+  const text = Buffer.from(out.data.files[0]!.data).toString();
+  // 回归点：单引号标量一旦跨行，js-yaml 抛「deficient indentation」→ 外壳判 invalid YAML frontmatter
+  // 并**丢掉整个技能**（比不备份更糟）。这里用 js-yaml 逐字符验证编码结果。
+  const frontmatter = text.slice(text.indexOf('\n') + 1, text.indexOf('\n---\n', 4));
+  const parsed = yaml.load(frontmatter) as Record<string, string>;
+  assert.equal(parsed.name, 'binary-diff');
+  assert.equal(parsed.description, description, '多行 description 必须逐字符还原');
+  assert.equal(parsed.whenToUse, whenToUse, '多行 whenToUse 必须逐字符还原');
+  assert.ok(text.includes('description: |'), `多行值应写成块标量: ${text.slice(0, 80)}`);
+
+  // 单行值仍是单引号（与改造前逐字节一致，老包/老快照的 diff 不会平白变大）
+  const plain = makeContext('win32', 'C:\\Users\\alice');
+  plain.skills = {
+    list: async () => [{ name: 'plain', description: "it's fine" }],
+    get: async (name) => ({ name, description: "it's fine", content: 'body' }),
+  };
+  const plainOut = await new SkillsAdapter().export(plain, { includeSecrets: false });
+  const plainText = Buffer.from(plainOut.data.files[0]!.data).toString();
+  assert.ok(plainText.includes("description: 'it''s fine'"), plainText);
+  assert.equal((yaml.load(plainText.slice(4, plainText.indexOf('\n---\n', 4))) as Record<string, string>).description, "it's fine");
+
+  // 回车 / 控制字符（YAML 里不能出现在块标量或单引号标量中）→ 双引号 + 转义，仍逐字符还原
+  const weird = makeContext('win32', 'C:\\Users\\alice');
+  const weirdValue = 'a\rb\tc\u0001d';
+  weird.skills = {
+    list: async () => [{ name: 'weird', description: weirdValue }],
+    get: async (name) => ({ name, description: weirdValue, content: 'body' }),
+  };
+  const weirdOut = await new SkillsAdapter().export(weird, { includeSecrets: false });
+  const weirdText = Buffer.from(weirdOut.data.files[0]!.data).toString();
+  assert.ok(weirdText.includes('description: "a\\rb\\tc\\x01d"'), weirdText);
+  assert.equal((yaml.load(weirdText.slice(4, weirdText.indexOf('\n---\n', 4))) as Record<string, string>).description, weirdValue);
 });
 
 test('issue #37: skills 导出把「跟随/跳过的链接」写进 warnings（不再静默缺失）', async () => {

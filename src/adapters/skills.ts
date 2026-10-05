@@ -35,8 +35,95 @@ export function skillServiceRel(name: string): string {
   return normalizePath(path.join(name, 'SKILL.md'));
 }
 
-/** YAML 单引号标量转义（`'` → `''`）。 */
-function quoteYaml(value: string): string {
+/**
+ * YAML 标量编码（issue #71 真机验收发现的缺陷修复）。
+ *
+ * 原实现只做单引号转义（`'` → `''`），**值里含换行时会写出跨行的单引号标量**：真机
+ * `binary-diff` 的 `description` 是块标量（解析后含换行），落盘即非法 YAML，外壳
+ * `dsh-skill-filesystem` 会 `skill file … ignored: invalid YAML frontmatter` 把**整个技能丢掉**
+ * ——比不备份更糟。三档策略（都不 import `js-yaml`，adapters 层不该依赖它）：
+ *  1. 能安全缩进的多行值 → 块标量 `|`（可读、便于 diff）；
+ *  2. 含换行 / 回车 / 控制字符的值 → 双引号 + 转义（转义表与 js-yaml dumper 一致）；
+ *  3. 其余单行值 → 单引号（与原行为一致，`'` 用 `''` 转义）。
+ * 三档都保证解析回来与原字符串**逐字符相等**。
+ */
+const NAMED_ESCAPES: Record<string, string> = {
+  '\0': '\\0',
+  '\x07': '\\a',
+  '\b': '\\b',
+  '\t': '\\t',
+  '\n': '\\n',
+  '\v': '\\v',
+  '\f': '\\f',
+  '\r': '\\r',
+  '\x1b': '\\e',
+  '"': '\\"',
+  '\\': '\\\\',
+  '\x85': '\\N',
+  '\xa0': '\\_',
+  '\u2028': '\\L',
+  '\u2029': '\\P',
+};
+
+/** 该字符必须转义才能安全出现在 YAML 标量里（控制字符 / DEL / C1 / BOM / 代理对）。 */
+function needsEscape(ch: string): boolean {
+  const code = ch.codePointAt(0) ?? 0;
+  return (
+    code < 0x20 ||
+    code === 0x7f ||
+    (code >= 0x80 && code <= 0xa0) ||
+    code === 0xfeff ||
+    code === 0xfffe ||
+    code === 0xffff ||
+    (code >= 0xd800 && code <= 0xdfff)
+  );
+}
+
+/** 双引号标量（唯一能无损表达任意字符串的 YAML 标量形态）。 */
+function doubleQuoteYaml(value: string): string {
+  let out = '"';
+  for (const ch of value) {
+    const named = NAMED_ESCAPES[ch];
+    if (named !== undefined) out += named;
+    else if (needsEscape(ch)) {
+      const code = ch.codePointAt(0) ?? 0;
+      const hex = code.toString(16).toUpperCase();
+      out += code <= 0xff ? `\\x${hex.padStart(2, '0')}` : `\\u${hex.padStart(4, '0')}`;
+    } else out += ch;
+  }
+  return `${out}"`;
+}
+
+/**
+ * 该值能否写成块标量 `|`（缩进 2 空格）。
+ *
+ * 块标量默认 clip chomping：**恰好一个**尾换行会被还原，没有尾换行会多补一个、多个尾换行会被裁到
+ * 一个（实测 `a\n\n` → `a\n`）⇒ 只对「以恰好一个换行结尾」的值无损。行内空行本身安全
+ * （实测 `a\n\nb\n` 精确往返）；含回车、非空行有首尾空白、或含需转义字符的仍走双引号。
+ */
+function canUseBlockScalar(value: string): boolean {
+  if (!value.endsWith('\n') || value.endsWith('\n\n')) return false;
+  if (value.includes('\r')) return false;
+  for (const line of value.split('\n')) {
+    if (line === '') continue;
+    if (/^[ \t]|[ \t]$/.test(line)) return false;
+    for (const ch of line) if (needsEscape(ch)) return false;
+  }
+  return true;
+}
+
+/** 值 → YAML 标量（三档策略见上方注释）。 */
+function yamlScalar(value: string): string {
+  if (canUseBlockScalar(value)) {
+    // 尾换行交给块标量的 clip chomping 还原（见 canUseBlockScalar 注释），故先摘掉
+    const body = value
+      .slice(0, -1)
+      .split('\n')
+      .map((line) => `  ${line}`)
+      .join('\n');
+    return `|\n${body}`;
+  }
+  if (/[\n\r]/.test(value) || [...value].some(needsEscape)) return doubleQuoteYaml(value);
   return `'${value.replace(/'/g, "''")}'`;
 }
 
@@ -51,8 +138,8 @@ function quoteYaml(value: string): string {
  *    （`modelInvocable` / `userInvocable` 会被判为 legacy 键并拒绝）。
  */
 export function buildSkillFile(def: SkillDefinitionView): string {
-  const lines: string[] = ['---', `name: ${quoteYaml(def.name)}`, `description: ${quoteYaml(def.description)}`];
-  if (def.whenToUse !== undefined && def.whenToUse !== '') lines.push(`whenToUse: ${quoteYaml(def.whenToUse)}`);
+  const lines: string[] = ['---', `name: ${yamlScalar(def.name)}`, `description: ${yamlScalar(def.description)}`];
+  if (def.whenToUse !== undefined && def.whenToUse !== '') lines.push(`whenToUse: ${yamlScalar(def.whenToUse)}`);
   const invocation = def.invocation;
   if (invocation !== undefined && invocation.modelInvocable === false) lines.push('disable-model-invocation: true');
   if (invocation !== undefined && invocation.userInvocable === false) lines.push('user-invocable: false');

@@ -70,6 +70,7 @@ export const SYNC_API = {
   githubPoll: `${API_BASE}/sync/github/poll`,
   githubCancel: `${API_BASE}/sync/github/cancel`,
   githubValidate: `${API_BASE}/sync/github/validate`,
+  githubRepositories: `${API_BASE}/sync/github/repositories`,
   history: `${API_BASE}/sync/history`,
   snapshotsList: `${API_BASE}/sync/snapshots-list`,
   download: `${API_BASE}/sync/download`,

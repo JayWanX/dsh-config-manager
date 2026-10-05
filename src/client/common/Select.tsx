@@ -109,6 +109,13 @@ export interface SelectProps {
   /** 无障碍名（无可见 label 挂在本控件上时必填） */
   ariaLabel?: string
   disabled?: boolean
+  /**
+   * 当前值不在 options 里时触发器显示的文案（如「手动填写地址」）。
+   *
+   * 不传时保持既有语义：显示原值本身。传了空串同样走原值 —— 显式区分「没给占位」与「占位是空」，
+   * 免得调用方想表达「什么都没有」却拿到一个看起来没选中的控件。
+   */
+  placeholder?: string
   title?: string
   className?: string
   style?: CSSProperties
@@ -121,7 +128,7 @@ export interface SelectProps {
 
 
 export function Select(props: SelectProps) {
-  const { value, options, onChange, ariaLabel, disabled = false, title, className, style, onOpen } = props
+  const { value, options, onChange, ariaLabel, disabled = false, placeholder, title, className, style, onOpen } = props
   const [open, setOpen] = useState(false)
   const [active, setActive] = useState(-1)
   /** 弹层容器（解析见 resolveMenuHost）；null = 未解析 / 不可用 → 不渲染菜单。 */
@@ -134,7 +141,7 @@ export function Select(props: SelectProps) {
   const listRef = useRef<HTMLDivElement | null>(null)
   const listId = useId()
 
-  const label = selectDisplayLabel(options, value)
+  const label = selectDisplayLabel(options, value, placeholder ?? '')
 
   const close = (refocus: boolean): void => {
     setOpen(false)

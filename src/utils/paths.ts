@@ -41,7 +41,11 @@ export function isPathSafe(entryName: string): boolean {
   return true;
 }
 
-/** 候选目录是否位于父目录之内（含等于父目录） */
+/** 候选目录是否位于父目录之内（含等于父目录）。
+ *
+ * 纯字符串语义（不碰文件系统）：两侧必须是**同一种拼写**，调用方若混用
+ * realpath 结果与原路径（Windows 8.3 短名、macOS `/var`→`/private/var`）会误判为越界 ——
+ * `path.relative` 不会折叠短名，务必先各自 realpath 再调用。 */
 export function isSameOrChild(p: string, parent: string): boolean {
   const rel = path.relative(parent, p);
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));

@@ -9,6 +9,22 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 > **Release workflow**: on tag push, CI extracts the current version's section as the release notes highlights;
 > the build fails fast if the section is missing, so you cannot forget to update it.
 
+## [Unreleased]
+
+> **同步通道新增「选择已有仓库 / 新建仓库」**：git 通道的仓库地址此前只能手填 —— 得先去 GitHub 建好仓库、
+> 复制 clone URL、再贴回来，还容易漏掉「必须私有」这条前提。现在配置弹窗可以直接从当前 token 可见的
+> **私有**仓库里选（按最近更新排序，带更新时间与 fork 徽章），或就地新建一个私有仓库并自动选中。
+> 公开仓库不进列表、也没有「公开」开关 —— 新建请求体根本不带 `private`，宿主恒定以私有建仓
+> （同步仓库公开等于把配置内容公开）。地址输入框保留：ssh、本地路径、不在列表里的仓库仍可手填。
+>
+> **Repository picker for the sync channel**: the git channel's repository URL no longer has to be typed
+> by hand (create the repo on GitHub, copy the clone URL, paste it back — and remember that it must be
+> private). The channel dialog now lists the **private** repositories the current token can see (sorted by
+> most recently updated, with a timestamp and a fork badge), or creates a new private repository inline and
+> selects it. Public repositories are never listed and there is no "public" switch — the create request does
+> not even carry `private`, because the host always creates private repos (a public sync repo would publish
+> your configuration). The URL field stays: ssh remotes, local paths and unlisted repos are still typeable.
+
 ## [0.1.69] - 2026-10-04
 
 > **本版已发布**：覆盖此前数轮并行落地的工作（会话跨机迁移与体检、UI v2 信息架构、磁盘占用体检、

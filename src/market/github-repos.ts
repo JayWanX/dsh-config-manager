@@ -5,6 +5,8 @@
  *   getUser()                  验证 token（GET /user）并取回登录名；
  *   repoExists()               判断仓库是否存在（200 / 404）；
  *   createPublicRepo()         创建公开仓库（POST /user/repos，public + auto_init）；
+ *   createRepo()               创建仓库（可指定 private；createPublicRepo 的通用形态）；
+ *   listRepos()                列当前用户可见仓库（GET /user/repos，按最近更新排序）；
  *   ensureFork()               直查用户同名仓库复用已 fork / 新建 fork 并轮询就绪（fork 异步创建）；
  *   readFile()                 读仓库内文本文件（contents API，base64 解码）；
  *   getRepoStars()             读仓库 star 数（带 token；「我的配置」页用）；
@@ -67,6 +69,20 @@ export interface GitHubForkInfo {
   htmlUrl: string;
   cloneUrl: string;
   defaultBranch: string;
+}
+
+/** 仓库列表条目投影（listRepos 返回；比 GitHubRepoInfo 多两个时间戳，供排序与展示） */
+export interface GitHubRepoSummary {
+  fullName: string;
+  htmlUrl: string;
+  cloneUrl: string;
+  defaultBranch: string;
+  private: boolean;
+  fork: boolean;
+  /** 最近一次 push 时间（ISO 8601；GitHub 对空仓库返回 null → 空串） */
+  pushedAt: string;
+  /** 最近一次更新时间（ISO 8601；缺失 → 空串） */
+  updatedAt: string;
 }
 
 /** PR 信息投影（openPullRequest / listOpenPullRequests 返回） */
@@ -222,6 +238,22 @@ function toRepoInfo(data: unknown): GitHubRepoInfo {
   };
 }
 
+/** 仓库 JSON → GitHubRepoSummary（时间戳缺失 / null 时置空串，UI 按「未知」处理） */
+function toRepoSummary(data: unknown): GitHubRepoSummary {
+  const obj = asRecord(data);
+  const fullName = getStr(obj, 'full_name');
+  return {
+    fullName,
+    htmlUrl: getStr(obj, 'html_url'),
+    cloneUrl: getOptStr(obj, 'clone_url') ?? `https://github.com/${fullName}.git`,
+    defaultBranch: getOptStr(obj, 'default_branch') ?? 'main',
+    private: getBool(obj, 'private'),
+    fork: getBool(obj, 'fork'),
+    pushedAt: getOptStr(obj, 'pushed_at') ?? '',
+    updatedAt: getOptStr(obj, 'updated_at') ?? '',
+  };
+}
+
 /** PR JSON → GitHubPullRequestInfo（head.ref 缺失时置空串） */
 function toPullInfo(data: unknown): GitHubPullRequestInfo {
   const obj = asRecord(data);
@@ -279,10 +311,40 @@ export class GitHubAuthRest {
 
   /** 创建公开仓库（POST /user/repos；private:false + auto_init:true 保证有初始 commit 可 clone）。 */
   async createPublicRepo(name: string, description?: string): Promise<GitHubRepoInfo> {
-    const body: Record<string, unknown> = { name, private: false, auto_init: true };
+    return this.createRepo(name, description !== undefined ? { description } : {});
+  }
+
+  /**
+   * 创建仓库（POST /user/repos）。private 缺省 false（保持既有语义）；auto_init:true 保证有初始
+   * commit，clone 后立即有 HEAD 可提交（同步通道 push 的前置条件）。
+   * createPublicRepo 是本方法的公开仓库特例（保留原签名以兼容既有调用方）。
+   */
+  async createRepo(
+    name: string,
+    options: { private?: boolean; description?: string } = {},
+  ): Promise<GitHubRepoInfo> {
+    const body: Record<string, unknown> = { name, private: options.private === true, auto_init: true };
+    const description = options.description;
     if (description !== undefined && description !== '') body['description'] = description;
     const data = await this.requestJson('POST', '/user/repos', body);
     return toRepoInfo(data);
+  }
+
+  /**
+   * 列当前用户可见的仓库（GET /user/repos，含私有；需要 token）。
+   * 固定 sort=updated + per_page=100（REST 单页上限）：同步通道只需要「最近还在用的仓库」，
+   * 翻页会带来额外请求与列表 UI 复杂度，因此只取第一页并按 limit 显式截断。
+   */
+  async listRepos(limit: number = 100): Promise<GitHubRepoSummary[]> {
+    const query = new URLSearchParams();
+    query.set('sort', 'updated');
+    query.set('per_page', '100');
+    const data = await this.requestJson('GET', `/user/repos?${query.toString()}`);
+    if (!Array.isArray(data)) {
+      throw new GitHubApiError('GitHub repos 响应不是数组', 'invalid_response');
+    }
+    const cap = Math.min(Math.max(limit, 1), 100);
+    return data.slice(0, cap).map((item) => toRepoSummary(item));
   }
 
   /**

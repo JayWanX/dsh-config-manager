@@ -30,6 +30,18 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
+/** 仓库选择器用例共用的宿主投影（与 src/market/github-repos.ts 的 GitHubRepoSummary 同构）。 */
+const REPO_SUMMARY = {
+  fullName: 'xiaojun/dsh-configs',
+  htmlUrl: 'https://github.com/xiaojun/dsh-configs',
+  cloneUrl: 'https://github.com/xiaojun/dsh-configs.git',
+  defaultBranch: 'main',
+  private: true,
+  fork: false,
+  pushedAt: '2026-09-30T10:00:00Z',
+  updatedAt: '2026-09-30T11:00:00Z',
+};
+
 test('S-01 api.status()：GET 到 /sync/status，解析配置/凭据/上次同步', async () => {
   const body = {
     ok: true, configured: true, repoUrl: 'https://github.com/u/r.git',
@@ -599,4 +611,48 @@ test('S-30 api.status()：lastSyncChannel 回填（磁盘 ui-prefs；UI 通道�
   const api = new SyncApi();
   const result = await api.status();
   assert.equal(result.lastSyncChannel, 'webdav');
+});
+
+test('S-31 api.githubListRepositories()：GET 列举仓库（不设 method，只读）', async () => {
+  const calls: FetchCall[] = [];
+  installFetchMock((call) => {
+    calls.push(call)
+    return jsonResponse(200, { ok: true, repos: [REPO_SUMMARY] })
+  })
+  const api = new SyncApi()
+  const result = await api.githubListRepositories()
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0]?.url, SYNC_API.githubRepositories)
+  assert.equal(calls[0]?.init?.method, undefined, 'GET 不设 method')
+  assert.equal(result.repos.length, 1)
+  assert.equal(result.repos[0]?.cloneUrl, 'https://github.com/xiaojun/dsh-configs.git')
+});
+
+test('S-32 api.githubCreateRepository()：POST 新建仓库，请求体不含 private（宿主恒定私有）', async () => {
+  const calls: FetchCall[] = [];
+  installFetchMock((call) => {
+    calls.push(call)
+    return jsonResponse(200, { ok: true, repo: REPO_SUMMARY })
+  })
+  const api = new SyncApi()
+  const result = await api.githubCreateRepository('  dsh-configs  ', ' 我的配置 ')
+  assert.equal(calls[0]?.url, SYNC_API.githubRepositories)
+  assert.equal(calls[0]?.init?.method, 'POST')
+  const sent = JSON.parse(String(calls[0]?.init?.body ?? '{}')) as Record<string, unknown>
+  assert.equal(sent['name'], 'dsh-configs', '名称前后空白被裁掉')
+  assert.equal(sent['description'], '我的配置')
+  assert.ok(!('private' in sent), '请求体不得出现 private —— 公开与否由宿主决定，客户端无权表达')
+  assert.equal(result.repo.private, true)
+});
+
+test('S-33 api.githubCreateRepository()：描述为空时不发送 description 字段', async () => {
+  const calls: FetchCall[] = [];
+  installFetchMock((call) => {
+    calls.push(call)
+    return jsonResponse(200, { ok: true, repo: REPO_SUMMARY })
+  })
+  const api = new SyncApi()
+  await api.githubCreateRepository('dsh-configs', '   ')
+  const sent = JSON.parse(String(calls[0]?.init?.body ?? '{}')) as Record<string, unknown>
+  assert.ok(!('description' in sent), '空描述不占字段（与 GitHub 默认描述口径一致）')
 });

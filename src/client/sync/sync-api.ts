@@ -13,6 +13,9 @@
  * POST /api/dsh-config-manager/sync/github/start   → GithubDeviceFlowStartResponse（GitHub OAuth 设备码）
  * POST /api/dsh-config-manager/sync/github/poll    → GithubPollResponse（凭 flowId 轮询；成功时 token 已由 Host 写入 credentials）
  * POST /api/dsh-config-manager/sync/github/cancel  → { ok: true }
+ * POST /api/dsh-config-manager/sync/github/validate → GithubValidateResponse（token 是否已配置且有效）
+ * GET  /api/dsh-config-manager/sync/github/repositories → GithubRepositoriesResponse（选择已有仓库；只读）
+ * POST /api/dsh-config-manager/sync/github/repositories → GithubCreateRepositoryResponse（新建仓库；**宿主强制 private**）
  * ```
  *
  * 安全约束：
@@ -32,6 +35,7 @@ import { getJson, LONG_REQUEST_TIMEOUT_MS, postJson, type RequestOptions } from 
 import { CONFIG_MANAGER_API, SYNC_API } from '../common/routes.ts';
 import type { ExportPreviewResponse } from '../api.ts';
 import { zhUiT, type UiT } from '../../ui/i18n.ts';
+import { repoCreateBody } from '../../ui/sync-repository-picker.ts';
 
 /** 同步端点常量：**唯一来源** = `common/routes.ts`（W4 单点化），此处重导出保持既有导入面。 */
 export { SYNC_API };
@@ -458,6 +462,36 @@ export interface GithubValidateResponse {
   login?: string;
 }
 
+/** 仓库列表条目（宿主 `GitHubRepoSummary` 的投影；token 等秘密永不在此出现）。 */
+export interface GithubRepositorySummary {
+  /** owner/name */
+  fullName: string;
+  /** 仓库主页（展示用） */
+  htmlUrl: string;
+  /** 提交值：clone URL（https 形态，不含凭据） */
+  cloneUrl: string;
+  defaultBranch: string;
+  private: boolean;
+  fork: boolean;
+  /** 最近一次 push（ISO 8601；空仓库 → 空串） */
+  pushedAt: string;
+  /** 最近一次更新（ISO 8601；缺字段 → 空串） */
+  updatedAt: string;
+}
+
+/** GET /sync/github/repositories 响应：当前 GitHub 用户可见的仓库（按最近更新排序）。 */
+export interface GithubRepositoriesResponse {
+  ok: boolean;
+  repos: GithubRepositorySummary[];
+}
+
+/** POST /sync/github/repositories 响应：新建的仓库。
+ *  **恒定私有** —— 宿主强制 private:true，客户端无法请求公开仓库。 */
+export interface GithubCreateRepositoryResponse {
+  ok: boolean;
+  repo: GithubRepositorySummary;
+}
+
 /** 同步请求选项（长操作 5 分钟；超时文案沿用 `error.syncTimeout`，分钟插值）。 */
 const SYNC_OPTS: RequestOptions = { timeoutMs: LONG_REQUEST_TIMEOUT_MS, timeoutKey: 'error.syncTimeout' };
 
@@ -538,6 +572,23 @@ export class SyncApi {
    *  401 → valid:false 引导重新登录；非 401 错误向上抛，UI 兜底不误判登出） */
   async githubValidate(): Promise<GithubValidateResponse> {
     return postJson<GithubValidateResponse>(SYNC_API.githubValidate, {}, this.t, SYNC_OPTS);
+  }
+
+  /** 列出当前 GitHub 用户可见的仓库（供「选择已有仓库」下拉；只读，不改任何状态）。
+   *  未登录 / token 失效 → 401，由调用方按「先登录」引导处理。 */
+  async githubListRepositories(): Promise<GithubRepositoriesResponse> {
+    return getJson<GithubRepositoriesResponse>(SYNC_API.githubRepositories, this.t, SYNC_OPTS);
+  }
+
+  /** 新建仓库并返回其信息（供「新建仓库」表单；**宿主强制私有**，
+   *  描述为空则不传该字段）。名称非法 / 已存在 → 422，由调用方展示原因。 */
+  async githubCreateRepository(name: string, description = ''): Promise<GithubCreateRepositoryResponse> {
+    return postJson<GithubCreateRepositoryResponse>(
+      SYNC_API.githubRepositories,
+      repoCreateBody(name, description),
+      this.t,
+      SYNC_OPTS,
+    );
   }
 
   /** 同步历史：列出本地祖先快照 + 自动同步执行记录（按 createdAt 倒序合并）。 */

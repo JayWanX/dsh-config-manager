@@ -20,11 +20,11 @@
  *  ③ **不认识的记录一律计数上报**，绝不静默吞掉。
  *
  * 三段式分层（t4，档 B 前置）：
- *  ① **解析**（本文件）：Claude 记录 → IR（\`./session-ir.ts\`）；
- *  ② **合成**（\`./session-ir.ts\` 的 \`synthesizeDshRows\`）：IR → DSH 行（**所有会话类来源共用**）；
+ *  ① **解析**（本文件）：Claude 记录 → IR（`./session-ir.ts`）；
+ *  ② **合成**（`./session-ir.ts` 的 `synthesizeDshRows`）：IR → DSH 行（**所有会话类来源共用**）；
  *  ③ **编码**（本文件）：行 → 字节（zstd 帧拼接 + 校验和）。
- *  本文件**刻意不出现在 file-budget 的 import 白名单里**：它 import 了 \`node:fs\` 的**类型**用于
- *  构造只读句柄的回调（\`ClaudeReadHandle\`，追加能力通道），这是**零运行期 I/O** 的类型依赖。
+ *  本文件**刻意不出现在 file-budget 的 import 白名单里**：它 import 了 `node:fs` 的**类型**用于
+ *  构造只读句柄的回调（`ClaudeReadHandle`，追加能力通道），这是**零运行期 I/O** 的类型依赖。
  *  守卫按运行时性质放行（见 file-budget.test.ts 的白名单说明）。
  */
 import type { Stats } from 'node:fs';
@@ -80,14 +80,14 @@ export interface ClaudeSessionFile {
 /**
  * **只读**的文件读取面（additive，2026-10）：**内部**用它支持「大文件只读头尾」的追加通道。
  *
- * 现状：转码器一次吃全文（\`ClaudeSessionFile.text\`），本接口是**给将来留的扩展位**，不是
+ * 现状：转码器一次吃全文（`ClaudeSessionFile.text`），本接口是**给将来留的扩展位**，不是
  * 现状产物的一部分 —— 因此它**刻意不从本模块再导出**（v1 公开面是 registry/claude-code.ts
  * 到转码器的调用，不是这个内部形状）。真正需要它的是「同一会话被再次导入时只转尾段」那条路
- * （竞品 \`tailSessionEvents\` 的等价物），属于 t4 之后的档 B 工作。
+ * （竞品 `tailSessionEvents` 的等价物），属于 t4 之后的档 B 工作。
  */
 export interface ClaudeReadHandle {
   readonly id: string;
-  /** 只需要文件元信息与大小（宿主侧用 \`ctx.fs.stat\` 即可满足，避免为了 size 读整份文件） */
+  /** 只需要文件元信息与大小（宿主侧用 `ctx.fs.stat` 即可满足，避免为了 size 读整份文件） */
   stat(): Promise<Stats>;
   /** 只读前 n 字节（可选实现；未提供时由调用方整读后再截取） */
   readHead?(bytes: number): Promise<string>;
@@ -184,7 +184,7 @@ function blockOf(raw: unknown): ParsedBlock {
 }
 
 /**
- * 内容块抽取：字符串正文 / 数组正文 / 对象正文（含 \`text\` 字段）。
+ * 内容块抽取：字符串正文 / 数组正文 / 对象正文（含 `text` 字段）。
  *
  * 注意第三条分支（数组里的**对象**且带 text）会被当作文本块 —— 这是重构前的**既有行为**，
  * 逐字节回归钉住了它；改它会改变产物（用户在会话里看到多余/缺失的文本块）。
@@ -213,7 +213,7 @@ function irBlockOf(block: ParsedBlock): IrBlock {
   return irTextBlock(block.text);
 }
 
-/** 一条 Claude 记录 → IR 消息；\`undefined\` = 该记录不产出消息（未迁移的类型） */
+/** 一条 Claude 记录 → IR 消息；`undefined` = 该记录不产出消息（未迁移的类型） */
 function irMessageOf(
   rec: Record<string, unknown>,
   parsed: readonly ParsedBlock[],
@@ -247,7 +247,7 @@ function irMessageOf(
 /**
  * Claude 会话原文 → IR（**纯函数，不读盘**）。
  *
- * 反应：坏行不抛、计数上报（\`stats.unparsable\`）；缺 cwd 时**不产出会话**（由调用方转成 skip 码），
+ * 反应：坏行不抛、计数上报（`stats.unparsable`）；缺 cwd 时**不产出会话**（由调用方转成 skip 码），
  * 因为 DSH 会按 cwd 的目录键归位，猜一个 cwd 等于把会话放到错误的项目里。
  */
 export function parseClaudeSession(

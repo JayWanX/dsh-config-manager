@@ -9,7 +9,7 @@
  *
  * 刻意不做的事（**类本身零副作用**；注册动作只发生在显式工厂里）：
  *  - `ForeignSourceRegistry` 类**不注册任何具体来源**：单测只装一个假来源即可。
- *    六个来源的装配集中在文件末尾的 `builtinForeignSources()` / `createBuiltinForeignSourceRegistry()`
+ *    全部 30 个来源（6 配置类 + 24 会话类）的装配集中在文件末尾的 `builtinForeignSources()` / `createBuiltinForeignSourceRegistry()`
  *    （t22 收口）：GUI 的来源发现路由、CLI 的 `dcm import --from <来源>` 共用同一份定义，
  *    来源清单与 `FOREIGN_SOURCE_IDS` 由测试钉住一致（两处各自维护必然漂移）。
  *  - **不产生用户可见字符串**：错误只给稳定机器码 + 可用来源清单，文案由 UI/CLI 字典映射。
@@ -40,15 +40,48 @@ import { normalizePlatform, roamingAppDataDir, xdgDataHome } from './platform-pa
 import type { ForeignPlatform } from './platform-paths.ts';
 import { FOREIGN_TRUTH_TABLES } from './truth-table.ts';
 import type { ForeignTruthTableEntry } from './truth-table.ts';
+/* ---- 档 B 24 个会话类来源的装配点（每一条自带 wiring，经 sessionSourceOf 收口）---- */
+import { createChatgptSource } from './chatgpt.ts';
+import { createClineSource } from './cline.ts';
+import { createContinueSource } from './continue.ts';
+import { createCrushSource } from './crush.ts';
+import { createDsh4Source } from './dsh4.ts';
+import { createDshSource } from './dsh.ts';
+import { createGeminiSource } from './gemini.ts';
+import { createGooseSource } from './goose.ts';
+import { createGrokbuildSource } from './grokbuild.ts';
+import { createKilocodeSource } from './kilocode.ts';
+import { createKimiSource } from './kimi.ts';
+import { createMimocodeSource } from './mimocode.ts';
+import { createOpenclawSource } from './openclaw.ts';
+import { createOpencodeSource } from './opencode.ts';
+import { createPiSource } from './pi.ts';
+import { createQoderSource } from './qoder.ts';
+import { createQwenSource } from './qwen.ts';
+import { createReasonixSource } from './reasonix.ts';
+import { createTeleagentSource } from './teleagent.ts';
+import { createTraeSource } from './trae.ts';
+import { createVibeSource } from './vibe.ts';
+import { createWorkbuddySource } from './workbuddy.ts';
+import { createZcodeSource } from './zcode.ts';
+import { createZedSource } from './zed.ts';
 import type {
   ForeignConflictPolicy, ForeignEvidenceKind, ForeignImportResult, ForeignSkip, ForeignSkipCode, ForeignSourceId,
 } from './types.ts';
 
 /* ---------------- 来源 id 词表 ---------------- */
 
-/** 六个来源 id（顺序 = §8.2 真值表顺序，稳定不变；UI 列表顺序取注册顺序而非此表） */
+/**
+ * 30 个来源 id（顺序 = §8.2 真值表顺序 = source-modules.ts 的形状表，稳定不变；UI 列表顺序取注册顺序而非此表）。
+ *
+ * **必须与 `FOREIGN_SOURCE_MODULE_SHAPES` 逐项同序**（file-budget / source-registry 双向断言）——
+ * 漏扩这里会让 file-budget 的 C 档把来源模块误报成「未登记共享模块」。
+ */
 export const FOREIGN_SOURCE_IDS: readonly ForeignSourceId[] = [
   'claude-code', 'hermes', 'cursor', 'codex', 'copilot', 'antigravity',
+  'gemini', 'reasonix', 'opencode', 'mimocode', 'zcode', 'grokbuild', 'openclaw', 'pi',
+  'kimi', 'kilocode', 'qoder', 'chatgpt', 'workbuddy', 'qwen', 'continue', 'cline',
+  'goose', 'dsh4', 'zed', 'crush', 'teleagent', 'trae', 'vibe', 'dsh',
 ];
 
 export function isForeignSourceId(v: string): v is ForeignSourceId {
@@ -415,7 +448,10 @@ function probePathsOf(id: ForeignSourceId): (opts: ForeignProbeOptions) => reado
   };
 }
 
-/** 六个内置来源（顺序 = §8.2 真值表顺序；每调用一次返回一份新定义，注册表逐次装配） */
+/**
+ * 30 个内置来源（顺序 = §8.2 真值表顺序 = `source-modules.ts` 的形状表；
+ * 每调用一次返回一份新定义，注册表逐次装配）。前 6 个配置类内联定义，后 24 个会话类调各自工厂。
+ */
 export function builtinForeignSources(): readonly ForeignSource[] {
   return [
     /* ------------------------------------------------ Claude Code（~/.claude） */
@@ -602,10 +638,40 @@ export function builtinForeignSources(): readonly ForeignSource[] {
         return convertAntigravity(read.input);
       },
     },
+
+    /* ---------------- 档 B 24 个会话类来源（顺序 = source-modules.ts 的形状表） ----------------
+     * 每一条的 detect / build / probePaths / evidence 都由它自己的 wiring 经 sessionSourceOf 收口，
+     * **不在这里重抄路径清单或证据档**。dsh / dsh4 是手写 detect/build（字节直通经不了草稿→IR→合成），
+     * 但复用同一份 kernel.collectSessionSections。
+     */
+    createGeminiSource(),
+    createReasonixSource(),
+    createOpencodeSource(),
+    createMimocodeSource(),
+    createZcodeSource(),
+    createGrokbuildSource(),
+    createOpenclawSource(),
+    createPiSource(),
+    createKimiSource(),
+    createKilocodeSource(),
+    createQoderSource(),
+    createChatgptSource(),
+    createWorkbuddySource(),
+    createQwenSource(),
+    createContinueSource(),
+    createClineSource(),
+    createGooseSource(),
+    createDsh4Source(),
+    createZedSource(),
+    createCrushSource(),
+    createTeleagentSource(),
+    createTraeSource(),
+    createVibeSource(),
+    createDshSource(),
   ];
 }
 
-/** 六个内置来源的注册表（宿主路由与 CLI 的**唯一**装配点） */
+/** 30 个内置来源的注册表（宿主路由与 CLI 的**唯一**装配点） */
 export function createBuiltinForeignSourceRegistry(): ForeignSourceRegistry {
   return createForeignSourceRegistry(builtinForeignSources());
 }

@@ -1,5 +1,5 @@
 /**
- * \`src/foreign/\` 的**体积停止线护栏**（三档，可机械触发）。
+ * `src/foreign/` 的**体积停止线护栏**（三档，可机械触发）。
  *
  * 为什么要有这份护栏（t4，档 B 前置）：竞品 dsh-chat-import 的 1000/800 行纪律**只写在
  * AGENTS.md**，零自动兜底 —— 结果它**自己已经越线**（discovery.mjs 2285 行 / tools.mjs 1557 行，
@@ -10,13 +10,13 @@
  * 三档（各自独立、都能单独红）：
  *  A. **行数闸门**：`src/foreign/` 下全部手维护的 `.ts`（排除 `*.test.ts` 与 fixtures）逐档限额，
  *     超线即 fail，**失败消息自带拆分指引**（第一句就告诉你去拆哪、怎么拆）。
- *  B. **分层 import 白名单**：\`src/foreign/**\` 里 import \`node:fs\`/\`node:fs/promises\` 的模块集合
+ *  B. **分层 import 白名单**：`src/foreign/**` 里 import `node:fs`/`node:fs/promises` 的模块集合
  *     必须**恰好等于**白名单 —— 往翻译层（纯函数层）里 import fs 一律红灯。
- *  C. **来源形状枚举**：每个来源 id 必须恰好有 \`read-<id>.ts\` + \`<id>.ts\` 两个模块，
+ *  C. **来源形状枚举**：每个来源 id 必须恰好有 `read-<id>.ts` + `<id>.ts` 两个模块，
  *     且**多一个、少一个都红**（这是「同一来源的解析/发现逻辑出现第 3 处副本」唯一可机械化的近似）。
  *
- * 范式来自本仓库既有的源码级守卫：\`tests/packaging-contract.test.ts\`（正则读源码，不 import 宿主）
- * 与 \`tests/route/route-fence.test.ts\`（结构守卫「绕过 kit 就红」）。
+ * 范式来自本仓库既有的源码级守卫：`tests/packaging-contract.test.ts`（正则读源码，不 import 宿主）
+ * 与 `tests/route/route-fence.test.ts`（结构守卫「绕过 kit 就红」）。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -33,22 +33,22 @@ const FOREIGN_DIR = import.meta.dirname;
 /**
  * 两档行数上限（与竞品同口径：翻译层 800 / 读盘层 1000）。
  *
- * \`read-<id>.ts\` = 读盘层（host 面，含路径真值表与文件遍历）→ 1000；
- * 其余手维护的 \`src/foreign/*.ts\` = 翻译层 / 共享内核 / 注册表 → 800。
+ * `read-<id>.ts` = 读盘层（host 面，含路径真值表与文件遍历）→ 1000；
+ * 其余手维护的 `src/foreign/*.ts` = 翻译层 / 共享内核 / 注册表 → 800。
  */
 export const FOREIGN_LINE_BUDGETS = {
-  /** 读盘层（\`read-*.ts\`） */
+  /** 读盘层（`read-*.ts`） */
   reader: 1000,
   /** 翻译层 / 内核 / 注册表 / IR（其余一切手维护模块） */
   converter: 800,
 } as const;
 
 /**
- * 显式豁免清单（\`<文件名>: <理由>\`）。
+ * 显式豁免清单（`<文件名>: <理由>`）。
  *
  * 语义与竞品**刻意不同**：它允许「提案未批准前继续只做 bugfix」的状态**可见**，而不是让
  * 超线变成改测试数字。往这里加条目 = 公开承认该文件欠一次拆分，评审时一眼可见。
- * 本仓库当前**没有**豁免项 —— 既有的 \`registry.ts\`（502 行）在限额内。
+ * 本仓库当前**没有**豁免项 —— 既有的 `registry.ts`（502 行）在限额内。
  */
 export const FOREIGN_LINE_EXEMPT: Readonly<Record<string, string>> = {};
 
@@ -56,7 +56,7 @@ function budgetFor(name: string): number {
   return name.startsWith('read-') ? FOREIGN_LINE_BUDGETS.reader : FOREIGN_LINE_BUDGETS.converter;
 }
 
-/** 手维护的模块（排除测试与夹具；\`lib/\` 产物不在本目录） */
+/** 手维护的模块（排除测试与夹具；`lib/` 产物不在本目录） */
 async function listForeignModules(): Promise<string[]> {
   const out: string[] = [];
   for (const entry of await fsp.readdir(FOREIGN_DIR, { withFileTypes: true })) {
@@ -105,38 +105,58 @@ test('A 行数闸门：豁免清单只允许放行真实存在且确实超线的
 /* ---------------- B. 分层 import 白名单 ---------------- */
 
 /**
- * 允许 import \`node:fs\` / \`node:fs/promises\` 的模块，**恰好**是这些：
+ * 允许 import `node:fs` / `node:fs/promises` 的模块，**恰好**是这些：
  *
- *  - \`read-*.ts\`：读盘层（host 面）—— 它的职责就是读别人的磁盘；
- *  - \`registry.ts\`：装配层，detect 只做 \`stat\` 探测（只 stat、绝不读内容）；
- *  - \`claude-sessions.ts\`：**只 import 类型**（\`import type { Stats }\`，零运行期 I/O），
+ *  - `read-*.ts`：读盘层（host 面）—— 它的职责就是读别人的磁盘；
+ *  - `registry.ts`：装配层，detect 只做 `stat` 探测（只 stat、绝不读内容）；
+ *  - `claude-sessions.ts`：**只 import 类型**（`import type { Stats }`，零运行期 I/O），
  *    为将来「大文件只读头尾」的追加通道保留一个只读句柄形状。
  *
- * **\`bundle.ts\` 刻意不在名单里**（t4 实测核对）：它产出 zip 字节，但走的是 \`utils/zip.ts\`，
- * 自己**不 import \`node:fs\`**。白名单是「恰好相等」的集合，凭职责印象放进去会让断言变成
- * 永远的假绿（少一项却从不红）—— 加模块前先 grep \`node:fs\`，不要凭职责猜。
+ * **`bundle.ts` 刻意不在名单里**（t4 实测核对）：它产出 zip 字节，但走的是 `utils/zip.ts`，
+ * 自己**不 import `node:fs`**。白名单是「恰好相等」的集合，凭职责印象放进去会让断言变成
+ * 永远的假绿（少一项却从不红）—— 加模块前先 grep `node:fs`，不要凭职责猜。
  *
  * 名单**恰好相等**（不是包含）：少一个 = 有人删了读盘层还没清理白名单；多一个 = 有人往
  * 翻译层/IR 层里 import 了 fs —— 那正是这条纪律要挡的事。
+ *
+ * 档 B 追加（2026-10-05，**逐个 grep `node:fs` 实测，不凭职责猜**；并在全部写者停下后再复 grep 一次）：
+ *  - `session-read.ts`：会话类来源**共用**的读盘内核（listDirNames / readJsonSafe / statOrNull /
+ *    readBytesSafe …），24 个会话来源里 t3/t4 的 read-*.ts **一律经它读盘**，自己不 import fs；
+ *  - `read-gemini / read-kimi / read-qoder / read-workbuddy / read-qwen / read-continue / read-pi /
+ *    read-openclaw`（t2 的 8 个读盘层）：各自直接 import fs；
+ *  - `sqlite.ts`：**t9 起是宿主侧模块**（只读复制路线要 `node:fs/promises`），不是纯函数层 ——
+ *    这一条与 t4 初版注释相反，是**复 grep 才发现**的（照抄旧注释会漏、凭职责猜也会漏）。
+ *  反例（**确实不 import fs，不得加进来**）：`platform-paths.ts` / `session-source.ts` /
+ *  `truth-table.ts`（kernel.ts / session-ir.ts 里的 "node:fs" 只出现在注释里）。
  */
 export const FOREIGN_FS_IMPORT_ALLOWLIST: readonly string[] = [
   'claude-sessions.ts',
   'read-antigravity.ts',
   'read-claude-code.ts',
   'read-codex.ts',
+  'read-continue.ts',
   'read-copilot.ts',
   'read-cursor.ts',
+  'read-gemini.ts',
   'read-hermes.ts',
+  'read-kimi.ts',
+  'read-openclaw.ts',
+  'read-pi.ts',
+  'read-qoder.ts',
+  'read-qwen.ts',
+  'read-workbuddy.ts',
   'registry.ts',
+  'session-read.ts',
+  'sqlite.ts',
 ];
 
 const FS_IMPORT_RE = /(?:^|\n)\s*import\s+(?:type\s+)?[^;\n]*?from\s+'node:fs(?:\/promises)?'/;
 
 /**
- * **手维护的实现模块**（B/C 两档的适用面）——递归收集 \`src/foreign/\` 下的 .ts，
- * 跳过 fixtures / node_modules，**并排除 \`*.test.ts\`**。
+ * **手维护的实现模块**（B/C 两档的适用面）——递归收集 `src/foreign/` 下的 .ts，
+ * 跳过 fixtures / node_modules，**并排除 `*.test.ts`**。
  *
- * 为什么必须排除测试：测试要读 fixture，**天然**会 import \`node:fs\`；但「翻译层不许碰盘」
+ * 为什么必须排除测试：测试要读 fixture，**天然**会 import `node:fs`；但「翻译层不许碰盘」
  * 的语义对象是**实现模块**，不是测试。A 档行数闸门本来就用了同一排除口径，B 档必须一致 ——
  * 否则护栏会把测试文件误报成「翻译层越界」，红灯指向错误的地方（t4 实测踩过一次）。
  */
@@ -204,7 +224,7 @@ test('C 来源形状：每个来源 id 恰好 \`read-<id>.ts\` + \`<id>.ts\`，�
   );
 });
 
-/** 判据 = 该模块名是否「看起来属于某个来源」（\`<id>.ts\` 或 \`read-<id>.ts\`）；共享模块由下面的清单挡住 */
+/** 判据 = 该模块名是否「看起来属于某个来源」（`<id>.ts` 或 `read-<id>.ts`）；共享模块由下面的清单挡住 */
 function isSourceShaped(name: string): boolean {
   const base = name.replace(/\.ts$/, '').replace(/^read-/, '');
   return FOREIGN_SOURCE_IDS.includes(base as (typeof FOREIGN_SOURCE_IDS)[number]);
@@ -222,7 +242,12 @@ test('C 来源形状：共享模块清单是封闭集合（新模块必须显式
   const all = await listForeignImplementationTs();
   const modules = all.filter((f) => !f.includes('/'));
   const shared = modules.filter((m) => !isSourceShaped(m));
-  const expected = ['bundle.ts', 'claude-sessions.ts', 'kernel.ts', 'registry.ts', 'session-ir.ts', 'source-modules.ts', 'types.ts'];
+  const expected = [
+    'bundle.ts', 'claude-sessions.ts', 'kernel.ts',
+    /* 档 B 新增的 5 个共享地基（零 source 形状，但也不是来源模块）： */
+    'platform-paths.ts', 'registry.ts', 'session-ir.ts', 'session-read.ts', 'session-source.ts',
+    'source-modules.ts', 'sqlite.ts', 'truth-table.ts', 'types.ts',
+  ];
   assert.deepEqual(
     shared.sort(),
     expected,

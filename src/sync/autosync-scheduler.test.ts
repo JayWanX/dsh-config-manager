@@ -502,7 +502,13 @@ test('runOnce: 远端最新快照为普通 → 加密检测不触发（listSnaps
 test('双通道：git/webdav 同时 enabled → 各自独立排期；runOnce 写各自通道配置', async () => {
   const gitCfg: AutosyncConfig = { enabled: true, interval: '30m', startupMinIntervalMs: 300000, consecutiveFailures: 0 };
   const webdavCfg: AutosyncConfig = { enabled: true, interval: '5m', startupMinIntervalMs: 300000, consecutiveFailures: 0 };
-  const configs: Record<SyncTransportType, AutosyncConfig> = { git: gitCfg, webdav: webdavCfg };
+  // 全通道配置由唯一枚举派生（新增通道不得手写漏项）；其余通道保持默认关闭
+  const configs = {} as Record<SyncTransportType, AutosyncConfig>;
+  for (const ch of SYNC_CHANNELS) {
+    configs[ch] = { enabled: false, interval: '30m', startupMinIntervalMs: 300000, consecutiveFailures: 0 };
+  }
+  configs.git = gitCfg;
+  configs.webdav = webdavCfg;
   const pending: Array<() => void> = [];
   let timerSeq = 0;
   const engine = {

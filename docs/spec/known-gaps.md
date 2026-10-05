@@ -64,6 +64,7 @@
 | G-29 | 会话在应用内**读不出来**：官方 `session.export` 通道（原样 ZIP，含子会话与附件）此前**从未接入** | ✅ 已修复（只读探测/流式代理路由 + 体检弹窗逐行下载入口；判据按 **500** 而非过时的 501，见 §1） |
 | G-30 | checkpoint（会话 / 工作区 / 配置三态同点检查点）：宿主能力已交付（引擎 + 7 条子路径），但 **`src/client/**` 零消费者** → 用户点不到 | ⚠️ **部分交付：宿主能力已可用，界面未接线**（见 §3） |
 | G-31 | 云端点同步通道（S3 兼容系 ×5 / GitHub Gist）：transport 已交付（52 条单测），但**未接线进 `SYNC_CHANNELS` / 路由 / UI** → 用户点不到 | ⚠️ **部分交付：宿主能力已可用，界面未接线**（见 §3） |
+| G-32 | SQLite 只读探测的**写副作用**（WAL 库被就地打开会新建 `<db>-shm`/`<db>-wal`）与 `immutable=1` 在 `-wal` 非空时**静默丢数据** | ✅ 已处置（`sqlite.ts` 三态打开计划 direct / immutable / copy + 1 GiB 上限 + **绝不退回就地打开**；四条残余风险见 §3） |
 
 ---
 
@@ -474,6 +475,17 @@
 | 缺什么才能用 | ① 把 s3（含五家兼容商）与 gist 并入 `SYNC_CHANNELS`，并补齐 `channelOf` / `channelMap` / `parseSyncChannel` 的 `Record` 分支（typecheck 会逐处点名，**不得只手改一处**，尤其 `Record<SyncTransportType, T>` 的构造处与客户端镜像）；② `src/index.ts` 的 `makeSyncEngine` 增 `S3Transport` / `GistTransport` 构造分支（接到 DSH credentials 的 `getToken` / AccessKey Secret 端口）；③ `/sync/*` 与 `prepareSync` 接受新通道的非密字段（bucket / region / endpoint / pathStyle / gistId / 前缀）并只回传 `CloudChannelView`；④ 客户端补 `CLIENT_SYNC_CHANNELS` 成员、同步设置 / 状态切片与 zh/en 文案；⑤ 若新增通道路由，必须同步 `tests/route/route-parity.test.ts` 与 `route-fence.test.ts` 的计数；⑥ 新通道的快照布局必须与既有「内容寻址 blob 仓 + 删除墓碑」兼容（`blobRefs` / `blobs/<sha256>`）。 |
 | 验证方式 | `src/sync/s3/s3-transport.test.ts` + `sigv4.test.ts` + `cloud-config.test.ts` + `src/sync/gist/gist-transport.test.ts` 共 **52** 条（按 `^test(` 计数）。**通道面零测试**：`src/sync/sync-config.test.ts` 仍断言 `SYNC_CHANNELS` 恰为 `['git', 'webdav']`，没有任何用例覆盖「用 s3 / gist 真的同步一次」—— 这正是本条登记的意义。 |
 | 接入时不得放宽 | 凭据值绝不进日志 / 产物 / 回传；加密与解密密码仍只在进程内存；S3 签名与 Gist token 只经注入的 credentials 端口；`includeSecrets ⇒ encrypt`、非加密快照声明 `containsSecrets` 即拒绝等既有同步不变量对每个通道同等适用。 |
+### G-32 SQLite 只读探测的写副作用与 `immutable` 前提（t9，2026-10）
+
+| 项 | 内容 |
+|---|---|
+| 背景 | 外部 agent 的多个来源把会话存在 SQLite 库里（opencode 家族 / goose / zed / crush，以及 trae 的 VS Code `state.vscdb`）。「只读打开」看起来无害，实测不然。 |
+| 实测（本机 Node v24.13.0） | ① `new DatabaseSync(db, { readOnly: true })` 就地在 **WAL 模式**的库上会新建 `<db>-shm`（32768 B）与 `<db>-wal`（0 B），close 后仍在 —— 也就是说**只读探测会往用户的 agent 数据目录写文件**；DELETE 日志模式的库则前后目录 / size / mtime 逐字不变（零伴生文件）。② `file:<db>?immutable=1` 在 `-wal` 非空时**忽略整条 WAL**（实测 `no such table`）= **静默丢数据**。 |
+| 处置 | `src/foreign/sqlite.ts` 的 `planSqliteOpen` 三态计划，判据是**只读库头 + 伴生文件大小**（header[18]/[19]==2 即 WAL）：**direct**（回滚日志库且无热 `-journal`，实测零副作用）/ **immutable**（WAL 且 `-wal`/`-journal` 都为空或不存在 = 主库完整）/ **copy**（其余：有 pending `-wal` 或热 `-journal` → 把 db + `-wal`/`-shm`/`-journal` 拷到**私有临时目录**读副本，close 时删）。**copy 上限 1 GiB**（`DEFAULT_MAX_COPY_BYTES`，超限报 `copy-too-large`），**绝不退回就地打开**；immutable 一旦前提不满足（URI 打不开）就改走 copy，**绝不拿陈旧数据充数**。 |
+| 残余风险（四条，如实登记） | ① **源库正被写入时 copy 是某一时刻的近似快照**，撕裂的副本会让该库整体读不到（报 `source-unreadable`，绝不静默）；② **`immutable` 不加锁**，并发写入者存在时读到的是主库的固定快照，可能**少最后几条已提交**；③ **>1 GiB 且带 pending `-wal` 的库会被拒绝读取**（可见码 `copy-too-large`，不静默、不降级）；④ `--user-data-dir` 改写 `data_dir` 的 zed 安装仍**只能由用户显式给路径**（自动探测按缺省 XDG 路径，猜不到改写后的位置）。 |
+| 判负层次（同一处收口） | 非 SQLite 文本文件的**构造是「惰性成功」**（`new DatabaseSync(垃圾文本, {readOnly:true})` 不抛），**判负必须落在表探测处**：`sqlite.ts` 的签名判定（表 + 关键列，`PRAGMA table_info` 自适应）不符 → 关闭句柄返回 null，8 个来源的 `readFindings` 报 `shape-mismatch`（**不是** `open-failed`）。 |
+| 验证方式 | `src/foreign/sqlite.test.ts`（9 条）：direct / copy-WAL / immutable-干净 WAL 三组形态对「读一遍后的源目录」按**名字 + 大小 + mtime 逐字比较**，全部断言**零新增零改动**（干净 WAL 那条正是旧实现会红的用例）；另有 `copy-too-large` 用例断言「拒绝复制时也**绝不**就地打开」；8 个 SQLite 家族来源逐源注入垃圾库断言 `shape-mismatch`。 |
+| 关联 | trae 的 VS Code `state.vscdb` 走同一个 `openSqliteIfShape` → 自动获得零写入。`file-budget.test.ts` 的 fs 白名单已据此登记 `sqlite.ts`（它现在 import `node:fs`/`node:os`/`node:path`，复制路线必需）。 |
 
 ---
 

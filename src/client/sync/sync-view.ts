@@ -190,8 +190,14 @@ export function severityLabel(severity: PlanItem['severity'], t: UiT = zhUiT): s
 
 /* ---------------------------------------------------------------- 按钮状态 */
 
-/** 远程同步通道类型：git（默认）或 webdav。类型唯一来源 = 宿主 SYNC_CHANNELS（type-only 别名）。 */
-export type SyncChannel = SyncTransportType;
+/**
+ * 远程同步通道类型（客户端**已接线**的通道：git / webdav）。
+ *
+ * 宿主 SYNC_CHANNELS 已是 4 条（+ s3 / gist），但这两条的界面接线由 t12 负责；
+ * 在此之前客户端只操作已接线的两条 —— 类型收窄到 CLIENT_SYNC_CHANNELS，避免把
+ * 未接线通道混进 UI 状态机（Record<SyncChannel, …> 全按已接线集合构造）。
+ */
+export type SyncChannel = (typeof CLIENT_SYNC_CHANNELS)[number];
 
 /**
  * 客户端侧通道清单（**唯一一份运行期镜像**）。
@@ -203,8 +209,17 @@ export type SyncChannel = SyncTransportType;
  */
 const CLIENT_SYNC_CHANNELS = ['git', 'webdav'] as const satisfies readonly SyncTransportType[];
 
-type UncoveredChannel = Exclude<SyncTransportType, (typeof CLIENT_SYNC_CHANNELS)[number]>;
-/** 穷尽检查：UncoveredChannel 非 never（宿主加了通道、镜像没加）时该行类型不成立 → 编译报错。 */
+/**
+ * 宿主已并入、但客户端界面**尚未接线**的通道（t12 落地时把它们并入 CLIENT_SYNC_CHANNELS 并删除本行）。
+ * 单独列出来是为了保住下面的穷尽检查：宿主新增通道时仍然编译报错，而不是静默漏掉一个通道。
+ */
+const PENDING_CLIENT_SYNC_CHANNELS = ['s3', 'gist'] as const satisfies readonly SyncTransportType[];
+
+type UncoveredChannel = Exclude<
+  SyncTransportType,
+  (typeof CLIENT_SYNC_CHANNELS)[number] | (typeof PENDING_CLIENT_SYNC_CHANNELS)[number]
+>;
+/** 穷尽检查：UncoveredChannel 非 never（宿主加了通道、镜像与待办清单都没跟）时该行类型不成立 → 编译报错。 */
 const clientChannelsAreExhaustive: UncoveredChannel extends never ? true : never = true;
 void clientChannelsAreExhaustive;
 

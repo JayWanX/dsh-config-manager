@@ -101,7 +101,7 @@ export interface CliOptions {
   sections?: string;
   /** --out <path>：backup / import 输出 ZIP 路径（缺省写入导出目录，自动去重不覆盖） */
   out?: string;
-  /** --from <source>：import 的外部来源 id（六个之一） */
+  /** --from <source>：import 的外部来源 id（30 个之一） */
   from?: string;
   /** --cwd <dir>：import 的项目目录（契约 §8.2 的项目级路径；缺省 = 进程 cwd） */
   cwd?: string;
@@ -614,7 +614,7 @@ export function printUsage(io: CliIo = defaultIo): void {
       '                                [--data-dir <dir>]',
       '      把本机已装的外部 agent 配置翻译成标准 bundle v1 ZIP（之后用导入流程导入）',
       '      / translate a foreign agent config into a standard bundle ZIP',
-      '      来源 source：claude-code | hermes | cursor | codex | copilot | antigravity',
+      '      来源 source：claude-code | hermes | cursor | codex | copilot | antigravity | gemini | reasonix | opencode | mimocode | zcode | grokbuild | openclaw | pi | kimi | kilocode | qoder | chatgpt | workbuddy | qwen | continue | cline | goose | dsh4 | zed | crush | teleagent | trae | vibe | dsh',
       '      （未知来源 → 退出码 1 并列出可用来源）/ unknown source exits 1 and lists available sources.',
       '      --dry-run 只打印分区摘要与未迁移项（零写入）；--cwd 给出项目级配置所在目录（缺省进程 cwd）。',
       '      凭据值绝不进入产物：只保留字段名与「需在 DSH 补录」的引用名。',
@@ -654,7 +654,7 @@ export function printUsage(io: CliIo = defaultIo): void {
       '  --json             verify 输出机器可读 JSON / machine-readable output',
       '  --sections <list>  backup 分区白名单（逗号分隔；缺省 ' + DEFAULT_BACKUP_SECTIONS.join(',') + '）',
       '  --out <path>       backup / import 输出 ZIP 路径（缺省自动命名，绝不覆盖既有文件）',
-      '  --from <source>    import 的外部来源 id（六个之一；缺省报错）',
+      '  --from <source>    import 的外部来源 id（30 个之一；缺省报错）',
       '  --cwd <dir>        import 的项目目录（契约 §8.2 的项目级配置；缺省进程 cwd）',
       '  --home <dir>       sessions repair / web 的 DSH home（缺省 $DSH_HOME，即 ~/.dsh）',
       '  --port <n>         web：监听端口（缺省 0 = 内核随机分配；恒只绑 127.0.0.1）',

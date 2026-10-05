@@ -28,18 +28,23 @@ import { zhMsg } from '../core/messages.ts';
 import type { MsgFunc } from '../core/messages.ts';
 import { parseJsonSafe, stringifyJsonSafe } from '../utils/json.ts';
 import { atomicWriteFile } from '../utils/atomic-write.ts';
+import { SYNC_CHANNELS } from '../utils/shared-constants.ts';
+import type { SigV4DialectId } from './s3/sigv4.ts';
 
 export const SYNC_CONFIG_FILE = 'sync-config.json';
 
 /**
- * 同步通道枚举（**唯一声明处**，t32）：所有「有哪些通道 / 通道列表 / 通道判定」的唯一事实源。
+ * 同步通道枚举（**唯一事实源**，t32）：所有「有哪些通道 / 通道列表 / 通道判定」的唯一来源。
+ *
+ * 声明处 = `src/utils/shared-constants.ts`（**零依赖**：client 半可运行时 import 而不带进
+ * node 模块）；本文件 re-export，宿主侧沿用既有 import 路径即可。
  *
  * 为什么要单一来源：此前 SyncTransportType 在 sync-config / ui-prefs / client sync-api /
  * client sync-view 各自声明一遍，通道数组也在 autosync-scheduler 里写了两遍 ——「改一处漏一处」
- * 的表现是某个通道**静默**不再排期 / 不再落盘，而不是报错。新增通道只改这里：typecheck 会在
+ * 的表现是某个通道**静默**不再排期 / 不再落盘，而不是报错。新增通道只改声明处：typecheck 会在
  * 所有 Record<SyncTransportType, X> 的构造处与穷尽检查处报错。
  */
-export const SYNC_CHANNELS = ['git', 'webdav'] as const;
+export { SYNC_CHANNELS };
 
 /** 同步通道类型（由 SYNC_CHANNELS 派生；host 侧与 client 半统一引用）。 */
 export type SyncTransportType = (typeof SYNC_CHANNELS)[number];
@@ -98,12 +103,18 @@ export interface FullSyncConfig {
   transport: SyncTransportType;
   git?: GitConfig;
   webdav?: WebDavConfig;
+  /** 云端点通道 s3（活动兼容商；只有非密字段 + 密钥标记，绝无密钥值） */
+  s3?: S3ChannelConfig;
+  /** 云端点通道 gist（只有非密字段 + 密钥标记，绝无 token 值） */
+  gist?: GistChannelConfig;
 }
 
 /** 持久化的同步通道配置：可辨识联合（schemaVersion 恒 2） */
 export type SyncConfig =
   | { schemaVersion: 2; transport: 'git'; git: GitConfig }
-  | { schemaVersion: 2; transport: 'webdav'; webdav: WebDavConfig };
+  | { schemaVersion: 2; transport: 'webdav'; webdav: WebDavConfig }
+  | { schemaVersion: 2; transport: 's3'; s3: S3ChannelConfig }
+  | { schemaVersion: 2; transport: 'gist'; gist: GistChannelConfig };
 
 /** git 通道守卫 */
 export function isGitConfig(cfg: SyncConfig): cfg is Extract<SyncConfig, { transport: 'git' }> {
@@ -113,6 +124,16 @@ export function isGitConfig(cfg: SyncConfig): cfg is Extract<SyncConfig, { trans
 /** webdav 通道守卫 */
 export function isWebDavConfig(cfg: SyncConfig): cfg is Extract<SyncConfig, { transport: 'webdav' }> {
   return cfg.transport === 'webdav';
+}
+
+/** s3 通道守卫（provider 在 cfg.s3.provider：s3 / oss / cos / minio / kodo） */
+export function isS3Config(cfg: SyncConfig): cfg is Extract<SyncConfig, { transport: 's3' }> {
+  return cfg.transport === 's3';
+}
+
+/** gist 通道守卫 */
+export function isGistConfig(cfg: SyncConfig): cfg is Extract<SyncConfig, { transport: 'gist' }> {
+  return cfg.transport === 'gist';
 }
 
 /** 从 v1 扁平形态解析 git 配置；缺 repoUrl → null（gitBin 已废弃：始终使用系统 PATH 中的 git） */
@@ -181,9 +202,18 @@ export async function readSyncConfig(dir: string): Promise<SyncConfig | null> {
     if (git === null) return null;
     return { schemaVersion: 2, transport: 'git', git };
   }
-  const webdav = parseV2WebDavNamespace(obj['webdav']);
-  if (webdav === null) return null;
-  return { schemaVersion: 2, transport: 'webdav', webdav };
+  if (transport === 'webdav') {
+    const webdav = parseV2WebDavNamespace(obj['webdav']);
+    if (webdav === null) return null;
+    return { schemaVersion: 2, transport: 'webdav', webdav };
+  }
+  // 云端点通道：非密配置住在 sync-cloud-config.json（活动 provider 由 active 记录）
+  if (transport === 's3') {
+    const s3 = await readS3ChannelConfig(dir);
+    return s3 === null ? null : { schemaVersion: 2, transport: 's3', s3 };
+  }
+  const gist = await readGistChannelConfig(dir);
+  return gist === null ? null : { schemaVersion: 2, transport: 'gist', gist };
 }
 
 /**
@@ -227,7 +257,10 @@ function readBothNamespaces(file: string): Promise<{ git?: GitConfig; webdav?: W
 export async function readFullSyncConfig(dir: string): Promise<FullSyncConfig | null> {
   const file = path.join(dir, SYNC_CONFIG_FILE)
   const both = await readBothNamespaces(file)
-  if (both.git === undefined && both.webdav === undefined) return null
+  // 云端点通道的配置不在 sync-config.json（见 sync-cloud-config.json）；这里一并对齐成完整视图
+  const s3 = await readS3ChannelConfig(dir)
+  const gist = await readGistChannelConfig(dir)
+  if (both.git === undefined && both.webdav === undefined && s3 === null && gist === null) return null
   // 从原始文件读取当前活动 transport 字段
   let transport: SyncTransportType = 'git'
   try {
@@ -240,7 +273,13 @@ export async function readFullSyncConfig(dir: string): Promise<FullSyncConfig | 
       if (parsedChannel !== undefined) transport = parsedChannel
     }
   } catch { /* 默认 git */ }
-  return { transport, git: both.git, webdav: both.webdav }
+  return {
+    transport,
+    git: both.git,
+    webdav: both.webdav,
+    ...(s3 === null ? {} : { s3 }),
+    ...(gist === null ? {} : { gist }),
+  }
 }
 
 /**
@@ -250,12 +289,18 @@ export async function readFullSyncConfig(dir: string): Promise<FullSyncConfig | 
 export async function readSyncConfigFor(dir: string, channel: SyncTransportType): Promise<SyncConfig | null> {
   const full = await readFullSyncConfig(dir);
   if (full === null) return null;
-  if (channel === 'webdav') {
-    if (full.webdav === undefined) return null;
-    return { schemaVersion: 2, transport: 'webdav', webdav: full.webdav };
+  switch (channel) {
+    case 'git':
+      return full.git === undefined ? null : { schemaVersion: 2, transport: 'git', git: full.git };
+    case 'webdav':
+      return full.webdav === undefined ? null : { schemaVersion: 2, transport: 'webdav', webdav: full.webdav };
+    case 's3':
+      return full.s3 === undefined ? null : { schemaVersion: 2, transport: 's3', s3: full.s3 };
+    case 'gist':
+      return full.gist === undefined ? null : { schemaVersion: 2, transport: 'gist', gist: full.gist };
+    default:
+      return null;
   }
-  if (full.git === undefined) return null;
-  return { schemaVersion: 2, transport: 'git', git: full.git };
 }
 
 /**
@@ -264,24 +309,42 @@ export async function readSyncConfigFor(dir: string, channel: SyncTransportType)
  * - 另一通道之前配置过 → 一并保留（切换通道不丢失另一通道的 repoUrl/url）；
  * - 覆盖旧值；未配置过的字段不写入。
  */
-export async function writeSyncConfig(dir: string, cfg: SyncConfig): Promise<void> {
+export async function writeSyncConfig(
+  dir: string,
+  cfg: SyncConfig,
+  secrets?: CloudSecretWriter,
+): Promise<void> {
+  // 云端点通道：非密字段写 sync-cloud-config.json（复用既有只写端口层，密钥值绝不落文件）；
+  // sync-config.json 只更新「活动通道」指针，与 git/webdav 命名空间互不干扰。
+  if (isS3Config(cfg) || isGistConfig(cfg)) {
+    const provider: CloudSyncProvider = isGistConfig(cfg) ? GIST_PROVIDER : cfg.s3.provider;
+    const input: CloudChannelWriteInput = isGistConfig(cfg)
+      ? {
+          gistId: cfg.gist.gistId,
+          ...(cfg.gist.apiBaseUrl === undefined ? {} : { apiBaseUrl: cfg.gist.apiBaseUrl }),
+          ...(cfg.gist.filePrefix === undefined ? {} : { filePrefix: cfg.gist.filePrefix }),
+        }
+      : {
+          endpoint: cfg.s3.endpoint,
+          region: cfg.s3.region,
+          bucket: cfg.s3.bucket,
+          accessKeyId: cfg.s3.accessKeyId,
+          ...(cfg.s3.prefix === undefined ? {} : { prefix: cfg.s3.prefix }),
+          ...(cfg.s3.pathStyle === undefined ? {} : { pathStyle: cfg.s3.pathStyle }),
+          ...(cfg.s3.dialectId === undefined ? {} : { dialectId: cfg.s3.dialectId }),
+        };
+    await writeCloudChannelConfig(dir, provider, input, secrets);
+    await writeSyncConfigTransport(dir, cfg.transport);
+    return;
+  }
   await fs.mkdir(dir, { recursive: true });
   const file = path.join(dir, SYNC_CONFIG_FILE)
   const existing = await readBothNamespaces(file)
-  const payload: Record<string, unknown> = {
-    schemaVersion: SYNC_CONFIG_SCHEMA_VERSION,
-    transport: cfg.transport,
-  }
-  if (isGitConfig(cfg)) {
-    payload.git = cfg.git
-    // 保留另一通道的 webdav 配置（存在时）
-    if (existing.webdav !== undefined) payload.webdav = existing.webdav
-  } else {
-    payload.webdav = cfg.webdav
-    // 保留另一通道的 git 配置（存在时）
-    if (existing.git !== undefined) payload.git = existing.git
-  }
-  await atomicWriteFile(file, stringifyJsonSafe(payload, { space: 2 }), { mode: 0o600 });
+  const namespaces: { git?: GitConfig; webdav?: WebDavConfig } = { git: existing.git, webdav: existing.webdav }
+  if (isGitConfig(cfg)) namespaces.git = cfg.git
+  else namespaces.webdav = cfg.webdav
+  // 另一通道之前配置过 → 一并保留（切换通道不丢失另一通道的 repoUrl/url）
+  await writeSyncConfigFile(dir, namespaces, cfg.transport)
 }
 
 /** 断开单条通道配置的结果（供路由层决定凭据/自动同步/UI 偏好怎么收尾）。 */
@@ -311,33 +374,50 @@ export interface ClearSyncChannelResult {
  */
 export async function clearSyncChannel(dir: string, channel: SyncTransportType): Promise<ClearSyncChannelResult> {
   const file = path.join(dir, SYNC_CONFIG_FILE);
-  const both = await readBothNamespaces(file);
-  const other: SyncTransportType = channel === 'git' ? 'webdav' : 'git';
-  const removed = channel === 'git' ? both.git !== undefined : both.webdav !== undefined;
-  const otherCfg = other === 'git' ? both.git : both.webdav;
-
-  if (otherCfg === undefined) {
-    // 没有另一条通道 → 文件不再代表任何配置：删掉它（readFullSyncConfig 回落 null）
-    if (removed) await fs.rm(file, { force: true });
-    return { removed, hasRemaining: false, transport: channel };
+  const before = await listConfiguredChannels(dir);
+  const removed = before.includes(channel);
+  if (!removed) {
+    // 幂等：本来没配置 → 不写任何文件（含云端点文件）
+    const current = await readTransportPointer(dir);
+    const transport = before.includes(current) ? current : (before[0] ?? current);
+    return { removed: false, hasRemaining: before.length > 0, transport };
   }
 
-  // 读当前活动通道（与 readFullSyncConfig 同口径）；它指向被删通道时切到剩下的那条
-  let current: SyncTransportType = 'git';
-  try {
-    const raw = await fs.readFile(file, 'utf8');
-    const parsed = parseJsonSafe(raw);
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      current = parseSyncChannel((parsed as Record<string, unknown>)['transport']) ?? 'git';
+  if (channel === 'git' || channel === 'webdav') {
+    const both = await readBothNamespaces(file);
+    const namespaces: { git?: GitConfig; webdav?: WebDavConfig } =
+      channel === 'git' ? { webdav: both.webdav } : { git: both.git };
+    const remaining = before.filter((c) => c !== channel);
+    if (remaining.length === 0) {
+      // 一条不剩 → 文件不再代表任何配置：删掉它（readFullSyncConfig 回落 null）
+      await fs.rm(file, { force: true });
+      return { removed: true, hasRemaining: false, transport: channel };
     }
-  } catch { /* 读不到 → 缺省 git（与 readFullSyncConfig 一致） */ }
-  const transport: SyncTransportType = current === channel ? other : current;
+    const current = await readTransportPointer(dir);
+    const transport = current === channel || !remaining.includes(current) ? remaining[0]! : current;
+    await writeSyncConfigFile(dir, namespaces, transport);
+    return { removed: true, hasRemaining: true, transport };
+  }
 
-  const payload: Record<string, unknown> = { schemaVersion: SYNC_CONFIG_SCHEMA_VERSION, transport };
-  if (other === 'git') payload.git = otherCfg;
-  else payload.webdav = otherCfg;
-  await atomicWriteFile(file, stringifyJsonSafe(payload, { space: 2 }), { mode: 0o600 });
-  return { removed, hasRemaining: true, transport };
+  // 云端点通道：清掉该通道**全部**已保存的 provider（s3 通道可能存了多家作为切换记忆），
+  // 密钥槽位由路由层 unset（本模块只碰配置文件）。
+  if (channel === 'gist') {
+    await clearCloudChannelConfig(dir, GIST_PROVIDER);
+  } else {
+    const saved = await readCloudSyncConfig(dir);
+    for (const provider of S3_COMPAT_PROVIDERS) {
+      if (saved?.savedProviders[provider] !== undefined) await clearCloudChannelConfig(dir, provider);
+    }
+  }
+  const remaining = await listConfiguredChannels(dir);
+  if (remaining.length === 0) {
+    await fs.rm(file, { force: true });
+    return { removed: true, hasRemaining: false, transport: channel };
+  }
+  const current = await readTransportPointer(dir);
+  const transport = current === channel || !remaining.includes(current) ? remaining[0]! : current;
+  await writeSyncConfigTransport(dir, transport);
+  return { removed: true, hasRemaining: true, transport };
 }
 
 /**
@@ -492,6 +572,11 @@ export interface CloudS3ChannelConfig {
   accessKeyId: string;
   /** path-style 寻址开关（缺省取变体默认：MinIO true，其余 false） */
   pathStyle?: boolean;
+  /**
+   * 显式覆盖变体默认签名方言（缺省 = provider 变体默认；'aws4' = AWS SigV4，'oss4' = 阿里云 OSS4）。
+   * 非法的值在解析期被忽略（回落变体默认）—— 该字段是高级覆盖，不是配置错误来源。
+   */
+  dialectId?: SigV4DialectId;
   /** 密钥是否已在 DSH credentials 里（**只回标记，不回值**） */
   secretStored?: boolean;
 }
@@ -508,6 +593,29 @@ export interface CloudGistChannelConfig {
   secretStored?: boolean;
 }
 
+/**
+ * s3 通道（SYNC_CHANNELS 的 's3'）的配置 = 具体兼容商的非密配置 + provider 身份。
+ * 密钥值绝不在此（只在 DSH credentials 的 cloudSecretRef(provider) 槽位）。
+ */
+export interface S3ChannelConfig extends CloudS3ChannelConfig {
+  /** 具体 S3 兼容商（s3 / oss / cos / minio / kodo） */
+  provider: S3CompatProvider;
+}
+
+/** gist 通道（SYNC_CHANNELS 的 'gist'）的配置：非密字段；token 只在 DSH credentials。 */
+export type GistChannelConfig = CloudGistChannelConfig;
+
+/**
+ * 每个云端点**通道**当前选用的 provider（保存即选定；断开即移除）。
+ * s3 通道 → 五家兼容商之一；gist 通道 → 恒 'gist'。
+ * 与 savedProviders 的分工：savedProviders 是「切换 provider 时能自动回填」的记忆，
+ * 本字段回答「这条通道现在用哪一个」。
+ */
+export interface CloudActiveProviders {
+  s3?: S3CompatProvider;
+  gist?: GistProvider;
+}
+
 /** 按通道分别保存的非密配置（照 cloud-sync 的 savedProviders 模式）。 */
 export interface CloudSavedProviders {
   s3?: CloudS3ChannelConfig;
@@ -522,6 +630,8 @@ export interface CloudSavedProviders {
 export interface CloudSyncConfig {
   schemaVersion: number;
   savedProviders: CloudSavedProviders;
+  /** 每条云端点通道当前选用的 provider（缺省 = 旧文件，读侧按「唯一已保存者」推断） */
+  active?: CloudActiveProviders;
 }
 
 /** 某通道读出来的配置（按 provider 收窄的联合）。 */
@@ -562,6 +672,8 @@ export interface CloudChannelWriteInput {
   prefix?: string;
   accessKeyId?: string;
   pathStyle?: boolean;
+  /** 显式覆盖签名方言（可缺省；仅 'aws4' | 'oss4' 被接受） */
+  dialectId?: SigV4DialectId;
   gistId?: string;
   apiBaseUrl?: string;
   filePrefix?: string;
@@ -603,6 +715,10 @@ export class CloudConfigError extends Error {
 const BUCKET_NAME_RE = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
 /** gist id：GitHub 的十六进制串 */
 const GIST_ID_RE = /^[0-9a-f]{5,64}$/i;
+/** 签名方言 id 守卫（与 src/sync/s3/sigv4.ts 的 SigV4DialectId 同集合；非法值忽略）。 */
+function isSigV4DialectId(value: unknown): value is SigV4DialectId {
+  return value === 'aws4' || value === 'oss4';
+}
 
 /** 端点校验（http(s)、无 userinfo、无 query/hash）；返回错误码或 null。 */
 export function validateCloudEndpoint(endpoint: string): CloudConfigIssueCode | null {
@@ -707,6 +823,7 @@ function parseS3Channel(raw: unknown): CloudS3ChannelConfig | null {
   const cfg: CloudS3ChannelConfig = { endpoint: endpoint.trim(), region: region.trim(), bucket: bucket.trim(), accessKeyId: accessKeyId.trim() };
   if (typeof o['prefix'] === 'string' && o['prefix'].trim() !== '') cfg.prefix = o['prefix'].trim();
   if (typeof o['pathStyle'] === 'boolean') cfg.pathStyle = o['pathStyle'];
+  if (isSigV4DialectId(o['dialectId'])) cfg.dialectId = o['dialectId'];
   if (o['secretStored'] === true) cfg.secretStored = true;
   // 注意：raw 里若混进 secretAccessKey/token 之类的键，这里**整体忽略**（读侧绝不回读密钥）
   return cfg;
@@ -761,7 +878,22 @@ export async function readCloudSyncConfig(dir: string): Promise<CloudSyncConfig 
   const o = parsed as Record<string, unknown>;
   const version = typeof o['schemaVersion'] === 'number' ? o['schemaVersion'] : CLOUD_SYNC_CONFIG_SCHEMA_VERSION;
   if (version !== CLOUD_SYNC_CONFIG_SCHEMA_VERSION) return null;
-  return { schemaVersion: version, savedProviders: parseCloudSavedProviders(o['savedProviders']) };
+  const active = parseCloudActive(o['active']);
+  return {
+    schemaVersion: version,
+    savedProviders: parseCloudSavedProviders(o['savedProviders']),
+    ...(active === undefined ? {} : { active }),
+  };
+}
+
+/** 解析 active 选择（未知/非法值一律丢弃；一个都没有 → undefined，读侧按单一已保存者推断）。 */
+function parseCloudActive(raw: unknown): CloudActiveProviders | undefined {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const o = raw as Record<string, unknown>;
+  const out: CloudActiveProviders = {};
+  if (isS3CompatProvider(o['s3'])) out.s3 = o['s3'];
+  if (isGistProvider(o['gist'])) out.gist = o['gist'];
+  return out.s3 === undefined && out.gist === undefined ? undefined : out;
 }
 
 /** 读取单条云端点通道的配置；该通道未配置/非法 → null。 */
@@ -903,14 +1035,19 @@ export async function writeCloudChannelConfig(
       ...(input.prefix !== undefined && input.prefix.trim() !== '' ? { prefix: normalizePrefix(input.prefix) } : {}),
       accessKeyId: (input.accessKeyId ?? '').trim(),
       ...(typeof input.pathStyle === 'boolean' ? { pathStyle: input.pathStyle } : {}),
+      ...(isSigV4DialectId(input.dialectId) ? { dialectId: input.dialectId } : {}),
       ...(secretStored ? { secretStored: true } : {}),
     };
   }
   const nextSaved = assignProvider(saved, provider, cfg);
+  // 「保存即选定」：写这条 provider 就把该通道的 active 指向它（切回其他 provider 时 savedProviders 仍留记忆）
+  const nextActive: CloudActiveProviders = { ...(existing?.active ?? {}) };
+  if (isGistProvider(provider)) nextActive.gist = 'gist';
+  else nextActive.s3 = provider;
   await fs.mkdir(dir, { recursive: true });
   await atomicWriteFile(
     file,
-    stringifyJsonSafe({ schemaVersion: CLOUD_SYNC_CONFIG_SCHEMA_VERSION, savedProviders: nextSaved }, { space: 2 }),
+    stringifyJsonSafe({ schemaVersion: CLOUD_SYNC_CONFIG_SCHEMA_VERSION, savedProviders: nextSaved, active: nextActive }, { space: 2 }),
     { mode: 0o600 },
   );
   return isGistProvider(provider)
@@ -946,6 +1083,12 @@ export async function clearCloudChannelConfig(
   if (!present) return { removed: false, hasRemaining: Object.keys(saved).length > 0 };
   if (provider === GIST_PROVIDER) delete saved.gist;
   else delete saved[provider];
+  const active: CloudActiveProviders = { ...(existing.active ?? {}) };
+  if (isGistProvider(provider)) {
+    if (active.gist !== undefined) delete active.gist;
+  } else if (active.s3 === provider) {
+    delete active.s3;
+  }
   const remaining = Object.keys(saved).length > 0;
   if (!remaining) {
     await fs.rm(file, { force: true });
@@ -953,9 +1096,94 @@ export async function clearCloudChannelConfig(
   }
   await atomicWriteFile(
     file,
-    stringifyJsonSafe({ schemaVersion: CLOUD_SYNC_CONFIG_SCHEMA_VERSION, savedProviders: saved }, { space: 2 }),
+    stringifyJsonSafe({
+      schemaVersion: CLOUD_SYNC_CONFIG_SCHEMA_VERSION,
+      savedProviders: saved,
+      ...(active.s3 === undefined && active.gist === undefined ? {} : { active }),
+    }, { space: 2 }),
     { mode: 0o600 },
   );
   return { removed: true, hasRemaining: true };
+}
+
+
+/* ------------------------------------------------------------------------------------------------
+ * 云端点通道 → SyncConfig 投影（S3 兼容系 / gist）
+ * ---------------------------------------------------------------------------------------------- */
+
+/**
+ * s3 通道当前选用的兼容商：
+ *  - 有 active.s3 → 用它（且必须仍有已保存配置）；
+ *  - 旧文件（无 active）→ 只有**唯一一家**已保存时据此推断，多家并存时为 null（不猜）。
+ */
+export async function readActiveS3Provider(dir: string): Promise<S3CompatProvider | null> {
+  const all = await readCloudSyncConfig(dir);
+  if (all === null) return null;
+  const active = all.active?.s3;
+  if (active !== undefined) return all.savedProviders[active] === undefined ? null : active;
+  const present = S3_COMPAT_PROVIDERS.filter((p) => all.savedProviders[p] !== undefined);
+  return present.length === 1 ? present[0]! : null;
+}
+
+/** s3 通道的配置投影（未配置 → null）；provider 由 active 决定。 */
+async function readS3ChannelConfig(dir: string): Promise<S3ChannelConfig | null> {
+  const provider = await readActiveS3Provider(dir);
+  if (provider === null) return null;
+  const cfg = await readCloudChannelConfig(dir, provider);
+  if (cfg === null || cfg.provider === GIST_PROVIDER) return null;
+  return { provider, ...cfg.config };
+}
+
+/** gist 通道的配置投影（未配置 → null）。 */
+async function readGistChannelConfig(dir: string): Promise<GistChannelConfig | null> {
+  const cfg = await readCloudChannelConfig(dir, GIST_PROVIDER);
+  return cfg === null || cfg.provider !== GIST_PROVIDER ? null : cfg.config;
+}
+
+/**
+ * 当前仍配置的通道清单（git/webdav 命名空间 ∪ 云端点已保存的 provider），顺序 = SYNC_CHANNELS。
+ * 供路由层判断「还有没有其他通道可用」与断开后回落活动通道。
+ */
+export async function listConfiguredChannels(dir: string): Promise<SyncTransportType[]> {
+  const both = await readBothNamespaces(path.join(dir, SYNC_CONFIG_FILE));
+  const cloud = await listCloudConfiguredProviders(dir);
+  const out: SyncTransportType[] = [];
+  if (both.git !== undefined) out.push('git');
+  if (both.webdav !== undefined) out.push('webdav');
+  if (cloud.some((p) => isS3CompatProvider(p))) out.push('s3');
+  if (cloud.includes(GIST_PROVIDER)) out.push('gist');
+  return out;
+}
+
+/** 读 sync-config.json 的活动通道指针（读不到 → git，与 readFullSyncConfig 同口径）。 */
+async function readTransportPointer(dir: string): Promise<SyncTransportType> {
+  try {
+    const raw = await fs.readFile(path.join(dir, SYNC_CONFIG_FILE), 'utf8');
+    const parsed = parseJsonSafe(raw);
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parseSyncChannel((parsed as Record<string, unknown>)['transport']) ?? 'git';
+    }
+  } catch { /* 读不到 → 缺省 git */ }
+  return 'git';
+}
+
+/** 写 sync-config.json（活动通道 + git/webdav 命名空间；云端点配置不在此文件）。 */
+async function writeSyncConfigFile(
+  dir: string,
+  namespaces: { git?: GitConfig; webdav?: WebDavConfig },
+  transport: SyncTransportType,
+): Promise<void> {
+  await fs.mkdir(dir, { recursive: true });
+  const payload: Record<string, unknown> = { schemaVersion: SYNC_CONFIG_SCHEMA_VERSION, transport };
+  if (namespaces.git !== undefined) payload.git = namespaces.git;
+  if (namespaces.webdav !== undefined) payload.webdav = namespaces.webdav;
+  await atomicWriteFile(path.join(dir, SYNC_CONFIG_FILE), stringifyJsonSafe(payload, { space: 2 }), { mode: 0o600 });
+}
+
+/** 只更新 sync-config.json 的活动通道指针，原样保留 git/webdav 命名空间。 */
+async function writeSyncConfigTransport(dir: string, transport: SyncTransportType): Promise<void> {
+  const file = path.join(dir, SYNC_CONFIG_FILE);
+  const existing = await readBothNamespaces(file);
+  await writeSyncConfigFile(dir, { git: existing.git, webdav: existing.webdav }, transport);
 }
 

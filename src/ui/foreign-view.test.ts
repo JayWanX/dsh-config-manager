@@ -2,10 +2,10 @@
  * foreign-view 测试：检测结果 → 界面行的纯函数映射（t17）。
  *
  * 钉住四条最容易悄悄坏掉的纪律：
- *  ① **码全量映射**：27 个冻结 ForeignSkipCode 逐个有字典键，且键在 uiZh 里真实存在
+ *  ① **码全量映射**：冻结 ForeignSkipCode 逐个有字典键，且键在 uiZh 里真实存在
  *     （缺一个 = 界面上冒出一个裸机器码，而用户不知道那是什么）；
  *  ② **未检测到不是错误**：badge 必须是 info（写成 error 会让用户以为自己的机器坏了）；
- *  ③ **未知来源不编造**：非六来源 id 显示「未识别的来源」+ 保留原始 id；
+ *  ③ **未知来源不编造**：非冻结词表 id 显示「未识别的来源」+ 保留原始 id；
  *  ④ **未检测到 ≠ 空**：empty 只对 found=true 成立（否则「没装」会被读成「装了但读不出来」）。
  */
 import test from 'node:test';
@@ -29,26 +29,26 @@ import type { UiTextKey } from './i18n.ts';
 const zh = makeUiT('zh');
 const en = makeUiT('en');
 
-/** 冻结码全量（与 src/foreign/types.ts 的 ForeignSkipCode 同集；此处显式抄一份是为了
- *  「漏配文案」在测试里立刻可见，而不是被动等编译器）。 */
-const ALL_CODES: ForeignSkipCode[] = [
-  'unsupported-hooks', 'unsupported-commands', 'credentials-not-migrated',
-  'skill-missing-file', 'skill-invalid-frontmatter', 'skill-invalid-name',
-  'mcp-server-empty', 'mcp-type-sse-coerced', 'mcp-credential-redacted',
-  'source-unreadable', 'session-format-version-unknown', 'session-format-unsupported',
-  'session-missing-cwd', 'session-unsafe-id', 'session-empty', 'session-unparsable',
-  'unsupported-session-record', 'session-id-conflict', 'skill-id-conflict',
-  'sessions-not-migrated', 'memory-report-only', 'skill-category-flattened',
-  'legacy-rules-file', 'instructions-merged', 'instructions-override-selected',
-  'source-empty-file', 'source-location-overridden',
-];
+/**
+ * 冻结码全量 —— **从真实来源派生，绝不手抄**。
+ *
+ * `FOREIGN_SKIP_KEY` 的类型是 `Record<ForeignSkipCode, UiTextKey>`（不是 Partial）：
+ * 新增码而忘了配键 = **编译失败**，所以 `Object.keys()` 就是 `ForeignSkipCode` 的运行期全量。
+ * 此前这里手抄 27 个码并断言 `length === 27`，types.ts 加到 29 码后**不会红**（断言的只是
+ * 它自己抄的那份）—— 那正是本仓库一路在防的「假绿」。
+ */
+const ALL_CODES: readonly ForeignSkipCode[] = Object.keys(FOREIGN_SKIP_KEY) as ForeignSkipCode[];
 
 function src(overrides: Partial<ForeignSourceStatusInput> = {}): ForeignSourceStatusInput {
   return { id: 'claude-code', found: true, paths: ['.claude/settings.json'], skipped: [], ...overrides };
 }
 
-test('foreign-view：27 个冻结码逐个有字典键，且键在字典里真实存在（缺一个即裸机器码）', () => {
-  assert.equal(ALL_CODES.length, 27, '冻结码应为 27 个；本清单与 types.ts 漂移时此断言先红');
+test('foreign-view：冻结码逐个有字典键，且键在字典里真实存在（缺一个即裸机器码）', () => {
+  assert.ok(ALL_CODES.length > 0, '码集不能为空（否则本用例形同虚设）');
+  // 正向核对：字典里以 foreign.skip. 开头的键必须与码集**一一对应**
+  // （少一个 = 界面显示裸机器码；多一个 = 删了码却没删文案）。
+  const dictCodes = Object.keys(uiZh).filter((k) => k.startsWith('foreign.skip.')).sort();
+  assert.deepEqual(ALL_CODES.map((c) => 'foreign.skip.' + c).sort(), dictCodes, '字典里的 foreign.skip.* 键必须与冻结码集逐项一致');
   for (const code of ALL_CODES) {
     const key = FOREIGN_SKIP_KEY[code];
     assert.equal(key, 'foreign.skip.' + code, code + ' 的键形必须是 foreign.skip.<code>');
@@ -78,8 +78,15 @@ test('foreign-view：skip 行保留 origin 与 count（有值才带，零/空不
   assert.equal(bare.count, undefined, 'count=0 不占位（不谎报有 0 项）');
 });
 
-test('foreign-view：六来源显示名走字典，未知 id 不编造（保留原始 id）', () => {
-  const ids = ['claude-code', 'hermes', 'cursor', 'codex', 'copilot', 'antigravity'];
+test('foreign-view：30 来源显示名走字典，未知 id 不编造（保留原始 id）', () => {
+  // 这个 30 项字面量清单是**故意的**：source-registry.test.ts 拿它当单一事实源的反查锚点，
+  // 不是手抄漂移（顺序与 source-modules.ts 的形状表逐项一致）。
+  const ids = [
+    'claude-code', 'hermes', 'cursor', 'codex', 'copilot', 'antigravity',
+    'gemini', 'reasonix', 'opencode', 'mimocode', 'zcode', 'grokbuild', 'openclaw', 'pi',
+    'kimi', 'kilocode', 'qoder', 'chatgpt', 'workbuddy', 'qwen', 'continue', 'cline',
+    'goose', 'dsh4', 'zed', 'crush', 'teleagent', 'trae', 'vibe', 'dsh',
+  ];
   for (const id of ids) {
     assert.ok(isKnownForeignSource(id), id + ' 必须属于冻结词表');
     const row = foreignSourceRow(src({ id }), zh);

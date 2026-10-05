@@ -140,10 +140,17 @@ test('契约：形状非法（未知来源 id / 空 labelKey / 缺 detect 或 bu
 
 /* ---------------- 3. 来源 id 词表 ---------------- */
 
-test('契约：来源 id 词表恰为六来源，顺序稳定，未知值不被当成来源', () => {
-  assert.deepEqual([...FOREIGN_SOURCE_IDS], ['claude-code', 'hermes', 'cursor', 'codex', 'copilot', 'antigravity']);
+test('契约：来源 id 词表恰为 30 来源，顺序稳定，未知值不被当成来源', () => {
+  assert.deepEqual([...FOREIGN_SOURCE_IDS], [
+    'claude-code', 'hermes', 'cursor', 'codex', 'copilot', 'antigravity',
+    'gemini', 'reasonix', 'opencode', 'mimocode', 'zcode', 'grokbuild', 'openclaw', 'pi',
+    'kimi', 'kilocode', 'qoder', 'chatgpt', 'workbuddy', 'qwen', 'continue', 'cline',
+    'goose', 'dsh4', 'zed', 'crush', 'teleagent', 'trae', 'vibe', 'dsh',
+  ],
+  );
   for (const id of FOREIGN_SOURCE_IDS) assert.ok(isForeignSourceId(id), id);
-  for (const bad of ['claude', 'Claude-Code', '', 'foreign', 'gemini']) {
+  // 'gemini' 曾是这里的「非法样本」，档 B 起它是真来源 —— 非法样本必须用真正不存在的 id
+  for (const bad of ['claude', 'Claude-Code', '', 'foreign', 'gemini-code', 'no-such-source']) {
     assert.equal(isForeignSourceId(bad), false, bad + ' 不得被当成来源 id');
   }
 });
@@ -187,7 +194,7 @@ test('契约：外来源单元 id → foreign:<source>:<section>:<unit>，且不
     null,
   );
 
-  // 六个来源 × 若干分区都必须成立（冻结的是形态，不是个别样例）
+  // 30 个来源 × 若干分区都必须成立（冻结的是形态，不是个别样例）
   for (const source of FOREIGN_SOURCE_IDS) {
     for (const section of ['mcp', 'skills', 'agentInstructions', 'sessions', 'workspaces'] as const) {
       const one = foreignUnitId(source, section, 'u');
@@ -233,14 +240,14 @@ test('契约：冲突码与冲突策略已冻结，且不存在覆盖分支', ()
 });
 
 
-/* ---------------- 6. 六个内置来源的装配（t22 收口） ---------------- */
+/* ---------------- 6. 30 个内置来源的装配（t22 收口；档 B 起含 24 个会话类来源） ---------------- */
 
 /** 已入库的 Cursor fixture（用户级 basic/.cursor + 项目级 basic/project/.cursor） */
 const CURSOR_FIXTURE = path.join(import.meta.dirname, 'fixtures', 'cursor', 'basic');
 
-test('装配：六个内置来源全部注册，id 与冻结词表逐字一致（不靠两份清单各自维护）', () => {
+test('装配：30 个内置来源全部注册，id 与冻结词表逐字一致（不靠两份清单各自维护）', () => {
   const reg = createBuiltinForeignSourceRegistry();
-  assert.equal(reg.size, 6);
+  assert.equal(reg.size, 30);
   assert.deepEqual([...reg.ids()], [...FOREIGN_SOURCE_IDS], '注册顺序与 id 必须与 §8.1 词表一致');
   for (const source of reg.list()) {
     assert.equal(source.labelKey, 'foreign.source.' + source.id, source.id);
@@ -257,7 +264,7 @@ test('装配：可重复装配且互不共享实例（宿主路由与 CLI 各自
   assert.equal(a.size, b.size);
 });
 
-test('装配：未知 id 的稳定错误带六个可用来源（CLI/路由直接回显给用户）', () => {
+test('装配：未知 id 的稳定错误带全部可用来源（CLI/路由直接回显给用户）', () => {
   const reg = createBuiltinForeignSourceRegistry();
   let caught: unknown;
   try {
@@ -270,11 +277,11 @@ test('装配：未知 id 的稳定错误带六个可用来源（CLI/路由直接
   assert.deepEqual((caught as ForeignSourceError).available, [...FOREIGN_SOURCE_IDS]);
 });
 
-test('检测：空 home 下六来源一律 found=false、绝不抛，且结果里没有绝对路径', async () => {
+test('检测：空 home 下 30 来源一律 found=false、绝不抛，且结果里没有绝对路径', async () => {
   const emptyHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'foreign-detect-empty-'));
   try {
     const statuses = await detectForeignSources(createBuiltinForeignSourceRegistry(), { homeDir: emptyHome, env: {} });
-    assert.equal(statuses.length, 6);
+    assert.equal(statuses.length, 30);
     for (const s of statuses) {
       assert.equal(s.found, false, s.id + ' 在空 home 下不得被判为已安装');
       assert.deepEqual([...s.paths], [], s.id);

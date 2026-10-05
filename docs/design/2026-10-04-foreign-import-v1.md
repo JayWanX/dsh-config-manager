@@ -131,11 +131,13 @@ Claude Code 的对话**不能直接搬**，必须转码 —— 两边落盘形�
   合并需要新的文本合并语义与回滚策略，风险远大于收益。
 - 是否允许用户**显式选择**导入 `settings.env` 的凭据值（写进 DSH credentials）？v1 一律不导。
 
-## 8. 六来源导入契约（**冻结**，t12，2026-10-04）
+## 8. 30 来源导入契约（6 配置类 v1 冻结 + 24 会话类档 B，2026-10-05）
 
-> 这一节是**实现契约**：六个来源（claude-code / hermes / cursor / codex / copilot / antigravity）
-> 的并行实现、CLI 接线与 GUI 入口都以此为唯一依据。改这里 = 改契约，必须同步
-> src/foreign/types.ts 与 src/foreign/registry.ts 的护栏测试（src/foreign/registry.test.ts）。
+> 这一节是**实现契约**：v1 的六个配置类来源（claude-code / hermes / cursor / codex / copilot /
+> antigravity）与档 B 新增的 **24 个会话类来源**（清单与顺序见 §8.2.2）的并行实现、CLI 接线与
+> GUI 入口都以此为唯一依据。改这里 = 改契约，必须同步 src/foreign/types.ts、
+> src/foreign/source-modules.ts、src/foreign/truth-table.ts 的护栏测试
+> （src/foreign/registry.test.ts / source-registry.test.ts / truth-table.test.ts / file-budget.test.ts）。
 
 ### 8.1 来源注册表接口（冻结）
 
@@ -161,13 +163,47 @@ Claude Code 的对话**不能直接搬**，必须转码 —— 两边落盘形�
 4. **重复注册是装配期错误**：先注册的原样保留，后注册的抛 duplicate-source（不得静默覆盖）。
 5. **不产出用户可见字符串**：只有 labelKey 与机器码；文案由 7 套字典映射（i18n 铁律）。
 
-### 8.2 六来源路径真值表（三平台）
+### 8.2 30 来源路径真值表（三平台）
+
+**真值表数据源 = `src/foreign/truth-table.ts` 的 `FOREIGN_TRUTH_TABLES`（30 条，顺序与
+`source-modules.ts` / `types.ts` 的 `ForeignSourceId` union 同序）**；`truth-table.test.ts` 拿它与各来源的
+`probePaths()` 逐平台交叉核对 —— 注释、数据、实现三者不一致即红灯。下表是它的可读投影。
 
 **取证标注**：**实测取证** = 2026-10-04 在本机（Windows）实际观察到该路径/键名（只记录路径与键名，
 **不记录任何值**）；**文档取证** = 官方文档（链接见行尾）。本机没有该来源的（cursor / codex /
 copilot）只能文档取证，其验收必须显式标注「文档取证、未经真机验证」。
 
 公共约定：~ = Windows 的 %USERPROFILE%，macOS/Linux 的 $HOME。
+
+**本批三处订正（此前文档 / 任务表写错，以下为准）**：
+
+- **trae 是 SQLite 源，不是文件源**：会话在 `&lt;User&gt;/{globalStorage,workspaceStorage/**}/state.vscdb`
+  的 **ItemTable**（键 → 值；值可能是 TEXT 也可能是 BLOB）。初版真值表按「文件」归类，错。
+  实现复用 `sqlite.ts` 的只读能力探测，因此也继承 known-gaps **G-32** 的零写入处置。
+- **vibe 不是 VS Code 根**：位置是 `&lt;home&gt;/.vibe/logs/session` + 每会话目录里的 `messages.jsonl`，
+  **没有任何平台分支**；且 `$VIBE_HOME` 是**追加**（env 根与 `~/.vibe` 根**并存**），**不是替换**。
+  初版把它写成 VS Code User 根（并怀疑是 SQLite），错。
+- **gemini 是单对象 JSON，不是 JSONL**：`&lt;home&gt;/.gemini/history/&lt;slot&gt;/chats/session-*.json`
+  顶层是 `{sessionId, projectHash, startTime, directories[], messages[]}` 的**一个对象**；
+  按 JSONL 逐行解析会整份失败（单测用格式化多行夹具钉住）。
+
+**取证边界（「已知不知道」，与实现一起保留，不得美化）**：
+
+- **字段级 schema 未取证**：SQLite 家族的库（opencode / mimocode / kilocode / zcode / teleagent /
+  goose / zed / crush）与 **trae 的会话容器**，四份调研报告都只给了**库路径与表名**，没给字段级
+  schema。实现因此**一律不写死列名**：`PRAGMA table_info` 自适应列 + 结构自证（表 / 关键列签名），
+  认不出来就返回 null 或报码，绝不猜。
+- **trae 只有 `memento/icube-ai-agent-storage` 一个 ItemTable 键有确证**；另有「4 个回退键」但
+  **四份报告都没给键名** → 用保守键名模式兜底（含 `icube`，或像会话键且明确不是 UI 键）；
+  解析不出如实报 `chat-storage-key-not-found`，绝不假装成功。
+- **chatgpt 没有 cwd 字段**：导出包里的记录不带 cwd ⇒ 唯一允许的推导是**显式路径所在目录**，
+  并如实报 `session-cwd-derived`（进 skipped，绝不静默）；它同时**没有自动根**（`defaults: []`），
+  本机自动探测恒 0 命中，恒报 `source-needs-explicit-path`。
+- **qwen 的 `&lt;slug&gt;` 编码语义未取证**：qoder 明写 `/`→`-`、workbuddy 明写哈希不可逆，而 qwen
+  四份报告只写 `&lt;slug&gt;` ⇒ **不据 slug 推导 cwd**（推导 = 猜）；记录自身没有 cwd 时按
+  `session-missing-cwd` 跳过并报码。
+
+#### 8.2.1 六个配置类来源（v1，冻结）
 
 | 来源 | 位置（相对 home） | Windows | macOS | Linux | 取证 |
 |---|---|---|---|---|---|
@@ -214,6 +250,40 @@ copilot）只能文档取证，其验收必须显式标注「文档取证、未�
 - Antigravity 的两个 mcp_config.json **本机都是 0 字节** → 0 字节必须报 source-empty-file，
   **绝不产出空 mcp 分区**、绝不抛异常。
 
+#### 8.2.2 24 个会话类来源（档 B，2026-10-05）
+
+令牌：`&lt;home&gt;` = 用户 home；`&lt;appdata&gt;` = Windows `%APPDATA%` / macOS `~/Library/Application Support` / Linux `$XDG_CONFIG_HOME|~/.config`；`&lt;xdgdata&gt;` = Windows `%LOCALAPPDATA%` / macOS `~/Library/Application Support` / Linux `$XDG_DATA_HOME|~/.local/share`。
+证据强度直接取自真值表、**不得美化**：全表 30 条 = measured 5（claude-code / hermes / antigravity / dsh / dsh4）+ fixture 23 + documented 2（copilot / chatgpt）。
+
+| 来源 | 默认位置（模板） | 平台差异 / 动态面 | 环境变量（replace / append） | 证据 |
+|---|---|---|---|---|
+| gemini | `&lt;home&gt;/.gemini/history` | **单对象 JSON**：`&lt;slot&gt;/chats/session-*.json`（顶层 `{sessionId, projectHash, startTime, directories[], messages[]}`；见「订正」） | — | fixture |
+| reasonix | `&lt;home&gt;/.reasonix/sessions`（win32 另加 `&lt;appdata&gt;/reasonix`） | 第二根只在 win32 且 `$APPDATA` 存在时加入；`&lt;stem&gt;.jsonl` + 伴生 `&lt;stem&gt;.meta.json` | APPDATA（**append**，仅 win32） | fixture |
+| opencode | `&lt;home&gt;/.local/share/opencode/opencode.db` | 三平台同（**win32 也是 ~/.local/share**，不是 %APPDATA%）；V1 表 session/message/part，V2 表按 PRAGMA 自适应 | — | fixture |
+| mimocode | `&lt;home&gt;/.local/share/mimocode/mimocode.db` | opencode fork，三表同构 | — | fixture |
+| zcode | `&lt;home&gt;/.zcode/cli/db/db.sqlite` | session / message / part 三表 | — | fixture |
+| grokbuild | `&lt;home&gt;/.grok/sessions` + `&lt;home&gt;/.grok/archived_sessions`（**双根**） | `&lt;encodeURIComponent(cwd)&gt;/&lt;sessionId&gt;/{summary.json, chat_history.jsonl}` | GROK_HOME（replace） | fixture |
+| openclaw | `&lt;home&gt;/.openclaw/agents` | `agents/&lt;agent&gt;/sessions/*.jsonl` + 同目录 `sessions.json` 索引（**只贡献显示名**） | — | fixture |
+| pi | `&lt;home&gt;/.pi/agent/sessions` | 列表首行是会话头（不变成消息）；目录名携带 cwd：`--&lt;cwd&gt;--/&lt;timestamp&gt;_&lt;uuid&gt;.jsonl` | — | fixture |
+| kimi | `&lt;home&gt;/.kimi/sessions` + `&lt;home&gt;/.kimi-code/sessions`（**双根两代布局**） | 旧目录名 = md5(workdir)，靠 `kimi.json` 反解；新布局 `&lt;workspaceId&gt;/&lt;sid&gt;/agents/main/wire.jsonl` | — | fixture |
+| kilocode | `&lt;home&gt;/.local/share/kilo/kilo.db` | opencode 家族三表 | — | fixture |
+| qoder | `&lt;home&gt;/.qoder/projects` | `&lt;encoded-project&gt;/&lt;sessionId&gt;.jsonl`；子代理在 `subagents/*.jsonl`，本版**只计数不迁移**（`unsupported-session-record`） | — | fixture |
+| chatgpt | **无自动根**（`defaults: []`） | 只能显式给路径；本机自动探测恒 0 命中，恒报 `source-needs-explicit-path` | — | documented |
+| workbuddy | `&lt;home&gt;/.workbuddy/projects` | `&lt;project-hash&gt;/&lt;session-uuid&gt;.jsonl`（目录名 = cwd 哈希，**不可逆**）；cwd 只取记录字段，没有就跳过 | — | fixture |
+| qwen | `&lt;home&gt;/.qwenworkcn/projects` | `&lt;slug&gt;/&lt;session-uuid&gt;.jsonl`；slug 编码语义未取证（见「取证边界」），不据它推导 cwd | — | fixture |
+| continue | `&lt;home&gt;/.continue/sessions` | `&lt;sessionId&gt;.json`（单对象）+ 同目录 `sessions.json` 索引 | CONTINUE_GLOBAL_DIR（**replace** → `&lt;dir&gt;/sessions`；VS Code / JetBrains / CLI 共用一份） | fixture |
+| cline | `&lt;home&gt;/.cline/data/sessions` + `&lt;appdata&gt;/Code/User/globalStorage/saoudrizwan.claude-dev` + `Code - Insiders` + `VSCodium` 三个 legacy 根 | 现代 `&lt;sessionId&gt;/{&lt;id&gt;.json,&lt;id&gt;.messages.json,&lt;id&gt;.compaction.json}`；legacy `tasks/&lt;id&gt;/{api_conversation_history,ui_messages}.json` | CLINE_SESSION_DATA_DIR / CLINE_DATA_DIR / CLINE_DIR / CLINE_LEGACY_GLOBAL_STORAGE_DIR / CLINE_VSCODE_GLOBAL_STORAGE_DIR（全 **replace**；两个 legacy override 命中即**只返回该一根**） | fixture |
+| goose | win32 `&lt;appdata&gt;/Block/goose/data/sessions/sessions.db`；darwin `~/Library/Application Support/Block/goose/sessions/sessions.db`；linux `&lt;home&gt;/.local/share/goose/sessions/sessions.db` | 三平台分支不同；`sessions{working_dir}` + `messages{content_json}`（旧 `sessions/*.jsonl` **刻意不读**） | GOOSE_PATH_ROOT（replace，**仅绝对路径** → `&lt;root&gt;/data`） | fixture |
+| dsh4 | `&lt;home&gt;/.dsh/sessions` | V4 代次；`&lt;projectKey&gt;/&lt;session&gt;/session.v4.jsonl.zstd`，**逐字节直通**（不重编码） | DSH_HOME（replace → `&lt;home&gt;/sessions`） | measured |
+| zed | win32 `&lt;xdgdata&gt;/Zed/threads/threads.db`（目录名**大写 Zed**）；darwin `~/Library/Application Support/Zed/threads/threads.db`；linux `&lt;xdgdata&gt;/zed/threads/threads.db` | 单表 `threads(id,summary,updated_at,data_type,data,parent_id,folder_paths,created_at)`；`data` BLOB 恒 zstd | XDG_DATA_HOME（replace，**仅 linux**，仅绝对路径） | fixture |
+| crush | `&lt;xdgdata&gt;/crush/projects.json`（用户级只放注册表） | **库在项目里**：`&lt;项目&gt;/.crush/crush.db`，每项目一个库，靠注册表 + 显式 projectDir 探测；缺库报 `crush-db-missing` | CRUSH_GLOBAL_DATA（replace，仅绝对）/ XDG_DATA_HOME（replace，仅 linux，仅绝对） | fixture |
+| teleagent | `&lt;home&gt;/.local/share/TeleAgent/users` | **每账户一个库**：`users/&lt;account&gt;/teleagent.db`（opencode 三表同构） | TELEAGENT_HOME（replace → `&lt;home&gt;/users/&lt;account&gt;/teleagent.db`） | fixture |
+| trae | `&lt;appdata&gt;/Trae/User`、`&lt;appdata&gt;/Trae CN/User`、`&lt;appdata&gt;/TRAE SOLO CN/User`、`&lt;appdata&gt;/TRAE SOLO/User`（**4 发行版**） | **SQLite**：`&lt;User&gt;/{workspaceStorage,globalStorage/**}/state.vscdb` 的 ItemTable（见「订正」与「取证边界」）；`$APPDATA` 缺失即跳过 | XDG_CONFIG_HOME（replace，仅 linux，仅绝对） | fixture |
+| vibe | `&lt;home&gt;/.vibe/logs/session` | **无平台分支**；`session_&lt;ts&gt;_&lt;shortId&gt;/{meta.json, messages.jsonl}` | VIBE_HOME（**append**：env 根与 `~/.vibe` 根**并存**） | fixture |
+| dsh | `&lt;home&gt;/.dsh/sessions` | V3 族（v0–v3，按首帧 `header.version` 判定）；`&lt;projectKey&gt;/&lt;session&gt;/session.jsonl.zstd`，**逐字节直通** | DSH_HOME（replace → `&lt;home&gt;/sessions`） | measured |
+
+两条实现结论：① **dsh / dsh4 是同一扫描器与同一装配器的两代次视图**（`read-dsh.ts` + `dsh.ts` 的 `createDshLikeSource`），目标机 `SESSION_FORMAT_VERSION` 不匹配时**刻意一条都不产出**（DSH 会静默跳过非本 build 版本 → 会话列表消失）；② **JSONL / 单对象 JSON 的形态差异必须按源分别处理**（gemini / continue 是单对象，其余多数是 JSONL），按 JSONL 统一解析会把整份读失败。
+
 ### 8.3 单元 id 格式（冻结）
 
 **既有 DSH 单元 id（一字不改）**：
@@ -234,7 +304,7 @@ copilot）只能文档取证，其验收必须显式标注「文档取证、未�
 - **绝不进入 bundle 相对路径**，**绝不替换** DSH 单元 id：目标机适配器仍按 &lt;section&gt;:&lt;unit&gt; 计算，
   产物与不带来源标记的普通 bundle 完全一致（复用既有管道，不新增写入通道）。
 - 外部来源产出的**工作区记录 id** 沿用既有约定 &lt;sourceId&gt;:&lt;projectKey&gt;（v1 已落地
-  claude-code:&lt;projectKey&gt;，六个来源同一规则）。
+  claude-code:&lt;projectKey&gt;，**30 个来源同一规则**）。
 
 **不重叠是构造性的**（不是靠约定）：foreign 不在 15 个 SectionId 里，也不等于 plugin / patch /
 workspace。registry.test.ts 用真实样本**双向**断言：DSH id 恒非外来源形态，外来源 id 恒不落进任何
@@ -284,6 +354,8 @@ FOREIGN_CONFLICT_POLICY = 'skip-no-overwrite'（ForeignConflictPolicy 是**单�
   instructions-override-selected、source-empty-file、source-location-overridden（本次新增）。
 
 ### 8.6 六来源共同的安全不变量（与 §4 同源，逐来源点名）
+
+> 本节写于 v1（六个配置类来源）。第 **1 / 5 / 6** 条（凭据值绝不进包 / 只读 home 固定位置与字节上限 / 位置覆盖如实报告）对档 B 的 **24 个会话类来源同样适用**；第 2 / 3 / 4 条是 Hermes / Codex 的逐来源点名，不因新增来源而改变。
 
 1. **凭据值绝不进包**：.env、auth.json、mcp_oauth_tokens.json、MCP 的 env/headers、URL 的
    userinfo —— 过**导出侧同一个** defaultSecretScanner，只留字段名 + 引用名。

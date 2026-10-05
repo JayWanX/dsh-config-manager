@@ -13,7 +13,7 @@
  *  - resolveGeminiHome({ homeDir })：~/.gemini 的路径解析（三平台同形，无环境变量覆盖）
  *  - readAntigravity({ geminiDir })：直接对着一个已解析的 .gemini 目录读盘
  * 调参用 .gemini 目录而不是 homeDir：**位置解析与读盘解耦**，测试可以对着临时目录建
- * \`<任意目录>/config/mcp_config.json\`（绕开「点开头目录在测试环境里不好造」的问题），
+ * `<任意目录>/config/mcp_config.json`（绕开「点开头目录在测试环境里不好造」的问题），
  * 而且调用方（t22 的宿主装配）本来就要自己决定 homeDir。
  *
  * 本层只做「读得到就读、读不到如实报」，绝不猜、绝不截断；0 字节文件**绝不抛**：

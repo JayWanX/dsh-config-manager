@@ -99,6 +99,8 @@ import type { MutationLockPort } from './utils/env-lock.ts'
 import type { RecursiveListing } from './utils/recursive-walk.ts'
 import { GitTransport } from './sync/git/git-transport.ts'
 import { WebDavTransport } from './sync/webdav/webdav-transport.ts'
+import { S3Transport } from './sync/s3/s3-transport.ts'
+import { GistTransport } from './sync/gist/gist-transport.ts'
 import { DeviceFlowStore, GitHubAuthClient } from './sync/github-auth.ts'
 import { SyncEngine } from './sync/sync-engine.ts'
 import { SyncSessionStore } from './sync/sync-session.ts'
@@ -114,7 +116,7 @@ import { readAllAutosyncConfigs, readAutosyncConfig } from './sync/autosync-conf
 import type { AutosyncInterval, AutosyncRunStatus } from './sync/autosync-config.ts'
 import { appendAutosyncEntry } from './sync/sync-history.ts'
 import { MigrationStore, type MigrationKind, type MigrationResult, MIGRATION_HISTORY_DIR } from './core/migration-history.ts'
-import { readSyncConfig, validateRepoUrl, validateWebDavUrl, isWebDavConfig, channelOf, parseSyncChannel, SYNC_CHANNELS } from './sync/sync-config.ts'
+import { readSyncConfig, validateRepoUrl, validateWebDavUrl, isWebDavConfig, isS3Config, isGistConfig, channelOf, parseSyncChannel, SYNC_CHANNELS, GIST_PROVIDER, isS3CompatProvider, validateCloudChannelInput, cloudSecretRef } from './sync/sync-config.ts'
 import {
   resolveSessionFormatDisposition,
   sessionFormatAbortResponse,
@@ -1430,7 +1432,7 @@ export async function tryDecryptCredentials(
  * （见 W1 报告的重测配方），把结果落到这里；makeRoutes 里的 const routeEnv: RouteEnvInferred =
  * 注解保证两侧不漂移（新增依赖漏登记会在构造点报错）。
  */
-export type RouteEnvInferred = { sessionExportFetch: ((input: string, init: RequestInit) => Promise<Response>) | undefined; sessionExportPort: number | undefined; adapters: ConfigAdapter<unknown>[]; sessionHealth: { homeDir: string; targetFormatVersion: () => number | undefined; workspaceKeys: () => Promise<ReadonlySet<string>>; knownSessionIds: () => Promise<ReadonlySet<string>>; }; backupScheduler: BackupScheduler; bootSafetyAudit: () => Promise<BootSafetyReport>; cancelDecisionTimeoutMs: number; buildMarketSummary: (e: { url: string; addedAt: string; }) => Promise<MarketSummary>; credentials: CredentialProvider; dataDir: string; exportsDir: string; githubAuth: GitHubAuthClient; githubClientId: string | undefined; githubClientSecret: string | undefined; githubFlows: DeviceFlowStore; history: MigrationStore; host: ConfigManagerHostContext; itemCached: (url: string, itemId: string) => Promise<boolean>; knownSyncSectionIds: Set<SectionId>; makeImporter: () => Importer; makeMarketReader: () => GitMarketReader; makeRecoveryExecutors: (runId: string) => RecoveryExecutorFns; makeSyncEngine: (cfg: SyncConfig, engineOpts?: { includeOptInSections?: boolean; }) => SyncEngine; marketBootAutoRefreshed: { value: boolean; }; marketCacheIndex: (url: string) => string; marketDir: string; marketCacheItemDir: (url: string) => string; marketStarCache: StarCache; marketWorkDir: (url: string) => string; meGitHubRest: GitHubAuthRest; meService: MyRepoService; meTokenProvider: () => Promise<string>; msg: MsgFunc; prepareSync: (body: Record<string, unknown>) => Promise<SyncConfig>; profileLauncher: DshProfileLauncher; profileRuntime: DshProfileRuntimeRegistry; profiles: DshProfileManager; pruneStagedMarketZips: () => Promise<void>; readCachedIndexObj: (url: string) => Promise<MarketIndex | null>; recoveryOrchestrator: RecoveryOrchestrator; resolveSyncPassword: (ref: string) => Promise<string | undefined>; roots: string[]; runAbortControllers: Map<string, AbortController>; runCancels: Map<string, { signal: AbortController; settle: (d: 'rollback' | 'keep') => void; decided: boolean }>; runs: RunRegistry; scheduler: AutoSyncScheduler; selectionCache: Partial<Record<"git" | "webdav", SyncSelection>>; selectionHasOptInSections: (channel: SyncTransportType) => boolean; selectionView: (channel: SyncTransportType) => Promise<SelectionView>; selectionViewByChannel: () => Promise<Record<SyncTransportType, SelectionView>>; snapshotEntrySections: (snapshotDir: string) => Promise<string[]>; snapshotsDir: string; syncCredentialsByChannelView: () => Promise<Record<SyncTransportType, { encryptPasswordConfigured: boolean; decryptPasswordConfigured: boolean; }>>; syncDir: string; syncPasswordConfigured: (ref: string) => Promise<boolean>; syncSectionCatalog: { id: SectionId; displayName: string; portability: Portability; defaultIncluded: boolean; }[]; syncSessions: SyncSessionStore; tmpDir: string; tryAppendHistory: (raw: { kind: MigrationKind; result: MigrationResult; sections: string[]; operationId?: string; snapshotId?: string; runId?: string; source: 'api' | 'autosync' | 'backup-scheduler' | 'recovery' | 'cli' | 'internal'; summary: string; error?: string; }) => Promise<string | undefined>; withMutationGate: (op: string, handler: (req: IncomingMessage, res: ServerResponse, lockCtx?: MutationLockContext, journalCtx?: JournalRunContext) => Promise<void>, opts?: { journaled?: boolean; deferredSnapshot?: boolean; }) => ((req: IncomingMessage, res: ServerResponse) => Promise<void>); writeItemCache: (url: string, itemId: string, manifestRaw: string, zipBytes: Uint8Array) => Promise<void>; }
+export type RouteEnvInferred = { sessionExportFetch: ((input: string, init: RequestInit) => Promise<Response>) | undefined; sessionExportPort: number | undefined; adapters: ConfigAdapter<unknown>[]; sessionHealth: { homeDir: string; targetFormatVersion: () => number | undefined; workspaceKeys: () => Promise<ReadonlySet<string>>; knownSessionIds: () => Promise<ReadonlySet<string>>; }; backupScheduler: BackupScheduler; bootSafetyAudit: () => Promise<BootSafetyReport>; cancelDecisionTimeoutMs: number; buildMarketSummary: (e: { url: string; addedAt: string; }) => Promise<MarketSummary>; credentials: CredentialProvider; dataDir: string; exportsDir: string; githubAuth: GitHubAuthClient; githubClientId: string | undefined; githubClientSecret: string | undefined; githubFlows: DeviceFlowStore; history: MigrationStore; host: ConfigManagerHostContext; itemCached: (url: string, itemId: string) => Promise<boolean>; knownSyncSectionIds: Set<SectionId>; makeImporter: () => Importer; makeMarketReader: () => GitMarketReader; makeRecoveryExecutors: (runId: string) => RecoveryExecutorFns; makeSyncEngine: (cfg: SyncConfig, engineOpts?: { includeOptInSections?: boolean; }) => SyncEngine; marketBootAutoRefreshed: { value: boolean; }; marketCacheIndex: (url: string) => string; marketDir: string; marketCacheItemDir: (url: string) => string; marketStarCache: StarCache; marketWorkDir: (url: string) => string; meGitHubRest: GitHubAuthRest; meService: MyRepoService; meTokenProvider: () => Promise<string>; msg: MsgFunc; prepareSync: (body: Record<string, unknown>) => Promise<SyncConfig>; profileLauncher: DshProfileLauncher; profileRuntime: DshProfileRuntimeRegistry; profiles: DshProfileManager; pruneStagedMarketZips: () => Promise<void>; readCachedIndexObj: (url: string) => Promise<MarketIndex | null>; recoveryOrchestrator: RecoveryOrchestrator; resolveSyncPassword: (ref: string) => Promise<string | undefined>; roots: string[]; runAbortControllers: Map<string, AbortController>; runCancels: Map<string, { signal: AbortController; settle: (d: 'rollback' | 'keep') => void; decided: boolean }>; runs: RunRegistry; scheduler: AutoSyncScheduler; selectionCache: Partial<Record<SyncTransportType, SyncSelection>>; selectionHasOptInSections: (channel: SyncTransportType) => boolean; selectionView: (channel: SyncTransportType) => Promise<SelectionView>; selectionViewByChannel: () => Promise<Record<SyncTransportType, SelectionView>>; snapshotEntrySections: (snapshotDir: string) => Promise<string[]>; snapshotsDir: string; syncCredentialsByChannelView: () => Promise<Record<SyncTransportType, { encryptPasswordConfigured: boolean; decryptPasswordConfigured: boolean; }>>; syncDir: string; syncPasswordConfigured: (ref: string) => Promise<boolean>; syncSectionCatalog: { id: SectionId; displayName: string; portability: Portability; defaultIncluded: boolean; }[]; syncSessions: SyncSessionStore; tmpDir: string; tryAppendHistory: (raw: { kind: MigrationKind; result: MigrationResult; sections: string[]; operationId?: string; snapshotId?: string; runId?: string; source: 'api' | 'autosync' | 'backup-scheduler' | 'recovery' | 'cli' | 'internal'; summary: string; error?: string; }) => Promise<string | undefined>; withMutationGate: (op: string, handler: (req: IncomingMessage, res: ServerResponse, lockCtx?: MutationLockContext, journalCtx?: JournalRunContext) => Promise<void>, opts?: { journaled?: boolean; deferredSnapshot?: boolean; }) => ((req: IncomingMessage, res: ServerResponse) => Promise<void>); writeItemCache: (url: string, itemId: string, manifestRaw: string, zipBytes: Uint8Array) => Promise<void>; }
 
 /** 解密错误 → 用户可读文本：BAD_PASSWORD 只报「密码错误」（不泄内部细节），其余原文 */
 export function decryptErrorText(error: unknown, msg: MsgFunc): string {
@@ -1479,8 +1481,9 @@ interface RoutesDeps {
 /** 同步路由可预期的请求级错误（status 缺省 400；引擎/传输失败走 500）。
  * 继承 kit 的 RouteError → 错误→HTTP 映射全仓只有 writeRouteError 一份。 */
 export class SyncRouteError extends RouteError {
-  constructor(message: string, status: number = 400) {
-    super(message, status)
+  /** code：稳定机器码（如 cloud.endpointRequired），由 UI 映射进字典；缺省 = 无码。 */
+  constructor(message: string, status: number = 400, code?: string) {
+    super(message, status, code)
     this.name = 'SyncRouteError'
   }
 }
@@ -1507,7 +1510,11 @@ export async function parseSyncBody(
   body: Record<string, unknown>,
   deps: ParseSyncBodyDeps,
 ): Promise<SyncConfig> {
-  const transport = parseSyncChannel(body['transport']) ?? 'git'
+  const rawTransport = body['transport']
+  // 通道值解析：接受通道名（s3/gist）；也接受**具体兼容商**（oss/cos/minio/kodo）直接落到 s3 通道
+  const transport = parseSyncChannel(rawTransport) ?? (isS3CompatProvider(rawTransport) ? 's3' : 'git')
+  if (transport === 's3') return parseCloudS3Body(body, rawTransport, deps)
+  if (transport === 'gist') return parseCloudGistBody(body, deps)
   if (transport === 'webdav') {
     const url = typeof body['url'] === 'string' ? body['url'].trim() : ''
     if (url === '') throw new SyncRouteError('url is required for webdav')
@@ -1551,6 +1558,115 @@ export async function parseSyncBody(
     schemaVersion: 2,
     transport: 'git',
     git: { repoUrl },
+  }
+}
+
+/** 请求体字段 → 去空白字符串（非字符串 = 空）。 */
+function syncStr(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+/** 云端点密钥写入失败 → 可操作错误（**含 ref 名、绝不含密钥值**）。 */
+function cloudCredentialWriteError(ref: string, kind: string, error: unknown): SyncRouteError {
+  const reason = error instanceof Error ? error.message : String(error)
+  return new SyncRouteError(
+    kind + ' 写入 DSH credentials 失败：' + reason + '（请在 DSH 凭据管理里配置 ' + ref + ' 后重试）',
+    400,
+    'cloud.credentialsWriteFailed',
+  )
+}
+
+/**
+ * s3 通道请求体 → SyncConfig（provider 必填或由 transport 直接给出）。
+ * 非密字段按 validateCloudChannelInput 校验（错误码 = HTTP body.code，由 UI 映射字典）；
+ * 密钥**只写**进 DSH credentials 的 cloudSecretRef(provider) 槽位，绝不进返回值 / 文件 / 日志。
+ */
+async function parseCloudS3Body(
+  body: Record<string, unknown>,
+  rawTransport: unknown,
+  deps: ParseSyncBodyDeps,
+): Promise<SyncConfig> {
+  const provider = isS3CompatProvider(body['provider'])
+    ? body['provider']
+    : (isS3CompatProvider(rawTransport) ? rawTransport : null)
+  if (provider === null) {
+    throw new SyncRouteError('provider is required for s3 (s3/oss/cos/minio/kodo)', 400, 'cloud.providerUnknown')
+  }
+  const endpoint = syncStr(body['endpoint']).replace(/\/+$/, '')
+  const region = syncStr(body['region'])
+  const bucket = syncStr(body['bucket'])
+  const accessKeyId = syncStr(body['accessKeyId'])
+  const prefix = syncStr(body['prefix'])
+  const pathStyle = typeof body['pathStyle'] === 'boolean' ? body['pathStyle'] : undefined
+  const dialectId = body['dialectId'] === 'aws4' || body['dialectId'] === 'oss4' ? body['dialectId'] : undefined
+  const issue = validateCloudChannelInput(provider, {
+    endpoint,
+    region,
+    bucket,
+    accessKeyId,
+    ...(prefix === '' ? {} : { prefix }),
+    ...(pathStyle === undefined ? {} : { pathStyle }),
+    ...(dialectId === undefined ? {} : { dialectId }),
+  })
+  if (issue !== null) throw new SyncRouteError(issue, 400, issue)
+  const secret = typeof body['secret'] === 'string' && body['secret'] !== '' ? body['secret'] : undefined
+  if (secret !== undefined) {
+    const ref = cloudSecretRef(provider)
+    try {
+      await deps.credentials.set(credentialRef(ref), secret)
+    } catch (error) {
+      throw cloudCredentialWriteError(ref, 'S3 密钥', error)
+    }
+  }
+  return {
+    schemaVersion: 2,
+    transport: 's3',
+    s3: {
+      provider,
+      endpoint,
+      region,
+      bucket,
+      accessKeyId,
+      ...(prefix === '' ? {} : { prefix }),
+      ...(pathStyle === undefined ? {} : { pathStyle }),
+      ...(dialectId === undefined ? {} : { dialectId }),
+    },
+  }
+}
+
+/**
+ * gist 通道请求体 → SyncConfig。token 只写进 cloudSecretRef('gist') 槽位
+ * （请求体字段名 token 或 secret 都接受；值绝不进返回值 / 文件 / 日志）。
+ */
+async function parseCloudGistBody(body: Record<string, unknown>, deps: ParseSyncBodyDeps): Promise<SyncConfig> {
+  const gistId = syncStr(body['gistId'])
+  const apiBaseUrl = syncStr(body['apiBaseUrl'])
+  const filePrefix = syncStr(body['filePrefix'])
+  const issue = validateCloudChannelInput(GIST_PROVIDER, {
+    gistId,
+    ...(apiBaseUrl === '' ? {} : { apiBaseUrl }),
+    ...(filePrefix === '' ? {} : { filePrefix }),
+  })
+  if (issue !== null) throw new SyncRouteError(issue, 400, issue)
+  const token = typeof body['token'] === 'string' && body['token'] !== ''
+    ? body['token']
+    : (typeof body['secret'] === 'string' && body['secret'] !== '' ? body['secret'] : undefined)
+  if (token !== undefined) {
+    const ref = cloudSecretRef(GIST_PROVIDER)
+    try {
+      await deps.credentials.set(credentialRef(ref), token)
+    } catch (error) {
+      throw cloudCredentialWriteError(ref, 'Gist token', error)
+    }
+  }
+  return {
+    schemaVersion: 2,
+    transport: 'gist',
+    gist: {
+      gistId,
+      ...(apiBaseUrl === '' ? {} : { apiBaseUrl }),
+      ...(filePrefix === '' ? {} : { filePrefix }),
+    },
   }
 }
 
@@ -2381,8 +2497,7 @@ function makeRoutes(deps: RoutesDeps): { routes: WebRoute[]; scheduler: AutoSync
    *  缺失通道 = 尚未加载（启动竞态窗口）；读取/使用处兜底 defaultSyncSelection。 */
   const selectionCache: Partial<Record<SyncTransportType, SyncSelection>> = {}
   void readAllSyncSelections(syncDir).then((all) => {
-    selectionCache.git = all.git
-    selectionCache.webdav = all.webdav
+    for (const channel of SYNC_CHANNELS) selectionCache[channel] = all[channel]
   }).catch(() => { /* 读失败保持缺省 */ })
 
   /** 确保指定通道缓存已加载（status/save 路由调用；启动竞态兜底）。 */
@@ -2443,11 +2558,15 @@ function makeRoutes(deps: RoutesDeps): { routes: WebRoute[]; scheduler: AutoSync
 
   const selectionViewByChannel = async (): Promise<Record<SyncTransportType, SelectionView>> => {
     const all = await readAllSyncSelections(syncDir)
-    selectionCache.git = all.git
-    selectionCache.webdav = all.webdav
     const view = (sel: SyncSelection): SelectionView =>
       ({ mode: sel.mode, sections: sel.sections, sessionsLimit: sel.sessionsLimit, sessionsInclude: sel.sessionsInclude, encrypt: sel.encrypt, includeSecrets: sel.includeSecrets })
-    return { git: view(all.git), webdav: view(all.webdav) }
+    // 通道集合来自唯一枚举（SYNC_CHANNELS）；不得穷举字面量（漏一处即该通道状态静默缺失）
+    const out = {} as Record<SyncTransportType, SelectionView>
+    for (const channel of SYNC_CHANNELS) {
+      selectionCache[channel] = all[channel]
+      out[channel] = view(all[channel])
+    }
+    return out
   }
 
   /** 该通道的持久化选择是否显式勾选了「可选分区」（sessions）—— 决定用户驱动的拉取侧能否看见它。 */
@@ -2477,6 +2596,41 @@ function makeRoutes(deps: RoutesDeps): { routes: WebRoute[]; scheduler: AutoSync
         },
         // 显式传超时：不依赖默认值，慢速 WebDAV 上传大快照有足够窗口
         timeoutMs: WEBDAV_TIMEOUT_MS,
+        msg,
+      })
+    } else if (isS3Config(cfg)) {
+      // S3 兼容系（s3/oss/cos/minio/kodo 共用同一实现 + 变体表）：AccessKey Secret 只经
+      // credentials 端口现取（永不落盘 / 永不出宿主）；endpoint/region 空串由变体模板兜底。
+      const provider = cfg.s3.provider
+      transport = new S3Transport({
+        provider,
+        bucket: cfg.s3.bucket,
+        accessKeyId: cfg.s3.accessKeyId,
+        credentials: {
+          getSecretAccessKey: async () => {
+            const resolved = await credentials.resolve(credentialRef(cloudSecretRef(provider)))
+            return resolved?.value ?? ''
+          },
+        },
+        ...(cfg.s3.endpoint === '' ? {} : { endpoint: cfg.s3.endpoint }),
+        ...(cfg.s3.region === '' ? {} : { region: cfg.s3.region }),
+        ...(cfg.s3.prefix === undefined ? {} : { prefix: cfg.s3.prefix }),
+        ...(cfg.s3.pathStyle === undefined ? {} : { pathStyle: cfg.s3.pathStyle }),
+        ...(cfg.s3.dialectId === undefined ? {} : { dialectId: cfg.s3.dialectId }),
+        msg,
+      })
+    } else if (isGistConfig(cfg)) {
+      // GitHub Gist：token 只经 credentials 端口现取（只写不回读）
+      transport = new GistTransport({
+        gistId: cfg.gist.gistId,
+        credentials: {
+          getToken: async () => {
+            const resolved = await credentials.resolve(credentialRef(cloudSecretRef(GIST_PROVIDER)))
+            return resolved?.value ?? ''
+          },
+        },
+        ...(cfg.gist.apiBaseUrl === undefined ? {} : { apiBaseUrl: cfg.gist.apiBaseUrl }),
+        ...(cfg.gist.filePrefix === undefined ? {} : { filePrefix: cfg.gist.filePrefix }),
         msg,
       })
     } else {

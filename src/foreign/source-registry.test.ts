@@ -166,10 +166,12 @@ test('清单同步：CLI help 文本里的来源清单与事实源一致（人�
   assert.ok(line !== undefined, 'CLI help 里必须有一行列出全部来源（找不到 = 被删了，请补回并同步事实源）');
   // 形态 = `来源 source：a | b | c`：先切掉标签（取**最后一个**全角/半角冒号之后），再按竖线切
   const body = (line ?? '').replace(/^.*[：:]/u, '');
-  // 每个 token 还要剥掉包围它的 JS 字符串字面量标点（行尾的 `',`）
+  // 每个 token 还要剥掉包围它的 JS 字符串字面量标点（行尾的 `',`）。
+  // **必须保留数字**：来源 id 允许数字（`dsh4`），只保留 [a-z-] 会把它静默剥成 `dsh`，
+  // 于是这条断言对含数字的 id **恒红**（2026-10-05 档 B 加 dsh4 时实测踩到）。
   const listed = body
     .split('|')
-    .map((s) => s.replace(/[^a-z-]/g, ''))
+    .map((s) => s.replace(/[^a-z0-9-]/g, ''))
     .filter((s) => s !== '');
   assert.deepEqual(
     listed,

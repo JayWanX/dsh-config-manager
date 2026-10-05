@@ -7,7 +7,7 @@
  * 同源产出全部在那里，本层**不重造**）。
  *
  * 真值表与取证强度（`evidence`）**一律从 truth-table.ts 派生**（该文件是单一事实源）：
- * 本来源在本仓是 `fixture`（夹具 + 单测可复现，真机未验证）—— \`不得\` 在这里手写更好看的一档。
+ * 本来源在本仓是 `fixture`（夹具 + 单测可复现，真机未验证）—— 绝不在这里手写更好看的一档。
  *
  * probePaths 也按真值表**模板展开**（与 registry.ts 的 probePathsOf 同一口径）：<home> 令牌
  * 原样替换，因此三平台护栏拿合成探测值比对时逐字相同；**读盘**走 read-qoder.ts 的 joinFor
@@ -27,14 +27,14 @@ import type { QoderSessionFile } from './read-qoder.ts';
 export const QODER_PROVIDER = 'qoder';
 
 /** 按 id 取真值表条目；缺条目 = 装配期错误（宁可炸，也不悄悄少一份取证声明） */
-export function truthEntryOf(id: ForeignSourceId): ForeignTruthTableEntry {
+function truthEntryOf(id: ForeignSourceId): ForeignTruthTableEntry {
   const found = FOREIGN_TRUTH_TABLES.find((entry) => entry.id === id);
   if (found === undefined) throw new Error('真值表缺少来源定义: ' + id);
   return found;
 }
 
 /** 真值表的 `<home>` 模板 → 目标平台下的绝对探测位置（与 registry.probePathsOf 同口径） */
-export function probePathsFromTruth(id: ForeignSourceId, opts: RootProbeOptions): readonly string[] {
+function probePathsFromTruth(id: ForeignSourceId, opts: RootProbeOptions): readonly string[] {
   const entry = truthEntryOf(id);
   return entry.defaults[normalizePlatform(opts.platform)].map((t) => t.split('<home>').join(opts.homeDir));
 }

@@ -33,7 +33,7 @@ async function stubEnv(): Promise<Record<string, unknown>> {
     /**
      * **host.homeDir 刻意设成一个「像 \$DSH_HOME 但不是用户 home」的路径**。
      *
-     * 这是防回归的关键：宿主 context 的 homeDir 是 \$DSH_HOME（≈ ~/.dsh），而六来源真值表
+     * 这是防回归的关键：宿主 context 的 homeDir 是 \$DSH_HOME（≈ ~/.dsh），而来源真值表
      * 全部相对**用户 home**。此前 POST 用 host.homeDir 拼路径 → 去找 ~/.dsh/.claude（全读不到）→
      * 稳定回 400 nothing-to-import，而 GET 用 os.homedir() 显示 found=true —— **两个接口自相矛盾**。
      * 若测试桩把 host.homeDir 设成 os.homedir()，这个缺陷就会被**掩盖**（两边恰好同值）。
@@ -103,15 +103,20 @@ async function callRoute(url: string): Promise<{ status: number; body: ForeignSo
   return { status: res.status, body: JSON.parse(res.body) as ForeignSourcesBody, raw: res.body };
 }
 
-test('foreign-sources：六条来源的检测结果齐全、冲突策略可见、绝不回传绝对路径', async () => {
+test('foreign-sources：30 条来源的检测结果齐全、冲突策略可见、绝不回传绝对路径', async () => {
   const { status, body, raw } = await callRoute('/api/dsh-config-manager/foreign-sources');
   assert.equal(status, 200);
   assert.equal(body.conflictPolicy, 'skip-no-overwrite');
   assert.equal(body.projectScoped, false, '未显式给 projectDir 时绝不猜「项目 = 宿主 cwd」');
   assert.deepEqual(
     body.sources.map((s) => s.id),
-    ['claude-code', 'hermes', 'cursor', 'codex', 'copilot', 'antigravity'],
-    '六个来源一个都不能少、顺序稳定',
+    [
+      'claude-code', 'hermes', 'cursor', 'codex', 'copilot', 'antigravity',
+      'gemini', 'reasonix', 'opencode', 'mimocode', 'zcode', 'grokbuild', 'openclaw', 'pi',
+      'kimi', 'kilocode', 'qoder', 'chatgpt', 'workbuddy', 'qwen', 'continue', 'cline',
+      'goose', 'dsh4', 'zed', 'crush', 'teleagent', 'trae', 'vibe', 'dsh',
+    ],
+    '30 个来源一个都不能少、顺序稳定',
   );
   for (const source of body.sources) {
     assert.equal(typeof source.found, 'boolean', source.id + ' 的 found 必须是布尔');
@@ -141,7 +146,7 @@ test('foreign-sources：?projectDir= 被真正传给来源（项目级真值位�
 
    两个缺陷的防回归护栏（都由 captain 复验确认）：
     ① 缺陷 1（严重）：POST 曾用 \`host.homeDir\`（= \$DSH_HOME ≈ ~/.dsh）当来源基准，
-       而六来源真值表相对**用户 home** → POST 恒读不到 → 400 nothing-to-import，
+       而来源真值表相对**用户 home** → POST 恒读不到 → 400 nothing-to-import，
        与 GET（用 os.homedir()）显示 found=true **自相矛盾**；
     ② 缺陷 2：路由模块曾 \`import { PLUGIN_VERSION } from '../index.ts'\` → 任何直接
        import 本模块的单测都会连带加载 @deepseek-ai/* 而 ERR_MODULE_NOT_FOUND。
@@ -149,7 +154,7 @@ test('foreign-sources：?projectDir= 被真正传给来源（项目级真值位�
 
 test('foreign-context：来源上下文恒以**用户 home** 为基准，绝不取宿主 homeDir（缺陷 1 防回归）', () => {
   const ctx = foreignSourceContext()
-  // 不传 userHome → 回退 os.homedir()（= 六来源真值表的基准）
+  // 不传 userHome → 回退 os.homedir()（= 来源真值表的基准）
   assert.equal(ctx.homeDir, os.homedir(), '缺省必须是用户 home，不是 $DSH_HOME')
   // 显式传入优先
   assert.equal(foreignSourceContext({ userHome: 'C:/users/x' }).homeDir, 'C:/users/x')

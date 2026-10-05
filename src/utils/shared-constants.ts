@@ -22,3 +22,18 @@
  * 分出来（旧宿主不回 containerType 时的降级路径，issue #55）。
  */
 export const ENCRYPTED_CONTAINER_CODE = 'encrypted-container';
+
+/**
+ * 同步通道清单（**零依赖**：宿主与 client 半都可运行时 import）。
+ *
+ * 为什么放在这里（而不是 `src/sync/sync-config.ts`）：sync-config.ts import 了
+ * node:fs / node:path，client 半**运行时** import 它会把 node 模块带进浏览器产物
+ * （DSH loader 报 missed the module table，整个插件不加载）。通道清单是「纯常量」，
+ * 与 ENCRYPTED_CONTAINER_CODE 同一处置：常量放这里，读写实现留在 sync-config.ts。
+ *
+ * 宿主侧 sync-config.ts **re-export** 它，仍是全仓唯一事实源（类型 SyncTransportType 由它派生）。
+ *
+ * 通道与「云端点具体兼容商」的关系：`s3` 是一条通道（配置里带 `provider` 区分
+ * s3 / oss / cos / minio / kodo 五家），`gist` 是一条通道（provider 恒 gist）。
+ */
+export const SYNC_CHANNELS = ['git', 'webdav', 's3', 'gist'] as const;

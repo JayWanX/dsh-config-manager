@@ -69,7 +69,7 @@ test('解析：--from/--cwd 只属于 import（其余子命令沿用原有拒绝
 
 /* ---------------- ② 未知来源 ---------------- */
 
-test('运行：未知来源 → 退出码 1 且打印六个可用来源', async () => {
+test('运行：未知来源 → 退出码 1 且打印全部可用来源（30 个）', async () => {
   const io = collector();
   const dir = await tempDir('dcm-import-unknown-');
   try {
@@ -83,7 +83,12 @@ test('运行：未知来源 → 退出码 1 且打印六个可用来源', async 
     assert.ok(io.errors.some((e) => e.includes('nonexistent-source')), '必须点名未知来源');
     const available = io.errors.find((e) => e.includes('可用来源'));
     assert.ok(available !== undefined, '必须给出可用来源清单');
-    for (const id of ['claude-code', 'hermes', 'cursor', 'codex', 'copilot', 'antigravity']) {
+    for (const id of [
+      'claude-code', 'hermes', 'cursor', 'codex', 'copilot', 'antigravity',
+      'gemini', 'reasonix', 'opencode', 'mimocode', 'zcode', 'grokbuild', 'openclaw', 'pi',
+      'kimi', 'kilocode', 'qoder', 'chatgpt', 'workbuddy', 'qwen', 'continue', 'cline',
+      'goose', 'dsh4', 'zed', 'crush', 'teleagent', 'trae', 'vibe', 'dsh',
+    ]) {
       assert.ok(available.includes(id), '可用来源清单必须含 ' + id);
     }
     assert.deepEqual(io.logs, [], '未知来源不得打印任何"成功"摘要');

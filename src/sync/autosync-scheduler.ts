@@ -38,7 +38,7 @@ import type { MutationLockPort, MutationLockContext } from '../utils/env-lock.ts
 import { withMutationLock, LOCK_BLOCK_MESSAGE } from '../utils/env-lock.ts';
 import { readAutosyncConfig, writeAutosyncConfig } from './autosync-config.ts';
 import type { AutosyncConfig, AutosyncInterval } from './autosync-config.ts';
-import { readSyncConfigFor, isGitConfig, isWebDavConfig, SYNC_CHANNELS } from './sync-config.ts';
+import { readSyncConfigFor, isGitConfig, isWebDavConfig, isS3Config, isGistConfig, SYNC_CHANNELS } from './sync-config.ts';
 import type { SyncConfig, SyncTransportType } from './sync-config.ts';
 import { readSyncHistory, appendAutosyncEntry } from './sync-history.ts';
 import type { AutosyncHistoryEntry } from './sync-history.ts';
@@ -664,6 +664,14 @@ export function syncIsConfigured(cfg: SyncConfig | null): boolean {
   }
   if (isGitConfig(cfg)) {
     return typeof cfg.git.repoUrl === 'string' && cfg.git.repoUrl !== '';
+  }
+  // 云端点通道：非密字段已解析出来（读取层对未配置一律回 null）；这里再核一次必填项。
+  // 缺任一必填 → 视为未配置 → autosync 安静跳过（unconfigured），不抛错、不空转。
+  if (isS3Config(cfg)) {
+    return cfg.s3.bucket !== '' && cfg.s3.accessKeyId !== '';
+  }
+  if (isGistConfig(cfg)) {
+    return cfg.gist.gistId !== '';
   }
   return false;
 }

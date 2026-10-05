@@ -427,7 +427,11 @@ test('plugins: preview 不调用打包钩子，但条目/白名单/告警与 exp
 });
 
 test('plugins: preview 零 spawn 量本地源体积（file: 走 stat、link: 走目录度量）', async () => {
-  const src = makeContext('win32', 'C:\\Users\\alice', 'web');
+  // 体积度量链走 resolveLocalPluginPath → 宿主 path.resolve：win32 形状的 home 在 POSIX 宿主上会被
+  // 解析到 cwd 之下（mock 的 home 相对 key 失配 ⇒ statSize 读不到 ⇒ 体积 0）。按宿主平台选 home 形状，
+  // 断言在 windows / linux / macOS 三端一致。
+  const onWindows = process.platform === 'win32';
+  const src = makeContext(onWindows ? 'win32' : 'linux', onWindows ? 'C:\\Users\\alice' : '/home/alice', 'web');
   // file: 相对路径以 profile 目录为基准（resolveLocalPluginPath 的契约）
   await src.fs.writeFile('profiles/web/pkgs/local.tgz', new Uint8Array(4096));
   src.plugins.installed.set('file-pkg', {

@@ -465,6 +465,8 @@ dsh-config-manager verify C:/backups/dsh-config.zip   # 或按路径
 
 **凭据文件永不进入备份。** `.credentials.*`、`.env`、`*.pem` 等由显式黑名单排除；只遍历白名单目录（绝不对整个主目录递归）；symlink 一律跳过而非跟随。
 
+**离线备份只覆盖磁盘上的技能。** 插件注册表里的技能（外壳从 profile 的插件包里加载的那些，见 issue #71）需要 DSH 运行时才能列举，因此**只有 GUI 导出（或 DSH 健康时的定时备份）能带上它们**；CLI `backup` 只收 `$DSH_HOME/skills` 目录下的文件——想要完整的技能备份，请在 DSH 健康时用 GUI 导出。
+
 结构化分区（设置 / UI / providers / 插件 / MCP / prompts / workspaces）**不会**被偷偷伪造：它们需要 DSH 服务层读值并脱敏，因此一律不写入、在 manifest 里标记为 `false`——计划输出会把它们列在「离线不可收集」下，让你清楚这份备份到底有什么、没有什么。DSH 健康时想要完整备份，请用 GUI 导出。
 
 ```bash

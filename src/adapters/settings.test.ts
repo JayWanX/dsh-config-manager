@@ -98,3 +98,53 @@ test('settings: validate 拒绝非法结构', async () => {
   const noNs = await adapter.validate({ version: 1, namespaces: null as never });
   assert.equal(noNs.valid, false);
 });
+/* ---------------- 快路径：宿主实现 describeAll 时只读一趟，且结果与逐名路径逐字相同 ---------------- */
+
+/** 给 MemSettings 挂一个批量读（真实宿主即如此：多一个全量 describe，其余不变） */
+function withDescribeAll(ctx: ReturnType<typeof makeContext>): { calls: () => number } {
+  let calls = 0;
+  const base = ctx.settings;
+  ctx.settings.describeAll = async (opts?: { redactSecrets?: boolean }) => {
+    calls += 1;
+    const out: { ns: string; info: Awaited<ReturnType<typeof base.describe>> }[] = [];
+    for (const ns of base.registered) out.push({ ns, info: await base.describe(ns, opts) });
+    return out;
+  };
+  return { calls: () => calls };
+}
+
+test('settings: 宿主实现 describeAll 时只读一趟，条目/告警与逐名路径逐字相同', async () => {
+  const ctx = makeContext('win32', 'C:\\Users\\alice');
+  ctx.settings.ns.set('general', { value: { theme: 'dark' }, revision: 3, secrets: [] });
+  ctx.settings.ns.set('llm-deepseek', {
+    value: { apiKeyEnv: 'DEEPSEEK_API_KEY' },
+    revision: 5,
+    secrets: [{ path: ['apiKey'], set: true }],
+  });
+  // 'zz-unregistered' 非 UI 类且未注册：两条路径都必须产出同一条 settingsNsReadFailed 告警
+  const NSX = [...NS, 'zz-unregistered'];
+  const slowOut = await new SettingsAdapter(NSX).export(ctx, { includeSecrets: false });
+
+  const counted = withDescribeAll(ctx);
+  const fastOut = await new SettingsAdapter(NSX).export(ctx, { includeSecrets: false });
+
+  assert.equal(counted.calls(), 1, 'N 个 namespace 只允许一次全量读取（真机 24 个逐个 describe ≈1.7 s）');
+  assert.deepEqual(fastOut.data, slowOut.data);
+  assert.equal(fastOut.warnings.length, 1, '未注册 namespace 仍要告警（不得静默吞掉）');
+  assert.equal(slowOut.warnings.length, 1);
+  // 告警点名同一个 namespace：真实宿主两条路径都由 DshSettingsFacade 抛同一条
+  // `namespace not found: <ns>`（describe 复用 describeAll），此处内存宿主文案不同，
+  // 故只钉「数量 + 点名」而不是整句文本
+  assert.ok(fastOut.warnings[0]?.includes('zz-unregistered'));
+  assert.ok(slowOut.warnings[0]?.includes('zz-unregistered'));
+});
+
+test('settings: describeAll 抛错时退回逐名路径（快路径失败不得让整分区告警）', async () => {
+  const ctx = makeContext('win32', 'C:\\Users\\alice');
+  ctx.settings.ns.set('general', { value: { theme: 'dark' }, revision: 3, secrets: [] });
+  ctx.settings.describeAll = async () => { throw new Error('boom'); };
+  const out = await new SettingsAdapter(['general']).export(ctx, { includeSecrets: false });
+  assert.equal(out.data.namespaces['general']?.revision, 3, '退回逐名 describe 后仍要读到值');
+  assert.deepEqual(out.warnings, []);
+});
+

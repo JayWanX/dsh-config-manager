@@ -11,6 +11,8 @@
  * GUI 入口接线（t17）新增 `POST /foreign-import`（外部来源 → 受控临时目录 bundle，供导入向导消费）→ **75**。
  * F-2 官方 session.export 通道新增 `GET /session-export`（缺 sessionId = 探测，带 sessionId = 流式代理 ZIP，
  * **同一路径两形态**，所以只算一条）→ **76**。
+ * 仓库选择器（同步通道「选择已有仓库 / 新建仓库」）新增 `GET+POST /sync/github/repositories` → **77**
+ * （同一路径两个方法：GET 列举 / POST 新建；路径不得重复是 webServer 的硬约束，故不拆成两条）。
  * 快照是本次重构唯一的行为契约：kit 化 + 按域拆组文件之后，声明集合必须逐条不变。
  *
  * **T4（会话体检）为什么没有让这里变成 72**：它挂在**既有**的 `recovery` prefix 路由下
@@ -42,11 +44,12 @@ const root = path.resolve(import.meta.dirname, '../..');
 const METHOD_ORDER = ['GET', 'POST', 'PUT', 'DELETE'] as const;
 
 /**
- * 路由清单快照（76 条；见文件头「迁移记录」；68 = W1 快照 67 + 档案启动 `/profiles/launch` + 档案复制 `/profiles/copy` − 已下线的 `/lifecycle`；
+ * 路由清单快照（77 条；见文件头「迁移记录」；68 = W1 快照 67 + 档案启动 `/profiles/launch` + 档案复制 `/profiles/copy` − 已下线的 `/lifecycle`；
  * m-disk-usage 新增 `GET /disk-usage` 与 `POST /disk-usage/cleanup` → 70；m-update-check 新增 `GET /update-check` → 71；
  * 「拉取即导入」`POST /sync/download` → 72；远端快照删除 `POST /sync/snapshot-delete` → 73；
  * 外部 agent 导入收口（t22）`GET /foreign-sources` → 74；GUI 入口接线（t17）`POST /foreign-import` → 75；
- * F-2 `GET /session-export`（探测 + 流式代理同一路径两形态，只算一条）→ 76）。
+ * F-2 `GET /session-export`（探测 + 流式代理同一路径两形态，只算一条）→ 76；
+ * 仓库选择器 `GET+POST /sync/github/repositories`（列举 + 新建同一路径）→ 77）。
  *
  * ⚠️ **成本提示（P-3）**：这是**硬编码清单**，不是从源码派生的期望值 —— 新增一条路由
  * **必须同步更新这里**，否则本测试必然变红（T14 复现：临时加一条 `endpoint({ path: '/api/dsh-config-manager/__p3_probe',
@@ -120,6 +123,7 @@ const ROUTE_SNAPSHOT = [
   ['exact', 'POST', '/api/dsh-config-manager/sync/github/poll'],
   ['exact', 'POST', '/api/dsh-config-manager/sync/github/start'],
   ['exact', 'POST', '/api/dsh-config-manager/sync/github/validate'],
+  ['exact', 'GET+POST', '/api/dsh-config-manager/sync/github/repositories'],
   ['exact', 'GET', '/api/dsh-config-manager/sync/history'],
   ['exact', 'POST', '/api/dsh-config-manager/sync/pull'],
   ['exact', 'POST', '/api/dsh-config-manager/sync/download'],
@@ -206,10 +210,10 @@ function declaredRoutes(): string[] {
   return rows.sort();
 }
 
-test('W1 parity：路由清单与预期快照逐条一致（76 条）', () => {
+test('W1 parity：路由清单与预期快照逐条一致（77 条）', () => {
   const expected = ROUTE_SNAPSHOT.map(([kind, methods, routePath]) => row(kind as string, (methods as string).split('+'), routePath as string)).sort();
   const actual = declaredRoutes();
-  assert.equal(expected.length, 76, '快照自身应为 76 条');
+  assert.equal(expected.length, 77, '快照自身应为 77 条');
   assert.deepEqual(actual, expected, 'kit 化/拆组后路由声明集合必须逐条不变');
 });
 
@@ -222,5 +226,5 @@ test('W1 parity 解析器自检：少一条 / 改一条 / 改方法都会被检�
   const renamed = [...actual.slice(1), actual[0]!.replace(/\/[^/]+$/, '/__drifted__')];
   assert.notDeepEqual(renamed, expected, '路径漂移必须被判为不一致');
   // 解析器必须真的解析到 74 条（否则上面的 deepEqual 可能是「两边都空」的假绿）
-  assert.equal(actual.length, 76, `解析到的路由数应为 76，实际 ${actual.length}`);
+  assert.equal(actual.length, 77, `解析到的路由数应为 77，实际 ${actual.length}`);
 });

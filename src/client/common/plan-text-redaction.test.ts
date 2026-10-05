@@ -255,6 +255,21 @@ const RENDER_POINTS: RenderPoint[] = [
     bare: R('{view.detail !== null && <span className={css.progressDetail}>{view.detail}</span>}'),
     why: '当前项名（宿主回传）',
   },
+  /* ---------------- 同步：仓库选择器（选择已有仓库 / 新建仓库） ---------------- */
+  {
+    id: 'sync-repo-picker-load-error',
+    file: 'src/client/sync/SyncRepositoryPicker.tsx',
+    redacted: R('{t(\'repoPicker.loadFailed\')}（{redact(loadError)}）'),
+    bare: R('{t(\'repoPicker.loadFailed\')}（{loadError}）'),
+    why: '仓库列表拉取失败文本（GitHub 状态/网络响应）',
+  },
+  {
+    id: 'sync-repo-picker-create-error',
+    file: 'src/client/sync/SyncRepositoryPicker.tsx',
+    redacted: R('{createError !== null && <span className={css.formError}>{redact(createError)}</span>}'),
+    bare: R('{createError !== null && <span className={css.formError}>{createError}</span>}'),
+    why: '新建仓库失败文本（GitHub 校验消息可能回显仓库名/URL）',
+  },
   /* ---------------- 关于：更新内容弹窗（G-04） ---------------- */
   {
     id: 'release-notes-error',

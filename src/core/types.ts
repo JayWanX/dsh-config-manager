@@ -168,6 +168,12 @@ export interface NamespaceInfo {
   secrets: { path: string[]; set: boolean }[];
 }
 
+/** `SettingsFacade.describeAll()` 的单条结果：namespace 名 + 该 namespace 的 `NamespaceInfo`。 */
+export interface NamedNamespaceInfo {
+  ns: string;
+  info: NamespaceInfo;
+}
+
 export interface SettingsFacade {
   /** 读某 namespace（redactSecrets 剥离密钥值）；返回含乐观锁 revision */
   describe(namespace: string, opts?: { redactSecrets?: boolean }): Promise<NamespaceInfo>;
@@ -175,6 +181,16 @@ export interface SettingsFacade {
   replace(namespace: string, value: unknown, expectedRevision?: number): Promise<void>;
   /** 部分更新（未来 Merge 策略用） */
   update?(namespace: string, patch: unknown, expectedRevision?: number): Promise<void>;
+  /**
+   * 一次读回**全部**已注册 namespace（可选；未实现 = 调用方退回逐名 `describe()`）。
+   *
+   * 为什么需要：真实 DSH 的 `SettingsProvider.describe()` 根本没有 namespace 参数 ——
+   * 它每次都对**全部**注册项做 `schema.toJSON()` + 多次 `structuredClone` + `redactSecrets`，
+   * 「按名单逐个 describe」于是成了 O(N²)：真机 24 个 namespace 实测 ≈1.7 s，而一次全量
+   * 只需 ≈70 ms（`/export-preview` 的 settings / credentialsStatus 两个分区各占 1.5 s 以上，
+   * 是总览页卡顿的第二大来源）。
+   */
+  describeAll?(opts?: { redactSecrets?: boolean }): Promise<NamedNamespaceInfo[]>;
 }
 
 export interface CredentialsFacade {
@@ -333,6 +349,43 @@ export interface PatchFileFacade {
   applyPatchChanges(file: string, changes: PatchChange[]): Promise<void>;
 }
 
+/**
+ * 技能摘要（`ctx.skills.list()` 的返回项；DSH `SkillSummary` 的结构子集）。
+ *
+ * 为什么只声明用得到的字段：core / adapters 不允许 import `@deepseek-ai/*`（架构边界测试），
+ * 宿主的实现在 `src/index.ts` 里做结构适配；这里只钉住备份真正需要的字段。
+ */
+export interface SkillSummaryView {
+  name: string;
+  description: string;
+  whenToUse?: string;
+  invocation?: { modelInvocable?: boolean; userInvocable?: boolean };
+  source?: string;
+  provider?: string;
+}
+
+/** 技能定义（`ctx.skills.get(name)` 的返回项）：摘要 + 正文。 */
+export interface SkillDefinitionView extends SkillSummaryView {
+  content: string;
+}
+
+/**
+ * skills 服务端口（issue #71）。
+ *
+ * 为什么需要它：DSH 的技能**不落在一个可枚举的目录里**。技能 provider 由插件在 apply 时
+ * 注册（`ctx.skills.registerProvider`），可以来自 pnpm 装出来的 profile 插件包
+ * （`profiles/<p>/node_modules` 下任意层级的 `SKILL.md`）、`customSkillDirs` 配置项、或
+ * `DSH_BUNDLED_SKILL_DIR` 的内置目录。此前 dcm 只扫 `$DSH_HOME/skills`，
+ * 于是真机上「一个技能都备份不到」（用户报告的「备份不到外壳 skills」）。
+ *
+ * 可选：宿主未提供（旧宿主 / 无 skills 服务的环境）时 skills 分区退回纯目录扫描，
+ * 行为与改造前完全一致 —— 绝不因为缺这个端口而报错或静默丢分区。
+ */
+export interface SkillStoreFacade {
+  list(): Promise<SkillSummaryView[]>;
+  get(name: string): Promise<SkillDefinitionView | undefined>;
+}
+
 export interface FileSystemFacade {
   readFile(relPath: string): Promise<Uint8Array>;
   writeFile(relPath: string, data: Uint8Array): Promise<void>;
@@ -385,6 +438,23 @@ export interface FileSystemFacade {
    * 可选：未实现时归位功能只产出 ungrouped 计划 + 告警，绝不猜测 cwd 与工作区是否同一目录。
    */
   realpathDir?(absPath: string): Promise<string | null>;
+  /**
+   * 目录体积上界（只读预览用；不是目录 / 读不到 → null）。
+   *
+   * 用途：本地源插件里的 `link:` 指向**目录**（`npm pack` 的输入），只读预览要给出量级又不能
+   * spawn 打包进程。`statSize` 对目录一律返回 null（目录 size 毫无意义），`listRecursiveDetailed`
+   * 走的是 home 相对路径 + home 边界校验（真机这些源目录在 `$DSH_HOME` 之外，必然被挡），
+   * 所以需要一条与 `realpathDir` 同族的「绝对路径目录度量」。
+   *
+   * 语义：入参只可能是本机插件 spec 推导出的绝对路径（与 `realpathDir` 同一条约定，
+   * **不受 home 边界限制**）；返回常规文件字节数之和 —— 是 `npm pack` 产物的**上界**
+   * （真机比值约 0.29：pack 产物是 gzip）；不跟随符号链接目录、跳过 `node_modules`
+   * （npm pack 自己也排除它，数进去只会把量级抬高一个数量级）；`maxEntries` 兜底，
+   * 超限即停并返回已累计值（宁可低估，不可卡住预览）。
+   *
+   * 可选：未实现时调用方对这类目录退回「体积按 0」（旧行为，只少一个数字）。
+   */
+  dirSizeBytes?(absPath: string, opts?: { maxEntries?: number }): Promise<number | null>;
   /**
    * 确保绝对路径目录存在（issue #45 已知缺口：导入工作区记录前不建目录 → DSH `create()`
    * 的 realpath 直接 ENOENT，只留一句非致命警告）。
@@ -454,6 +524,12 @@ export interface HostContext {
    * 可选：缺省时归位功能整体不可用（依赖它的调用点必须报「宿主未提供会话存储」而不是静默成功）。
    */
   sessions?: SessionStoreFacade;
+  /**
+   * 技能服务端口（issue #71；宿主注入对应 `ctx.skills`）。
+   *
+   * 可选：缺省时 skills 分区只扫 `$DSH_HOME/skills`（改造前行为），不报错。
+   */
+  skills?: SkillStoreFacade;
   /** 当前管理的 DSH profile 名（如 web）；引擎用它定位 profiles/<profile>/cordis.patch.yml。宿主不暴露时缺省 */
   profile?: string;
   /**
@@ -549,7 +625,17 @@ export interface PathIssue {
   section?: SectionId;
 }
 
-export interface SnapshotTarget { adapter: SectionId; ref: string; }
+export interface SnapshotTarget {
+  adapter: SectionId;
+  ref: string;
+  /**
+   * patch 行类目标的**所在层**（相对 homeDir 的 POSIX 路径，见 core/patch-layers.ts）。
+   *
+   * 为什么必须带上：patch 行有两层（home 层 + profile 层），同一 `ref`（lineId）在两层的
+   * 原值不同、写入位置也不同。缺省 = 用户层（`cordis.patch.yml`），保持旧调用方行为不变。
+   */
+  file?: string;
+}
 
 export interface PlanItem {
   id: string;                 // 稳定项 id（plugin:pkg / prompt:name / workspace:<id> …）
@@ -823,6 +909,8 @@ export interface SnapshotEntry {
   kind: SnapshotEntryKind;
   adapter: SectionId;
   ref: string;
+  /** patchLine 条目：原行所在层（相对 homeDir 的 POSIX 路径）。缺省 = 用户层（旧快照） */
+  file?: string;
   /** 原值（credential 条目不含值，仅 existed 标志） */
   before: unknown;
   revision?: number;

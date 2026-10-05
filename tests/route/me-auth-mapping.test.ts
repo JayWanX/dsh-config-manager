@@ -57,8 +57,10 @@ test('M3 源码守卫：/me/* 路由统一走 isGitHubAuthMissing，无「只映
     '不得残留 unauthorized-only 的 401/500 映射（issue #29 根因）',
   );
 
+  // 5 处：/me/* 的四条（items、listing、relist、delete）+ sync 的 GitHub 仓库列举/新建
+  // （2026-10-04 增补：仓库选择器同样要能把「没登录」如实报成 401，而不是伪装成 500）。
   const mapped = src.split('isGitHubAuthMissing(error) ? 401 : 500').length - 1;
-  assert.equal(mapped, 4, 'me/items、me/listing、me/relist、me/delete 四条路由都必须走统一判定');
+  assert.equal(mapped, 5, 'me/items、me/listing、me/relist、me/delete 四条路由 + sync 仓库端点都必须走统一判定');
 
   assert.ok(
     src.includes('if (!isGitHubAuthMissing(error)) throw error'),

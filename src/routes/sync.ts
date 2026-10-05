@@ -40,7 +40,7 @@ function extractPathMappings(body: Record<string, unknown>): PathMapping[] {
   }
   return out
 }
-import { REVIEW_KINDS, ROUTE_TIMEOUT_MS, SYNC_CREDENTIAL_REF, SYNC_WEBDAV_CREDENTIAL_REF, SyncRouteError, buildAutosyncStatus, buildAutosyncStatusByChannel, credentialRef, extractSyncSections, extractSyncSessions, isAutosyncInterval, isToolchainChangeItem, planToConfirmItems, syncPasswordRef, withTimeout, writeSyncRouteError } from '../index.ts'
+import { REVIEW_KINDS, ROUTE_TIMEOUT_MS, SYNC_CREDENTIAL_REF, SYNC_WEBDAV_CREDENTIAL_REF, SyncRouteError, buildAutosyncStatus, buildAutosyncStatusByChannel, credentialRef, extractSyncSections, extractSyncSessions, isAutosyncInterval, isGitHubAuthMissing, isToolchainChangeItem, planToConfirmItems, syncPasswordRef, withTimeout, writeSyncRouteError } from '../index.ts'
 import { GitHubApiError } from '../market/github-repos.ts'
 import type { SectionId } from '../schema/types.ts'
 import { redact } from '../security/redaction.ts'
@@ -454,6 +454,40 @@ export function syncRoutes(env: RoutesEnv): WebRoute[] {
         })
       } catch (error) {
         writeJson(res, 500, { error: redact(error instanceof Error ? error.message : String(error)) })
+      }
+    }),
+    // ------------------------------------------ sync/github/repositories
+    // 仓库选择器（issue：同步通道支持「选择已有仓库 / 新建仓库」）：
+    //   GET  → 列出当前用户可见仓库（按最近更新排序），供 UI 下拉选择；
+    //   POST → 新建**私有**仓库（body: { name, description? }），返回仓库信息供回填 repoUrl。
+    // token 来源与 /sync/github/validate 完全一致（DSH credentials 的 SYNC_CREDENTIAL_REF），
+    // 401（未登录 / token 失效）单独映射，其余错误走通用 500 —— 与 me 路由同一口径。
+    // 不进 mutation gate：两步都不写本地文件（只读列举 + 幂等元操作），
+    // 而 gate 在 SAFE MODE 下会直接拒绝，会把「选仓库」变成不可用功能。
+    endpoint({ path: '/api/dsh-config-manager/sync/github/repositories', methods: ['GET', 'POST'] }, async (req, res) => {
+      try {
+        if (req.method === 'GET') {
+          const repos = await meGitHubRest.listRepos()
+          writeJson(res, 200, { ok: true, repos })
+          return
+        }
+        const body = await readJsonBody(req)
+        const name = typeof body?.['name'] === 'string' ? body['name'].trim() : ''
+        if (name === '') {
+          writeJson(res, 400, { error: 'name is required' })
+          return
+        }
+        const description = typeof body?.['description'] === 'string' ? body['description'].trim() : ''
+        // private 恒为 true（宿主强制）：同步仓库必须私有，public 会把配置内容公开。
+        // 客户端**不能**通过 body 把它改成公开 —— 安全约束落在宿主侧，不依赖 UI。
+        const repo = await meGitHubRest.createRepo(name, {
+          private: true,
+          ...(description !== '' ? { description } : {}),
+        })
+        writeJson(res, 200, { ok: true, repo })
+      } catch (error) {
+        const status = isGitHubAuthMissing(error) ? 401 : 500
+        writeJson(res, status, { error: redact(error instanceof Error ? error.message : String(error)) })
       }
     }),
     // ------------------------------------------------------ sync/history

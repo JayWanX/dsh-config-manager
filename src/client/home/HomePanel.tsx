@@ -13,8 +13,10 @@
  * **移出首页**（§7）：分区构成卡的展开态改在产物库与导出流程里；活动视口归只读面板。
  * 状态行**不重复**恢复待处理的提示 —— 全局 SAFE MODE 横幅已经承担（§4.4）。
  *
- * 数据流：挂载/刷新时对 6 个只读 API 做 Promise.allSettled 并行聚合；全部渲染模型
- * 来自 src/ui/overview-view.ts 纯函数（node 单测覆盖），本组件只做装配。
+ * 数据流：挂载/刷新时对 5 个**毫秒级**只读 API 做 Promise.allSettled 并行聚合，首屏不等分区预览；
+ * 分区构成（export-preview）单独后发 —— 它要遍历全部默认分区（含本地插件打包、会话扫描），
+ * 是最慢的一步，等它会让整页转圈（真机曾达 12~30 s）。全部渲染模型来自 src/ui/overview-view.ts
+ * 纯函数（node 单测覆盖），本组件只做装配。
  * 安全：历史摘要渲染前 redact()（宿主侧已脱敏，此处仅做 [REDACTED] 可读化显示）。
  */
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
@@ -45,7 +47,8 @@ import {
   type OverviewMetricKey,
 } from '../../ui/overview-view.ts'
 import { Badge, Button, Card, Spinner, StatusDot, Stepper } from '../common/ui.tsx'
-import { SectionComposition } from '../common/SectionComposition.tsx'
+import { SectionComposition, type SectionCompositionItem } from '../common/SectionComposition.tsx'
+import { DEFAULT_INCLUDED_SECTION_IDS } from '../../schema/section-registry.ts'
 import { sectionLabeler } from '../common/section-labels.ts'
 import { BackupIcon, ExportIcon, ImportIcon, SyncIcon, ArrowRightIcon } from '../common/Icon.tsx'
 import { CopyButton } from '../common/CopyButton.tsx'
@@ -83,7 +86,7 @@ interface OverviewData {
   schedule: BackupScheduleStatus | null
   sync: SyncStatusResponse | null
   history: HistoryListResult | null
-  /** 分区构成（export-preview 只读预览；null = 未加载/失败 → 不显示该卡） */
+  /** 分区构成（export-preview 只读预览；null = 未到货/失败 → 卡片先渲染默认分区骨架） */
   sections: ExportPreviewResponse | null
 }
 
@@ -186,33 +189,52 @@ export function HomePanel({ api, syncApi, historyApi, t, openActivity, openForei
   const store = useSyncExternalStore(runStore.subscribe, runStore.getSnapshot)
   const [data, setData] = useState<OverviewData>(initialData)
   const [loading, setLoading] = useState(true)
+  /** 分区构成预览是否在途（独立于首屏 loading：它后发且最慢） */
+  const [sectionsLoading, setSectionsLoading] = useState(true)
   const [backupRunning, setBackupRunning] = useState(false)
   /** 卸载后不再 setState（异步回调竞态防护） */
   const aliveRef = useRef(true)
   useEffect(() => () => { aliveRef.current = false }, [])
 
-  const load = useCallback(async (): Promise<void> => {
-    setLoading(true)
-    const [backups, snapshots, schedule, sync, history, sections] = await Promise.allSettled([
+  /** 首屏：5 个毫秒级只读接口；settle 即渲染（不 await 分区预览） */
+  const loadFast = useCallback(async (): Promise<void> => {
+    const [backups, snapshots, schedule, sync, history] = await Promise.allSettled([
       api.listBackupFiles(),
       api.snapshots(),
       api.backupSchedule(),
       syncApi.status(),
       historyApi.list({}),
-      // 分区构成（只读预览；失败不阻塞整页，仅隐藏该卡）
-      api.exportPreview(undefined),
     ])
     if (!aliveRef.current) return
-    setData({
+    setData((prev) => ({
+      ...prev,
       backups: backups.status === 'fulfilled' ? backups.value : null,
       snapshots: snapshots.status === 'fulfilled' ? snapshots.value : null,
       schedule: schedule.status === 'fulfilled' ? schedule.value : null,
       sync: sync.status === 'fulfilled' ? sync.value : null,
       history: history.status === 'fulfilled' ? history.value : null,
-      sections: sections.status === 'fulfilled' ? sections.value : null,
-    })
+    }))
     setLoading(false)
   }, [api, syncApi, historyApi])
+
+  /** 分区构成（只读预览）：独立后发；失败只让该卡显示失败态，绝不阻塞首屏 */
+  const loadSections = useCallback(async (): Promise<void> => {
+    setSectionsLoading(true)
+    try {
+      const sections = await api.exportPreview(undefined)
+      if (aliveRef.current) setData((prev) => ({ ...prev, sections }))
+    } catch {
+      // 保持 sections=null：卡片按「读取失败 · 将整体导出」渲染（不静默消失，也不误导为 0 项）
+    } finally {
+      if (aliveRef.current) setSectionsLoading(false)
+    }
+  }, [api])
+
+  /** 全量刷新（挂载、立即备份后、定时备份弹窗关闭后） */
+  const load = useCallback(async (): Promise<void> => {
+    setLoading(true)
+    await Promise.all([loadFast(), loadSections()])
+  }, [loadFast, loadSections])
 
   useEffect(() => {
     void load()
@@ -324,6 +346,17 @@ export function HomePanel({ api, syncApi, historyApi, t, openActivity, openForei
   const totalSize = data.backups !== null ? data.backups.reduce((n, b) => n + b.sizeBytes, 0) : null
   const scheduleStatus = data.schedule
   const nextRun = scheduleStatus !== null ? nextRunText(scheduleStatus, t) : null
+
+  /* —— 分区构成卡：预览未到货时先渲染默认分区骨架（loading），失败则整片 failed ——
+     骨架行**不显示 0 项 / 0 B**：0 会被读成「这一项没有内容」，而引擎对清单缺失的分区按
+     整体导出处理，语义正好相反（见 SectionComposition 的类型注释）。 */
+  const previewSections = data.sections !== null && data.sections.sections.length > 0 ? data.sections.sections : null
+  const compositionRows: SectionCompositionItem[] = previewSections ?? DEFAULT_INCLUDED_SECTION_IDS.map((id) => ({
+    section: id,
+    count: 0,
+    sizeBytes: 0,
+    state: sectionsLoading ? 'loading' : 'failed',
+  }))
 
   /** 指标段渲染模型（名词在前：label dim + 值 bold；附注仅时间/告警）。 */
   const segModels = metrics.map((m) => {
@@ -492,21 +525,28 @@ export function HomePanel({ api, syncApi, historyApi, t, openActivity, openForei
             </Card>
           )}
 
-          {/* 4. 分区构成卡（export-preview 只读；两列网格 + 合计行） */}
-          {data.sections !== null && data.sections.sections.length > 0 && (
-            <Card>
-              <div className={css.groupHeader}>
-                <span className={css.groupLabel}>{t('overview.sections.title')}</span>
-                <span className={css.groupNote}>{t('overview.sections.hint')}</span>
-                <span className={css.statusSpacer} />
-                <span className={css.hint}>
-                  {t('overview.sections.total')} {formatBytes(data.sections.totalSizeBytes)}
-                  {data.sections.sectionsFailed > 0 && ` · ${t('export.previewSkipped', { count: String(data.sections.sectionsFailed) })}`}
-                </span>
-              </div>
-              <SectionComposition sections={data.sections.sections} t={t} sectionLabel={sectionLabeler(t)} />
-            </Card>
-          )}
+          {/* 4. 分区构成卡（export-preview 只读；两列网格 + 合计行）
+              预览未到货时也渲染：先给默认分区骨架，避免整页等最慢的一步 */}
+          <Card>
+            <div className={css.groupHeader}>
+              <span className={css.groupLabel}>{t('overview.sections.title')}</span>
+              <span className={css.groupNote}>{t('overview.sections.hint')}</span>
+              <span className={css.statusSpacer} />
+              <span className={css.hint}>
+                {data.sections !== null
+                  ? (
+                    <>
+                      {t('overview.sections.total')} {formatBytes(data.sections.totalSizeBytes)}
+                      {data.sections.sectionsFailed > 0 && ` · ${t('export.previewSkipped', { count: String(data.sections.sectionsFailed) })}`}
+                    </>
+                  )
+                  : sectionsLoading
+                    ? <span className={css.statSeg}><Spinner /></span>
+                    : <span className={css.warnText}>{t('picker.sectionLoadFailed')}</span>}
+              </span>
+            </div>
+            <SectionComposition sections={compositionRows} t={t} sectionLabel={sectionLabeler(t)} />
+          </Card>
 
           {/* 5. 最近活动表（fit-content；类型并入内容列；成功=绿点） */}
           <Card className={css.activityCard}>

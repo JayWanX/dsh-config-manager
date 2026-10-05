@@ -9,6 +9,105 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 > **Release workflow**: on tag push, CI extracts the current version's section as the release notes highlights;
 > the build fails fast if the section is missing, so you cannot forget to update it.
 
+## [Unreleased]
+
+> **同步通道新增「选择已有仓库 / 新建仓库」**：git 通道的仓库地址此前只能手填 —— 得先去 GitHub 建好仓库、
+> 复制 clone URL、再贴回来，还容易漏掉「必须私有」这条前提。现在配置弹窗可以直接从当前 token 可见的
+> **私有**仓库里选（按最近更新排序，带更新时间与 fork 徽章），或就地新建一个私有仓库并自动选中。
+> 公开仓库不进列表、也没有「公开」开关 —— 新建请求体根本不带 `private`，宿主恒定以私有建仓
+> （同步仓库公开等于把配置内容公开）。地址输入框保留：ssh、本地路径、不在列表里的仓库仍可手填。
+>
+> **Repository picker for the sync channel**: the git channel's repository URL no longer has to be typed
+> by hand (create the repo on GitHub, copy the clone URL, paste it back — and remember that it must be
+> private). The channel dialog now lists the **private** repositories the current token can see (sorted by
+> most recently updated, with a timestamp and a fork badge), or creates a new private repository inline and
+> selects it. Public repositories are never listed and there is no "public" switch — the create request does
+> not even carry `private`, because the host always creates private repos (a public sync repo would publish
+> your configuration). The URL field stays: ssh remotes, local paths and unlisted repos are still typeable.
+
+> **性能修复**：本轮修的是**「总览」页每次都要等十几秒到半分钟**的问题 —— 根因是首屏把只读预览
+> 也当成了真实导出，并且一次预览里叠加了三处重复的全量读取。真机（24 个 settings namespace、
+> 12 个本地源插件）实测：全量预览 27.6 s → 现在首屏不再等它。
+>
+> - **预览不再打包本地插件**：`plugins` 分区此前没有 `preview()`，调用方退回 `export()`，
+>   于是每次打开「总览」都会为每个 `link:`/`file:` 插件 spawn 一次 `npm pack`
+>   （真机 12 个 ≈12 s）。现在 `PluginsAdapter.preview()` 只读清单、patch 行、pnpm-workspace 与
+>   patch 文件，**零进程副作用**；本地源体积改为**零 spawn 只读度量**（`file:` 源按一次 `stat`；
+>   `link:` 目录走新增的宿主门面 `FileSystemFacade.dirSizeBytes()` —— 跳过 `node_modules`、不跟随
+>   链接目录，给出的是 pack 产物的量级上界），单元清单与导出产物逐项同口径（含 `fileCount` 与原子组）。
+> - **settings / credentialsStatus 只读一趟**：宿主 `SettingsProvider.describe()` 是「无参 = 全量」，
+>   逐个 namespace 调用实际是 O(N²)（真机 24 个 ≈1.7 s，两个分区各来一遍）。新增可选能力
+>   `SettingsFacade.describeAll()`，适配器一次读回全部 namespace 再本地取用；宿主未实现或调用
+>   抛错时逐字退回原路径，告警文案不变。
+> - **总览页首屏不再等预览**：`HomePanel` 拆成「5 个毫秒级只读接口」与「分区构成」两段，
+>   首屏不再被最慢分区拖住；分区构成卡改为**始终渲染**，数据未到先显示骨架（`读取中…`），
+>   失败显示 `读取失败 · 将整体导出`，合计位在未到货时显示加载态而不是 0。
+>
+> **Performance**: the Overview page no longer makes you wait. Three separate causes were stacked into
+> one first paint: the read-only preview was running the real export path, and two sections re-read every
+> settings namespace once per name.
+>
+> - **Preview no longer packs local plugins**: the `plugins` section had no `preview()`, so the caller fell
+>   back to `export()` and spawned one `npm pack` per `link:`/`file:` plugin (~12 s on a real machine with
+>   12 local sources) every time the Overview opened. `PluginsAdapter.preview()` is now side-effect free;
+>   local source sizes are measured read-only without spawning anything (`file:` sources by a single `stat`;
+>   `link:` directories through the new host facade `FileSystemFacade.dirSizeBytes()`, which skips
+>   `node_modules` and never follows linked directories and is an order-of-magnitude upper bound on the pack
+>   output), and its unit list matches the exported one item for item.
+> - **settings / credentialsStatus read once**: the host `describe()` is "no argument = everything", so
+>   calling it per namespace is O(N²) (24 namespaces ≈1.7 s, twice per preview). A new optional
+>   `SettingsFacade.describeAll()` reads them all in one call; hosts that lack it (or that throw) fall back
+>   to the old per-name path with identical warnings.
+> - **The Overview first paint no longer awaits the preview**: `HomePanel` now loads the five fast read-only
+>   APIs first and the section composition separately. The composition card always renders, showing skeleton
+>   rows (`Loading…`) until the data arrives and `Load failed · export everything` on failure.
+
+> **本轮修复**：外壳里配好的 MCP 服务器与技能**备份不到** —— 导出包里 `mcp/servers.json` 恒为空、
+> `custom/skills/` 一个条目都没有，而插件报的是「成功」。根因是两处「只看了一个地方」：MCP / prompts /
+> 插件激活行的 patch **只读了 home 层**，而外壳真正写进去的是**档案层** `profiles/<name>/cordis.patch.yml`；
+> 技能**只扫了 `$DSH_HOME/skills`**，而外壳的技能来自插件注册表。现在 patch 行按层读取、写回原层，
+> 技能经外壳的 `skills` 服务收编，备份与回滚都记住每一行属于哪一层。
+>
+> **Theme**: MCP servers and skills configured in the shell could not be backed up at all (issue #71) —
+> the bundle's `mcp/servers.json` was always empty and `custom/skills/` had no entries, while the plugin
+> reported success. The plugin read only the home layer of the patch file for MCP / prompts / plugin
+> activation rows (the shell writes them into the **profile layer**), and it scanned only
+> `$DSH_HOME/skills` for skills while the shell serves them from its plugin registry. Patch rows are now
+> read per layer and written back to the layer they came from, skills are collected through the shell's
+> `skills` service, and backup/rollback record the layer of every row.
+
+### 🔌 修复：备份不到外壳的 MCP 与 Skills（issue #71）· MCP / skills not backed up (issue #71)
+
+- 🔌 **MCP 服务器现在从两个 patch 层读出**：`$DSH_HOME/cordis.patch.yml`（用户层）与
+  `$DSH_HOME/profiles/<name>/cordis.patch.yml`（档案层）按 **DSH 自己的合并优先级**取有效行（home 层后合并 ⇒
+  优先级更高），同名 `lineId` 只保留优先级最高的那一条；每条导出条目记下自己的来源层。
+  **MCP servers are now read from both patch layers**, merged in DSH's own precedence order (the home
+  layer wins), with the source layer recorded per entry.
+- ✍️ **导入写回原层，不再一律写 home 层**：来自档案层的行写回档案层（并且是**目标机当前档案**），来自用户层的
+  写回用户层；旧备份包没有层字段 ⇒ 按用户层处理（改造前行为，不猜）。同一根因下 prompts 分区与插件激活行
+  一起修好。**Imports write back to the layer a row came from** — profile-layer rows go to the target
+  machine's current profile; bundles from older versions have no layer field and keep the old home-layer
+  behavior. Prompts and plugin activation rows are fixed by the same change.
+- 🧩 **技能经外壳的 `skills` 服务收编**（`ctx.skills.list()` / `get(name)`）：注册表里的技能按
+  `<name>/SKILL.md` 虚拟路径并入 `custom/skills/`，frontmatter 只写 DSH 认的键（`name` / `description` /
+  `whenToUse`，调用策略写 `disable-model-invocation` / `user-invocable`）；**同名时磁盘原文优先**，
+  服务不可用就退回纯目录扫描（只记 warn，不编造告警）。**Skills are collected through the shell's `skills`
+  service** as virtual `<name>/SKILL.md` paths; on-disk files win on the same path, and a missing service
+  degrades to directory scanning.
+- 🛟 **备份与回滚记住 patch 行的层**：快照条目记录 `file`，回滚写回**原层**（旧快照缺该字段 ⇒ 用户层）；
+  计划项去重键把层算进去，档案层的行不再被 home 层的同名行吞掉；整文件还原接受**任一层**的
+  `cordis.patch.yml` 备份。**Snapshots and rollback now record the layer of every patch row.**
+- 🧾 **多行技能字段不再写出非法 YAML**：服务技能的 `description` / `whenToUse` 可能是块标量
+  （真机 `dsh-reverse-skill/skills/binary-diff` 是 4 行 211 字符），重建 frontmatter 按三档编码 ——
+  以恰好一个换行结尾的多行值写块标量 `|`（尾换行交给 clip chomping 还原）、含换行 / 回车 / 控制字符的
+  写双引号 + 转义、其余仍是单引号；解析回来**逐字符相同**。原先只做单引号转义，多行值会跨行 ⇒ 外壳判
+  `invalid YAML frontmatter` 并**丢掉整个技能**（比不备份更糟）。**Multi-line skill fields are now encoded
+  as valid YAML** (block scalar / double-quoted escapes / single-quoted), so the shell can never drop a skill
+  over frontmatter.
+- 🧪 **用例**：新增 `src/core/patch-layers.test.ts`（层优先级 / 写回层解析 / 单层读失败不阻塞），
+  扩充 `src/adapters/files.test.ts`（技能服务合并、磁盘优先、服务缺失、路径安全、**多行字段的 YAML 合法性**）、`mcp.test.ts`、
+  `prompts.test.ts`、`plugins.test.ts`、`tests/core/patch-file-snapshot.test.ts`（快照记层 + 回滚写回原层）。
+
 ## [0.1.69] - 2026-10-04
 
 > **本版已发布**：覆盖此前数轮并行落地的工作（会话跨机迁移与体检、UI v2 信息架构、磁盘占用体检、

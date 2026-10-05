@@ -10,25 +10,32 @@
  * 文件条目随分区进入 ZIP（落在 `plugin-files/local-plugins/` 前缀下，复用既有文件类分区通道，
  * **不新增分区 id**）；导入时把 spec 重写为 `file:<解包后的绝对路径>` 再交给官方安装通道。
  */
+import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { sha256Hex } from '../utils/hashing.ts';
 import { installSpecFor, resolveProcessProfileName } from '../core/plugin-cli.ts';
-import { LOCAL_PLUGIN_DIR } from '../core/local-plugin-pack.ts';
+import { classifyPluginSpec, LOCAL_PLUGIN_DIR, resolveLocalPluginPath } from '../core/local-plugin-pack.ts';
 import type { PackLocalPluginsResult } from '../core/local-plugin-pack.ts';
 import { msgOf, zhMsg } from '../core/messages.ts';
 import type { MsgFunc } from '../core/messages.ts';
+import { stringifyJsonSafe } from '../utils/json.ts';
 import { isPathSafe, normalizePath } from '../utils/paths.ts';
 import { PLUGIN_PATCH_REF_PREFIX } from '../core/backup.ts';
+import { readEffectivePatchLines, resolveWriteLayer, USER_PATCH_FILE } from '../core/patch-layers.ts';
 import { parsePnpmPatchedDependencies, sanitizePnpmWorkspacePatches } from './pnpm-workspace.ts';
 import type { LocalPluginTarball, PatchLine, PluginEntry, PluginsSection, PnpmPatchFile } from '../schema/types.ts';
 import type {
   ApplyResult, ConfigAdapter, ExportOptions, ExportSection, ExportUnit, HostContext,
-  ImportContext, PlanItem, ValidationResult,
+  ImportContext, PlanItem, SectionPreview, ValidationResult,
 } from '../core/types.ts';
 import { sectionMeta } from '../schema/section-registry.ts';
 import { validateJsonSection } from './json-section.ts';
 
-export const USER_PATCH_FILE = 'cordis.patch.yml';
+/**
+ * 用户（home）patch 层路径 —— 定义已移到 `core/patch-layers.ts`（issue #71：patch 有 home /
+ * profile 两层，层身份属于引擎知识，不属于某个 adapter）。此处 re-export 保持既有 import 面。
+ */
+export { USER_PATCH_FILE };
 
 /**
  * 本地源插件打包钩子（由宿主注入，见 src/index.ts createAdapters）。
@@ -137,6 +144,109 @@ function entriesOfRaw(raw: unknown): { config?: unknown }[] {
   return [];
 }
 
+/**
+ * 预览路径测到的本地源插件体积（`preview()` 写入，`listUnits()` 读取）。
+ *
+ * 为什么用 WeakMap 而不是给 `PluginsSection` 加字段：`localTarballs` 是备份格式的一部分
+ * （schema 校验、市场安全防线都在看它），而预览产物里本就没有 tarball 字节；把「只读预览测到的
+ * 体积」混进载荷只会让「预览说的」与「导出做的」更难分辨。挂在载荷对象上则随对象一起回收，
+ * 导出产物（真实 base64）走另一条分支，行为逐字不变。
+ */
+const previewTarballBytes = new WeakMap<object, Map<string, number>>();
+
+/**
+ * 零 spawn 推导本地源插件的体积（预览专用）。
+ *
+ * 两条路径，都是**只读度量**、都不 spawn 打包进程：
+ *  - `file:` 源 → 一次 stat：源 tarball 本身就是 gzip 容器，字节数与 `npm pack` 产物同量级；
+ *  - `link:` 源 → 目录体积上界（`fs.dirSizeBytes`）：这是 `npm pack` 的输入目录，体积比
+ *    pack 产物大（真机约 3.4 倍，pack 产物是 gzip），用来展示「量级」足够。
+ *    绝不在这里手写递归（见 local-plugin-pack.ts 安全约束：node_modules 由 npm pack 自己排除，
+ *    手写递归会把它整个算进来）——度量交给宿主门面，由它负责跳过 node_modules 与链接目录。
+ *
+ * 登记本身就是语义：Map 里有该插件 = 「该单元随备份携带一个文件」，与导出产物里
+ * `npm pack` 打出的 tarball（`fileCount: 1`）对齐；宿主未实现相应度量、越界路径
+ * （fs 门面对 home 外绝对路径抛 `host.fsPathEscape`）、目录读不到一律按 0 ——
+ * 预览绝不能因为一个体积数字而失败。
+ */
+async function measureLocalSources(plugins: PluginEntry[], ctx: HostContext): Promise<Map<string, number>> {
+  const sizes = new Map<string, number>();
+  const statSize = ctx.fs.statSize;
+  const dirSize = ctx.fs.dirSizeBytes;
+  // profile 目录与打包钩子同源（local-plugin-host.ts：优先 profileDir，回退按 profile 名拼接）
+  const profileDir = ctx.profileDir !== undefined && ctx.profileDir !== ''
+    ? ctx.profileDir
+    : join(ctx.homeDir, PNPM_PROFILE_DIR(ctx.profile));
+  for (const pl of plugins) {
+    const kind = classifyPluginSpec(pl.spec);
+    if (kind !== 'file' && kind !== 'link') continue;
+    try {
+      const abs = resolveLocalPluginPath(pl.spec ?? '', { homeDir: ctx.homeDir, profileDir });
+      // 宿主未实现对应度量 → null → 按 0（旧行为，只少一个数字）
+      const size = kind === 'link'
+        ? (dirSize !== undefined ? await dirSize.call(ctx.fs, abs) : null)
+        : (statSize !== undefined ? await statSize.call(ctx.fs, abs) : null);
+      sizes.set(pl.name, size !== null && size > 0 ? size : 0);
+    } catch {
+      // 越界 / 读不到：按 0 处理（预览不因此失败），但仍算「随包携带一个文件」
+      sizes.set(pl.name, 0);
+    }
+  }
+  return sizes;
+}
+
+/**
+ * 由分区载荷派生单元清单（纯函数、零 I/O）。
+ *
+ * 单元 = 插件包 / cordis 补丁行 / pnpm-workspace.yaml / 单个 patch 文件。
+ * 后两者构成**原子组**：patchedDependencies 的声明与 patches/** 文件必须同进同出
+ * （issue #35 —— 只搬声明会让目标机 pnpm 拒绝一切 add），故互相写进 lockedWith，
+ * 由选择模型保证勾选/取消同步。
+ *
+ * `tarballBytes` = 预览路径登记到的本地源体积（见 measureLocalSources，0 = 体积未知但仍随包携带）；
+ * 缺省时体积与文件数完全按导出产物里的 base64 计算 —— 与改造前逐字一致。
+ */
+function unitsOf(data: PluginsSection, tarballBytes?: Map<string, number>): ExportUnit[] {
+  const wsId = 'plugins:pnpm-workspace';
+  const patchFileIds = (data.patchFiles ?? []).map((pf) => `plugins:patch:${normalizePath(pf.relativePath)}`);
+  const group = [wsId, ...patchFileIds];
+  const units: ExportUnit[] = [];
+  for (const pl of data.plugins) {
+    const tarball = tarballOf(data, pl.name);
+    const measured = tarballBytes?.get(pl.name);
+    units.push({
+      id: `plugin:${pl.name}`,
+      label: pl.name,
+      detail: pl.version,
+      // base64 长度 → 原始字节数（仅用于展示体积，不求精确）；预览路径没有字节，用 stat 量到的源体积
+      sizeBytes: tarball !== undefined ? Math.floor((tarball.base64.length * 3) / 4) : measured ?? 0,
+      ...(tarball !== undefined || measured !== undefined ? { fileCount: 1 } : {}),
+    });
+  }
+  for (const line of data.patch) {
+    // 由 mcp / prompts adapter 管理的行不属本分区（applyItem 同样跳过），列出来只会误导用户
+    if (isManagedElsewhere(line.raw)) continue;
+    units.push({ id: `patch:${line.lineId}`, label: line.lineId, sizeBytes: 0 });
+  }
+  if (data.pnpmWorkspace !== undefined && data.pnpmWorkspace !== null && data.pnpmWorkspace !== '') {
+    units.push({
+      id: wsId,
+      label: 'pnpm-workspace.yaml',
+      sizeBytes: data.pnpmWorkspace.length,
+      ...(group.length > 1 ? { lockedWith: group } : {}),
+    });
+  }
+  for (const pf of data.patchFiles ?? []) {
+    units.push({
+      id: `plugins:patch:${normalizePath(pf.relativePath)}`,
+      label: pf.relativePath,
+      sizeBytes: Math.floor((pf.base64.length * 3) / 4),
+      ...(group.length > 1 ? { lockedWith: group } : {}),
+    });
+  }
+  return units;
+}
+
 export class PluginsAdapter implements ConfigAdapter<PluginsSection> {
   readonly id = 'plugins' as const;
   // 元数据唯一来源 = 注册表（t31）：不再与 ui/export-flow.ts 的导出目录各写一份
@@ -154,6 +264,42 @@ export class PluginsAdapter implements ConfigAdapter<PluginsSection> {
   }
 
   async export(ctx: HostContext, options: ExportOptions): Promise<ExportSection<PluginsSection>> {
+    return this.collect(ctx, options, true);
+  }
+
+  /**
+   * 只读预览（`/export-preview` 用）：与 `export()` **同口径**，但不做任何本地源打包。
+   *
+   * 为什么必须覆写：基类缺省会让调用方退回 `export()`，而 `export()` 会为每个 `link:`/`file:`
+   * 插件 spawn 一次 `npm pack`（真机 12 个本地源插件 ≈12 s）。「总览」页只想知道条目数与体积，
+   * 却因此每次都要打包一遍全部本地插件 —— 预览是纯只读路径，不该有任何进程副作用。
+   *
+   * 与 `export()` 的**唯一**差异：
+   * - 不注入 `localTarballs`（没有字节），故清单 spec 保持原样（不做 `file:<tarball>` 改写）；
+   * - 插件单元体积改为 `file:` 源的一次 stat（`measureLocalSources`），`link:` 目录按 0；
+   * - 体积用一次 `stringify` 算 UTF-8 字节数（与 /export-preview 对 JSON 分区的口径一致）。
+   * 其余（清单过滤、patch 行、pnpm-workspace、patchFiles、条目级白名单、告警文案、单元分组）逐字相同。
+   */
+  async preview(ctx: HostContext, options: ExportOptions): Promise<SectionPreview<PluginsSection>> {
+    const collected = await this.collect(ctx, options, false);
+    const data = collected.data;
+    const tarballBytes = await measureLocalSources(data.plugins, ctx);
+    if (tarballBytes.size > 0) previewTarballBytes.set(data, tarballBytes);
+    return {
+      section: collected,
+      // 与 src/index.ts 对 JSON 分区现算体积的口径一致（utf8 字节数）
+      sizeBytes: new TextEncoder().encode(stringifyJsonSafe(data)).length,
+      items: unitsOf(data, tarballBytes),
+    };
+  }
+
+  /**
+   * 导出与预览的共同内核。
+   *
+   * `pack=false` 时跳过本地源打包（预览路径）—— 除该段外两条路径逐字共用，
+   * 避免「预览说会带什么」与「导出真的带什么」分叉。
+   */
+  private async collect(ctx: HostContext, options: ExportOptions, pack: boolean): Promise<ExportSection<PluginsSection>> {
     const plugins: PluginEntry[] = [];
     const warnings: string[] = [];
     try {
@@ -175,11 +321,12 @@ export class PluginsAdapter implements ConfigAdapter<PluginsSection> {
       warnings.push(msgOf(ctx)('adapter.pluginListReadFailed', { reason: err instanceof Error ? err.message : String(err) }));
     }
     const patch: PatchLine[] = [];
-    try {
-      const lines = await ctx.patchFile.readPatchLines(USER_PATCH_FILE);
-      for (const l of lines) patch.push({ file: USER_PATCH_FILE, lineId: l.lineId, raw: l.raw });
-    } catch (err) {
-      warnings.push(msgOf(ctx)('adapter.patchReadFailed', { reason: err instanceof Error ? err.message : String(err) }));
+    // issue #71：patch 有两层（home 层 + profile 层），只读 home 层会漏掉 DSH 工具与 marketplace
+    // 写入 profile 层的激活行 —— 导出少了它们，导入到新机就少一批插件加载项。
+    const patchRead = await readEffectivePatchLines(ctx.patchFile, ctx.profile);
+    for (const l of patchRead.lines) patch.push({ file: l.file, lineId: l.lineId, raw: l.raw });
+    for (const f of patchRead.failures) {
+      warnings.push(msgOf(ctx)('adapter.patchReadFailed', { reason: `${f.file}: ${f.reason}` }));
     }
     // pnpm-workspace.yaml（allowBuilds / minimumReleaseAgeExclude 等）：随插件分区迁移，
     // 否则目标 profile 的 pnpm 可能因构建白名单/冷静期拒绝安装插件（§34.17 同款语义）。
@@ -236,7 +383,7 @@ export class PluginsAdapter implements ConfigAdapter<PluginsSection> {
     // （曾导致插件被静默丢失）。钩子由宿主注入；未注入 / 无本地源 / 单个失败一律不中断导出。
     let localTarballs: LocalPluginTarball[] | undefined;
     let effectivePlugins = plugins;
-    if (this.localPack !== undefined) {
+    if (pack && this.localPack !== undefined) {
       try {
         const packed = await this.localPack(plugins, ctx);
         warnings.push(...packed.warnings);
@@ -312,44 +459,8 @@ export class PluginsAdapter implements ConfigAdapter<PluginsSection> {
    * 由选择模型保证勾选/取消同步。
    */
   listUnits(section: ExportSection<PluginsSection>): ExportUnit[] {
-    const data = section.data;
-    const wsId = 'plugins:pnpm-workspace';
-    const patchFileIds = (data.patchFiles ?? []).map((pf) => `plugins:patch:${normalizePath(pf.relativePath)}`);
-    const group = [wsId, ...patchFileIds];
-    const units: ExportUnit[] = [];
-    for (const pl of data.plugins) {
-      const tarball = (data.localTarballs ?? []).find((t) => t.packageName === pl.name);
-      units.push({
-        id: `plugin:${pl.name}`,
-        label: pl.name,
-        detail: pl.version,
-        // base64 长度 → 原始字节数（仅用于展示体积，不求精确）
-        sizeBytes: tarball !== undefined ? Math.floor((tarball.base64.length * 3) / 4) : 0,
-        ...(tarball !== undefined ? { fileCount: 1 } : {}),
-      });
-    }
-    for (const line of data.patch) {
-      // 由 mcp / prompts adapter 管理的行不属本分区（applyItem 同样跳过），列出来只会误导用户
-      if (isManagedElsewhere(line.raw)) continue;
-      units.push({ id: `patch:${line.lineId}`, label: line.lineId, sizeBytes: 0 });
-    }
-    if (data.pnpmWorkspace !== undefined && data.pnpmWorkspace !== null && data.pnpmWorkspace !== '') {
-      units.push({
-        id: wsId,
-        label: 'pnpm-workspace.yaml',
-        sizeBytes: data.pnpmWorkspace.length,
-        ...(group.length > 1 ? { lockedWith: group } : {}),
-      });
-    }
-    for (const pf of data.patchFiles ?? []) {
-      units.push({
-        id: `plugins:patch:${normalizePath(pf.relativePath)}`,
-        label: pf.relativePath,
-        sizeBytes: Math.floor((pf.base64.length * 3) / 4),
-        ...(group.length > 1 ? { lockedWith: group } : {}),
-      });
-    }
-    return units;
+    // 预览产物没有 tarball 字节，体积来自 measureLocalSources 挂上的统计（导出产物走 base64 分支）
+    return unitsOf(section.data, previewTarballBytes.get(section.data));
   }
 
   /**
@@ -491,16 +602,20 @@ export class PluginsAdapter implements ConfigAdapter<PluginsSection> {
 
     // 用户 patch 行：lineId 唯一键；存在且同 → Skip；存在不同 → Conflict；不存在 → Create。
     // mcp-client 行与 systemPrompt/planMode 行由 mcp/prompts adapter 管理，此处跳过（避免重复写入覆盖）。
-    const targetLines = await ctx.target.patchFile.readPatchLines(USER_PATCH_FILE);
+    // issue #71：目标行同样跨两层（否则 profile 层已有的行会被误判成 Create → 导入后出现重复行）
+    const targetLines = (await readEffectivePatchLines(ctx.target.patchFile, ctx.target.profile)).lines;
     for (const pl of data.patch) {
       if (isManagedElsewhere(pl.raw)) continue;
       const id = `patch:${pl.lineId}`;
       const tl = targetLines.find((l) => l.lineId === pl.lineId);
+      // 层身份随计划项走：applyItem 按 pl.file 写回，导入前快照按 target.file 记原行，
+      // 两者必须是同一层，否则回滚会把另一层改坏（issue #71）。
+      const layer = resolveWriteLayer(pl.file, ctx.target.profile);
       if (!tl) {
         items.push({
           id, kind: 'Create', adapter: 'plugins',
           description: msg('adapter.patchLineCreate', { lineId: pl.lineId }), severity: 'info',
-          target: { adapter: 'plugins', ref: pl.lineId },
+          target: { adapter: 'plugins', ref: pl.lineId, file: layer },
         });
       } else if (isDeepStrictEqual(tl.raw, pl.raw)) {
         items.push({ id, kind: 'Skip', adapter: 'plugins', description: msg('adapter.patchLineSame', { lineId: pl.lineId }), severity: 'info' });
@@ -508,7 +623,7 @@ export class PluginsAdapter implements ConfigAdapter<PluginsSection> {
         items.push({
           id, kind: 'Conflict', adapter: 'plugins',
           description: msg('adapter.patchLineDiff', { lineId: pl.lineId }), severity: 'warning',
-          target: { adapter: 'plugins', ref: pl.lineId },
+          target: { adapter: 'plugins', ref: pl.lineId, file: layer },
         });
       }
     }
@@ -646,7 +761,9 @@ export class PluginsAdapter implements ConfigAdapter<PluginsSection> {
     const data = ctx.sections.get('plugins') as PluginsSection | undefined;
     const pl = data?.patch.find((p) => p.lineId === ref);
     if (!pl) return { ok: false, message: msg('adapter.patchMissing', { ref }) };
-    await ctx.target.patchFile.applyPatchChanges(pl.file, [
+    // 层身份按**语义**映射到目标机：来源是别的 profile 层时不能照抄名字（目标机未必有那个
+    // profile，宿主门面会拒绝），一律落到目标机当前 profile 层（与计划项 target.file 同口径）。
+    await ctx.target.patchFile.applyPatchChanges(resolveWriteLayer(pl.file, ctx.target.profile), [
       { lineId: ref, raw: pl.raw, action: item.kind === 'Create' ? 'insert' : 'update' },
     ]);
     return { ok: true, needsRestart: true, message: msg('adapter.patchWritten', { ref }) };

@@ -18,20 +18,46 @@ import { DshPluginsFacade, DshSessionStoreFacade, ensureActivationRow, normalize
 import { zhMsg } from './core/messages.ts';
 import { createLogger, type Logger } from './utils/logger.ts';
 import { resolveProfileDir } from './core/plugin-cli.ts';
+import { USER_PATCH_FILE } from './core/patch-layers.ts';
 import type { DshPluginResult } from './core/plugin-cli.ts';
 import type { PatchChange, PatchFileFacade } from './core/types.ts';
 
 /* ------------------------------------------------ mock 基础设施 */
 
+/**
+ * 内存 patch 门面：`lines` = 用户层，`byFile` = 其它层（issue #71 起 patch 有 home / profile 两层）。
+ *
+ * `ensureActivationRow` 现在把激活行写进 **profile 层**（`profiles/<p>/cordis.patch.yml`），
+ * 所以断言要按层看：`byFile` 里那一桶才是激活行。
+ */
 class MemPatchFile implements PatchFileFacade {
   lines = new Map<string, { lineId: string; raw: unknown }>();
-  async readPatchLines(_file: string): Promise<{ lineId: string; raw: unknown }[]> {
-    return [...this.lines.values()];
+  byFile = new Map<string, Map<string, { lineId: string; raw: unknown }>>();
+  bucket(file: string): Map<string, { lineId: string; raw: unknown }> {
+    if (file === USER_PATCH_FILE) return this.lines;
+    let bucket = this.byFile.get(file);
+    if (bucket === undefined) {
+      bucket = new Map<string, { lineId: string; raw: unknown }>();
+      this.byFile.set(file, bucket);
+    }
+    return bucket;
   }
-  async applyPatchChanges(_file: string, changes: PatchChange[]): Promise<void> {
+  /** 全部层加起来的行数（旧断言「一共几行」用）。 */
+  get size(): number {
+    let n = this.lines.size;
+    for (const bucket of this.byFile.values()) n += bucket.size;
+    return n;
+  }
+  async readPatchLines(file: string): Promise<{ lineId: string; raw: unknown }[]> {
+    if (file === USER_PATCH_FILE) return [...this.lines.values()];
+    const bucket = this.byFile.get(file);
+    return bucket === undefined ? [] : [...bucket.values()];
+  }
+  async applyPatchChanges(file: string, changes: PatchChange[]): Promise<void> {
+    const bucket = this.bucket(file);
     for (const c of changes) {
-      if (c.action === 'remove') this.lines.delete(c.lineId);
-      else this.lines.set(c.lineId, { lineId: c.lineId, raw: c.raw });
+      if (c.action === 'remove') bucket.delete(c.lineId);
+      else bucket.set(c.lineId, { lineId: c.lineId, raw: c.raw });
     }
   }
 }
@@ -86,13 +112,14 @@ test('install: 无 marketplace 时走 CLI 通道（mock runner 记录 argv），
     assert.equal(calls[0]?.profileDir, profileDir);
     assert.equal(calls[0]?.profile, 'web');
     assert.deepEqual(calls[0]?.args, ['add', 'pkg-a'], '必须构造 dsh plugin --profile web add pkg-a 的 argv');
-    // 非 bundle：成功路径幂等补激活行
+    // 非 bundle：成功路径幂等补激活行 —— 写进 **profile 层**（issue #71：激活行属于档案，不属于 home 层）
     assert.deepEqual(
-      [...patchFile.lines.keys()],
+      [...patchFile.bucket('profiles/web/cordis.patch.yml').keys()],
       ['pm-pkg-a'],
       '非 bundle 插件安装后写入 pm-<slug> 激活行',
     );
-    assert.deepEqual(patchFile.lines.get('pm-pkg-a')?.raw, { id: 'pm-pkg-a', name: 'pkg-a' });
+    assert.deepEqual(patchFile.bucket('profiles/web/cordis.patch.yml').get('pm-pkg-a')?.raw, { id: 'pm-pkg-a', name: 'pkg-a' });
+    assert.equal(patchFile.lines.size, 0, '不得落到用户（home）层');
   } finally {
     cleanup();
   }
@@ -107,7 +134,7 @@ test('install: bundle 包成功 → 不补 patch 行（reconcile 维护 bundles�
     const facade = new DshPluginsFacade(homeDir, 'web', patchFile, runner);
 
     await facade.install('pkg-bundle');
-    assert.equal(patchFile.lines.size, 0, 'bundle 包不写 patch 行');
+    assert.equal(patchFile.size, 0, 'bundle 包不写 patch 行');
   } finally {
     cleanup();
   }
@@ -218,7 +245,7 @@ test('ensureActivationRow: 幂等——重复安装不重复行', async () => {
     await ensureActivationRow(patchFile, join(profileDir, 'node_modules', 'pkg-a'), 'pkg-a');
     await ensureActivationRow(patchFile, join(profileDir, 'node_modules', 'pkg-a'), 'pkg-a');
     await ensureActivationRow(patchFile, join(profileDir, 'node_modules', 'pkg-a'), 'pkg-a');
-    assert.equal(patchFile.lines.size, 1, '三次调用只产生一行');
+    assert.equal(patchFile.size, 1, '三次调用只产生一行');
   } finally {
     cleanup();
   }
@@ -232,7 +259,7 @@ test('ensureActivationRow: 已有同 name 行（任意 id）→ 不重复插入'
     patchFile.lines.set('user-line', { lineId: 'user-line', raw: { id: 'user-line', name: 'pkg-a' } });
 
     await ensureActivationRow(patchFile, join(profileDir, 'node_modules', 'pkg-a'), 'pkg-a');
-    assert.equal(patchFile.lines.size, 1, '按 name 去重，不新增行');
+    assert.equal(patchFile.size, 1, '按 name 去重，不新增行');
     assert.equal(patchFile.lines.has('user-line'), true);
   } finally {
     cleanup();
@@ -246,7 +273,7 @@ test('ensureActivationRow: bundle 包跳过（reconcile 已维护 bundles）', a
     const patchFile = new MemPatchFile();
 
     await ensureActivationRow(patchFile, join(profileDir, 'node_modules', 'pkg-bundle'), 'pkg-bundle');
-    assert.equal(patchFile.lines.size, 0, 'bundle 包不写 patch 行');
+    assert.equal(patchFile.size, 0, 'bundle 包不写 patch 行');
   } finally {
     cleanup();
   }
@@ -290,8 +317,8 @@ test('ensureActivationRow: scope 包名 slug 形态正确（@scope/name → pm-s
     const patchFile = new MemPatchFile();
 
     await ensureActivationRow(patchFile, join(profileDir, 'node_modules', '@org', 'pkg-a'), '@org/pkg-a');
-    assert.equal(patchFile.lines.size, 1);
-    assert.equal(patchFile.lines.has('pm-org-pkg-a'), true, '去 @ 后连字符 slug');
+    assert.equal(patchFile.size, 1);
+    assert.equal(patchFile.bucket('profiles/web/cordis.patch.yml').has('pm-org-pkg-a'), true, '去 @ 后连字符 slug');
   } finally {
     cleanup();
   }

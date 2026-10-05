@@ -61,7 +61,7 @@ import type {
 } from './sync-api.ts'
 import {
   computeGithubLoginView, computeRemoteReady, computeSyncButtons, defaultChannelSyncState,
-  githubPollMessage, kindLabel, pullReportView, pushPreviewView, pushReportView, readStoredChannel,
+  githubPollMessage, isClientChannel, kindLabel, pullReportView, pushPreviewView, pushReportView, readStoredChannel,
   initialSyncSections, normalizeSessionsLimit, severityLabel, syncSectionOptions, writeStoredChannel,
 } from './sync-view.ts'
 import type {
@@ -403,7 +403,9 @@ export function SyncPanel({ api, t, cmT }: SyncPanelProps) {
       // 通道回填：优先磁盘持久化的选择（status.lastSyncChannel，ui-prefs.json）；未记录过则
       // 回退 localStorage 记忆（升级前遗留）→ 最后按配置（sync-config.transport）
       const savedChannel: SyncChannel = info.transport?.type === 'webdav' ? 'webdav' : 'git'
-      const remembered = info.lastSyncChannel ?? readStoredChannel()
+      // 宿主 ui-prefs 可能记录**客户端尚未接线**的云端通道（s3/gist）：UI 只认已接线通道，
+  // 未接线的值一律按「无记录」处理并回落 localStorage 记忆 —— 不把未接线通道混进 UI 状态机。
+  const remembered: SyncChannel | null = isClientChannel(info.lastSyncChannel) ? info.lastSyncChannel : readStoredChannel()
       // 可同步分区目录回填（host adapters 唯一事实源；仅 portable；两通道共用）
       const catalog = info.syncSections !== undefined ? syncSectionOptions(info.syncSections) : []
       // 每通道回填：优先该通道的持久化配置（syncSelectionByChannel / autosyncByChannel）；
@@ -1211,6 +1213,7 @@ export function SyncPanel({ api, t, cmT }: SyncPanelProps) {
           {/* 通道配置弹窗（渲染段拆到 ChannelConfigDialog，t42）：只配置**打开它的那条通道**，弹窗内不提供切换 */}
           <ChannelConfigDialog
             open={channelOpen}
+            api={api}
             t={t}
             uiT={uiT}
             channel={state.channel}

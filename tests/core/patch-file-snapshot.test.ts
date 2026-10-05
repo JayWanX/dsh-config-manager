@@ -93,6 +93,84 @@ test('issue #35：导入前快照覆盖 patch 文件，回滚还原被覆盖的�
   );
 });
 
+test('issue #71：patch 行快照记住所在层，回滚写回原层（不再一律回用户层）', async () => {
+  const ctx = makeContext('win32', HOME, 'web');
+  const PROFILE_REL = 'profiles/web/cordis.patch.yml';
+  // 真机形态：MCP 行在 profile 层；home 层另有同名行（优先级更高，属于另一份配置）
+  ctx.patchFile.bucket(PROFILE_REL).set('mcp-codegraph', {
+    lineId: 'mcp-codegraph',
+    raw: { id: 'mcp-codegraph', name: 'dsh-mcp-client', config: { serverName: 'codegraph', command: 'codegraph' } },
+  });
+  ctx.patchFile.lines.set('mcp-other', { lineId: 'mcp-other', raw: { id: 'mcp-other', name: 'dsh-mcp-client', config: { serverName: 'other' } } });
+
+  const plan: ImportPlan = {
+    items: [{
+      id: 'mcp:codegraph',
+      kind: 'Update',
+      adapter: 'mcp',
+      description: 'update mcp row',
+      severity: 'info',
+      target: { adapter: 'mcp', ref: 'mcp-codegraph', file: PROFILE_REL },
+    }],
+    globalStrategy: 'merge',
+    pathMappings: [],
+    missingSecrets: [],
+    needsRestart: false,
+    estimatedActions: emptyEstimatedActions(),
+  };
+  const store = new MemSnapshotStore();
+  const snapshot = await createSnapshot({ ctx, plan, sourceZip: 'C:\\tmp\\x.zip', store, adapters: [] });
+  const entry = snapshot.entries.find((e) => e.ref === 'mcp-codegraph');
+  assert.equal(entry?.kind, 'patchLine');
+  assert.equal(entry?.file, PROFILE_REL, '快照必须记住原行所在层，否则回滚会写错文件');
+  assert.equal(entry?.existed, true);
+
+  // 模拟导入：改写 profile 层的行（home 层不动）
+  ctx.patchFile.bucket(PROFILE_REL).set('mcp-codegraph', {
+    lineId: 'mcp-codegraph',
+    raw: { id: 'mcp-codegraph', name: 'dsh-mcp-client', config: { serverName: 'codegraph', command: 'codegraph', args: ['serve'] } },
+  });
+
+  const report = await rollback({ ctx, snapshot, store, adapters: [] });
+  assert.equal(report.full, true, JSON.stringify(report));
+  const restored = ctx.patchFile.bucket(PROFILE_REL).get('mcp-codegraph')?.raw as Record<string, unknown>;
+  assert.deepEqual(restored, { id: 'mcp-codegraph', name: 'dsh-mcp-client', config: { serverName: 'codegraph', command: 'codegraph' } }, '必须还原 profile 层的原行');
+  assert.equal(ctx.patchFile.lines.has('mcp-other'), true, 'home 层其它行不受影响');
+});
+
+test('issue #71：旧计划项没有层信息 → 快照/回滚回落到用户层（兼容旧备份）', async () => {
+  const ctx = makeContext('win32', HOME, 'web');
+  ctx.patchFile.lines.set('mcp-legacy', { lineId: 'mcp-legacy', raw: { id: 'mcp-legacy', name: 'dsh-mcp-client' } });
+  const plan: ImportPlan = {
+    items: [{
+      id: 'mcp:legacy',
+      kind: 'Update',
+      adapter: 'mcp',
+      description: 'legacy row',
+      severity: 'info',
+      target: { adapter: 'mcp', ref: 'mcp-legacy' },
+    }],
+    globalStrategy: 'merge',
+    pathMappings: [],
+    missingSecrets: [],
+    needsRestart: false,
+    estimatedActions: emptyEstimatedActions(),
+  };
+  const store = new MemSnapshotStore();
+  const snapshot = await createSnapshot({ ctx, plan, sourceZip: 'C:\\tmp\\x.zip', store, adapters: [] });
+  const entry = snapshot.entries.find((e) => e.ref === 'mcp-legacy');
+  assert.equal(entry?.file, 'cordis.patch.yml', '缺省层 = 用户层');
+
+  // 非法层字符串不得被当成文件名（宿主门面只认两层；否则会抛「仅支持管理 …」）
+  ctx.patchFile.lines.set('mcp-evil', { lineId: 'mcp-evil', raw: { id: 'mcp-evil', name: 'dsh-mcp-client' } });
+  const evilPlan: ImportPlan = {
+    ...plan,
+    items: [{ ...plan.items[0]!, id: 'mcp:evil', target: { adapter: 'mcp', ref: 'mcp-evil', file: 'settings.yaml' } }],
+  };
+  const snap2 = await createSnapshot({ ctx, plan: evilPlan, sourceZip: 'C:\\tmp\\x.zip', store, adapters: [] });
+  assert.equal(snap2.entries.find((e) => e.ref === 'mcp-evil')?.file, 'cordis.patch.yml', '不认识的层 → 用户层，绝不透传');
+});
+
 test('issue #35：目标机原本没有该 patch 文件 → 快照 existed=false（不谎报有原值）', async () => {
   const ctx = makeContext('win32', HOME, 'web');
   const store = new MemSnapshotStore();

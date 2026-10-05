@@ -12,7 +12,8 @@ import { InfoHint } from '../common/InfoHint.tsx'
 import { Modal } from '../common/Modal.tsx'
 import { Select } from '../common/Select.tsx'
 import { SYNC_CREDENTIAL_REF, SYNC_WEBDAV_CREDENTIAL_REF } from './sync-api.ts'
-import type { SyncStatusResponse } from './sync-api.ts'
+import type { SyncApi, SyncStatusResponse } from './sync-api.ts'
+import { SyncRepositoryPicker } from './SyncRepositoryPicker.tsx'
 import { presetById, presetIdForUrl, privateRepoHint, WEBDAV_PRESETS } from './sync-view.ts'
 import type { GithubLoginView, SyncChannel } from './sync-view.ts'
 import css from '../config-manager.module.css'
@@ -32,9 +33,10 @@ export type ChannelFormPatch = {
  * 拆出的职责单元只接收「渲染所需数据 + 回调」：`onFormChange` 由父组件实现为
  * 「patch 表单 + 防抖自动保存」—— 防抖定时器与卸载 flush 仍归父组件（单一状态源）。
  */
-export function ChannelConfigDialog({ open, onClose, t, uiT, channel, busy, savingConfig, remoteReady, repoUrl, token, webdavUrl, webdavUsername, webdavPassword, statusInfo, githubSignedIn, githubView, onFormChange, onGithubStart, onGithubCancel, onSave }: {
+export function ChannelConfigDialog({ open, onClose, api, t, uiT, channel, busy, savingConfig, remoteReady, repoUrl, token, webdavUrl, webdavUsername, webdavPassword, statusInfo, githubSignedIn, githubView, onFormChange, onGithubStart, onGithubCancel, onSave }: {
   open: boolean
   onClose: () => void
+  api: SyncApi
   t: TranslateNS<'config-manager-sync'>
   uiT: UiT
   channel: SyncChannel
@@ -80,6 +82,16 @@ export function ChannelConfigDialog({ open, onClose, t, uiT, channel, busy, savi
       {channel === 'git' && (
         <>
           <span className={css.groupLabel}>{t('config.title')}</span>
+          {/* 仓库选择器：选择已有私有仓库 / 新建私有仓库（手填地址仍保留在下方 —— ssh、
+              本地路径、不在列表里的仓库都得能填） */}
+          <SyncRepositoryPicker
+            open={open}
+            api={api}
+            t={t}
+            repoUrl={repoUrl}
+            busy={busy}
+            onPick={(cloneUrl) => { onFormChange({ repoUrl: cloneUrl }) }}
+          />
           <label className={css.field}>
             <span className={css.fieldLabel}>{t('config.repoUrl')} <InfoHint text={t('config.repoUrlHint')} label={t('common.infoHint')} /></span>
             <input

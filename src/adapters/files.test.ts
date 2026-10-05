@@ -4,6 +4,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import * as yaml from 'js-yaml';
 import { SkillsAdapter } from './skills.ts';
 import { AgentPresetsAdapter } from './agent-presets.ts';
 import { AgentInstructionsAdapter } from './agent-instructions.ts';
@@ -44,6 +45,165 @@ test('skills: 导出收集文件 + 导入往返（hash 幂等）', async () => {
   await dst.fs.writeFile('skills/coding.md', Buffer.from('# Changed\n', 'utf8'));
   items = await adapter.analyzeImport(out.data, makeImportContext(dst, sections));
   assert.ok(items.some((i) => i.kind === 'Conflict'));
+});
+
+test('issue #71: skills 合并技能服务（外壳技能不在 $DSH_HOME/skills 里）', async () => {
+  const src = makeContext('win32', 'C:\\Users\\alice');
+  // 真机形态：$DSH_HOME/skills 不存在，技能全在服务里（profile 插件包 / customSkillDirs / 内置目录）
+  src.skills = {
+    list: async () => [
+      { name: 'reverse-skill', description: '逆向工程技能', whenToUse: '分析二进制时', invocation: { modelInvocable: true, userInvocable: true } },
+      { name: 'browser-skill', description: '浏览器操作' },
+    ],
+    // 真机上 get() 返回的是完整定义（元数据与 list() 的摘要同源，外加 content）
+    get: async (name) => ({
+      name,
+      description: name === 'reverse-skill' ? '逆向工程技能' : '浏览器操作',
+      whenToUse: name === 'reverse-skill' ? '分析二进制时' : undefined,
+      content: `# ${name} body\n`,
+    }),
+  };
+  const adapter = new SkillsAdapter();
+  const out = await adapter.export(src, { includeSecrets: false });
+  assert.deepEqual(
+    out.data.files.map((f) => f.relativePath).sort(),
+    ['browser-skill/SKILL.md', 'reverse-skill/SKILL.md'],
+    '服务技能必须映射成 <name>/SKILL.md 虚拟路径进备份',
+  );
+  const text = Buffer.from(out.data.files.find((f) => f.relativePath === 'reverse-skill/SKILL.md')!.data).toString();
+  assert.ok(text.startsWith("---\nname: 'reverse-skill'\n"), `frontmatter 头不对: ${text.slice(0, 60)}`);
+  assert.ok(text.includes("description: '逆向工程技能'"));
+  assert.ok(text.includes("whenToUse: '分析二进制时'"));
+  assert.ok(text.includes('\n---\n\n# reverse-skill body\n'), '正文必须原样保留');
+  assert.equal(out.data.files[0]?.contentHash, sha256Hex(out.data.files[0]!.data), 'content 模式必须带哈希');
+
+  // 单元 id = 技能名（选择器上「一个技能一个勾选项」）
+  const units = adapter.listUnits(out);
+  assert.deepEqual(units.map((u) => u.id).sort(), ['skills:browser-skill', 'skills:reverse-skill']);
+
+  // 预览与导出的体积口径一致（size 模式走同一条重建逻辑）
+  const previewed = await adapter.preview(src, { includeSecrets: false });
+  const previewUnit = previewed.items.find((u) => u.id === 'skills:reverse-skill');
+  assert.equal(previewUnit?.sizeBytes, Buffer.from(out.data.files.find((f) => f.relativePath === 'reverse-skill/SKILL.md')!.data).byteLength);
+
+  // 导入往返：Create → 写到目标机的 skills/<name>/SKILL.md
+  const sections = new Map([['skills', out.data]]);
+  const dst = makeContext('linux', '/home/bob');
+  const items = await adapter.analyzeImport(out.data, makeImportContext(dst, sections));
+  assert.ok(items.every((i) => i.kind === 'Create'));
+  for (const item of items) assert.equal((await adapter.applyItem(item, makeImportContext(dst, sections))).ok, true);
+  assert.ok(Buffer.from(await dst.fs.readFile('skills/reverse-skill/SKILL.md')).toString().includes('name: \'reverse-skill\''));
+});
+
+test('issue #71: 技能服务与磁盘同路径 → 磁盘原文优先；调用策略只写 DSH 认的键', async () => {
+  const src = makeContext('win32', 'C:\\Users\\alice');
+  await src.fs.writeFile('skills/reverse-skill/SKILL.md', Buffer.from('---\nname: \'reverse-skill\'\ndescription: \'disk\'\n---\n\ndisk body\n', 'utf8'));
+  src.skills = {
+    list: async () => [{ name: 'reverse-skill', description: 'service' }],
+    get: async (name) => ({ name, description: 'service', content: 'service body', invocation: { modelInvocable: false, userInvocable: false } }),
+  };
+  const out = await new SkillsAdapter().export(src, { includeSecrets: false });
+  assert.equal(out.data.files.length, 1);
+  assert.equal(out.data.files[0]?.relativePath, 'reverse-skill/SKILL.md');
+  assert.ok(Buffer.from(out.data.files[0]!.data).toString().includes('disk body'), '磁盘原文是事实源，服务不得覆盖它');
+
+  // 服务独有的技能：调用策略必须写成 disable-model-invocation / user-invocable（legacy 键会被 DSH 拒绝）
+  const only = makeContext('win32', 'C:\\Users\\alice');
+  only.skills = {
+    list: async () => [{ name: 'hidden', description: 'd' }],
+    get: async (name) => ({ name, description: 'd', content: 'body', invocation: { modelInvocable: false, userInvocable: false } }),
+  };
+  const out2 = await new SkillsAdapter().export(only, { includeSecrets: false });
+  const text = Buffer.from(out2.data.files[0]!.data).toString();
+  assert.ok(text.includes('disable-model-invocation: true'), text);
+  assert.ok(text.includes('user-invocable: false'), text);
+  assert.ok(!text.includes('modelInvocable'), 'legacy 键会让 DSH 忽略整个技能');
+});
+
+test('issue #71: 技能服务缺失/抛错不影响目录扫描，也不编造告警', async () => {
+  const src = makeContext('win32', 'C:\\Users\\alice');
+  await src.fs.writeFile('skills/coding.md', Buffer.from('# Coding\n', 'utf8'));
+  // ① 宿主没提供技能服务（旧宿主）→ 纯目录扫描，行为与改造前一致
+  const plain = await new SkillsAdapter().export(src, { includeSecrets: false });
+  assert.deepEqual(plain.data.files.map((f) => f.relativePath), ['coding.md']);
+  assert.deepEqual(plain.warnings, []);
+
+  // ② 服务列举抛错 → 如实告警到日志，备份不因此失败（技能分区仍带目录内容）
+  const broken = makeContext('win32', 'C:\\Users\\alice');
+  await broken.fs.writeFile('skills/coding.md', Buffer.from('# Coding\n', 'utf8'));
+  const warned: string[] = [];
+  broken.log.warn = (m: unknown) => { warned.push(String(m)); };
+  broken.skills = { list: async () => { throw new Error('registry down'); }, get: async () => undefined };
+  const out = await new SkillsAdapter().export(broken, { includeSecrets: false });
+  assert.deepEqual(out.data.files.map((f) => f.relativePath), ['coding.md']);
+  assert.equal(warned.some((w) => w.includes('registry down')), true, `服务失败必须留痕: ${warned.join(' | ')}`);
+
+  // ③ 单个技能 get 失败/返回 undefined → 跳过该技能，其余照常
+  const partial = makeContext('win32', 'C:\\Users\\alice');
+  partial.skills = {
+    list: async () => [{ name: 'good', description: 'd' }, { name: 'bad', description: 'd' }, { name: 'weird', description: 'd' }],
+    get: async (name) => {
+      if (name === 'bad') throw new Error('broken provider');
+      if (name === 'weird') return undefined;
+      return { name, description: 'd', content: 'body' };
+    },
+  };
+  const out3 = await new SkillsAdapter().export(partial, { includeSecrets: false });
+  assert.deepEqual(out3.data.files.map((f) => f.relativePath), ['good/SKILL.md']);
+});
+
+test('issue #71: 技能服务里的非法技能名不得逃出 skills/ 目录（路径安全）', async () => {
+  const src = makeContext('win32', 'C:\\Users\\alice');
+  src.skills = {
+    list: async () => [{ name: '../escape', description: 'd' }, { name: 'a/b', description: 'd' }, { name: 'ok', description: 'd' }],
+    get: async (name) => ({ name, description: 'd', content: 'body' }),
+  };
+  const out = await new SkillsAdapter().export(src, { includeSecrets: false });
+  assert.deepEqual(out.data.files.map((f) => f.relativePath), ['ok/SKILL.md'], '越界技能名一律跳过');
+});
+
+test('issue #71: 多行技能字段必须编码成合法 YAML（真机 binary-diff 形态）', async () => {
+  const src = makeContext('win32', 'C:\\Users\\alice');
+  // 真机 dsh-reverse-skill 的 binary-diff：description 是块标量，解析后含换行（211 字符 / 5 行）
+  const description = '跨版本符号迁移与二进制差分。\n适用场景：内核缺 PDB 用旧版符号推导。\n核心方法：用 LLM 做结构化差异比对。\n';
+  const whenToUse = '旧版本符号迁移到新版本时\n内核缺 PDB 时\n';
+  src.skills = {
+    list: async () => [{ name: 'binary-diff', description }],
+    get: async (name) => ({ name, description, whenToUse, content: '# body\n' }),
+  };
+  const out = await new SkillsAdapter().export(src, { includeSecrets: false });
+  const text = Buffer.from(out.data.files[0]!.data).toString();
+  // 回归点：单引号标量一旦跨行，js-yaml 抛「deficient indentation」→ 外壳判 invalid YAML frontmatter
+  // 并**丢掉整个技能**（比不备份更糟）。这里用 js-yaml 逐字符验证编码结果。
+  const frontmatter = text.slice(text.indexOf('\n') + 1, text.indexOf('\n---\n', 4));
+  const parsed = yaml.load(frontmatter) as Record<string, string>;
+  assert.equal(parsed.name, 'binary-diff');
+  assert.equal(parsed.description, description, '多行 description 必须逐字符还原');
+  assert.equal(parsed.whenToUse, whenToUse, '多行 whenToUse 必须逐字符还原');
+  assert.ok(text.includes('description: |'), `多行值应写成块标量: ${text.slice(0, 80)}`);
+
+  // 单行值仍是单引号（与改造前逐字节一致，老包/老快照的 diff 不会平白变大）
+  const plain = makeContext('win32', 'C:\\Users\\alice');
+  plain.skills = {
+    list: async () => [{ name: 'plain', description: "it's fine" }],
+    get: async (name) => ({ name, description: "it's fine", content: 'body' }),
+  };
+  const plainOut = await new SkillsAdapter().export(plain, { includeSecrets: false });
+  const plainText = Buffer.from(plainOut.data.files[0]!.data).toString();
+  assert.ok(plainText.includes("description: 'it''s fine'"), plainText);
+  assert.equal((yaml.load(plainText.slice(4, plainText.indexOf('\n---\n', 4))) as Record<string, string>).description, "it's fine");
+
+  // 回车 / 控制字符（YAML 里不能出现在块标量或单引号标量中）→ 双引号 + 转义，仍逐字符还原
+  const weird = makeContext('win32', 'C:\\Users\\alice');
+  const weirdValue = 'a\rb\tc\u0001d';
+  weird.skills = {
+    list: async () => [{ name: 'weird', description: weirdValue }],
+    get: async (name) => ({ name, description: weirdValue, content: 'body' }),
+  };
+  const weirdOut = await new SkillsAdapter().export(weird, { includeSecrets: false });
+  const weirdText = Buffer.from(weirdOut.data.files[0]!.data).toString();
+  assert.ok(weirdText.includes('description: "a\\rb\\tc\\x01d"'), weirdText);
+  assert.equal((yaml.load(weirdText.slice(4, weirdText.indexOf('\n---\n', 4))) as Record<string, string>).description, weirdValue);
 });
 
 test('issue #37: skills 导出把「跟随/跳过的链接」写进 warnings（不再静默缺失）', async () => {

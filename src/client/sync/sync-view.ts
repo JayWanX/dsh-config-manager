@@ -224,7 +224,7 @@ const clientChannelsAreExhaustive: UncoveredChannel extends never ? true : never
 void clientChannelsAreExhaustive;
 
 /** 通道值守卫（localStorage 等原始输入）。 */
-function isClientChannel(value: unknown): value is SyncChannel {
+export function isClientChannel(value: unknown): value is SyncChannel {
   return typeof value === 'string' && (CLIENT_SYNC_CHANNELS as readonly string[]).includes(value);
 }
 

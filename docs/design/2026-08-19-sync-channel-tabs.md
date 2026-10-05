@@ -69,6 +69,17 @@ v1（顶层单通道）→ **v2 按通道命名空间**：
 - 私有仓库提示 Banner 仅 git 子 tab 常驻；同步历史（`SyncHistoryView`）保持全局置于底部（记录两通道全部操作）。
 - 渲染模型纯函数新增（`sync-view.ts`）：`ChannelSyncState`（每通道状态）、`defaultChannelSyncState()`、`channelTabModels(active, busy)`。
 
+### 仓库选择器（选择已有仓库 / 新建仓库，2026-10-04 增补）
+
+git 通道的仓库地址此前只能手填 —— 用户得先去 GitHub 建好仓库、复制 clone URL、再贴回来，且容易漏掉「必须私有」这条安全前提。现在配置弹窗的 git 分支在地址输入框上方多了一个仓库选择器（`src/client/sync/SyncRepositoryPicker.tsx`，自包含组件；地址输入框保留 —— ssh、本地路径、不在列表里的仓库仍可手填）：
+
+- **选择已有仓库**：下拉列出当前 token 可见的**私有**仓库（公开仓库不进列表 —— 同步仓库公开即等于把配置内容公开），按最近更新排序，标签带更新时间与 fork 徽章；选中即把 clone URL 写进表单（走既有的 `onFormChange` + 防抖自动保存）。
+- **新建私有仓库**：下拉末项是「新建私有仓库」，选中后在**同一弹窗内**展开内联表单（仓库名 + 可选描述）。**没有「公开」开关**，请求体也不传 `private` —— 宿主对这条端点恒定以 `private:true` 建仓，客户端连表达「公开」这个意图的途径都没有（安全约束落在宿主侧，UI 不重复也不放宽）。建仓成功后自动选中新仓库。
+- 列表**惰性加载**（首次展开下拉、或进弹窗时地址已非空才请求）；失败不静默：内联红字 + toast，宿主下发的文本一律先过 `redact()` 再渲染。
+- 纯逻辑（过滤/排序/地址归一/名称校验/请求体拼装/时间格式化）在 `src/ui/sync-repository-picker.ts`，与 React 解耦、可被 node:test 直接覆盖。
+
+宿主侧新增一条端点（`src/routes/sync.ts`）：`GET /api/dsh-config-manager/sync/github/repositories`（列仓库，只读）与 `POST`（新建，宿主强制 private）**共用同一路径** —— 路由围栏按 `(kind, path)` 去重，同一路径拆成两条会撞车，仓库内已有 `/sync/autosync`、`/backup-schedule` 同款先例。REST 能力落在 `src/market/github-repos.ts`：新增 `createRepo(name, { private, description })`（`createPublicRepo` 改为委托它，签名不变）与 `listRepos(limit)`（`GET /user/repos?sort=updated&per_page=100`，只取第一页）。两条分支都不挂 mutation gate：列举是只读、建仓是幂等元操作，挂上会让 SAFE MODE 下的用户连仓库都选不了。
+
 ### run-store 切片（`SyncStoreSlice`）
 
 - 顶层保留通道表单字段（repoUrl/token/webdavUrl/username/password），新增 `byChannel: { git: ChannelSyncState, webdav: ChannelSyncState }`。

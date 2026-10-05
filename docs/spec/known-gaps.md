@@ -65,6 +65,7 @@
 | G-30 | checkpoint（会话 / 工作区 / 配置三态同点检查点）：宿主能力已交付（引擎 + 7 条子路径），但 **`src/client/**` 零消费者** → 用户点不到 | ⚠️ **部分交付：宿主能力已可用，界面未接线**（见 §3） |
 | G-31 | 云端点同步通道（S3 兼容系 ×5 / GitHub Gist）：transport 已交付（52 条单测），但**未接线进 `SYNC_CHANNELS` / 路由 / UI** → 用户点不到 | ⚠️ **部分交付：宿主能力已可用，界面未接线**（见 §3） |
 | G-32 | SQLite 只读探测的**写副作用**（WAL 库被就地打开会新建 `<db>-shm`/`<db>-wal`）与 `immutable=1` 在 `-wal` 非空时**静默丢数据** | ✅ 已处置（`sqlite.ts` 三态打开计划 direct / immutable / copy + 1 GiB 上限 + **绝不退回就地打开**；四条残余风险见 §3） |
+| G-33 | 备份不到外壳的 MCP 与技能：patch 只读 home 层、技能不落目录（issue #71） | ✅ 已修复（patch 行按层读取并写回原层、技能经 `ctx.skills` 服务收编、快照与回滚记录层，见 §1） |
 
 ---
 
@@ -76,6 +77,8 @@
 > ——「同步快照不做协议协商」与「会话删除墓碑不代本机删除」在 §0 / §3 已占用这两个编号
 > （`AGENTS.md`、`docs/spec/sync-channel-v1.md`、`CHANGELOG.md` 都按后者引用）。现改编号为
 > `G-21` / `G-22`；对应测试名 `tests/security/credentials-refs-import.test.ts` 的 `G-19：…` 已同步改为 `G-22：…`。
+> **合并更正（2026-10，T0 统一基线）**：`origin/main` 侧新增的「patch 层 / 外壳 MCP 与技能」（issue #71）条目与本地 `G-29`
+> （官方 `session.export` 通道）撞号；合并时把上游那条改编号为 **`G-33`**，两条语义都保留（本节已同步其标题与 §4 引用）。
 > 「验证方式」列给出**可复现**的证据（测试用例名或命令），不是「读代码觉得对」。
 >
 > **G-08 是本节的特例**：它不是「被修好」，而是**该能力被产品决策整体取消**（加密不再做任何密码强度校验）。它保留在本节只为记录完整历史，**不要**读作「闸门已接通」。
@@ -303,6 +306,17 @@
 | 修复位置 | `src/client/run-store.ts` 新增 `RunStore.patchSyncPasswords({ token?, webdavPassword? })`：只写**内存**切片（不触发 `save()`）；`src/client/sync/SyncPanel.tsx` 的 `commit()` 在 `runStore.patch(...)` 之后立即用它把**在途输入**写回。 |
 | 不变量（未放宽） | 密码仍**绝不**进 sessionStorage / 磁盘 / 日志（`toPersistedState` 白名单一行未改，回归用例仍断言落盘文本不含密码）；刷新后仍清空（`applyPersisted` 的硬性归零也没动）。 |
 | 验证方式 | `src/client/run-store.test.ts` 的 issue #60 用例：在途密码经「无关 patch」后仍在内存、且落盘文本不含密码、未给出的字段部分更新语义正确；既有的「同步凭据绝不写入 sessionStorage」用例继续绿。 |
+
+### G-33 备份不到外壳的 MCP 与技能：patch 只读 home 层、技能不落目录（issue #71）
+
+| 项 | 内容 |
+|---|---|
+| 基线问题 | ① MCP / prompts / 插件激活行只读 `$DSH_HOME/cordis.patch.yml`（home 层），而外壳把激活行与 MCP 行写进 `$DSH_HOME/profiles/<name>/cordis.patch.yml`（档案层）—— `src/core/patch-layers.ts` 落地前，`src/adapters/mcp.ts`、`src/adapters/prompts.ts`、`src/adapters/plugins.ts` 都只调 `readPatchLines(USER_PATCH_FILE)`。② `skills` 分区只扫 `$DSH_HOME/skills` 目录，而外壳的技能来自插件注册表（`ctx.skills`），该目录在真机上根本不存在。③ 快照与回滚把 patch 行硬编码成 `'cordis.patch.yml'`（home 层），档案层的行回滚会写错文件。 |
+| 后果 | 真机（`DSH_HOME=D:\DSHHome`、`DSH_PROFILE=tauri`）：`only=[mcp]` 预览 9 ms、**0 条**、26 B；`[skills]` 6 ms、0 条、0 B；导出包 `mcp/servers.json` = `{version:1,servers:[]}`，`custom/skills/` 无条目 —— 而界面报「成功」。用户拿到的备份里没有外壳真正在用的 MCP 与技能，**恢复后等于没备份**。 |
+| 修复位置 | 新增零依赖 `src/core/patch-layers.ts`：层身份 = **相对 homeDir 的 POSIX 路径**（`cordis.patch.yml` / `profiles/<name>/cordis.patch.yml`，与 `src/core/backup.ts` 的 `HOST_FILE_CANDIDATES` 同口径），提供 `patchLayerRels`（home 优先，与 DSH 合并序一致）/ `readEffectivePatchLines` / `resolveWriteLayer` / `locatePatchLineLayer`；`src/adapters/mcp.ts`、`src/adapters/prompts.ts`、`src/adapters/plugins.ts` 改读两层并在条目上记 `sourceFile`，导入按来源层写回（档案层 → **目标机当前档案**）；`src/adapters/skills.ts` 覆写 `listRelPaths` / `readMember`，把 `ctx.skills.list()` / `get(name)` 的技能按 `<name>/SKILL.md` 虚拟路径并入，frontmatter 只写 DSH 认的键；`src/core/types.ts` 新增 `SkillStoreFacade` 与 `SnapshotTarget.file` / `SnapshotEntry.file`；`src/index.ts` 经 `readService(ctx, 'skills')` 惰取技能服务（**不进 `inject`**，避免阻塞 fiber），`DshPatchFileFacade` 的 `file` 参数改按 homeDir 相对路径解析并做包含性校验。 |
+| 不变量（未放宽） | 技能名仍过 `isPathSafe` 且不得含 `/`（不许逃出 `skills/`）；同名路径**磁盘原文优先**（服务只补磁盘没有的）；技能服务缺失或抛错只 `log.warn`，**不编造告警**、不阻断导出；旧备份包 / 旧快照没有层字段一律按**用户层**处理（改造前行为，不猜）；`PatchFileFacade` 的方法签名与 `phase4-crash-child` 的只读实现未改。 |
+| 验证方式 | `src/core/patch-layers.test.ts`（层优先级 / 写回层解析 / 单层读失败不阻塞）；`src/adapters/files.test.ts` 的 issue #71 四例（服务合并、磁盘优先、服务缺失不告警、非法技能名路径安全）；`src/adapters/mcp.test.ts`、`src/adapters/prompts.test.ts`、`src/adapters/plugins.test.ts` 的档案层读写例；`tests/core/patch-file-snapshot.test.ts`（快照记层 + 回滚写回原层、旧计划项回落用户层）；`src/index.facade.test.ts`（激活行写进**档案层**）。 |
+
 ### G-18 含 vault 的备份里带着凭据原文，导入后仍要求人工重填（issue #39）
 
 | 项 | 内容 |
@@ -496,6 +510,7 @@
 - **`prompts` 的 `systemPrompt` 形态**：源 namespace / patch 行里是字符串 `systemPrompt: "…"`，导入落盘形态为对象 `{ persona: "…" }`。persona **文本**无损，但字段**形状**改变（`RT-01` 已注明）。
 - **已知分区内的未知字段不写回目标（分区相关，勿一句话概括）**：导入不是 round-trip 复制，而是把已知语义落到目标。规格 §7.3 实测结论是**分区相关**的：`settings` / `ui` / `mcp` / `prompts` / `credentialsStatus` → 未知字段不写回；`workspaces[]` 记录、`plugins.patch[].raw`、`providers.raw` → 会随「整体搬运」落到目标。因此**不要声称「未知字段会被保留到目标」，也不要声称「一律被丢弃」**。
 - **文件类分区的 secret 命中不剥离内容**：G-09 修复后只「报告 + 告警」，命中的文件内容**原样进包**（见 §1 G-09 的边界）。
+- **离线 CLI `backup` 收不到插件注册表里的技能**：GUI 导出经 `ctx.skills` 收编外壳技能（见 §1 G-33），而 CLI 有「绝不 import `@deepseek-ai/*`」的硬约束（`src/core/backup-plan.ts:6-10`），只能扫 `$DSH_HOME/skills` 目录；真机上该目录可能**根本不存在**，此时 CLI 备份的 `skills` 分区为空，并在报告里如实列为空分区（`分区无内容，未写入 / section empty, skipped: skills`）。这是**有意的能力边界**（不是静默丢失，也不是 G-33 的残留）：要完整的技能备份请在 DSH 健康时用 GUI 导出。
 
 ### 4.1 checkpoint 的两条已知限制（T14-F3 / T14-F4）
 
@@ -521,3 +536,4 @@
 | 普通导入（GUI 向导）是否恒使用 `parseZipHardened` | 需追宿主注入链，超出取证范围（规格 §11 已登记） |
 | `source.platform` 取值是否被严格校验为枚举 | 源码只校验 `typeof === 'string'`（规格 §11 已登记） |
 | `sessions` 分区（`includeSessions: true`）内未知字段的行为 | 结构上不可能承载未知字段，未单独跑一次实测（规格 §11 已登记） |
+| 离线 CLI `backup` 在真机（`$DSH_HOME/skills` 不存在、技能全在插件注册表）上的技能覆盖范围 | CLI 只扫 `$DSH_HOME/skills`（§4 已列该边界）；「注册表技能在 GUI 导出侧确实被收编」有单测与真机导出取证，但 CLI 侧的空分区行为只有源码级推理，**未跑真机 CLI 验收** |

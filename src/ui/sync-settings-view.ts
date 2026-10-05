@@ -11,10 +11,18 @@
  */
 import type { SectionId } from '../schema/types.ts'
 import type { Selection } from './selection-model.ts'
+import type { SyncTransportType } from '../sync/sync-config.ts'
 
 /* ---------------------------------------------------------------- 基础类型 */
 
-/** 通道名（git | webdav）。 */
+/**
+ * 通道名（客户端**已接线**的通道：`git | webdav`）。
+ *
+ * 与 `src/client/sync/sync-view.ts` 的 `SyncChannel`（= `CLIENT_SYNC_CHANNELS`）同集合：
+ * 宿主 `SYNC_CHANNELS` 已是 4 条（+ s3 / gist），但那两条的界面接线是另一个任务 ——
+ * 在此之前 UI 状态机只操作已接线通道。若在此放宽成 `SyncTransportType`，
+ * `SyncUiState.channel`（窄）就会被宽值写入而编译报错。
+ */
 export type SyncChannelName = 'git' | 'webdav'
 
 /** 自动同步间隔（与 client 的 AutosyncInterval 同形）。 */
@@ -52,7 +60,16 @@ export interface SyncChannelSettings {
 
 /** 推/拉请求体（与 client 的 SyncPushPayload / SyncPullPayload 同形）。 */
 export interface SyncPushBody {
-  transport?: SyncChannelName
+  /**
+   * 请求体 transport：**宿主可接受的通道全集**（`SYNC_CHANNELS` = git/webdav/s3/gist）。
+   *
+   * 为什么是宽集合而不是上面的 `SyncChannelName`：client 的 `SyncPushPayload.transport`
+   * 已是宽集合（云端通道并入 `SYNC_CHANNELS` 后由 `SyncTransportType` 派生），t42 组装器
+   * 的产物会直接喂给 `saveQueueOnRequest` 等以 `SyncPushBody` 为参的纯函数；写窄会让
+   * 「client 宽 → ui 窄」在 typecheck 阶段失败（T0 合并 origin/main 实测 3 条）。
+   * transport 是**线上形状**，宿主按 `isSyncTransportType` 校验，宽集合才是正确口径。
+   */
+  transport?: SyncTransportType
   repoUrl?: string
   token?: string
   url?: string

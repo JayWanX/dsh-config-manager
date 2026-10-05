@@ -13,6 +13,7 @@ import { sha256Hex } from '../utils/hashing.ts';
 import { normalizePath } from '../utils/paths.ts';
 import { atomicWriteFile } from '../utils/atomic-write.ts';
 import { SECTION_IDS, isFileSection } from '../schema/config.ts';
+import { isPatchLayerRel, PROFILE_PATCH_FILENAME, USER_PATCH_FILE } from './patch-layers.ts';
 import type { SectionId } from '../schema/types.ts';
 import type {
   ConfigAdapter, HostContext, HostFileBackup, ImportPlan, PlanItem, Snapshot,
@@ -74,7 +75,7 @@ export function planItemWritesTarget(item: PlanItem, exec: PlanItemExecContext =
 const HOST_FILE_CANDIDATES: ReadonlyArray<{ relPath: string }> = [
   { relPath: 'settings.yaml' },
   { relPath: 'settings.json' },
-  { relPath: 'cordis.patch.yml' },
+  { relPath: USER_PATCH_FILE },
 ];
 
 /**
@@ -87,7 +88,7 @@ async function backupHostFiles(
 ): Promise<HostFileBackup[]> {
   const candidates = [...HOST_FILE_CANDIDATES];
   if (ctx.profile !== undefined && ctx.profile !== '') {
-    candidates.push({ relPath: `profiles/${ctx.profile}/cordis.patch.yml` });
+    candidates.push({ relPath: `profiles/${ctx.profile}/${PROFILE_PATCH_FILENAME}` });
     // pnpm-workspace.yaml 决定插件能否安装（allowBuilds/冷静期）→ 一并纳入宿主整文件备份
     candidates.push({ relPath: `profiles/${ctx.profile}/pnpm-workspace.yaml` });
   }
@@ -230,7 +231,9 @@ function collectTargets(plan: ImportPlan): SnapshotTarget[] {
   const targets: SnapshotTarget[] = [];
   for (const item of plan.items) {
     if (!planItemWritesTarget(item) || item.target === undefined) continue;
-    const key = `${item.target.adapter}\u0000${item.target.ref}`;
+    // issue #71：patch 行目标带层（同一 lineId 可能在两层各有一行）→ 去重键必须含层，
+    // 否则 profile 层的行会被 home 层的同名行吞掉，快照少记一条、回滚少还原一条。
+    const key = `${item.target.adapter}\u0000${item.target.file ?? ''}\u0000${item.target.ref}`;
     if (seen.has(key)) continue;
     seen.add(key);
     targets.push(item.target);
@@ -280,11 +283,13 @@ async function engineSnapshotEntry(ctx: HostContext, target: SnapshotTarget): Pr
           copiedTo: `blobs/${crypto.randomUUID()}`,
         };
       }
-      // patchLine：从组合 patch 文件读取原行（file 为必填的 file 字段约定为 'cordis.patch.yml'）
-      const file = 'cordis.patch.yml';
+      // patchLine：从**该行所在的 patch 层**读取原行（issue #71）。
+      // target.file 缺省 = 用户层（旧调用方 / 旧计划项），只接受合法层路径，绝不把任意字符串
+      // 当文件名传给宿主门面（那会抛「仅支持管理 …」）。
+      const file = target.file !== undefined && isPatchLayerRel(target.file) ? target.file : USER_PATCH_FILE;
       const lines = await ctx.patchFile.readPatchLines(file);
       const line = lines.find((l) => l.lineId === target.ref);
-      return { kind: 'patchLine', adapter: target.adapter, ref: target.ref, before: line?.raw ?? null, existed: line !== undefined };
+      return { kind: 'patchLine', adapter: target.adapter, ref: target.ref, file, before: line?.raw ?? null, existed: line !== undefined };
     }
     case 'skills':
     case 'agentPresets':

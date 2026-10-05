@@ -16,6 +16,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Dirent } from 'node:fs';
+import { isSameOrChild } from './paths.ts';
 
 /** 遍历中跳过的链接（备份必须能说明「哪些内容没进来」） */
 export interface SkippedLink {
@@ -44,15 +45,6 @@ function normalizeSlashes(p: string): string {
   return p.split(path.sep).join('/');
 }
 
-/** current 是否等于 base 或位于其下（win32 折叠大小写） */
-function isSameOrChild(current: string, base: string): boolean {
-  const c = path.resolve(current);
-  const b = path.resolve(base);
-  const cl = process.platform === 'win32' ? c.toLowerCase() : c;
-  const bl = process.platform === 'win32' ? b.toLowerCase() : b;
-  return cl === bl || cl.startsWith(bl.endsWith(path.sep) ? bl : bl + path.sep);
-}
-
 async function realpathSafe(p: string): Promise<string | null> {
   try { return await fs.realpath(p) } catch { return null }
 }
@@ -65,6 +57,11 @@ async function realpathSafe(p: string): Promise<string | null> {
 export async function listRecursiveFollowingLinks(baseDir: string, homeDir: string): Promise<RecursiveListing> {
   const base = path.resolve(baseDir);
   const home = path.resolve(homeDir);
+  // 边界判定专用基准：realpath 展开 Windows 8.3 短名（`C:\Users\IUUUUU~1\…` → `C:\Users\iuuuuuuuu\…`）
+  // 与 macOS 的 `/var` → `/private/var`，而 path.resolve 保留原拼写。两侧必须同为 realpath 形态，
+  // 否则「home 内的目标」会被误判成越界 —— issue #37 的链接跟随在 windows/macos 全红即此因。
+  // realpath 失败（路径不存在）时退回原拼写，保持「目录不存在视为空」的既有语义。
+  const homeReal = (await realpathSafe(home)) ?? home;
   const paths: string[] = [];
   const skippedLinks: SkippedLink[] = [];
   const unreadableDirs: string[] = [];
@@ -76,12 +73,12 @@ export async function listRecursiveFollowingLinks(baseDir: string, homeDir: stri
 
   /** @returns 是否真的进入了该目录（false = 被边界/去重/IO 挡下） */
   const walk = async (dir: string, depth: number, viaLink: string | null): Promise<boolean> => {
-    if (!isSameOrChild(dir, home)) return false;
+    const real = await realpathSafe(dir);
+    if (!isSameOrChild(real ?? path.resolve(dir), homeReal)) return false;
     if (depth > MAX_DEPTH) {
       if (viaLink !== null) skippedLinks.push({ path: viaLink, reason: 'too-deep' });
       return false;
     }
-    const real = await realpathSafe(dir);
     // 去重只针对**链接**：链接目标已经进过（自引用 / 两条链接指向同一处）→ 跳过。
     // 普通目录永远遍历（否则「真实目录 + 指向它的链接」会有一边被静默吞掉）。
     if (viaLink !== null && real !== null && visited.has(real)) {
@@ -122,7 +119,7 @@ export async function listRecursiveFollowingLinks(baseDir: string, homeDir: stri
         // 只对目录链接做这个检查会漏掉「skills/link.md → ~/外部文件」：
         // 内容会被读进备份（T2-P3 实测就是这种文件链接，属真实越界读取）。
         const target = await realpathSafe(abs);
-        if (target === null || !isSameOrChild(target, home)) {
+        if (target === null || !isSameOrChild(target, homeReal)) {
           skippedLinks.push({ path: entryRel, reason: 'outside-home' });
           continue;
         }

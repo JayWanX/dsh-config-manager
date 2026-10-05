@@ -187,6 +187,33 @@ test('plugins: 导出清单与 patch 行', async () => {
   assert.equal(v.valid, true);
 });
 
+test('issue #71: plugins 导出同时收集两层 patch 行（此前只读 home 层）', async () => {
+  const PROFILE_REL = 'profiles/tauri/cordis.patch.yml';
+  const src = makeContext('win32', 'C:\\Users\\alice', 'tauri');
+  src.patchFile.lines.set('typert-gateway', { lineId: 'typert-gateway', raw: { id: 'typert-gateway', disabled: false } });
+  // 真机形态：禁用行（mnemon-strategy-*）写在 profile 层，home 层另有插件配置行
+  src.patchFile.bucket(PROFILE_REL).set('mnemon-strategy-a', {
+    lineId: 'mnemon-strategy-a',
+    raw: { id: 'mnemon-strategy-a', name: '@mnemon/strategy-a', disabled: true },
+  });
+  const adapter = new PluginsAdapter();
+  const out = await adapter.export(src, { includeSecrets: false });
+  assert.equal(out.data.patch.length, 2, '真机的行在 profile 层，只读 home 层会漏掉');
+  assert.equal(out.data.patch.find((p) => p.lineId === 'mnemon-strategy-a')?.file, PROFILE_REL, '每行必须记住来源层');
+  assert.equal(out.data.patch.find((p) => p.lineId === 'typert-gateway')?.file, 'cordis.patch.yml');
+
+  // 导入写回原层：目标机没有该行 → Create，落在**目标机当前 profile 层**
+  const dst = makeContext('linux', '/home/bob', 'web');
+  const sections = new Map([['plugins', out.data]]);
+  const items = await adapter.analyzeImport(out.data, makeImportContext(dst, sections));
+  const created = items.find((i) => i.id === 'patch:mnemon-strategy-a');
+  assert.equal(created?.kind, 'Create');
+  const r = await adapter.applyItem(created!, makeImportContext(dst, sections));
+  assert.equal(r.ok, true);
+  assert.equal(dst.patchFile.bucket('profiles/web/cordis.patch.yml').has('mnemon-strategy-a'), true, '写回目标机的 profile 层');
+  assert.equal(dst.patchFile.lines.has('mnemon-strategy-a'), false, '不得搬到 home 层');
+});
+
 test('plugins: 导出携带 pnpm-workspace.yaml；analyze 目标无文件 → Create', async () => {
   const src = makeContext('win32', 'C:\\Users\\alice', 'web');
   await src.fs.writeFile('profiles/web/pnpm-workspace.yaml', new TextEncoder().encode('allowBuilds:\n  ssh2: true\n'));
@@ -326,3 +353,165 @@ test('plugins: 版本冲突 useImported → Update 走安装通道，失败同�
   assert.equal(rFail.ok, false);
   assert.equal(rFail.warning, true, '更新失败同样为非致命 warning');
 });
+/* ---------------- preview：只读预览不得触发任何本地源打包（总览慢的根因） ---------------- */
+
+test('plugins: preview 不调用打包钩子，但条目/白名单/告警与 export 同口径', async () => {
+  const src = makeContext('win32', 'C:\\Users\\alice', 'web');
+  src.plugins.installed.set('plain-pkg', { name: 'plain-pkg', version: '1.2.3', enabled: true });
+  src.plugins.installed.set('local-pkg', { name: 'local-pkg', version: '0.1.0', enabled: true, spec: 'link:../local-pkg' });
+  src.plugins.installed.set('dsh-config-manager', { name: 'dsh-config-manager', version: '9.9.9', enabled: true });
+  src.patchFile.lines.set('line-a', { lineId: 'line-a', raw: { id: 'plain-pkg', disabled: true } });
+  await src.fs.writeFile('profiles/web/pnpm-workspace.yaml', new TextEncoder().encode([
+    'allowBuilds:',
+    '  ssh2: true',
+    'patchedDependencies:',
+    '  foo: patches/foo.patch',
+    '',
+  ].join('\n')));
+  await src.fs.writeFile('profiles/web/patches/foo.patch', new TextEncoder().encode('diff --git a/x b/x\n'));
+
+  let hookCalls = 0;
+  const packedSpec = 'file:local-plugins/local-pkg-0.1.0.tgz';
+  const adapter = new PluginsAdapter('dsh-config-manager', async () => {
+    hookCalls += 1;
+    return {
+      packed: [{
+        packageName: 'local-pkg',
+        version: '0.1.0',
+        relativePath: 'local-plugins/local-pkg-0.1.0.tgz',
+        rewrittenSpec: packedSpec,
+        data: new Uint8Array(2048),
+      }],
+      rewritten: { 'local-pkg': packedSpec },
+      warnings: [],
+    };
+  });
+
+  const previewed = await adapter.preview(src, { includeSecrets: false });
+  assert.equal(hookCalls, 0, 'preview 必须跳过 localPack（真机 12 个本地源插件 = 12 s）');
+
+  const exported = await adapter.export(src, { includeSecrets: false });
+  assert.equal(hookCalls, 1, 'export 仍然打包（导入端靠 tarball 迁移本地源插件）');
+
+  // 同口径：patch 行、pnpm-workspace、patch 文件逐字相同
+  assert.deepEqual(previewed.section.data.patch, exported.data.patch);
+  // 清单只差「本地源 spec 的可移植化改写」——预览没有 tarball，不能假装已改写；
+  // 其余字段（包名/版本/启用态/bundle 归属）必须逐字相同
+  assert.deepEqual(
+    previewed.section.data.plugins.map((p) => ({ ...p, spec: p.spec === 'link:../local-pkg' ? packedSpec : p.spec })),
+    exported.data.plugins,
+    '预览清单与导出清单只允许在本地源 spec 上不同',
+  );
+  assert.equal(previewed.section.data.pnpmWorkspace, exported.data.pnpmWorkspace);
+  assert.deepEqual(previewed.section.data.patchFiles, exported.data.patchFiles);
+  assert.equal(previewed.section.data.localTarballs, undefined, '预览不携带 tarball 字节');
+  assert.equal(previewed.section.counts.plugins, 2);
+  assert.equal(previewed.section.counts.patchLines, 1);
+  assert.equal(previewed.section.counts.patchFiles, 1);
+  assert.equal(previewed.section.warnings.length, 0);
+  assert.equal(previewed.section.sectionId, 'plugins');
+
+  // 预览对本地源（link:）插件不做任何打包，但单元语义必须与导出产物一致：
+  // 导出产物里该插件带 tarball ⇒ fileCount: 1；预览没有字节 ⇒ 体积 0，同样 fileCount: 1
+  const previewLocal = previewed.items.find((u) => u.id === 'plugin:local-pkg');
+  assert.equal(previewLocal?.sizeBytes, 0, 'MemFs 未实现 dirSizeBytes ⇒ 目录体积未知按 0（宿主不支持时的旧行为）');
+  assert.equal(previewLocal?.fileCount, 1, 'link: 插件导出时必然携带一个 tarball ⇒ 预览也要标成文件单元');
+  const exportedLocal = adapter.listUnits(exported).find((u) => u.id === 'plugin:local-pkg');
+  assert.equal(exportedLocal?.fileCount, 1);
+
+  // items 与 listUnits(预览产物) 恒等：用户按预览勾选 = 导出真的带什么
+  assert.deepEqual(previewed.items, adapter.listUnits(previewed.section));
+
+  // 体积口径 = 该分区载荷的 UTF-8 字节数（与 /export-preview 对 JSON 分区现算的口径一致）
+  assert.equal(previewed.sizeBytes, new TextEncoder().encode(JSON.stringify(previewed.section.data)).length);
+});
+
+test('plugins: preview 零 spawn 量本地源体积（file: 走 stat、link: 走目录度量）', async () => {
+  // 体积度量链走 resolveLocalPluginPath → 宿主 path.resolve：win32 形状的 home 在 POSIX 宿主上会被
+  // 解析到 cwd 之下（mock 的 home 相对 key 失配 ⇒ statSize 读不到 ⇒ 体积 0）。按宿主平台选 home 形状，
+  // 断言在 windows / linux / macOS 三端一致。
+  const onWindows = process.platform === 'win32';
+  const src = makeContext(onWindows ? 'win32' : 'linux', onWindows ? 'C:\\Users\\alice' : '/home/alice', 'web');
+  // file: 相对路径以 profile 目录为基准（resolveLocalPluginPath 的契约）
+  await src.fs.writeFile('profiles/web/pkgs/local.tgz', new Uint8Array(4096));
+  src.plugins.installed.set('file-pkg', {
+    name: 'file-pkg', version: '1.0.0', enabled: true, spec: 'file:pkgs/local.tgz',
+  });
+  src.plugins.installed.set('link-pkg', {
+    name: 'link-pkg', version: '1.0.0', enabled: true, spec: 'link:../outside/link-pkg',
+  });
+  src.plugins.installed.set('registry-pkg', {
+    name: 'registry-pkg', version: '1.0.0', enabled: true, spec: '^1.2.3',
+  });
+  // 宿主门面提供目录度量：link: 是 npm pack 的输入目录，量级比 pack 产物大（gzip），但零 spawn
+  const measured: string[] = [];
+  src.fs.dirSizeBytes = async (absPath: string) => {
+    measured.push(absPath);
+    return absPath.endsWith('link-pkg') ? 24_576 : null;
+  };
+
+  const adapter = new PluginsAdapter('dsh-config-manager', undefined);
+  const previewed = await adapter.preview(src, { includeSecrets: false });
+  const byId = new Map(previewed.items.map((u) => [u.id, u]));
+  assert.equal(byId.get('plugin:file-pkg')?.sizeBytes, 4096, 'file: 源按 stat 得到的字节数');
+  assert.equal(byId.get('plugin:file-pkg')?.fileCount, 1, '有本地源体积 = 随包携带一个文件');
+  assert.equal(byId.get('plugin:link-pkg')?.sizeBytes, 24_576, 'link: 源按宿主门面的目录度量（绝对路径）');
+  assert.equal(byId.get('plugin:link-pkg')?.fileCount, 1, 'link: 仍需打包迁移 ⇒ 与导出产物一样是「携带一个文件」的单元');
+  assert.equal(measured.length, 1, '只量本地源目录，不碰 registry 包');
+  assert.ok(measured[0]?.endsWith('link-pkg'), '绝对路径由 spec 推导（resolveLocalPluginPath）');
+  assert.equal(byId.get('plugin:registry-pkg')?.sizeBytes, 0);
+  assert.equal(byId.get('plugin:registry-pkg')?.fileCount, undefined, 'registry 包不带文件');
+});
+
+test('plugins: preview 的目录度量不可用/抛错时体积按 0，绝不因此失败', async () => {
+  const src = makeContext('win32', 'C:\\Users\\alice', 'web');
+  src.plugins.installed.set('link-pkg', {
+    name: 'link-pkg', version: '1.0.0', enabled: true, spec: 'link:../outside/link-pkg',
+  });
+
+  // 宿主门面存在但越界抛错（真机：link: 目录在 $DSH_HOME 之外时 home 相对方法会抛 fsPathEscape）
+  src.fs.dirSizeBytes = async () => {
+    throw new Error('host.fsPathEscape');
+  };
+  const adapter = new PluginsAdapter('dsh-config-manager', undefined);
+  const failed = await adapter.preview(src, { includeSecrets: false });
+  assert.equal(
+    failed.items.find((u) => u.id === 'plugin:link-pkg')?.sizeBytes,
+    0,
+    '度量抛错 ⇒ 体积按 0，但仍算「随包携带一个文件」',
+  );
+  assert.equal(failed.items.find((u) => u.id === 'plugin:link-pkg')?.fileCount, 1);
+  assert.equal(failed.section.warnings.length, 0, '体积只是展示数字，不得变成分区告警');
+});
+
+test('plugins: preview 的条目级白名单与 export 一致（含原子组全或无）', async () => {
+  const src = makeContext('win32', 'C:\\Users\\alice', 'web');
+  src.plugins.installed.set('pkg-a', { name: 'pkg-a', version: '1.0.0', enabled: true });
+  src.plugins.installed.set('pkg-b', { name: 'pkg-b', version: '1.0.0', enabled: true });
+  src.patchFile.lines.set('line-a', { lineId: 'line-a', raw: { id: 'pkg-a', disabled: true } });
+  await src.fs.writeFile('profiles/web/pnpm-workspace.yaml', new TextEncoder().encode([
+    'allowBuilds:',
+    '  ssh2: true',
+    'patchedDependencies:',
+    '  foo: patches/foo.patch',
+    '',
+  ].join('\n')));
+  await src.fs.writeFile('profiles/web/patches/foo.patch', new TextEncoder().encode('diff --git a/x b/x\n'));
+
+  const adapter = new PluginsAdapter('dsh-config-manager', undefined);
+  const only = ['plugin:pkg-a', 'plugins:pnpm-workspace', 'plugins:patch:patches/foo.patch'];
+  // 注：白名单只影响「保留哪些单元」，不影响预览是否打包 —— preview 永远不打包
+  const previewed = await adapter.preview(src, { includeSecrets: false, includeItems: { plugins: only } });
+  const exported = await adapter.export(src, { includeSecrets: false, includeItems: { plugins: only } });
+  assert.deepEqual(previewed.section.data, exported.data);
+  assert.deepEqual(previewed.items, adapter.listUnits(previewed.section));
+
+  // 取消 pnpm-workspace 时 patch 文件一并剔除（全或无），预览同样不产出半套
+  const dropped = await adapter.preview(src, {
+    includeSecrets: false,
+    includeItems: { plugins: ['plugin:pkg-a', 'plugins:patch:patches/foo.patch'] },
+  });
+  assert.equal(dropped.section.data.pnpmWorkspace, null);
+  assert.equal(dropped.section.data.patchFiles, undefined);
+});
+

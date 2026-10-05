@@ -1,0 +1,6 @@
+---
+description: 无条件加载的规则（Always）
+alwaysApply: true
+---
+
+CURSOR_RULE_ALWAYS_BODY

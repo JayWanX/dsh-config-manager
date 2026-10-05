@@ -69,6 +69,11 @@ export interface HomePanelProps {
   t: TranslateNS<'config-manager'>
   /** 「活动」入口打开 Shell 的只读面板（完整迁移历史） */
   openActivity?: () => void
+  /**
+   * 打开导入面板并**直接停在「从其它 agent 导入」**（t17；由壳层注入）。
+   * 不传 → 该按钮不渲染（老调用方零改动）。
+   */
+  openForeignImport?: () => void
 }
 
 /** 聚合数据（null = 未加载/加载失败 → UI 占位）。 */
@@ -171,7 +176,7 @@ function dirOf(path: string): string {
 /**
  * 总览页（控制中心）：状态条 + 动作工具栏 + 备份位置 + 分区构成 + 最近活动。
  */
-export function HomePanel({ api, syncApi, historyApi, t, openActivity }: HomePanelProps) {
+export function HomePanel({ api, syncApi, historyApi, t, openActivity, openForeignImport }: HomePanelProps) {
   /**
    * 「定时备份」不再是独立页签 —— 设置卡并进本页（§7）。
    * 状态行的「定时备份」段点击**开这个弹窗**，而不是跳页：
@@ -252,6 +257,18 @@ export function HomePanel({ api, syncApi, historyApi, t, openActivity }: HomePan
    */
   const openImportTask = (): void => {
     runStore.patch({ task: { kind: 'import', origin: 'overview' } })
+  }
+
+  /**
+   * 「从其它 agent 导入」（t17）：与导入同一条通道，只是**先落在来源选择那一步**。
+   *
+   * 为什么有用例入口：用户装了 Claude Code / Cursor 这类工具时，「把我的 agent 配置搬过来」
+   * 是他最想做的事 —— 让他先点「导入」再在向导里找另一个按钮，是把一行可达的路径变成两步。
+   * 复用同一个 task（不新增 kind）：面板仍是导入面板，只是初始停在来源选择页。
+   */
+  const openForeignImportTask = (): void => {
+    runStore.patch({ task: { kind: 'import', origin: 'overview' } })
+    openForeignImport?.()
   }
 
   /**
@@ -382,6 +399,13 @@ export function HomePanel({ api, syncApi, historyApi, t, openActivity }: HomePan
         <Button title={t('overview.quick.importTitle')} onClick={openImportTask}>
           <ImportIcon size={14} /> {t('nav.import')}
         </Button>
+        {/* 外部 agent 入口（t17）：与「导入」并列但**直达来源选择** ——
+            装了 Claude Code / Cursor 的用户要找的就是这条路，而不是先进向导再找按钮。 */}
+        {openForeignImport !== undefined && (
+          <Button title={t('foreign.source.hint')} onClick={openForeignImportTask}>
+            <ImportIcon size={14} /> {t('foreign.source.title')}
+          </Button>
+        )}
         <Button title={t('overview.quick.syncTitle')} onClick={() => { navPanel('sync') }}>
           <SyncIcon size={14} /> {t('overview.quick.sync')}
         </Button>

@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "svc": {
+      "command": "npx",
+      "args": ["-y", "cursor-svc"],
+      "env": { "GITHUB_TOKEN": "ghp_CURSOR_FIXTURE_TOKEN_DO_NOT_SHIP", "PLAIN": "ok" }
+    },
+    "remote": {
+      "url": "https://user:pw@mcp.example.com/mcp",
+      "headers": { "Authorization": "Bearer CURSOR_BEARER_DO_NOT_SHIP", "X-Trace": "on" }
+    },
+    "shared": {
+      "command": "npx",
+      "args": ["-y", "user-level-shared"]
+    },
+    "empty": { "note": "既无 command 也无 url —— 必须进 skipped 而不是产出空条目" }
+  }
+}

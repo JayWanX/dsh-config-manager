@@ -1,0 +1,3 @@
+[mcp_servers.broken]
+command = "npx"
+args = ["-y", "unterminated

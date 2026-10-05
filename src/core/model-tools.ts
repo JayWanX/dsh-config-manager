@@ -184,6 +184,9 @@ export function createModelTools(deps: ModelToolsDeps) {
         ...(deps.host.msg === undefined ? {} : { msg: deps.host.msg }),
         // Phase 4 统一恢复校验（与 Host/CLI 同强度）
         snapshotsRoot: deps.snapshotsDir,
+        // T8-F3：宿主权威的「当前 DSH 版本」——不传就只能按磁盘依赖树 best-effort 猜，
+        // 桌面端磁盘那份可能过期 → 误报「版本不同」。只影响告警，不阻断。
+        currentDshVersion: deps.host.dshVersion,
       }
       const plan: RestorePlan = await planRestore(restoreOpts)
       if (confirm !== true) {

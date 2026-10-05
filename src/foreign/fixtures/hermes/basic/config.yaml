@@ -1,0 +1,48 @@
+# Hermes 用户配置（fixture）：顶层键名与真机实测一致，值全部是假值 —— 绝不可用于真机
+model: fixture-model
+providers: {}
+agent: {}
+terminal: {}
+browser: {}
+tool_loop_guardrails: {}
+compression: {}
+prompt_caching: {}
+auxiliary: {}
+display: {}
+stt: {}
+voice: {}
+memory: {}
+delegation: {}
+moa: {}
+skills: {}
+approvals: {}
+code_execution: {}
+streaming: {}
+telemetry: {}
+updates: {}
+_config_version: 1
+session_reset: {}
+group_sessions_per_user: false
+platform_toolsets: {}
+custom_providers: []
+platforms: {}
+plugins: []
+mcp_servers:
+  svc:
+    command: npx
+    args:
+      - -y
+      - fixture-svc
+    env:
+      GITHUB_TOKEN: ghp_FIXTURE_TOKEN_DO_NOT_SHIP
+      PLAIN: ok
+    enabled: true
+  web:
+    url: 'https://user:pw@mcp.example.com/mcp'
+    headers:
+      X-Trace: 'on'
+  legacy-sse:
+    url: https://sse.example.com/sse
+    type: sse
+  empty:
+    note: 既无 command 也无 url —— 必须进 skipped，绝不产出空条目

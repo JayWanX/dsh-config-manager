@@ -1,0 +1,28 @@
+# Codex CLI 用户级配置（fixture；形态取自官方文档 config-basic，值全部是假值，绝不可用于真机）
+model = "gpt-5-codex"
+approval_policy = 'on-request'
+sandbox_mode = "workspace-write"
+startup_timeout_sec = 20
+
+[mcp_servers.gitnexus]
+command = "npx"
+args = [
+  "-y",
+  "gitnexus",
+]
+env = { "GITHUB_TOKEN" = "ghp_FIXTURE_TOKEN_DO_NOT_SHIP", "PLAIN" = "ok" }
+
+[mcp_servers.remote]
+url = "https://user:pw@mcp.example.com/mcp"
+headers = { "X-Trace" = "on" }
+
+[mcp_servers.legacy-sse]
+url = "https://sse.example.com/sse"
+type = "sse"
+
+[mcp_servers.empty]
+note = "既无 command 也无 url —— 必须进 skipped 而不是产出空条目"
+
+# 字面量引号（单引号）键：反斜杠不被解释，正是 Windows 路径需要的形态
+[projects.'D:\proj\x']
+trust_level = "trusted"

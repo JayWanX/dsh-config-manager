@@ -23,12 +23,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { resolveFileTarget, verifySnapshot } from './backup.ts';
+import { normalizeDshVersion, resolveFileTarget, verifySnapshot } from './backup.ts';
 import { expectedSessionRefs, sweepGhostSessions } from './ghost-sweep.ts';
 import { zhMsg } from './messages.ts';
 import type { MsgFunc } from './messages.ts';
 import {
-  classifyDshPluginFailure, readInstalled, resolveProfileDir, runDshPlugin,
+  classifyDshPluginFailure, readInstalled, readInstalledVersion, resolveProfileDir, runDshPlugin,
 } from './plugin-cli.ts';
 import { parseJsonSafe } from '../utils/json.ts';
 import { atomicCopyFile, atomicWriteFile } from '../utils/atomic-write.ts';
@@ -80,6 +80,17 @@ export interface RestorePlan {
   };
   /** beforePlugins 基线是否可用（undefined=旧快照无基线 → 不计划任何插件卸载） */
   pluginBaselineConfirmed: boolean;
+  /**
+   * 快照记录的来源 DSH 版本（F-4；**可选**：旧快照没有该字段是常态，此时为 undefined）。
+   * 只承载事实，判定与展示在调用方（UI/CLI）；恢复绝不因它而拒绝。
+   */
+  snapshotDshVersion?: string;
+  /**
+   * 本机当前 DSH 版本（F-4；**可选**：无法判定时不猜，保持 undefined 且不产出版本告警）。
+   * 来源优先级：调用方注入的 `RestoreOptions.currentDshVersion`（宿主权威，桌面端取 installAnchor）
+   * → profile 依赖树里实际落盘的 `@deepseek-ai/dsh` 版本（离线 best-effort）。
+   */
+  currentDshVersion?: string;
 }
 
 export interface RestoreOptions {
@@ -91,6 +102,13 @@ export interface RestoreOptions {
   profile: string;
   /** 覆盖 settings 文件路径（默认探测 $DSH_HOME/settings.yaml → settings.json） */
   settingsPath?: string;
+  /**
+   * 本机当前 DSH 版本（F-4；**可选**）。宿主知道权威版本（`HostContext.dshVersion`，桌面端是
+   * `profileContext.installAnchor` 那份运行时）时应当注入 —— 它优先于离线 best-effort 的
+   * profile 依赖树探测。判定只在「与快照记录的值都已知且不同」时产出一条**可见告警动作**，
+   * 绝不拒绝恢复（兼容性口径是「打分 + 原因」，不是门禁）。
+   */
+  currentDshVersion?: string;
   /** 注入式插件卸载器（测试用；缺省走 runDshPlugin 官方通道） */
   pluginUninstaller?: (
     name: string, profileDir: string, profile: string,
@@ -361,8 +379,21 @@ export async function validateSnapshotForRestore(
 
 
 /**
+ * 本机 DSH 版本探测用的包名（F-4；离线 best-effort 来源 = profile 依赖树里实际落盘的这份）。
+ *
+ * 为什么可以离线读它：它是 DSH 自己在 `profiles/<p>/node_modules` 下安装的那份运行时，
+ * 「装了什么版本」与「跑的是什么版本」在普通档案里同源（桌面端例外 —— 那份在 app.asar 内，
+ * 所以宿主注入的 `currentDshVersion`（installAnchor）优先，见 `resolveDshVersion`）。
+ * 读不到一律 null：**不猜版本**，也就不产出「版本不同」的告警。
+ */
+const DSH_PACKAGE_NAME = '@deepseek-ai/dsh';
+
+/**
  * 生成恢复动作计划（dry-run 预览的唯一入口；零写入）：
  * 读快照 + 探测当前文件/已装插件状态，输出按执行顺序排列的动作清单。
+ *
+ * F-4：快照记录的来源 DSH 版本与本机版本都已知且**不同**时，末尾追加一条可见告警动作（kind='skip'）
+ * 并在 `snapshotDshVersion` / `currentDshVersion` 回传两侧事实；绝不因此拒绝恢复。
  */
 export async function planRestore(opts: RestoreOptions): Promise<RestorePlan> {
   const { snapshotDir, homeDir, profile } = opts;
@@ -597,6 +628,27 @@ export async function planRestore(opts: RestoreOptions): Promise<RestorePlan> {
     });
   }
 
+  // F-4：快照来源 DSH 版本 vs 本机当前版本 —— **只在两侧都已知且不同**时给一条可见告警。
+  // 三条不得放宽：① 旧快照缺 dshVersion 是常态，绝不因此产生任何告警或拒绝；
+  // ② 判不出本机版本时不猜（不产生告警）；③ 只告警、**绝不拒绝恢复**（兼容性口径是「打分 + 原因」）。
+  const snapshotDshVersion = normalizeDshVersion(snapshot.dshVersion);
+  const currentDshVersion = normalizeDshVersion(opts.currentDshVersion)
+    ?? normalizeDshVersion(readInstalledVersion(profileDir, DSH_PACKAGE_NAME));
+  if (
+    snapshotDshVersion !== undefined
+    && currentDshVersion !== undefined
+    && snapshotDshVersion !== currentDshVersion
+  ) {
+    // 追加在**末尾**：既有动作的下标不位移（`snapshot-diff` 按 actions 下标回填变更状态）。
+    // kind='skip' 在本计划里就是「不产生写入、只作说明」的信息行（与 noBaseline / settingsNotBacked 同款），
+    // 因此既有 UI 无需改动即可把它显示出来（绝不静默）。
+    actions.push({
+      kind: 'skip',
+      description: msg('restore.versionMismatch', { snapshot: snapshotDshVersion, current: currentDshVersion }),
+      detail: msg('restore.versionMismatchDetail', { snapshot: snapshotDshVersion, current: currentDshVersion }),
+    });
+  }
+
   return {
     snapshotId: snapshot.id,
     createdAt: snapshot.createdAt,
@@ -604,6 +656,8 @@ export async function planRestore(opts: RestoreOptions): Promise<RestorePlan> {
     actions,
     summary: summarizeActions(actions),
     pluginBaselineConfirmed: baseline !== undefined,
+    ...(snapshotDshVersion !== undefined ? { snapshotDshVersion } : {}),
+    ...(currentDshVersion !== undefined ? { currentDshVersion } : {}),
   };
 }
 

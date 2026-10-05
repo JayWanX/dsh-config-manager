@@ -113,6 +113,10 @@ export function consultRoutes(env: RoutesEnv): WebRoute[] {
               homeDir: host.homeDir,
               profile: host.profile ?? 'web',
               snapshotsRoot: snapshotsDir,
+              // T20（收口 T8-F3）：本路径也在**宿主内**运行 → 传宿主权威版本（桌面端 = installAnchor
+              // 那份运行时），与 routes/snapshots.ts、core/model-tools.ts、cli/actions.ts(具名函数) 同口径。
+              // 只有离线 CLI 才退化成 profile 依赖树兜底；这里不得退化成兜底，否则又变成「3 处权威 + 1 处兜底」。
+              currentDshVersion: host.dshVersion,
             })
             restorePlan = {
               itemCount: plan.actions.length,

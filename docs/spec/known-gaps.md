@@ -61,6 +61,9 @@
 | G-26 | 包缺少 git 安装所需的构建入口：`dsh plugin add git+https://...` 必失败（issue #58） | ✅ 已修复（补 `scripts.prepare` + 三条 G-21 打包门禁；**pnpm 11 的 `allowBuilds` 仍须用户逐字授权一次**，见 §3.3） |
 | G-27 | 加密同步快照 >64 MiB 时远端列表恒为空、拉取报「快照损坏」、自动同步恒 `upToDate`，而 push 报成功（issue #59） | ✅ 已修复（读取侧改用自产载荷专用上限 + 读不出来的一律回传可见，见 §1） |
 | G-28 | WebDAV 密码输入框被无关状态更新自动清空（issue #60） | ✅ 已修复（`commit()` 经 `patchSyncPasswords` 把在途输入写回内存；持久化白名单不变，见 §1） |
+| G-29 | 会话在应用内**读不出来**：官方 `session.export` 通道（原样 ZIP，含子会话与附件）此前**从未接入** | ✅ 已修复（只读探测/流式代理路由 + 体检弹窗逐行下载入口；判据按 **500** 而非过时的 501，见 §1） |
+| G-30 | checkpoint（会话 / 工作区 / 配置三态同点检查点）：宿主能力已交付（引擎 + 7 条子路径），但 **`src/client/**` 零消费者** → 用户点不到 | ⚠️ **部分交付：宿主能力已可用，界面未接线**（见 §3） |
+| G-31 | 云端点同步通道（S3 兼容系 ×5 / GitHub Gist）：transport 已交付（52 条单测），但**未接线进 `SYNC_CHANNELS` / 路由 / UI** → 用户点不到 | ⚠️ **部分交付：宿主能力已可用，界面未接线**（见 §3） |
 
 ---
 
@@ -280,6 +283,16 @@
 | 不变量（未放宽） | ① `DEFAULT_MAX_JSON_BYTES`（64 MiB）仍是**不可信输入**的闸门，未被抬高 —— 抬高的只是「本插件自己写出去、又自己读回来」的那条链路；② 快照读取仍受 `maxDepth` 与形状校验约束；③ 读失败诊断是**远端当下状态**，**不落 sessionStorage**（`PersistedChannelSyncState` 显式剔除，刷新后重新 list）。 |
 | 验证方式 | `src/sync/snapshot-json.test.ts` 两条 issue #59 用例（自产上限 > 缺省上限、>64 MiB 载荷可反序列化且缺省上限仍拒它）；`src/sync/git/git-transport.test.ts` 与 webdav 通道既有用例回归。 |
 
+### G-29 会话在应用内**读不出来**：插件此前从未接入 DSH 官方的 `session.export` 通道（F-2）
+
+| 项 | 内容 |
+|---|---|
+| 基线问题 | DSH 自带插件 `@deepseek-ai/dsh-session-log-export` 早就提供 `GET|HEAD /api/session.export?sessionId=<非空>&includeDescendants=<true\|false 字面>`：由 DSH 自己 flush 内存会话、解码多帧 zstd、按「会话 + 子会话 + 附件」打**有界流式 ZIP**。本仓库全量 grep `session.export` / `includeDescendants` **0 命中** —— 我们既没有用它，也没有任何等价的「把一条对话原样拿走」的入口（既有的会话能力全是**逐字节搬运**，服务于导出/导入，不服务于「读出来」）。 |
+| 后果 | ① 用户想备份/取证/交给同事一条具体对话时，唯一的路径是「导出整个 sessions 分区」或自己进 `$DSH_HOME/sessions` 翻目录，而多帧 zstd 与代次命名让手工取用几乎不可行；② 生态同类插件（`dsh-sessions-manager`）已把这条通道做成主入口，我们的相对缺口是可见的。 |
+| 修复位置 | **宿主**：① 新路由组 `src/routes/session-export.ts`（经 `kit.endpoint()` 注册，**只读**）—— 同一条路径两种形态：缺 `sessionId` = **探测**（HEAD 打 DSH 自己的端点，回结构化三态），带 `sessionId` = **流式代理**（GET 原样回传 ZIP / 逐 chunk 转发，绝不整本缓冲）；② 判定纯函数 `classifySessionExportStatus(status, body)` 与探测 `probeSessionExport(fetch, port)` 导出给单测；③ 宿主能力 `HostContext.fetch` / `HostContext.webPort`（`src/core/types.ts` + `src/index.ts` 的 `ConfigManagerHostContext` 取 Cordis `ctx.fetch`、apply() 里 webServer 就绪后写端口），路由依赖在 `makeRouteEnv()` 里以**活 getter** 暴露（构造发生在 webServer 之前）。**浏览器**：④ `ConfigManagerApi.sessionExportProbe()` / `downloadSessionExport()`（复用既有 `openStream` + 流式落盘链路）；⑤ 纯展示模型 `src/client/session-export/session-export-view.ts`（三态 → 可用/原因/交互）；⑥ 事故恢复页「会话体检」弹窗逐行新增「下载原始日志 (ZIP)」按钮（`RecoveryPanel`）。 |
+| 不变量（未放宽） | ① **绝不照抄竞品的 `res.status !== 501` 判据**：本机 DSH 0.2.0-rc.2 的 app.asar 全量搜 `status: 501` **零命中**，服务缺失实际返 **500**，照抄会让入口**几乎恒显示**；② **三态而非二值**：`available`（200/400/404，含「会话不存在」这种业务结果）显示可用、`unavailable`（500 + `unavailable: missing`）**禁用并说明原因**、`unknown`（401/403、连不上、超时、读日志失败的 500）**保守显示为可用** —— 拿不到状态码绝不猜成「不支持」（那会藏掉本可用的功能）；③ 路由只读、**零写盘**，凭据/路径不进日志；④ 自请求必须带正确的 `Host: 127.0.0.1:<port>`（端口未知时**一个请求都不发**）—— 端口写错会被 DSH 的围栏判成 403，而 403 在本模块代表「被认证挡在门外」，拿注定 403 的请求当真话就是「恒隐藏」；⑤ 上游状态码**原样透传**（不把 404 改写成 200+ok:false）。 |
+| 验证方式 | `tests/route/session-export-routes.test.ts`（15 例：400/404/500-缺服务/500-读失败/200/401/403/501/未知状态的**四态映射**与反例护栏、探测请求形状（HEAD + Host/Origin 带端口）、**端口未知时不发请求**、上游状态码原样透传、ZIP **逐块转发**（2 chunk → 2 write）、缺 fetch/端口时 503、`includeDescendants` 只认字面值、路由只声明一条且经 `endpoint()`）；`src/client/session-export/session-export-view.test.ts`（8 例：pending ≠ unavailable、available 不打扰、unavailable 禁用 + 原因 + 状态码插值、unknown 保守可用、原因映射五类不重不漏、竞品判据反例、缺省原因兜底）；路由计数同步见 `tests/route/route-parity.test.ts` / `route-fence.test.ts`（75 → **76**；buildRoutes 68 → **69**）。 |
+| 生态对照 | 竞品 `dsh-sessions-manager` v3.7.6 用一个裸 `<a href="/api/session.export?..." download>` + 一次 `status !== 501` 预检；本仓库**不照抄**：探测放宿主侧（浏览器分不开 401/404/网络失败）、判据按 500 重写、并复用自己的流式下载链路（大 ZIP 不整本驻留内存）。 |
 ### G-28 WebDAV 密码输入框被无关状态更新清空（issue #60）
 
 | 项 | 内容 |
@@ -442,6 +455,26 @@
 | 为什么有意不修 | 删除会话是**不可回滚**的破坏性动作（DSH 无回收站、快照回滚不覆盖会话字节）。把它做成同步的自动副作用，会在「对端误删 / 对端只是没勾选」时静默毁掉本机数据。当前实现把它降级为**信息**（墓碑在拉取报告里可见），把删除留给用户显式动作。 |
 | 若将来要做 | 需要：① 适配器侧的会话删除能力（宿主 `sessionPersistence` 支持 + 审计）；② 新的计划项种类 + 逐项确认 UI（不得并入自动应用）；③ 与「导入前强制快照」的可回滚语义对齐（会话字节当前不可回滚）。 |
 
+### G-30 checkpoint（会话 / 工作区 / 配置三态同点检查点）：宿主能力已交付，但**界面未接线**
+
+| 项 | 内容 |
+|---|---|
+| 背景 | C-1 Q4 交付了 checkpoint 引擎（`src/core/checkpoint.ts`：三态捕获 + 内容指纹 + `samePointVerdictOf` 同点判定 + fail-closed 确认门 + 对象仓 / 台账降级）与 recovery prefix 下的 **7 条子路径**：`GET /recovery/checkpoints`、`GET /recovery/checkpoints/storage`、`POST /recovery/checkpoints/capture`、`GET /recovery/checkpoints/<id>`、`GET /recovery/checkpoints/<id>/preview`、`POST /recovery/checkpoints/<id>/rewind`、`POST /recovery/checkpoints/<id>/delete`（挂在既有 prefix 路由内分发，**不新增 `endpoint()` 条目**，因此 76 条路由快照不变）。宿主侧语义完整：预览零写入、未确认回滚 → 409 `denied` 且**零字节写入**、保护点 / guard 点不可删、存储栈不可用 → 503 + 结构化 guidance、SAFE MODE 下回滚/删除 423 而只读列表/预览不受影响。 |
+| **当前状态** | **⚠️ 部分交付：宿主能力已可用，界面未接线** —— `src/client/**` 对该族**只有字典键、没有任何消费者**：`src/client/recovery/recovery-locales.ts` 有完整的 `checkpoint.*`（zh/en）文案，但把该文件排除后 grep `checkpoint` 在 `src/client` 下 **0 命中**（`ConfigManagerApi` 没有 checkpoints 方法，`RecoveryPanel` 也没有任何调用）。结果：这条能力对用户**不存在** —— 点不到。 |
+| 缺什么才能用 | ① `src/client/api.ts` 的 `ConfigManagerApi` 补 list / storage / read / capture / preview / rewind / delete 共 7 条调用；② `RecoveryPanel` 增「检查点」区块（捕获：选工作区分块 + 会话；现状列表；预览；回滚必须走确认弹窗并显式传 `userConfirmed: true`；删除对保护点 / guard 点禁用），`storage.available === false` 时按 `guidance[]` 如实显示「存储栈不可用」，不假装可用；③ 文案键已齐（`checkpoint.*`，zh/en），只差接线；④ **工作区分块（chunks）的来源未定**：引擎只接受显式绝对路径分块，界面需要一个路径输入 / 选择来源（可先复用既有路径输入原语），否则只能捕获会话态、回滚面不完整。 |
+| 验证方式 | 引擎：`src/core/checkpoint.test.ts`（**18** 条：真实磁盘三态捕获、同点/跨度判定、保护点与 guard 点、分叉门、篡改记录、存储降级）；路由接口面：`tests/route/recovery-checkpoints.test.ts`（**5** 条，真 http server：七形态可达 / 409+denied+零写入 / 404/405/400 / 503+guidance / 保护点 / SAFE MODE）。**界面侧零测试** —— 没有任何自动化证据表明用户能用上它，这正是本条登记的意义。 |
+| 已知限制 | 见 §4.1（T14-F3 / T14-F4）。 |
+
+### G-31 云端点同步通道（S3 兼容系 ×5 / GitHub Gist）：transport 已交付，但**未接线**
+
+| 项 | 内容 |
+|---|---|
+| 背景 | 批次 3 交付了两个完整的 `SyncTransport` 实现：`src/sync/s3/`（AWS S3 以及 oss / cos / minio / kodo 五家兼容商，共用 `sigv4.ts` 签名 + `s3-providers.ts` 变体表）与 `src/sync/gist/`（GitHub Gist REST）。两者自带通道枚举与配置读取（`src/sync/sync-config.ts` 的 `S3_COMPAT_PROVIDERS` / `CLOUD_SYNC_PROVIDERS`，非密字段存独立的 `sync-cloud-config.json`），密钥纪律与既有通道同档：文件里只有非密字段 + `secretStored` 标记，AccessKey Secret / Gist Token 的**值**只在 DSH credentials 槽位（`cloudSecretRef()`），回传 UI 只走 `CloudChannelView`（带标记不带值）。 |
+| **当前状态** | **⚠️ 部分交付：宿主能力已可用，界面未接线** —— 全仓唯一通道事实源仍是 `SYNC_CHANNELS = ['git', 'webdav']`（`src/sync/sync-config.ts`），**不含 s3 / gist**；云端点段是**与主枚举解耦的独立枚举**，源码注释明写「批次 3 的写作用域不含那些文件，因此新增通道**不得**扩 `SYNC_CHANNELS`…将来并入 `SYNC_CHANNELS` 时只需删掉这里的枚举并补 Record 分支」。于是 `channelOf` / `channelMap` / 自动同步排期（`autosync-scheduler` 遍历 `SYNC_CHANNELS`）/ `makeSyncEngine` 的 transport 工厂（`src/index.ts` 只有 WebDav 与 Git 两个分支）/ `/sync/*` 路由（`prepareSync` 只认 git / webdav）/ 客户端 `CLIENT_SYNC_CHANNELS = ['git', 'webdav']` 与同步设置 UI 全都不认这两个通道 → 用户点不到。 |
+| 缺什么才能用 | ① 把 s3（含五家兼容商）与 gist 并入 `SYNC_CHANNELS`，并补齐 `channelOf` / `channelMap` / `parseSyncChannel` 的 `Record` 分支（typecheck 会逐处点名，**不得只手改一处**，尤其 `Record<SyncTransportType, T>` 的构造处与客户端镜像）；② `src/index.ts` 的 `makeSyncEngine` 增 `S3Transport` / `GistTransport` 构造分支（接到 DSH credentials 的 `getToken` / AccessKey Secret 端口）；③ `/sync/*` 与 `prepareSync` 接受新通道的非密字段（bucket / region / endpoint / pathStyle / gistId / 前缀）并只回传 `CloudChannelView`；④ 客户端补 `CLIENT_SYNC_CHANNELS` 成员、同步设置 / 状态切片与 zh/en 文案；⑤ 若新增通道路由，必须同步 `tests/route/route-parity.test.ts` 与 `route-fence.test.ts` 的计数；⑥ 新通道的快照布局必须与既有「内容寻址 blob 仓 + 删除墓碑」兼容（`blobRefs` / `blobs/<sha256>`）。 |
+| 验证方式 | `src/sync/s3/s3-transport.test.ts` + `sigv4.test.ts` + `cloud-config.test.ts` + `src/sync/gist/gist-transport.test.ts` 共 **52** 条（按 `^test(` 计数）。**通道面零测试**：`src/sync/sync-config.test.ts` 仍断言 `SYNC_CHANNELS` 恰为 `['git', 'webdav']`，没有任何用例覆盖「用 s3 / gist 真的同步一次」—— 这正是本条登记的意义。 |
+| 接入时不得放宽 | 凭据值绝不进日志 / 产物 / 回传；加密与解密密码仍只在进程内存；S3 签名与 Gist token 只经注入的 credentials 端口；`includeSecrets ⇒ encrypt`、非加密快照声明 `containsSecrets` 即拒绝等既有同步不变量对每个通道同等适用。 |
+
 ---
 
 ## 4. 不是缺口、但已知的有损点
@@ -451,6 +484,13 @@
 - **`prompts` 的 `systemPrompt` 形态**：源 namespace / patch 行里是字符串 `systemPrompt: "…"`，导入落盘形态为对象 `{ persona: "…" }`。persona **文本**无损，但字段**形状**改变（`RT-01` 已注明）。
 - **已知分区内的未知字段不写回目标（分区相关，勿一句话概括）**：导入不是 round-trip 复制，而是把已知语义落到目标。规格 §7.3 实测结论是**分区相关**的：`settings` / `ui` / `mcp` / `prompts` / `credentialsStatus` → 未知字段不写回；`workspaces[]` 记录、`plugins.patch[].raw`、`providers.raw` → 会随「整体搬运」落到目标。因此**不要声称「未知字段会被保留到目标」，也不要声称「一律被丢弃」**。
 - **文件类分区的 secret 命中不剥离内容**：G-09 修复后只「报告 + 告警」，命中的文件内容**原样进包**（见 §1 G-09 的边界）。
+
+### 4.1 checkpoint 的两条已知限制（T14-F3 / T14-F4）
+
+> 它们不是缺陷，而是**被有意保留的设计边界**；登记在这里是为了不让它们只活在验证报告里。
+
+- **T14-F3 — workspace 段的 `restored` 不按 chunk（分块）递减**：`CheckpointSegmentResult.restored` 的语义是「**成功写回的文件条数**」（`src/core/checkpoint.ts` 的 `restoreWorkspace` 逐文件 `restored += 1`），**没有分块级计数**：记录里的某一条分块整段不可用 / 被跳过时，这个数字不会为它单独扣减，`detail` 里也只给 `restored=` / `failed=` / `leftovers=` 三个聚合值与逐条 reasonCode，不按分块标注。因此界面上的 `restored=N` 只能读成「N 个文件写回成功」，**不能**读成「N 个分块都恢复了」；逐条是否失败仍可从 `failed` / `reasonCode` / `leftovers` 核验。
+- **T14-F4 — `capturedAt` 只保证 per-instance 单调**：三态的 `capturedAt` 取自引擎注入的时钟（`CheckpointEngineOptions.now`，缺省 `Date.now`），在**同一个实例内**非回退；它**不是**跨实例 / 跨机全局有序的时间戳（时钟回拨或两台机器时间不一致时不能据此排序检查点）。模块头已写明「**不假装原子**」（DSH 不提供跨态原子性）：`samePointVerdictOf` 只按 `spreadMs ≤ toleranceMs` + 三态可指纹判定 `samePoint`，不承诺三态真的落在同一瞬间。
 
 ---
 

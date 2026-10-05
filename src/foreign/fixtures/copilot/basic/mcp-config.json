@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "env": {
+        "GITHUB_TOKEN": "ghp_FIXTURE_TOKEN_DO_NOT_SHIP",
+        "PLAIN": "ok"
+      }
+    },
+    "docs": {
+      "url": "https://user:pw@mcp.example.com/mcp",
+      "headers": {
+        "X-Trace": "on"
+      }
+    },
+    "empty": {
+      "note": "既无 command 也无 url —— 必须进 skipped 而不是产出空条目"
+    }
+  }
+}

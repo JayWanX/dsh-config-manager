@@ -66,6 +66,7 @@ import css from '../config-manager.module.css'
 export interface ImportWizardViewProps {
   api: ConfigManagerApi
   t: TranslateNS<'config-manager'>
+  uiT?: UiT; onOpenForeignImport?: () => void // 可选：外部来源入口（见 SelectStep.foreignEntry）
 }
 
 /* 兼容性等级 → 字典键的映射统一在 ../common/compat-label.ts（同步确认页共用同一份，
@@ -430,7 +431,7 @@ function ResultStep(props: {
   )
 }
 
-function ImportWizardBody({ api, t }: ImportWizardViewProps) {
+function ImportWizardBody({ api, t, uiT, onOpenForeignImport }: ImportWizardViewProps) {
   const {
     imp,
     wizard,
@@ -509,6 +510,7 @@ function ImportWizardBody({ api, t }: ImportWizardViewProps) {
         onReset={resetWizard}
         apiT={api.t}
         t={t}
+        foreignEntry={uiT !== undefined && onOpenForeignImport !== undefined ? { uiT, onOpen: onOpenForeignImport } : undefined}
       />
     )
   }

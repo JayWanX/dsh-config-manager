@@ -14,7 +14,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { DshPluginsFacade, ensureActivationRow, resolveDshVersion } from './index.ts';
+import { DshPluginsFacade, DshSessionStoreFacade, ensureActivationRow, normalizeListedSession, resolveDshVersion, sessionPersistenceShapeOf } from './index.ts';
+import { zhMsg } from './core/messages.ts';
+import { createLogger, type Logger } from './utils/logger.ts';
 import { resolveProfileDir } from './core/plugin-cli.ts';
 import type { DshPluginResult } from './core/plugin-cli.ts';
 import type { PatchChange, PatchFileFacade } from './core/types.ts';
@@ -293,4 +295,124 @@ test('ensureActivationRow: scope 包名 slug 形态正确（@scope/name → pm-s
   } finally {
     cleanup();
   }
+});
+
+/* --------------------- F-1：会话存储读侧形状兼容（sessionPersistence.list()） --------------------- */
+
+type SessionCtx = ConstructorParameters<typeof DshSessionStoreFacade>[0]
+
+/** 假的 Cordis ctx：只有 readService 用到的 get(name) 有意义（其余服务一律 undefined）。 */
+function storeCtx(services: Record<string, unknown>): SessionCtx {
+  return { get: (name: string) => services[name] ?? null } as unknown as SessionCtx
+}
+
+/** 静默 logger：F-1 的「响亮」路径会写 error 日志，测试不该刷屏（断言的是抛错/返回值）。 */
+function silentLogger(): Logger {
+  return createLogger({ level: 'error', sink: () => {} })
+}
+
+test('F-1 sessionPersistenceShapeOf：按 API 形状探测（open=handle / readFrom|append=legacy）', () => {
+  assert.equal(sessionPersistenceShapeOf({ open: () => {}, list: async () => [] }), 'handle')
+  assert.equal(sessionPersistenceShapeOf({ readFrom: () => {}, list: async () => [] }), 'legacy')
+  assert.equal(sessionPersistenceShapeOf({ append: () => {}, list: async () => [] }), 'legacy')
+  assert.equal(sessionPersistenceShapeOf({ list: async () => [] }), 'unknown', '两个基线特征都没有 → 不猜')
+  assert.equal(sessionPersistenceShapeOf(null), 'unknown')
+  assert.equal(sessionPersistenceShapeOf([]), 'unknown', '数组不是服务对象')
+});
+
+test('F-1 normalizeListedSession：handle 与 legacy 两种元素形状归一到同一视图', () => {
+  const nested = { id: 's1', parentSession: 'p1', origin: 'subagent' }
+  assert.deepEqual(
+    normalizeListedSession({ header: nested }),
+    { id: 's1', parent: 'p1', origin: 'subagent', raw: nested },
+    'handle 形态：header 在 element.header，raw 必须是那个 header 对象本身',
+  )
+  const flat = { id: 's2', parentSessionId: 'p2', origin: 'subagent' }
+  assert.deepEqual(
+    normalizeListedSession(flat),
+    { id: 's2', parent: 'p2', origin: 'subagent', raw: flat },
+    'legacy 形态：header 字段平铺；父 id 连 DSH 的 RPC 投影名 parentSessionId 也认',
+  )
+  assert.equal(normalizeListedSession({ id: 's3' })?.parent, undefined, '没有父 id 时不给 parent（不猜）')
+  assert.equal(normalizeListedSession({ foo: 1 }), undefined, '认不出 id → undefined（调用方必须响亮处理）')
+  assert.equal(normalizeListedSession(null), undefined)
+  assert.equal(normalizeListedSession({ header: { origin: 'subagent' } }), undefined, 'header 是对象但取不出 id → 不认')
+});
+
+test('F-1 parentRelations：旧（legacy）形状 list() 元素仍能解析出父子关系（绝不退化成空 Map）', async () => {
+  const facade = new DshSessionStoreFacade(storeCtx({
+    sessionPersistence: {
+      readFrom: () => {},   // 旧基线特征：没有 open()
+      list: async () => [
+        { id: 'child-1', parentSession: 'parent-1', origin: 'subagent' },
+        { id: 'parent-1', origin: 'user' },
+        { id: 'child-2', parentSessionId: 'parent-1', origin: 'subagent' },
+      ],
+    },
+  }), 'C:/home/.dsh', zhMsg, silentLogger())
+
+  const relations = await facade.parentRelations()
+  assert.deepEqual(
+    [...relations.keys()].sort(), ['child-1', 'child-2'],
+    '旧形状必须解析出两条子会话 —— 空 Map 就是 F-1 的真机事故（父链连带静默失效）',
+  )
+  assert.deepEqual(relations.get('child-1'), { parent: 'parent-1', subagent: true })
+  assert.deepEqual(relations.get('child-2'), { parent: 'parent-1', subagent: true }, 'parentSessionId 投影名也认')
+  assert.equal(relations.has('parent-1'), false, '没有父 id 的顶层会话不进 Map')
+});
+
+test('F-1 parentRelations：新（handle）形状元素解析结果与 legacy 一致', async () => {
+  const facade = new DshSessionStoreFacade(storeCtx({
+    sessionPersistence: {
+      open: () => {},
+      list: async () => [
+        { header: { id: 'child-1', parentSession: 'parent-1', origin: 'subagent' } },
+        { header: { id: 'parent-1', origin: 'user' } },
+      ],
+    },
+  }), 'C:/home/.dsh', zhMsg, silentLogger())
+  assert.deepEqual(
+    [...(await facade.parentRelations())],
+    [['child-1', { parent: 'parent-1', subagent: true }]],
+  )
+});
+
+test('F-1 parentRelations：元素形状一个都认不出 → 抛错（绝不返回空 Map 冒充「没有父子关系」）', async () => {
+  const facade = new DshSessionStoreFacade(storeCtx({
+    sessionPersistence: { list: async () => [{ totallyDifferent: 1 }, { shape: 'v9' }] },
+  }), 'C:/home/.dsh', zhMsg, silentLogger())
+  await assert.rejects(() => facade.parentRelations(), /sessionPersistence/)
+});
+
+test('F-1 parentRelations：列举抛错 → 抛错（不吞成空 Map，避免被 5 s TTL 缓存放大）', async () => {
+  const facade = new DshSessionStoreFacade(storeCtx({
+    sessionPersistence: { list: async () => { throw new Error('corrupt session log') } },
+  }), 'C:/home/.dsh', zhMsg, silentLogger())
+  await assert.rejects(() => facade.parentRelations(), /corrupt session log/)
+});
+
+test('F-1 parentRelations：空列举 = 确实没有会话 → 空 Map（不抛错）', async () => {
+  const facade = new DshSessionStoreFacade(storeCtx({
+    sessionPersistence: { list: async () => [] },
+  }), 'C:/home/.dsh', zhMsg, silentLogger())
+  assert.equal((await facade.parentRelations()).size, 0)
+});
+
+test('F-1 parentRelations：宿主未接线 sessionPersistence → 空 Map（确定性事实，不抛错）', async () => {
+  const facade = new DshSessionStoreFacade(storeCtx({}), 'C:/home/.dsh', zhMsg, silentLogger())
+  assert.equal((await facade.parentRelations()).size, 0)
+});
+
+test('F-1 reindexSessionHeader：legacy 形状下仍能命中，并把**原样 header** 交给注册表', async () => {
+  const indexed: unknown[] = []
+  const rawHeader = { id: 's-1', parentSession: 'p-1', origin: 'subagent' }
+  const facade = new DshSessionStoreFacade(storeCtx({
+    sessionPersistence: { append: () => {}, list: async () => [{ id: 'other' }, rawHeader] },
+    workspaceRegistry: { indexHeader: (header: unknown) => { indexed.push(header) } },
+  }), 'C:/home/.dsh', zhMsg, silentLogger())
+
+  assert.equal(await facade.reindexSessionHeader('s-1'), true, '旧形状必须命中（恒 false 就是 F-1 事故）')
+  assert.equal(indexed.length, 1)
+  assert.equal(indexed[0], rawHeader, '必须回传原样 header 对象，不得自造（注册表要拿它校验 cwd）')
+  assert.equal(await facade.reindexSessionHeader('missing'), false, '确实没有该会话 → false')
 });

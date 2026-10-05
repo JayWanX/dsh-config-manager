@@ -43,6 +43,11 @@ import {
   type SessionRepairEntryView,
   type SessionRepairResult,
 } from '../../ui/session-inventory-view.ts'
+import {
+  sessionExportEntryState,
+  sessionExportReasonText,
+  type SessionExportProbe,
+} from '../session-export/session-export-view.ts'
 import { runStore, type RecoveryStoreSlice } from '../run-store.ts'
 import type { CrashReport, IncidentApi, RescueStatus } from './incident-api.ts'
 import {
@@ -216,7 +221,7 @@ function incidentStateLabel(t: TranslateNS<'config-manager-recovery'>, state: st
  */
 const EMPTY_COPY_T: TranslateNS<'config-manager'> = ((key: string) => key) as TranslateNS<'config-manager'>
 
-function SessionHealthCard({ recoveryApi, t, copyT }: Pick<RecoveryPanelProps, 'recoveryApi' | 't' | 'copyT'>) {
+function SessionHealthCard({ recoveryApi, t, copyT, diskApi }: Pick<RecoveryPanelProps, 'recoveryApi' | 't' | 'copyT' | 'diskApi'>) {
   /** 剪贴板反馈的翻译器（config-manager 命名空间；缺省退到 zhUiT 兜底）。 */
   const clipboardT = copyT ?? EMPTY_COPY_T
   /** 体检结果住**卡片**里：弹窗每次打开重新扫一遍（scanVersion 变化即重扫），关掉不留一屏陈旧数据。 */
@@ -226,6 +231,25 @@ function SessionHealthCard({ recoveryApi, t, copyT }: Pick<RecoveryPanelProps, '
   const [open, setOpen] = useState(false)
   const [scanVersion, setScanVersion] = useState(0)
   const scan = (): void => { setScanVersion((v) => v + 1) }
+  /**
+   * F-2：官方 session.export 端的可用性探测（一次；打开弹窗时顺带探）。
+   *
+   * 为什么**只在打开弹窗时**探：探测要走一次宿主自请求，用户没进这个界面时毫无意义；
+   * 而进程内缓存（setState 在卡片上）保证同一次对话里只探一次 —— 后端能力不会中途变化。
+   * 探测失败（网络/宿主异常）**不写 error**：它是「下载入口的可用性未知」，不是体检失败。
+   */
+  const [zipProbe, setZipProbe] = useState<SessionExportProbe | null>(null)
+  const zipChecked = useRef(false)
+  useEffect(() => {
+    if (!open || zipChecked.current) return
+    zipChecked.current = true
+    let alive = true
+    diskApi.sessionExportProbe()
+      .then((probe) => { if (alive) setZipProbe(probe) })
+      // 探测本身失败（宿主不可达等）→ 落到保守三态：**绝不**改判成不可用而把入口藏掉。
+      .catch(() => { if (alive) setZipProbe({ availability: 'unknown', reason: 'network-error', status: 0, path: '', checkedAt: new Date().toISOString() }) })
+    return () => { alive = false }
+  }, [open, diskApi])
 
   useEffect(() => {
     if (!open) return
@@ -279,6 +303,8 @@ function SessionHealthCard({ recoveryApi, t, copyT }: Pick<RecoveryPanelProps, '
           loading={loading}
           error={error}
           onScan={scan}
+          zipProbe={zipProbe}
+          api={diskApi}
         />
       )}
     </Card>
@@ -317,10 +343,22 @@ interface SessionHealthDialogProps {
   loading: boolean
   error: string | null
   onScan: () => void
+  /** F-2：官方 session.export 的可用性（null = 还没探出来 → 入口显示加载态，不误判禁用）。 */
+  zipProbe: SessionExportProbe | null
+  /** 供「下载原始日志 (ZIP)」拼下载地址（同一份 api 实例，别新起一个）。 */
+  api: import('../api.ts').ConfigManagerApi
 }
 
 function SessionHealthDialog(props: SessionHealthDialogProps) {
-  const { open, onClose, recoveryApi, t, clipboardT, response, loading, error, onScan } = props
+  const { open, onClose, recoveryApi, t, clipboardT, response, loading, error, onScan, zipProbe, api } = props
+  /**
+   * F-2：「下载原始日志 (ZIP)」入口的三态判定（**唯一**判定点在 ui/ 纯函数里，组件只映射）。
+   *
+   * 为什么不在组件里判 `status !== 501`（竞品做法）：那条判据在本机 DSH 上**已过时** ——
+   * 服务缺失返的是 500 而不是 501，照抄会让入口几乎恒显示。判定与理由见 session-export-view.ts。
+   */
+  const zipState = sessionExportEntryState(zipProbe)
+  const zipHint = sessionExportReasonText(zipState, t)
   const phase = sessionHealthPhase({ loading, error, response })
   /**
    * 本地的「已修复」行集合：批量/单条修复成功后**就地更新界面**，不再整屏重扫。
@@ -341,6 +379,23 @@ function SessionHealthDialog(props: SessionHealthDialogProps) {
   const repairEntries = sessionRepairEntries(response)
   /** 正在预览 / 应用 / 回滚的 unitId（进行中态住组件内；弹窗不跨页签） */
   const [busy, setBusy] = useState<string | null>(null)
+  /**
+   * F-2：正在下载原始日志的会话 id（进行中态住组件内 —— 弹窗不跨页签，无需进 runStore）。
+   *
+   * 为什么必须有：ZIP 可达数百 MB，点下去到浏览器开始落盘之间可能好几秒，
+   * 没有任何反馈会被当成「点了没反应」而反复点击。
+   */
+  const [zipBusy, setZipBusy] = useState<string | null>(null)
+  /** 触发一次 ZIP 下载；**失败必须显式报告**（绝不静默）。 */
+  const downloadZip = (sessionId: string): void => {
+    if (zipBusy !== null) return
+    setZipBusy(sessionId)
+    api.downloadSessionExport(sessionId)
+      .then((result) => { toast.ok(t('sessions.zip.done', { name: result.filename })) })
+      // 错误文本走 toast（与本节其它动作同一口径；http 层已脱敏）。
+      .catch((err) => { toast.error(t('sessions.zip.failed') + ': ' + (err instanceof Error ? err.message : String(err))) })
+      .finally(() => { setZipBusy(null) })
+  }
   /** 预览得到的修复计划（应用前必须显式确认；ok=false 时也在这里显示拒绝原因） */
   const [plan, setPlan] = useState<{ unitId: string; result: SessionRepairResult } | null>(null)
   /** 待确认的回滚目标（ConfirmDialog，danger） */
@@ -468,6 +523,15 @@ function SessionHealthDialog(props: SessionHealthDialogProps) {
             </Button>
           </div>
 
+          {/*
+            F-2：官方 session.export 通道的**可用性说明**（逐行入口见下方列表）。
+            ZIP 由 DSH 自己打包（含子会话与附件）；体检/修复动的是本机文件，两者不是一回事。
+            不可用时界面给出**可读原因**，绝不静默消失（消失会让用户以为插件根本没做这个功能）。
+          */}
+          {zipHint !== null && (
+            <Banner kind="warn">{zipHint}</Banner>
+          )}
+
           {phase === 'error' && <Banner kind="error">{error ?? t('common.unknownError')}</Banner>}
 
           {phase === 'ready' && response !== null && (
@@ -591,6 +655,20 @@ function SessionHealthDialog(props: SessionHealthDialogProps) {
                             </Button>
                           </div>
                         )}
+                        {/* F-2：下载该会话的原始日志 ZIP（**只读**；由 DSH 自己打包，含子会话与附件）。
+                            不可用时**禁用并给出原因**（不静默消失）—— 三态判定在 session-export-view.ts。 */}
+                        <div className={css.actionRow}>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={!zipState.enabled || zipBusy !== null}
+                            loading={zipBusy === row.sessionId}
+                            title={zipHint ?? t('sessions.zip.hint')}
+                            onClick={() => { downloadZip(row.sessionId) }}
+                          >
+                            {t('sessions.zip.action')}
+                          </Button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -1004,7 +1082,7 @@ export function RecoveryPanel(props: RecoveryPanelProps) {
       <DiskUsageCard api={props.diskApi} infoHintLabel={props.infoHintLabel ?? props.t('common.infoHint')} />
 
       {/* T5：会话体检（只读）—— 与「我的对话去哪了」是同一件事，故与事故恢复同屏 */}
-      <SessionHealthCard recoveryApi={recoveryApi} t={t} copyT={props.copyT} />
+      <SessionHealthCard recoveryApi={recoveryApi} t={t} copyT={props.copyT} diskApi={props.diskApi} />
 
       {/* SAFE MODE / recovery-required 状态提示（正常态不渲染任何横幅——无事项即静默） */}
       {view?.recoveryRequired === true && (

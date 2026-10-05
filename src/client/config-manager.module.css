@@ -4816,3 +4816,141 @@ button.profileRowMain:hover {
     background-image: none;
   }
 }
+/* ================================================================ §16 Page: Foreign agent import
+
+   外部 agent 配置导入的**只读发现 → 预览 → 交给既有导入向导**界面（t16 静态资产，
+   组件由 t17 落地）。本块只提供样式，不含任何逻辑；类名与 t17 组件的 `css.xxx` 一一对应。
+
+   为什么复用既有类而不是新造一套：
+   · 页面骨架沿用 `.viewBody`/`.pagePad`（页面主体区块间距由 §9b 统一提供）；
+   · 滚动区沿用 `.marketReviewScroll` 的高度契约（min 200px / max 800px，长列表不在页面上撑开）；
+   · 来源卡沿用 `.card`/`.groupLabel`/`.statRow` 的既有原语。
+   本块只补三件既有类**表达不了**的东西（Reuse → Extend → Refactor → Create 的第四步）：
+
+   ① `.sourceList`：来源是**可选行**（单选进入下一步），既有的勾选行（.pickerUnit）是"多选树节点"，
+      语义与命中路径的排版都不同，硬塞会把两种心智混在一行里；
+   ② `.sourcePaths`：命中路径要**等宽 + 可换行**（Windows 反斜杠路径很长），
+      既有 `.mono` 只管字体不管换行，长路径会把行撑宽、把右侧状态徽章挤出视野；
+   ③ `.skipList`：未迁移项的**两段式**行（机器码 → 人话 + 来源/条数），
+      与 `.warnList`（纯文本条目）不同 —— 它必须让"码"与"解释"在视觉上可区分，否则用户读不出
+      哪段是稳定标识、哪段是解释。
+
+   零硬编码颜色：全部走 --dsw-* token（tint 一律 color-mix）。 */
+
+/* 来源列表：可选行的纵向容器（单选进入下一步） */
+.sourceList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+/* 一行来源：左侧选择控件（t17 传入）+ 名称/状态 + 命中路径。
+   用 flex-start 而不是 center：命中路径可能折成多行，居中对齐会让左列控件浮在半空。 */
+.sourceRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+  min-width: 0;
+}
+
+/* 选中态：与产物库/档案行的既有写法同款（业务色 1px + 7% 底色） */
+.sourceRow[data-selected] {
+  border-color: var(--dsw-alias-state-business-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 7%, transparent);
+}
+
+/* 不可选（本机未检测到）：整体降一级对比度，但**不隐藏** —— 用户需要知道"这个来源我查过了" */
+.sourceRow[data-disabled] {
+  opacity: 0.7;
+}
+
+.sourceRowMain {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 来源名 + 状态徽章一行（名称可省略，徽章不收缩） */
+.sourceRowHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sourceRowName {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sourceRowHead > *:not(.sourceRowName) {
+  flex: none;
+}
+
+/* 命中路径：等宽 + 允许在任意位置换行（Windows 长路径不得撑宽行、不得把徽章挤出视野） */
+.sourcePaths {
+  display: block;
+  margin-top: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary);
+  overflow-wrap: anywhere;
+}
+
+/* 未迁移项列表：一行一项，左侧机器码、右侧解释 */
+.skipList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0 0;
+  padding: 0;
+  font-size: 11.5px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* 未迁移项行：码与解释同排（窄面板下允许换行成两段） */
+.skipRow {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* 稳定机器码（用户可据此搜索/上报）：等宽 + 次级底色，**刻意不隐藏** ——
+   用户报告问题时需要这个标识；容器上另有 title 承载完整说明。 */
+.skipCode {
+  flex: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--dsw-alias-label-tertiary) 12%, transparent);
+  color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+}
+
+/* 机器码之后的解释文本：占据剩余宽度，长文本在任意位置折行 */
+.skipText {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 未迁移项的计数与来源（如「来源：claude-code · 3 项」）：仍是文本，但比解释低一级 */
+.skipMeta {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+}

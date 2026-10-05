@@ -145,6 +145,7 @@ import { stringifyJsonSafe } from './utils/json.ts'
 import type { Manifest, SectionId, WorkspaceRecord } from './schema/types.ts'
 import { parseZip } from './utils/zip.ts'
 import { isSameOrChild } from './utils/paths.ts'
+import { isRecord } from './utils/guards.ts'
 import { createLogger, parseLogLevel, type Logger } from './utils/logger.ts'
 
 /* ---------------------------------------------------------------- identity */
@@ -624,12 +625,93 @@ class DshWorkspaceFacade implements WorkspaceFacade {
 // 字节级工具（projectKey 形状 / 首帧 cwd 读写 / 多 generation 改写）已抽到 utils/session-log.ts：
 // 宿主在线路径与 CLI 离线修复共用同一份实现（避免两处口径漂移）。
 
+/* --------------------------------------------- 会话存储读侧兼容（F-1） */
+
+/**
+ * 宿主 `sessionPersistence` 的 API 形状（**按 API 形状探测，绝不按 DSH 版本号猜**）。
+ *
+ * 为什么必须探测：DSH 的会话存储换过基线 —— 新基线有 `open()`（handle 形态，`list()` 的元素是
+ * 带 `header` 的 snapshot 对象），旧基线只有服务级的 `readFrom()` / `append()`（header 字段
+ * **平铺在元素上**）。本插件只读 `list()` 的结果，而两种形状里 header 的位置不同。
+ *
+ * 真机事故级的后果（F-1）：按写死的形状读，在另一种宿主上「一个都匹配不上」——
+ * `reindexSessionHeader` 恒 false、`parentRelations` 退化成**空 Map**（而空 Map 还会进 5 s 的
+ * TTL 缓存），于是「导出子代理会话时连带父对话」这条已经修好的能力在旧宿主上**静默失效**。
+ * 参照竞品 dsh-claude-move 的 isSessionHandle / storedSessionIdOf（index.mjs:88-154）。
+ */
+export type SessionPersistenceShape = 'handle' | 'legacy' | 'unknown'
+
+/** 会话存储**列举**接口的最小形状（两种基线都有 `list()`；本插件只读它，不写会话）。 */
+export interface SessionListService {
+  list(): Promise<readonly unknown[]>
+}
+
+/** 按 API 形状探测会话存储基线：有 `open` → handle；只有 `readFrom`/`append` → legacy；都没有 → unknown。 */
+export function sessionPersistenceShapeOf(service: unknown): SessionPersistenceShape {
+  if (!isRecord(service)) return 'unknown'
+  if (typeof service['open'] === 'function') return 'handle'
+  if (typeof service['readFrom'] === 'function' || typeof service['append'] === 'function') return 'legacy'
+  return 'unknown'
+}
+
+/** 归一后的列举元素 header 视图（只含本插件用到的字段）。 */
+export interface ListedSessionView {
+  id: string
+  /** 父会话 id（磁盘 header 名 `parentSession`；DSH 的 RPC 投影名 `parentSessionId` 一并认） */
+  parent?: string
+  /** header.origin（'subagent' = 子代理会话）——原样保留，不在这里做筛选 */
+  origin: unknown
+  /**
+   * **原样的 header 对象**（handle 形态 = `element.header`；legacy 形态 = 元素自身）。
+   * 回传给 DSH `WorkspaceRegistry.indexHeader()` 时必须用它 —— 绝不自己造一个 header。
+   */
+  raw: unknown
+}
+
+/**
+ * 把一个列举元素归一成 header 视图（**两种基线形状都认**）。
+ *
+ * 认不出 id → undefined：这是「读侧兼容失败」的唯一信号，调用方必须**响亮处理**
+ * （记日志 / 抛错），绝不当成「本机没有会话」。
+ */
+export function normalizeListedSession(element: unknown): ListedSessionView | undefined {
+  if (!isRecord(element)) return undefined
+  const nested = isRecord(element['header']) ? element['header'] : undefined
+  // handle 形态 = header 在 element.header；legacy 形态 = header 字段平铺在元素上。
+  // header 存在但取不出 id 时回落元素自身（两种都取不到才算解析失败 —— 不猜）。
+  const source = nested !== undefined && typeof nested['id'] === 'string' && nested['id'] !== '' ? nested : element
+  const id = source['id']
+  if (typeof id !== 'string' || id === '') return undefined
+  const rawParent = source['parentSession'] ?? source['parentSessionId']
+  const parent = typeof rawParent === 'string' && rawParent !== '' ? rawParent : undefined
+  return { id, origin: source['origin'], raw: source, ...(parent !== undefined ? { parent } : {}) }
+}
+
+/** 会话存储列举的结果（失败必须可区分，绝不与「本机没有会话」混淆）。 */
+type ListedSessions =
+  | { ok: true; items: readonly ListedSessionView[] }
+  /** unavailable = 服务/接口不可用（list 抛错或返回非数组）；shape-unknown = 元素形状一个都认不出 */
+  | { ok: false; reason: 'unavailable' | 'shape-unknown'; detail: string }
+
+/** 列举会话存储的用途（内部枚举；渲染时必须经字典键映射 —— **绝不把裸枚举塞进文案**）。 */
+type SessionStorePurpose = 'reindexSessionHeader' | 'parentRelations'
+
+/** 用途 → 字典键（本仓纪律：文案只做「原因 → 字典键」映射，禁止渲染裸枚举）。 */
+const SESSION_STORE_PURPOSE_KEY: Record<SessionStorePurpose, string> = {
+  reindexSessionHeader: 'host.sessionStorePurposeReindex',
+  parentRelations: 'host.sessionStorePurposeParentRelations',
+}
+
 /**
  * 父子关系缓存的 TTL（毫秒）。
  *
  * 取值依据：`sessionPersistence.list()` 在真机上约 **0.7 s**，而 `/export-preview` 每次都要它；
  * 父子关系只在「有新子代理会话」时变化，几秒陈旧对选择器的「勾父带子 / 勾子带父」联动毫无影响。
  * 取 5 s：连续打开/刷新选择器都在同一窗口内命中，同时保证新会话最多 5 s 后就能被联动识别。
+ *
+ * F-1：缓存里只放**成功结果** —— 列举失败/形状识别失败走 `parentRelations()` 的抛错路径，
+ * 由 ttl-cache 的「失败不缓存」语义保证下一次调用立刻重试；
+ * 不再把失败吞成空 Map（那会被缓存整整 5 s，正是「静默失效」的放大器）。
  */
 const PARENT_RELATIONS_CACHE_TTL_MS = 5_000
 
@@ -639,16 +721,25 @@ export class DshSessionStoreFacade implements SessionStoreFacade {
   private readonly root: string
   /**
    * 父子关系的短 TTL 缓存（见 `PARENT_RELATIONS_CACHE_TTL_MS`；同 key 并发合并成一次列举）。
-   * `parentRelations()` 把「列举失败」收成空 Map —— 那个空 Map 会进缓存 TTL（5 s），
-   * 对一个已经坏掉的服务连打不划算，且 5 s 后自然重试。
+   * F-1 后**只缓存成功结果**：列举失败/形状识别失败会让 `parentRelations()` 抛错，
+   * 而 ttl-cache 的语义是「失败不缓存」→ 下一次调用立刻重试（行为见 utils/ttl-cache.ts）。
    */
   private readonly parentRelationsCache = createTtlAsyncCache<Map<string, SessionParentRelation>>({
     ttlMs: PARENT_RELATIONS_CACHE_TTL_MS,
   })
+  /**
+   * 宿主日志（F-1）：会话存储的形状异常/列举异常必须**响亮**（绝不退化成空结果），
+   * 缺省不注入时用一个只输出 warn/error 的本地记录器（测试构造三参即可，行为不变）。
+   */
+  private readonly log: Logger
+  /** 文案翻译器（F-1 的形状异常诊断走字典，禁止硬编码用户可见字符串） */
+  private readonly msgFunc: MsgFunc
 
-  constructor(ctx: Context, homeDir: string, msg: MsgFunc = zhMsg) {
+  constructor(ctx: Context, homeDir: string, msg: MsgFunc = zhMsg, log?: Logger) {
     this.ctx = ctx
     this.root = join(homeDir, 'sessions')
+    this.log = log ?? createLogger({ level: 'warn' })
+    this.msgFunc = msg
   }
 
   /**
@@ -744,17 +835,86 @@ export class DshSessionStoreFacade implements SessionStoreFacade {
   async reindexSessionHeader(sessionId: string): Promise<boolean> {
     const registry = readService<{ indexHeader?: (header: unknown) => unknown }>(this.ctx, 'workspaceRegistry')
     // 会话存储服务：只用来取出该会话的最新 header（注册表内存里的那份可能已被改写作废）
-    const store = readService<{ list(): Promise<readonly { header?: { id?: unknown } }[]> }>(this.ctx, 'sessionPersistence')
+    const store = readService<SessionListService>(this.ctx, 'sessionPersistence')
     if (registry === undefined || typeof registry.indexHeader !== 'function' || store === undefined) return false
-    try {
-      const snapshots = await store.list()
-      const fresh = snapshots.find((snapshot) => snapshot.header?.id === sessionId)?.header
-      if (fresh === undefined) return false
-      await registry.indexHeader(fresh)
-      return true
-    } catch {
+    // F-1：按**形状**归一列举元素（handle / legacy 两种基线都认），不写死 element.header.id
+    const listed = await this.listSessionElements(store, 'reindexSessionHeader')
+    if (!listed.ok) {
+      // T8（F-1 收尾）：失败原因必须**可观测** —— 只返回 false 时它与「注册表不可用」无法区分，
+      // 排查只能看到「需重启 DSH 后再执行一次归位」，看不到「为什么」。
+      this.log.warn(listed.detail)
       return false
     }
+    const fresh = listed.items.find((item) => item.id === sessionId)
+    if (fresh === undefined) return false
+    try {
+      // 必须回传**原样的 header 对象**（handle = element.header；legacy = 元素自身）
+      await registry.indexHeader(fresh.raw)
+      return true
+    } catch (err) {
+      this.log.warn(`会话 header 重新索引失败（${sessionId}）：${err instanceof Error ? err.message : String(err)}`)
+      return false
+    }
+  }
+
+  /**
+   * 列举宿主会话存储并**把两种元素形状归一**（F-1 唯一入口）。
+   *
+   * 返回 `ok:false` 的两种情形必须被调用方**响亮处理**（记日志 + 抛错/明确失败返回）：
+   *  - `unavailable`：服务或 `list()` 不可用（抛错 / 返回非数组）；
+   *  - `shape-unknown`：有元素、但**一个都解析不出 id**（宿主形状既不是 handle 也不是 legacy）。
+   * 这两种**绝不**降级成「本机没有会话 / 没有父子关系」的空结果 —— 那正是 F-1 的真机事故。
+   * 元素**部分**认不出时保留已认出的并记一条警告（部分可用比全丢好，但必须可见）。
+   */
+  private async listSessionElements(
+    store: SessionListService,
+    purpose: SessionStorePurpose,
+  ): Promise<ListedSessions> {
+    // T8-F1：purpose 是内部枚举 → 先经字典键映射成人类可读用途，**绝不渲染裸枚举**；
+    // 三条 detail/warn 一律走 this.msgFunc（本文件里唯一的用户可见文案出口），不硬编码中文。
+    const purposeLabel = this.msgFunc(SESSION_STORE_PURPOSE_KEY[purpose])
+    let elements: readonly unknown[]
+    try {
+      elements = await store.list()
+    } catch (err) {
+      return {
+        ok: false,
+        reason: 'unavailable',
+        detail: this.msgFunc('host.sessionStoreListFailed', { purpose: purposeLabel, reason: errorMessage(err) }),
+      }
+    }
+    if (!Array.isArray(elements)) {
+      return {
+        ok: false,
+        reason: 'unavailable',
+        detail: this.msgFunc('host.sessionStoreListNotArray', { purpose: purposeLabel }),
+      }
+    }
+    const items: ListedSessionView[] = []
+    let unresolved = 0
+    for (const element of elements) {
+      const view = normalizeListedSession(element)
+      if (view === undefined) unresolved += 1
+      else items.push(view)
+    }
+    if (items.length === 0 && elements.length > 0) {
+      const detail = this.msgFunc('host.sessionStoreShapeUnknown', {
+        shape: sessionPersistenceShapeOf(store),
+        count: String(elements.length),
+      })
+      this.log.error(detail)
+      return { ok: false, reason: 'shape-unknown', detail }
+    }
+    if (unresolved > 0) {
+      this.log.warn(
+        this.msgFunc('host.sessionStorePartialUnresolved', {
+          count: String(unresolved),
+          total: String(elements.length),
+          purpose: purposeLabel,
+        }),
+      )
+    }
+    return { ok: true, items }
   }
 
   /**
@@ -762,8 +922,14 @@ export class DshSessionStoreFacade implements SessionStoreFacade {
    *
    * 实现走 DSH 会话存储的列举（与 `session/list` 同一数据源）：只取 header 的 `parentSession`，
    * 不解析任何日志字节 —— 让「导出父对话时连带子代理会话」不为此读一遍整棵会话树。
-   * 字段名以磁盘 header 为准（`parentSession`；DSH 的 RPC 投影才改名为 `parentSessionId`）。
-   * 服务缺失 / 列举失败 → 空 Map（调用方按「无法连带」处理，绝不假装带全）。
+   * 字段名以磁盘 header 为准（`parentSession`，两种写法都认；DSH 的 RPC 投影才改名为 `parentSessionId`）。
+   * 元素形状按 **API 形状探测**归一（handle 的 `element.header` 与 legacy 的平铺字段都认，F-1）。
+   *
+   * 失败语义（F-1，**不得放宽**）：
+   *  - 服务**未接线** → 空 Map（确定性事实：宿主没有会话存储，不是读失败）；
+   *  - 列举失败 / 元素形状一个都认不出 → **抛错**（带明确原因）。绝不返回空 Map ——
+   *    空 Map 会进 5 s TTL 缓存，且让「本机一条父子关系都没有」与「读不出来」无法区分，
+   *    「导出子代理会话连带父对话」就会再次静默失效。调用方各自有回退路径（见 `loadParentRelations`）。
    */
   async parentRelations(): Promise<Map<string, SessionParentRelation>> {
     return this.parentRelationsCache.resolve('local', () => this.loadParentRelations())
@@ -771,18 +937,22 @@ export class DshSessionStoreFacade implements SessionStoreFacade {
 
   /** 真正列举一次 DSH 会话存储（语义见 `parentRelations()`；本方法不做缓存） */
   private async loadParentRelations(): Promise<Map<string, SessionParentRelation>> {
+    const store = readService<SessionListService>(this.ctx, 'sessionPersistence')
+    // 服务**未接线**（宿主不提供 sessionPersistence）→ 不猜，空 Map（与改造前一致，属确定性事实）
+    if (store === undefined) return new Map<string, SessionParentRelation>()
+    // F-1：形状归一（handle 的 element.header / legacy 的元素自身都认）
+    const listed = await this.listSessionElements(store, 'parentRelations')
+    if (!listed.ok) {
+      // 读不到 / 形状认不出 → **响亮抛错**，绝不退化成「本机没有父子关系」的空 Map
+      // （空 Map 既会被 5 s TTL 缓存放大，也让「导出少带父对话」没有任何提示）。
+      // 调用方各自有回退路径：/export-preview 只是不标父链接（预览照常），
+      // 会话体检退回 storages 缓存枚举。
+      throw new Error(listed.detail)
+    }
     const out = new Map<string, SessionParentRelation>()
-    const store = readService<{ list(): Promise<readonly { header?: { id?: unknown; parentSession?: unknown; origin?: unknown } }[]> }>(this.ctx, 'sessionPersistence')
-    if (store === undefined) return out
-    try {
-      for (const snapshot of await store.list()) {
-        const id = snapshot.header?.id
-        const parent = snapshot.header?.parentSession
-        if (typeof id !== 'string' || id === '' || typeof parent !== 'string' || parent === '') continue
-        out.set(id, { parent, subagent: snapshot.header?.origin === 'subagent' })
-      }
-    } catch {
-      return new Map<string, SessionParentRelation>()
+    for (const item of listed.items) {
+      if (item.parent === undefined) continue
+      out.set(item.id, { parent: item.parent, subagent: item.origin === 'subagent' })
     }
     return out
   }
@@ -1119,6 +1289,15 @@ export class ConfigManagerHostContext implements HostContext {
   safeModeIsBlocked?: () => boolean
   /** Phase 3 恢复/事务（JournalStore + reconcile + SAFE MODE + runJournaled）。apply() 注入。 */
   phase3Recovery?: import('./core/phase3-host.ts').Phase3Recovery
+  /**
+   * 本机自请求能力（F-2：官方 session.export 通道的探测与代理）。
+   *
+   * 只有「让 DSH 自己的 /api/session.export 说一遍它自己的状态」这一种用法 ——
+   * 绝不拿它去访问外部网络（插件对外的网络调用有各自的既有通道）。
+   */
+  fetch?: (input: string, init: RequestInit) => Promise<Response>
+  /** 本实例 web 监听端口（webServer 就绪前为 undefined → 探测不发请求、如实降级）。 */
+  webPort?: number
 
   constructor(ctx: Context, homeDir: string, profile: string) {
     this.homeDir = homeDir
@@ -1146,7 +1325,13 @@ export class ConfigManagerHostContext implements HostContext {
     this.plugins = new DshPluginsFacade(homeDir, profile, this.patchFile, undefined, this.msg)
     this.workspace = new DshWorkspaceFacade(ctx, this.msg)
     this.fs = new DshFileSystemFacade(homeDir, this.msg)
-    this.sessions = new DshSessionStoreFacade(ctx, homeDir, this.msg)
+    this.sessions = new DshSessionStoreFacade(ctx, homeDir, this.msg, this.log)
+    // F-2：Cordis 的 fetch 服务（DSH 自己在用它转发 /api）。缺省回落进程全局 fetch（Node ≥18 恒有）。
+    const fetchService = readService<unknown>(ctx, 'fetch')
+    const fetchImpl = typeof fetchService === 'function' ? fetchService : globalThis.fetch
+    if (typeof fetchImpl === 'function') {
+      this.fetch = (input, init) => fetchImpl(input, init) as Promise<Response>
+    }
   }
 }
 
@@ -1245,7 +1430,7 @@ export async function tryDecryptCredentials(
  * （见 W1 报告的重测配方），把结果落到这里；makeRoutes 里的 const routeEnv: RouteEnvInferred =
  * 注解保证两侧不漂移（新增依赖漏登记会在构造点报错）。
  */
-export type RouteEnvInferred = { adapters: ConfigAdapter<unknown>[]; sessionHealth: { homeDir: string; targetFormatVersion: () => number | undefined; workspaceKeys: () => Promise<ReadonlySet<string>>; knownSessionIds: () => Promise<ReadonlySet<string>>; }; backupScheduler: BackupScheduler; bootSafetyAudit: () => Promise<BootSafetyReport>; cancelDecisionTimeoutMs: number; buildMarketSummary: (e: { url: string; addedAt: string; }) => Promise<MarketSummary>; credentials: CredentialProvider; dataDir: string; exportsDir: string; githubAuth: GitHubAuthClient; githubClientId: string | undefined; githubClientSecret: string | undefined; githubFlows: DeviceFlowStore; history: MigrationStore; host: ConfigManagerHostContext; itemCached: (url: string, itemId: string) => Promise<boolean>; knownSyncSectionIds: Set<SectionId>; makeImporter: () => Importer; makeMarketReader: () => GitMarketReader; makeRecoveryExecutors: (runId: string) => RecoveryExecutorFns; makeSyncEngine: (cfg: SyncConfig, engineOpts?: { includeOptInSections?: boolean; }) => SyncEngine; marketBootAutoRefreshed: { value: boolean; }; marketCacheIndex: (url: string) => string; marketDir: string; marketCacheItemDir: (url: string) => string; marketStarCache: StarCache; marketWorkDir: (url: string) => string; meGitHubRest: GitHubAuthRest; meService: MyRepoService; meTokenProvider: () => Promise<string>; msg: MsgFunc; prepareSync: (body: Record<string, unknown>) => Promise<SyncConfig>; profileLauncher: DshProfileLauncher; profileRuntime: DshProfileRuntimeRegistry; profiles: DshProfileManager; pruneStagedMarketZips: () => Promise<void>; readCachedIndexObj: (url: string) => Promise<MarketIndex | null>; recoveryOrchestrator: RecoveryOrchestrator; resolveSyncPassword: (ref: string) => Promise<string | undefined>; roots: string[]; runAbortControllers: Map<string, AbortController>; runCancels: Map<string, { signal: AbortController; settle: (d: 'rollback' | 'keep') => void; decided: boolean }>; runs: RunRegistry; scheduler: AutoSyncScheduler; selectionCache: Partial<Record<"git" | "webdav", SyncSelection>>; selectionHasOptInSections: (channel: SyncTransportType) => boolean; selectionView: (channel: SyncTransportType) => Promise<SelectionView>; selectionViewByChannel: () => Promise<Record<SyncTransportType, SelectionView>>; snapshotEntrySections: (snapshotDir: string) => Promise<string[]>; snapshotsDir: string; syncCredentialsByChannelView: () => Promise<Record<SyncTransportType, { encryptPasswordConfigured: boolean; decryptPasswordConfigured: boolean; }>>; syncDir: string; syncPasswordConfigured: (ref: string) => Promise<boolean>; syncSectionCatalog: { id: SectionId; displayName: string; portability: Portability; defaultIncluded: boolean; }[]; syncSessions: SyncSessionStore; tmpDir: string; tryAppendHistory: (raw: { kind: MigrationKind; result: MigrationResult; sections: string[]; operationId?: string; snapshotId?: string; runId?: string; source: 'api' | 'autosync' | 'backup-scheduler' | 'recovery' | 'cli' | 'internal'; summary: string; error?: string; }) => Promise<string | undefined>; withMutationGate: (op: string, handler: (req: IncomingMessage, res: ServerResponse, lockCtx?: MutationLockContext, journalCtx?: JournalRunContext) => Promise<void>, opts?: { journaled?: boolean; deferredSnapshot?: boolean; }) => ((req: IncomingMessage, res: ServerResponse) => Promise<void>); writeItemCache: (url: string, itemId: string, manifestRaw: string, zipBytes: Uint8Array) => Promise<void>; }
+export type RouteEnvInferred = { sessionExportFetch: ((input: string, init: RequestInit) => Promise<Response>) | undefined; sessionExportPort: number | undefined; adapters: ConfigAdapter<unknown>[]; sessionHealth: { homeDir: string; targetFormatVersion: () => number | undefined; workspaceKeys: () => Promise<ReadonlySet<string>>; knownSessionIds: () => Promise<ReadonlySet<string>>; }; backupScheduler: BackupScheduler; bootSafetyAudit: () => Promise<BootSafetyReport>; cancelDecisionTimeoutMs: number; buildMarketSummary: (e: { url: string; addedAt: string; }) => Promise<MarketSummary>; credentials: CredentialProvider; dataDir: string; exportsDir: string; githubAuth: GitHubAuthClient; githubClientId: string | undefined; githubClientSecret: string | undefined; githubFlows: DeviceFlowStore; history: MigrationStore; host: ConfigManagerHostContext; itemCached: (url: string, itemId: string) => Promise<boolean>; knownSyncSectionIds: Set<SectionId>; makeImporter: () => Importer; makeMarketReader: () => GitMarketReader; makeRecoveryExecutors: (runId: string) => RecoveryExecutorFns; makeSyncEngine: (cfg: SyncConfig, engineOpts?: { includeOptInSections?: boolean; }) => SyncEngine; marketBootAutoRefreshed: { value: boolean; }; marketCacheIndex: (url: string) => string; marketDir: string; marketCacheItemDir: (url: string) => string; marketStarCache: StarCache; marketWorkDir: (url: string) => string; meGitHubRest: GitHubAuthRest; meService: MyRepoService; meTokenProvider: () => Promise<string>; msg: MsgFunc; prepareSync: (body: Record<string, unknown>) => Promise<SyncConfig>; profileLauncher: DshProfileLauncher; profileRuntime: DshProfileRuntimeRegistry; profiles: DshProfileManager; pruneStagedMarketZips: () => Promise<void>; readCachedIndexObj: (url: string) => Promise<MarketIndex | null>; recoveryOrchestrator: RecoveryOrchestrator; resolveSyncPassword: (ref: string) => Promise<string | undefined>; roots: string[]; runAbortControllers: Map<string, AbortController>; runCancels: Map<string, { signal: AbortController; settle: (d: 'rollback' | 'keep') => void; decided: boolean }>; runs: RunRegistry; scheduler: AutoSyncScheduler; selectionCache: Partial<Record<"git" | "webdav", SyncSelection>>; selectionHasOptInSections: (channel: SyncTransportType) => boolean; selectionView: (channel: SyncTransportType) => Promise<SelectionView>; selectionViewByChannel: () => Promise<Record<SyncTransportType, SelectionView>>; snapshotEntrySections: (snapshotDir: string) => Promise<string[]>; snapshotsDir: string; syncCredentialsByChannelView: () => Promise<Record<SyncTransportType, { encryptPasswordConfigured: boolean; decryptPasswordConfigured: boolean; }>>; syncDir: string; syncPasswordConfigured: (ref: string) => Promise<boolean>; syncSectionCatalog: { id: SectionId; displayName: string; portability: Portability; defaultIncluded: boolean; }[]; syncSessions: SyncSessionStore; tmpDir: string; tryAppendHistory: (raw: { kind: MigrationKind; result: MigrationResult; sections: string[]; operationId?: string; snapshotId?: string; runId?: string; source: 'api' | 'autosync' | 'backup-scheduler' | 'recovery' | 'cli' | 'internal'; summary: string; error?: string; }) => Promise<string | undefined>; withMutationGate: (op: string, handler: (req: IncomingMessage, res: ServerResponse, lockCtx?: MutationLockContext, journalCtx?: JournalRunContext) => Promise<void>, opts?: { journaled?: boolean; deferredSnapshot?: boolean; }) => ((req: IncomingMessage, res: ServerResponse) => Promise<void>); writeItemCache: (url: string, itemId: string, manifestRaw: string, zipBytes: Uint8Array) => Promise<void>; }
 
 /** 解密错误 → 用户可读文本：BAD_PASSWORD 只报「密码错误」（不泄内部细节），其余原文 */
 export function decryptErrorText(error: unknown, msg: MsgFunc): string {
@@ -1901,8 +2086,15 @@ async function sessionHealthKnownIds(host: HostContext): Promise<ReadonlySet<str
         ids.add(sessionIdKey(childId))
         if (typeof relation.parent === 'string' && relation.parent !== '') ids.add(sessionIdKey(relation.parent))
       }
-    } catch {
-      /* 落回 storages 缓存 */
+    } catch (err) {
+      // T8-F2：**不许静默**。port 层刚刚改成「认不出形状就抛错」（F-1），调用点若把声响整吞，
+      // 用户看到的仍是「父子联动无缘无故不生效」。行为不变（不猜、落回下面的 storages 缓存），
+      // 但必须留下一条带机器可读 code 的 warn —— 这是本仓那条教训的正面形态：
+      // 注释承诺的防线，必须在运行时真的发生（可观测）。
+      host.log.warn(msgOf(host)('host.parentRelationsUnavailable', { reason: errorMessage(err) }), {
+        code: 'parent-relations-unavailable',
+        source: 'sessionHealthKnownIds',
+      })
     }
   }
   if (ids.size > 0) return ids
@@ -2522,6 +2714,9 @@ function makeRoutes(deps: RoutesDeps): { routes: WebRoute[]; scheduler: AutoSync
       const restoreOpts = {
         snapshotDir: dir, homeDir: host.homeDir, profile: host.profile, settingsPath: undefined, msg,
         snapshotsRoot: snapshotsDir, environmentFingerprint: host.phase3Recovery?.recoveryEnvFingerprint ?? 'unknown', requireOperationBound: true,
+        // F-4：本机**权威**版本（拉起本宿主的运行时 = profileContext.installAnchor 解析出的 dshVersion）——
+        // 与快照记录的来源版本不同时产出一条可见告警动作（不阻断恢复）。
+        currentDshVersion: host.dshVersion,
       }
       const plan = await planRestore(restoreOpts)
       const report = await executeRestorePlan(plan, makeRestoreExecutor(dir, host, host.profile), (info) => {
@@ -2575,6 +2770,12 @@ function makeRoutes(deps: RoutesDeps): { routes: WebRoute[]; scheduler: AutoSync
       profileLauncher,
       profileRuntime,
       profiles,
+      // F-2：官方 session.export 通道只需要「宿主自己能不能发一次本机请求」与「web 端口」。
+      // 后者在 apply() 里 webServer 就绪时才赋值，而本构造发生在它之前 —— 因此这里不能直接
+      // 抓 host.webPort 的值（那一刻恒 undefined）。改成读一个**活盒子**：apply() 往盒子里写，
+      // 路由表在请求期从同一个盒子取值（见 apply() 的 webServer 就绪段）。
+      get sessionExportFetch() { return host.fetch },
+      get sessionExportPort(): number | undefined { return host.webPort },
       // T4：会话体检（只读）。宿主侧注入「本机会话库扫描」的依赖来源 —— 路由不许自己读盘。
       sessionHealth: {
         // profileDir/dataDir 不在本作用域（apply() 的局部量），体检只认 homeDir 与两个事实来源
@@ -2865,8 +3066,13 @@ function makeRoutes(deps: RoutesDeps): { routes: WebRoute[]; scheduler: AutoSync
             if (facade?.parentRelations !== undefined) {
               try {
                 sessionsEntry.items = applySessionParentLinks(sessionsEntry.items, subagentParentMap(await facade.parentRelations()))
-              } catch {
-                /* 关系读不到 → 不标父对话（不猜），联动静默失效但预览不受影响 */
+              } catch (err) {
+                // T8-F2：行为不变（不标父对话、不猜、预览绝不打挂），但**必须记 warn**：
+                // 否则「选择器勾父带子静默不联动」对用户完全不可见（正是 F-1 想消除的那种失败形态）。
+                host.log.warn(msgOf(host)('host.parentRelationsUnavailable', { reason: errorMessage(err) }), {
+                  code: 'parent-relations-unavailable',
+                  source: 'exportPreview',
+                })
               }
             }
           }
@@ -3381,6 +3587,12 @@ export function apply(ctx: Context, config?: Config): void {
   }
   // 端口就绪 → 重新自报一次心跳（其它实例的「运行中」徽章与端口信息靠它；token 永不落盘）。
   webPort.value = webServer.port
+  // F-2：宿主自请求走这个端口（探测/代理 DSH 自己的 /api/session.export）——
+  // 必须在注册路由**之前**赋值，否则首次探测拿到 undefined 会如实降级成「拿不到状态码」。
+  // 注：本插件是 bundle 包、宿主半没有热重载，端口变化只有重启一次才可能发生。
+  // routeEnv 的 sessionExportPort 是**活 getter**（读 host.webPort），因此这里赋值对已构造好的
+  // 路由表同样生效 —— 不需要重建路由。
+  host.webPort = webServer.port
   profileRuntime.announce()
   ctx.effect(() => {
     const disposers = registerRoutes(webServer, routes)

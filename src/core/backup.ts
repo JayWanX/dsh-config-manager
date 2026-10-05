@@ -195,6 +195,20 @@ export function resolveFileTargetRel(adapter: SectionId, ref: string, profile?: 
   return normalizePath(path.join(base, ref));
 }
 
+/**
+ * 归一「快照来源 DSH 版本」（F-4）。
+ *
+ * 只接受**非空的真实版本串**：宿主 `resolveDshVersion` 在解析不到时返回 `'unknown'` 占位，
+ * 把它写进快照会让恢复侧的「两侧都已知且不同」判定拿占位值当已知版本而误报。
+ * 归一不到 → undefined（快照不写该字段，恢复时按「来源版本未知」处理，不告警）。
+ */
+export function normalizeDshVersion(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (trimmed === '' || trimmed === 'unknown') return undefined;
+  return trimmed;
+}
+
 export interface CreateSnapshotOptions {
   ctx: HostContext;
   plan: ImportPlan;
@@ -416,6 +430,8 @@ export async function createSnapshot(opts: CreateSnapshotOptions): Promise<Snaps
     status: 'pending',
     beforePlugins,
     hostFileBackups,
+    // F-4：拍快照时的本机 DSH 版本（归一到「能证明的真实版本」；解析不到则不写该字段）。
+    dshVersion: normalizeDshVersion(ctx.dshVersion),
     // Phase 4：operation-bound binding（journal ↔ snapshot 双向一致）
     ...(opts.operationId !== undefined ? { operationId: opts.operationId } : {}),
     ...(opts.operationType !== undefined ? { operationType: opts.operationType } : {}),

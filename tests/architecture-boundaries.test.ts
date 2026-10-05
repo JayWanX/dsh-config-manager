@@ -18,7 +18,7 @@
  *  - client   ：浏览器半，禁止 node: 内置与 node 专属裸包（fs/path/os/crypto 等）；
  *               刻意豁免模式参照 PathMappingForm.tsx —— 不 import node:path，改用轻量
  *               等价实现，因此 client 不应出现任何 node 依赖；
- *  - adapters / sync / market：实现层，只依赖 core/schema/security/utils，禁止
+ *  - adapters / sync / market / foreign：实现层，只依赖 core/schema/security/utils，禁止
  *                react/react-dom 与 ../client、../ui；
  *  - @deepseek-ai/* 只允许出现在 src/index.ts（host 入口）与 src/client/（浏览器半注入点）；
  *  - src/index.ts、src/cli/** 为入口层，豁免层规则（cli 仍受 @deepseek-ai 全局规则约束）。
@@ -72,6 +72,12 @@ const LAYER_RULES: Record<string, LayerRule> = {
     targets: ['react', 'react-dom', '../client/', '../ui/'],
   },
   market: {
+    mode: 'forbid',
+    targets: ['react', 'react-dom', '../client/', '../ui/'],
+  },
+  foreign: {
+    // 外部 agent 配置 → bundle v1 的转换层（2026-10）：与 adapters/sync/market 同为实现层，
+    // 依赖方向 foreign → core/schema/utils；core 保持扁平（不放子目录）。
     mode: 'forbid',
     targets: ['react', 'react-dom', '../client/', '../ui/'],
   },

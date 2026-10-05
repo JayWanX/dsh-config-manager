@@ -264,6 +264,12 @@ export interface SessionStoreFacade {
    * 子会话（否则目标机上那棵树是空的）；而逐个读日志首帧去反查父子关系等于把整棵会话树读一遍
    * （用户实测会话树数百 MB）。宿主用 DSH 自己的存储列举实现（解析成本在 DSH 侧已付）。
    * 缺省 = 无法连带子会话（本次导出只有「子会话带父对话」这一个方向，如实反映在报告里）。
+   *
+   * 失败语义（F-1，**必须区分「读不到」与「没有」**）：
+   *  - 服务未接线（宿主没有会话存储）→ 空 Map（确定性事实）；
+   *  - 列举失败 / 元素形状一个都解析不出 → **抛错**，绝不返回空 Map 冒充「本机没有任何父子关系」
+   *    （空 Map 会进宿主侧 5 s TTL 缓存，且让「导出子代理会话连带父对话」再次静默失效）。
+   *  - 调用方必须自己决定回退路径（如退回 storages 缓存枚举 / 只放弃「勾父带子」联动）。
    */
   parentRelations?(): Promise<Map<string, SessionParentRelation>>;
 }
@@ -478,6 +484,27 @@ export interface HostContext {
   safeModeIsBlocked?: () => boolean;
   /** Phase 3 恢复/事务（JournalStore + reconcile + runJournaled/runExternalIntent）。宿主注入。 */
   phase3Recovery?: import('./phase3-host.ts').Phase3Recovery;
+  /**
+   * 宿主可用的 fetch 能力（本机自请求），对应 Cordis 的 `ctx.fetch` 服务（F-2）。
+   *
+   * 为什么需要：「下载原始日志 (ZIP)」走的是 **DSH 自己的** `/api/session.export` —— 它挂在带
+   * 浏览器认证的 `/api` 前缀下，浏览器半既分不清 401 / 404 / 网络失败，也无法把「路由根本没注册」
+   * 与「持久化后端缺服务」分开。宿主在进程内自请求探测一次就能拿到**状态码 + 正文**，从而把可
+   * 操作的原因下发给界面（详见 src/routes/history.ts 的文件头）。
+   *
+   * 可选：缺省时调用点必须如实降级（探测回「拿不到状态码」的保守三态、代理回 503），绝不猜成
+   * 「会话不存在」或「本机不支持」。
+   */
+  fetch?: (input: string, init: RequestInit) => Promise<Response>;
+  /**
+   * 本实例 web 监听的端口（未监听 web 的部署为 undefined），与 `fetch` 配对使用（F-2）。
+   *
+   * 为什么必须显式给：自请求要带 `Host: 127.0.0.1:<port>` —— DSH 的 `/api` 围栏按 Host 头判
+   * 「是不是本机」并做同源比较，端口写错会被判成不允许的来源（403）；而 403 在本插件里代表
+   * 「被认证挡在门外」→ 后果是**入口恒隐藏**（正是要避免的那一类静默错误）。
+   * 因此端口未知时一律**不发请求**，如实降级。
+   */
+  webPort?: number;
 }
 
 /* ---------------- 导入计划（§13.3 十类 + 决策） ---------------- */
@@ -844,6 +871,17 @@ export interface Snapshot {
   beforePlugins?: PluginInfo[];
   /** 宿主整文件备份（settings.yaml / settings.json / cordis.patch.yml / profiles/<p>/cordis.patch.yml）。旧快照缺省 */
   hostFileBackups?: HostFileBackup[];
+  /**
+   * 拍这份快照时**本机 DSH 的版本**（F-4；可选）。
+   *
+   * 为什么需要：恢复是**离线**路径，否则事后无从知道「这份快照是哪个 DSH 版本下拍的」——
+   * 跨版本恢复恰恰是最需要说清楚的一种情况。三条硬边界：
+   *  ① **必须可选**：旧快照没有这个字段是常态，旧快照恢复路径一字不变；
+   *  ② 只在**两侧都已知且不同**时才给可见告警，**绝不硬拒**（本插件的兼容性口径是「打分 + 原因」）；
+   *  ③ 值只写**能证明的真实版本**（宿主 `HostContext.dshVersion`）；解析不到时**不写** ——
+   *     绝不写 'unknown' 之类的占位值，否则恢复时会拿占位值当「已知版本」误报版本不同。
+   */
+  dshVersion?: string;
   /** 置顶标记（P1-⑧）：置顶快照在保留清理（自动删最旧）中豁免，需用户手动删除 */
   pinned?: boolean;
   // ---- Phase 4 新增（F1：operation-bound + integrity + readiness）----

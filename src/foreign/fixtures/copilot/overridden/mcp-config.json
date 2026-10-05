@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "solo": {
+      "command": "node",
+      "args": [
+        "solo.js"
+      ]
+    }
+  }
+}

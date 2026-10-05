@@ -16,6 +16,9 @@ src/routes/    路由 kit(单入口 endpoint()：loopback 围栏 + 方法白名�
                + 顶层 try/catch) 与按域拆分的组文件(import/snapshots/profiles/backup/consult/sync/prefs/market/me/
                history/recovery)；新增一条 API = 在所属组文件加一条 endpoint({ path, methods }, handler) 声明
 src/core/      引擎(exporter/importer/restore/rollback/run-registry/plugin-cli)，与DSH解耦(ConfigAdapter/HostContext+内存mock)
+src/foreign/   外部 agent 配置→bundle v1 的**转换层**（实现层，与 adapters/sync/market 同级；Claude Code v1：
+               mcp/skills/agentInstructions/**sessions 转码**；纯翻译 + 读盘 + bundle 产出，凭据值绝不进包，见
+               docs/design/2026-10-04-foreign-import-v1.md）
 src/schema/    类型/Manifest/版本(CURRENT_SCHEMA_VERSION=1)
 src/security/  secret-scanner/redaction/zip-security/integrity/encryption(scrypt+AES-256-GCM)
 src/adapters/  13适配器(settings/ui/providers/plugins/mcp/prompts/skills/agentPresets/agentInstructions/workspaces/credentialsStatus/pluginFiles/self；includeSessions:true 时 +sessions=14)

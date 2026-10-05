@@ -1,0 +1,80 @@
+/**
+ * S3 兼容系通道（批次3 Q2）的**模块内双语消息目录**（zh 源 / en 镜像）。
+ *
+ * 为什么不写进 \`src/core/messages.ts\`：批次3 的写作用域只含 \`src/sync/s3|gist|sync-config.ts\`，
+ * 而 \`src/core/*\` 属他人 in-flight 工作区。本目录与 core 的同名目录**同形同纪律**
+ * （zh 为源、en 为 \`Record<keyof typeof zh, string>\` —— 缺键/多键即编译错误、{param} 插值、
+ * 未知键回退 zh 再回退键名），因此后续把键并入 \`src/core/messages.ts\` 是逐行搬迁，无需改写调用点。
+ *
+ * 纪律：**任何用户可见字符串都不得写在通道实现里**（含错误消息）；密钥值永不进消息
+ * （脱敏由通道层在拼消息前完成）。
+ */
+import type { MsgFunc, MsgParams } from '../../core/msg-types.ts';
+
+export const s3Zh = {
+  'sync.s3.providerUnknown': '未知的 S3 兼容通道: {provider}',
+  'sync.s3.endpointRequired': '对象存储 endpoint 必须是非空字符串（自建网关请填完整 http(s) 地址）',
+  'sync.s3.endpointInvalid': '无法解析对象存储 endpoint（必须是合法 http(s) URL）: {url}',
+  'sync.s3.endpointUserinfo': '请勿在 endpoint 中包含用户名/密码（AccessKey 走凭据字段，不会拼入地址）',
+  'sync.s3.regionRequired': '通道 {provider} 必须提供 region（V4 签名的作用域需要它）',
+  'sync.s3.bucketRequired': 'bucket 必须是非空字符串',
+  'sync.s3.bucketInvalid': '桶名不合法: {bucket}（3-63 位小写字母/数字/点/连字符，首尾必须是字母或数字）',
+  'sync.s3.prefixInvalid': '对象键前缀不合法: {prefix}（不得以 / 开头，不得含 .. 或反斜杠）',
+  'sync.s3.accessKeyIdRequired': 'accessKeyId 必须是非空字符串',
+  'sync.s3.credentialsRequired': 'credentials 必须提供 getSecretAccessKey()',
+  'sync.s3.invalidSnapshotId': '非法快照 id: {id}（仅允许字母数字开头，字符限 . _ -）',
+  'sync.s3.snapshotMissing': '快照 {id} 不存在（{url}）',
+  'sync.s3.requestFailed': '{method} {url} 失败 (HTTP {status}): {err}',
+  'sync.s3.requestError': '{method} {url} 请求出错: {err}',
+  'sync.s3.timeout': '{method} {url} 请求超时（{timeout}ms）',
+  'sync.s3.indexInvalid': '{url} 解析失败或结构非法: {err}',
+  'sync.s3.snapshotInvalid': '快照 {id} 解析失败或结构非法: {err}',
+} as const;
+
+export const s3En: Record<keyof typeof s3Zh, string> = {
+  'sync.s3.providerUnknown': 'Unknown S3-compatible channel: {provider}',
+  'sync.s3.endpointRequired': 'Object storage endpoint must be a non-empty string (use the full http(s) URL for self-hosted gateways)',
+  'sync.s3.endpointInvalid': 'Cannot parse the object storage endpoint (must be a valid http(s) URL): {url}',
+  'sync.s3.endpointUserinfo': 'Do not include a username/password in the endpoint (the AccessKey goes into the credential field, never the URL)',
+  'sync.s3.regionRequired': 'Channel {provider} requires a region (the V4 credential scope needs it)',
+  'sync.s3.bucketRequired': 'bucket must be a non-empty string',
+  'sync.s3.bucketInvalid': 'Invalid bucket name: {bucket} (3-63 lowercase letters/digits/dots/hyphens, must start and end with a letter or digit)',
+  'sync.s3.prefixInvalid': 'Invalid object key prefix: {prefix} (must not start with / and must not contain .. or backslashes)',
+  'sync.s3.accessKeyIdRequired': 'accessKeyId must be a non-empty string',
+  'sync.s3.credentialsRequired': 'credentials must provide getSecretAccessKey()',
+  'sync.s3.invalidSnapshotId': 'Invalid snapshot id: {id} (must start alphanumeric; only . _ - allowed)',
+  'sync.s3.snapshotMissing': 'Snapshot {id} does not exist ({url})',
+  'sync.s3.requestFailed': '{method} {url} failed (HTTP {status}): {err}',
+  'sync.s3.requestError': '{method} {url} request error: {err}',
+  'sync.s3.timeout': '{method} {url} request timed out ({timeout}ms)',
+  'sync.s3.indexInvalid': '{url} failed to parse or is structurally invalid: {err}',
+  'sync.s3.snapshotInvalid': 'Snapshot {id} failed to parse or is structurally invalid: {err}',
+};
+
+/** 插值：{param} → 形参值；缺参原样保留（与 core/messages.ts 同口径）。 */
+function interpolate(template: string, params?: MsgParams): string {
+  if (params === undefined) return template;
+  return template.replace(/\{(\w+)\}/g, (match, key: string) => {
+    const value = params[key];
+    return value === undefined ? match : String(value);
+  });
+}
+
+/**
+ * 构造「目录驱动」的 MsgFunc（s3 与 gist 两个新通道共用这一份）。
+ * en → en 目录（缺键回退 zh）；其余 → zh；未知键回退键名（绝不抛错）。
+ */
+export function makeCatalogMsg(
+  zh: Record<string, string>,
+  en: Record<string, string>,
+  lang?: string,
+): MsgFunc {
+  const useEn = lang === 'en';
+  return (key, params) => {
+    const template = (useEn ? en[key] ?? zh[key] : zh[key]) ?? key;
+    return interpolate(template, params);
+  };
+}
+
+/** 缺省（zh）S3 通道翻译器。 */
+export const s3Msg: MsgFunc = makeCatalogMsg(s3Zh, s3En, 'zh');

@@ -5,19 +5,42 @@
  * path/methods 就是唯一声明处；围栏、方法判定与顶层异常处理由 src/routes/kit.ts 在注册点统一提供。
  */
 
+import { join } from 'node:path'
+
 import { endpoint, readJsonBody, writeJson } from './kit.ts'
 import type { WebRoute } from './kit.ts'
 import type { RoutesEnv } from './context.ts'
 import { isValidOperationId } from '../core/journal.ts'
+import { CheckpointEngine, samePointVerdictOf } from '../core/checkpoint.ts'
+import type { CheckpointCaptureInput, CheckpointRewindInput } from '../core/checkpoint.ts'
 import { EnvironmentLockUnavailableError, runWithMutationLock } from '../utils/env-lock.ts'
 import { scanSessionHealth } from '../utils/session-health-scan.ts'
 import {
   applySessionRepair,
   listSessionRepairs,
   previewSessionRepair,
+  resolveSessionUnit,
   rollbackSessionRepair,
 } from '../utils/session-repair-service.ts'
 import { sessionHealthNextSteps } from '../index.ts'
+
+/**
+ * 检查点的机器可读结果 → HTTP 状态码。
+ * 界面按 body.code / body.outcome 出文案（**不靠状态码猜原因**）：这里只做粗分类，
+ * 让调用方能用 HTTP 语义区分「要用户确认（409）/ 目标不存在（404）/ 存储栈不可用（503）/ 真失败（500）」。
+ */
+function checkpointHttpStatus(value: { ok?: boolean; code?: string; outcome?: string }): number {
+  if (value.code === 'storage-unavailable') return 503
+  if (value.code === 'record-not-found') return 404
+  if (value.code === 'invalid-input') return 400
+  if (value.code === 'confirmation-required' || value.code === 'protected-checkpoint' || value.code === 'record-incomplete') return 409
+  if (value.code === 'invalid-path' || value.code === 'object-hash-mismatch' || value.code === 'object-missing') return 409
+  if (value.outcome === 'denied') return 409
+  if (value.outcome === 'partial') return 200
+  if (value.outcome === 'failed') return 500
+  if (value.code === 'restore-failed' || value.code === 'guard-failed' || value.code === 'ledger-write-failed' || value.code === 'nothing-to-restore') return 500
+  return 200
+}
 
 /** 预览回传的指纹（大小 + mtime）；形状不对一律 undefined（应用期就不会做 TOCTOU 判定）。 */
 function readRepairExpect(value: unknown): { size: number; mtimeMs: number } | undefined {
@@ -158,6 +181,184 @@ export function recoveryRoutes(env: RoutesEnv): WebRoute[] {
         } catch (error) {
           writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
         }
+        return
+      }
+      // ------------------------------------------------- C-1 Q4：checkpoint 三态同点
+      // 会话游标 + 工作区（显式路径分块）+ 本插件配置三态同点检查点与单命令回滚。
+      // 挂在既有 recovery prefix 内（与「事故恢复」同一件事，且**不新增路由条目**：本族已是
+      // prefix 路由，内部按 path 分发 —— 与 T4/T8 的 sessions 子路径同策略）。
+      // 写路径口径：capture / rewind / delete 过 withMutationLock；rewind/delete 另过 SAFE MODE
+      // （它们写工作区 / 会话日志 / 插件配置），capture 不过（它是救援点：SAFE MODE 下也要能用）。
+      // 响应一律机器可读 code（界面映射字典键），本文件不产出用户可见文案。
+      if (segments[0] === 'checkpoints') {
+        const engine = new CheckpointEngine({
+          dataDir,
+          homeDir: sessionHealth.homeDir,
+          log: (line) => host.log.warn(line),
+        })
+        const sub = segments.slice(1)
+        const reply = (value: { ok?: boolean; code?: string; outcome?: string }): void => {
+          writeJson(res, checkpointHttpStatus(value), value)
+        }
+        if (sub.length === 0) {
+          if (req.method !== 'GET') { writeJson(res, 405, { error: 'method not allowed' }); return }
+          const listed = await engine.list()
+          writeJson(res, listed.storage.available ? 200 : 503, listed)
+          return
+        }
+        // 存储栈状态（缺失时给结构化组合指引；**不崩**）
+        if (sub.length === 1 && sub[0] === 'storage') {
+          if (req.method !== 'GET') { writeJson(res, 405, { error: 'method not allowed' }); return }
+          const status = await engine.storageStatus()
+          writeJson(res, status.available ? 200 : 503, status)
+          return
+        }
+        // 捕获三态同点（chunks = 显式路径分块；unitId 或 sessionLogPath 指定会话）
+        if (sub.length === 1 && sub[0] === 'capture') {
+          if (req.method !== 'POST') { writeJson(res, 405, { error: 'method not allowed' }); return }
+          try {
+            const body = await readJsonBody(req)
+            if (body === undefined) { writeJson(res, 400, { error: 'invalid JSON body' }); return }
+            const chunks = Array.isArray(body['chunks'])
+              ? body['chunks'].filter((item): item is string => typeof item === 'string')
+              : []
+            let sessionLogPath = typeof body['sessionLogPath'] === 'string' ? body['sessionLogPath'] : ''
+            let sessionId = typeof body['sessionId'] === 'string' ? body['sessionId'] : ''
+            const unitId = typeof body['unitId'] === 'string' ? body['unitId'] : ''
+            if (unitId !== '') {
+              // unitId（projectKey/会话目录）→ 会话根内的真实日志文件；解析不出来一律 400（绝不猜）
+              const target = await resolveSessionUnit(join(sessionHealth.homeDir, 'sessions'), unitId)
+              if (target === undefined) {
+                writeJson(res, 400, { ok: false, code: 'invalid-input', detail: 'unitId=' + unitId })
+                return
+              }
+              sessionLogPath = target.file
+              if (sessionId === '') sessionId = target.sessionId
+            }
+            const input: CheckpointCaptureInput = { chunks }
+            if (sessionLogPath !== '') input.sessionLogPath = sessionLogPath
+            if (sessionId !== '') input.sessionId = sessionId
+            if (typeof body['note'] === 'string' && body['note'] !== '') input.note = body['note']
+            if (body['protect'] === true) input.protect = true
+            const result = await runWithMutationLock(
+              host.mutationLock,
+              { op: 'checkpoint-capture' },
+              async () => await engine.capture(input),
+            )
+            if (result.ok) {
+              await tryAppendHistory({
+                kind: 'recovery',
+                result: 'success',
+                sections: [],
+                source: 'recovery',
+                summary: '检查点捕获（三态同点）',
+              })
+            }
+            reply(result)
+          } catch (error) {
+            if (error instanceof EnvironmentLockUnavailableError) {
+              host.log.warn('mutation lock blocked: op=checkpoint-capture reason=' + error.reason)
+              writeJson(res, 423, { error: error.message, code: 'mutation-locked' })
+              return
+            }
+            writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+          }
+          return
+        }
+        // 单条详情（只读：含三态摘要与「同点」判定事实）
+        if (sub.length === 1) {
+          if (req.method !== 'GET') { writeJson(res, 405, { error: 'method not allowed' }); return }
+          const id = sub[0] ?? ''
+          const detail = await engine.read(id)
+          if (detail.record === undefined) {
+            writeJson(res, 404, { ok: false, code: 'record-not-found', id, storage: detail.storage })
+            return
+          }
+          const payload: Record<string, unknown> = {
+            ok: true,
+            id,
+            record: detail.record,
+            samePoint: samePointVerdictOf(detail.record),
+            storage: detail.storage,
+          }
+          if (detail.error !== undefined) payload['error'] = detail.error
+          writeJson(res, 200, payload)
+          return
+        }
+        // 只读预览：零写入（不过确认门、不拍保护点、不写任何字节）
+        if (sub.length === 2 && sub[1] === 'preview') {
+          if (req.method !== 'GET') { writeJson(res, 405, { error: 'method not allowed' }); return }
+          reply(await engine.preview(sub[0] ?? ''))
+          return
+        }
+        // 单命令回滚：fail-closed 确认门（userConfirmed 必须**恰好** true，引擎内再判一次）
+        if (sub.length === 2 && sub[1] === 'rewind') {
+          if (req.method !== 'POST') { writeJson(res, 405, { error: 'method not allowed' }); return }
+          const id = sub[0] ?? ''
+          try {
+            const body = await readJsonBody(req)
+            if (body === undefined) { writeJson(res, 400, { error: 'invalid JSON body' }); return }
+            const requested = Array.isArray(body['segments'])
+              ? body['segments'].filter((item): item is 'workspace' | 'session' | 'config' =>
+                item === 'workspace' || item === 'session' || item === 'config')
+              : undefined
+            const rewindInput: CheckpointRewindInput = { id, confirm: body['userConfirmed'] === true }
+            if (requested !== undefined) rewindInput.segments = requested
+            if (body['allowPartial'] === true) rewindInput.allowPartial = true
+            if (body['preRewindGuard'] === 'off' || body['preRewindGuard'] === 'require' || body['preRewindGuard'] === 'warn') {
+              rewindInput.guardPolicy = body['preRewindGuard']
+            }
+            const result = await runWithMutationLock(
+              host.mutationLock,
+              { op: 'checkpoint-rewind', target: id, isBlocked: () => host.safeModeIsBlocked?.() ?? false },
+              async () => await engine.rewind(rewindInput),
+            )
+            await tryAppendHistory({
+              kind: 'recovery',
+              result: result.outcome === 'restored' ? 'success' : result.outcome === 'partial' ? 'skipped' : 'failed',
+              sections: [],
+              source: 'recovery',
+              summary: '检查点回滚（三态同点）：' + result.outcome,
+              error: result.outcome === 'denied' || result.outcome === 'failed'
+                ? String(result.code) + (result.detail !== undefined ? ' ' + result.detail : '')
+                : undefined,
+            })
+            reply(result)
+          } catch (error) {
+            if (error instanceof EnvironmentLockUnavailableError) {
+              host.log.warn('mutation lock blocked: op=checkpoint-rewind reason=' + error.reason)
+              writeJson(res, 423, { error: error.message, code: 'mutation-locked' })
+              return
+            }
+            writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+          }
+          return
+        }
+        // 删除一条检查点：保护点 / guard 点一律拒绝（「不删被保护点」，无 force 后门）
+        if (sub.length === 2 && sub[1] === 'delete') {
+          if (req.method !== 'POST') { writeJson(res, 405, { error: 'method not allowed' }); return }
+          const id = sub[0] ?? ''
+          try {
+            const body = await readJsonBody(req)
+            if (body === undefined) { writeJson(res, 400, { error: 'invalid JSON body' }); return }
+            const confirmed = body['userConfirmed'] === true
+            const result = await runWithMutationLock(
+              host.mutationLock,
+              { op: 'checkpoint-delete', target: id, isBlocked: () => host.safeModeIsBlocked?.() ?? false },
+              async () => (confirmed ? await engine.remove(id) : { ok: false, code: 'confirmation-required' as const, id }),
+            )
+            reply(result)
+          } catch (error) {
+            if (error instanceof EnvironmentLockUnavailableError) {
+              host.log.warn('mutation lock blocked: op=checkpoint-delete reason=' + error.reason)
+              writeJson(res, 423, { error: error.message, code: 'mutation-locked' })
+              return
+            }
+            writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+          }
+          return
+        }
+        writeJson(res, 404, { error: 'not found' })
         return
       }
       // issue #31：残留锁的显式回收路由（POST /recovery/lock/recover）。

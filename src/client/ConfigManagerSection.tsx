@@ -37,6 +37,7 @@ import type { ArtifactCapability, ArtifactRow } from '../ui/artifact-view.ts'
 import { HomePanel } from './home/HomePanel.tsx'
 import { ExportView } from './export/ExportView.tsx'
 import { ImportWizardView } from './import/ImportWizardView.tsx'
+import { ForeignImportView } from './import/ForeignImportView.tsx'
 import { SyncPanel } from './sync/SyncPanel.tsx'
 import { MarketPanel } from './market/MarketPanel.tsx'
 import { AboutPanel } from './about/AboutPanel.tsx'
@@ -147,6 +148,15 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
   const [libraryAction, setLibraryAction] = useState<{ capability: ArtifactCapability; row: ArtifactRow } | null>(null)
   /** 产物列表刷新信号：恢复 / 删除 / 置顶完成后递增，让面板重拉四份清单 */
   const [libraryTick, setLibraryTick] = useState(0)
+
+  /**
+   * 导入面板当前是否停在「从其它 agent 导入」这一页（t17）。
+   *
+   * 为什么是壳层 state 而不是 runStore：它与「导入面板」同生命周期，且**不该被持久化** ——
+   * 刷新后重放一个「正在选来源」的界面只会骗人（来源检测结果要重新拉）。
+   * 关面板 / 切走即随组件卸载归零，与 libraryAction 同一档语义。
+   */
+  const [foreignImportOpen, setForeignImportOpen] = useState(false)
 
   /* ---------------- 状态栏版本（挂载时取一次；失败隐藏） ---------------- */
   const [version, setVersion] = useState<ServiceStatus | null>(null)
@@ -427,7 +437,20 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
   let page: ReactNode
   switch (panel) {
     case 'overview':
-      page = <HomePanel api={api} syncApi={syncApi} historyApi={historyApi} t={t} openActivity={() => { openTask('history') }} />
+      page = (
+        <HomePanel
+          api={api}
+          syncApi={syncApi}
+          historyApi={historyApi}
+          t={t}
+          openActivity={() => { openTask('history') }}
+          // 直达来源选择：开导入面板 + 把面板切到「从其它 agent 导入」那一步
+          openForeignImport={() => {
+            openTaskFrom('overview', 'import')
+            setForeignImportOpen(true)
+          }}
+        />
+      )
       break
     case 'import':
       // 导航已无此项（导入只走侧拉面板）。仅当旧持久化/深链把 panel 定到 import 时走到这里：
@@ -591,7 +614,32 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
             {/* 导入与逛市场都是多阶段流程（§1），同样由本面板承载。
                 此前只渲染了 export / runs / history / about —— 从产物库点「导入」会开到**一个空面板**，
                 而导入其实在页面那条路径里跑（返回后正好看到它），两处状态分叉。 */}
-            {activeTask.kind === 'import' && <ImportWizardView api={api} t={t} />}
+            {activeTask.kind === 'import' && (foreignImportOpen ? (
+              /* 「从其它 agent 导入」（t17）：页面级步骤，复用同一块面板 ——
+                 与既有导入向导并列，避免「弹窗套向导」。产包成功后把 zipPath 写进
+                 runStore.snapshots.importBackup（产物库「一键导入」那条已验证的通道），
+                 关掉本页即回到向导，由它消费该请求开始分析。 */
+              <ForeignImportView
+                api={api}
+                t={t}
+                uiT={uiT}
+                onReady={(result) => {
+                  setForeignImportOpen(false)
+                  runStore.patch({
+                    snapshots: {
+                      importBackup: { zipPath: result.zipPath, name: result.name },
+                    },
+                  })
+                }}
+              />
+            ) : (
+              <ImportWizardView
+                api={api}
+                t={t}
+                uiT={uiT}
+                onOpenForeignImport={() => { setForeignImportOpen(true) }}
+              />
+            ))}
             {activeTask.kind === 'market' && (
               <MarketPanel
                 api={marketApi}

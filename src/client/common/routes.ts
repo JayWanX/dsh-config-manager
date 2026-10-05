@@ -58,6 +58,18 @@ export const CONFIG_MANAGER_API = {
   starPrompt: `${API_BASE}/star-prompt`,
   releaseNotesPrompt: `${API_BASE}/release-notes-prompt`,
   updateCheck: `${API_BASE}/update-check`,
+  /**
+   * 外部 agent 来源发现（**只读**：只 stat、不回传绝对路径）。
+   * 见 src/routes/foreign.ts。
+   */
+  foreignSources: `${API_BASE}/foreign-sources`,
+  /** 外部来源 → 标准 bundle v1 ZIP（受控临时目录）→ zipPath，供导入向导消费。 */
+  foreignImport: `${API_BASE}/foreign-import`,
+  /**
+   * F-2：官方 session.export 通道（**只读**）。缺 `sessionId` = 探测可用性（回结构化三态），
+   * 带 `sessionId` = 流式代理 DSH 自己的 `/api/session.export`（原始日志 ZIP，含子会话与附件）。
+   */
+  sessionExport: `${API_BASE}/session-export`,
 } as const;
 
 /** 远程同步路由族（git / webdav 通道、GitHub device flow、历史快照、自动同步、分区选择）。 */

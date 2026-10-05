@@ -339,3 +339,113 @@ test('R-06 planRestore 零写入：预览不还原文件、不删除文件、不
     await assert.rejects(fs.readdir(path.join(f.snapshotDir, 'pre-restore')), '预览不得创建 pre-restore 目录');
   });
 });
+
+/* ------------- F-4：快照记录来源 DSH 版本 + 恢复时的可见版本告警（不阻断） ------------- */
+
+/** 版本告警行 = 描述里同时出现两个版本串的 skip 动作（不依赖具体文案语言）。 */
+function versionWarningOf(plan: Awaited<ReturnType<typeof planRestore>>, snapshotV: string, currentV: string) {
+  return plan.actions.find((a) => a.kind === 'skip' && a.description.includes(snapshotV) && a.description.includes(currentV));
+}
+
+test('F-4 planRestore：两侧版本都已知且不同 → 末尾追加可见告警，恢复照常可执行', async () => {
+  await withTmp(async (tmp) => {
+    const snapshot = makeSnapshot({ dshVersion: '0.1.5-rc.1' });
+    const f = await makeFixture(tmp, snapshot);
+
+    const plan = await planRestore({
+      snapshotDir: f.snapshotDir, homeDir: f.homeDir, profile: 'web', currentDshVersion: '0.2.0-rc.2',
+    });
+
+    assert.equal(plan.snapshotDshVersion, '0.1.5-rc.1', '计划必须回传快照记录的来源版本')
+    assert.equal(plan.currentDshVersion, '0.2.0-rc.2', '计划必须回传本机当前版本')
+    const warning = versionWarningOf(plan, '0.1.5-rc.1', '0.2.0-rc.2');
+    assert.ok(warning !== undefined, '版本不同必须有一条**可见**告警动作（绝不静默）')
+    assert.equal(warning?.kind, 'skip', '告警必须是零写入的信息行（不产生任何写动作）')
+    assert.equal(plan.actions.at(-1), warning, '追加在末尾：既有动作下标不位移（snapshot-diff 按下标关联）')
+    assert.equal(plan.summary.skips >= 1, true, '告警计入 skips（旧调用方的汇总口径不变）')
+  });
+});
+
+test('F-4 planRestore：两侧版本相同 → 不产生任何版本告警', async () => {
+  await withTmp(async (tmp) => {
+    const snapshot = makeSnapshot({ dshVersion: '0.1.5-rc.1' });
+    const f = await makeFixture(tmp, snapshot);
+    const plan = await planRestore({
+      snapshotDir: f.snapshotDir, homeDir: f.homeDir, profile: 'web', currentDshVersion: '0.1.5-rc.1',
+    });
+    assert.equal(versionWarningOf(plan, '0.1.5-rc.1', '0.1.5-rc.1'), undefined)
+    assert.equal(plan.snapshotDshVersion, '0.1.5-rc.1')
+    assert.equal(plan.currentDshVersion, '0.1.5-rc.1')
+  });
+});
+
+test('F-4 planRestore：旧快照缺 dshVersion → 不告警，恢复路径一字不变', async () => {
+  await withTmp(async (tmp) => {
+    // 旧快照（没有该字段）—— 这是常态，必须仍可恢复、且不产生任何版本相关噪声
+    const snapshot = makeSnapshot({ hostFileBackups: HOST_BACKUPS });
+    const f = await makeFixture(tmp, snapshot, {
+      'blobs/host/settings': 'SNAPSHOT settings\n',
+      'blobs/host/user-patch': '- id: snapshot-line\n',
+    });
+    await seedCurrent(f);
+
+    const plan = await planRestore({
+      snapshotDir: f.snapshotDir, homeDir: f.homeDir, profile: 'web', currentDshVersion: '0.2.0-rc.2',
+    });
+    assert.equal(plan.snapshotDshVersion, undefined, '旧快照没记录版本 → 保持 undefined（不猜）')
+    assert.equal(plan.currentDshVersion, '0.2.0-rc.2')
+    assert.equal(
+      plan.actions.some((a) => a.description.includes('0.2.0-rc.2')), false,
+      '来源版本未知时绝不产出「版本不同」告警（那会是假阳性）',
+    )
+    assert.equal(plan.actions.some((a) => a.kind === 'hostFileRestore'), true, '旧快照的还原动作照常计划')
+    // 零写入：预览不建 pre-restore
+    await assert.rejects(fs.readdir(path.join(f.snapshotDir, 'pre-restore')));
+  });
+});
+
+test('F-4 planRestore：宿主未注入版本 → 按 profile 依赖树 best-effort 探测（读不到则不告警）', async () => {
+  await withTmp(async (tmp) => {
+    const snapshot = makeSnapshot({ dshVersion: '0.1.5-rc.1' });
+    const f = await makeFixture(tmp, snapshot);
+
+    // (a) profile 依赖树里落盘的 DSH 版本 = 0.9.9 → 用它与本机快照版本比对
+    await fs.mkdir(path.join(f.homeDir, 'profiles', 'web', 'node_modules', '@deepseek-ai', 'dsh'), { recursive: true });
+    await fs.writeFile(
+      path.join(f.homeDir, 'profiles', 'web', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
+      JSON.stringify({ version: '0.9.9' }), 'utf8',
+    )
+    const plan = await planRestore({ snapshotDir: f.snapshotDir, homeDir: f.homeDir, profile: 'web' });
+    assert.equal(plan.currentDshVersion, '0.9.9', '不传 currentDshVersion 时按磁盘依赖树探测')
+    assert.ok(versionWarningOf(plan, '0.1.5-rc.1', '0.9.9') !== undefined, '探测到的版本不同 → 仍有可见告警')
+
+    // (b) 依赖树里没有 DSH（离线/极简 home）→ 版本未知 → 不猜、不告警
+    await fs.rm(path.join(f.homeDir, 'profiles'), { recursive: true, force: true });
+    const plan2 = await planRestore({ snapshotDir: f.snapshotDir, homeDir: f.homeDir, profile: 'web' });
+    assert.equal(plan2.currentDshVersion, undefined, '读不到就不猜（绝不写占位版本）')
+    assert.equal(plan2.actions.some((a) => a.description.includes('0.1.5-rc.1')), false, '版本未知 → 无告警')
+  });
+});
+
+test('F-4 restore：版本不同不阻断执行 —— 告警进报告、无失败项', async () => {
+  await withTmp(async (tmp) => {
+    const snapshot = makeSnapshot({
+      dshVersion: '0.1.5-rc.1',
+      hostFileBackups: [{ relPath: 'settings.yaml', blobPath: 'blobs/host/settings', existed: true }],
+    });
+    const f = await makeFixture(tmp, snapshot, { 'blobs/host/settings': 'SNAPSHOT settings\n' });
+    await fs.mkdir(f.homeDir, { recursive: true });
+    await fs.writeFile(path.join(f.homeDir, 'settings.yaml'), 'CURRENT settings\n', 'utf8');
+
+    const report = await restore({
+      snapshotDir: f.snapshotDir, homeDir: f.homeDir, profile: 'web', currentDshVersion: '0.2.0-rc.2',
+    });
+
+    assert.deepEqual(report.failed, [], '版本不同绝不导致恢复失败（只告警，不阻断）')
+    assert.equal(
+      report.skipped.some((s) => s.includes('0.1.5-rc.1') && s.includes('0.2.0-rc.2')), true,
+      '告警必须出现在恢复报告里（可见、可审计）',
+    )
+    assert.equal(await fs.readFile(path.join(f.homeDir, 'settings.yaml'), 'utf8'), 'SNAPSHOT settings\n', '还原照常执行')
+  });
+});

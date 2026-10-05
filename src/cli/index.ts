@@ -14,6 +14,9 @@
  *             离线只读自检备份 ZIP（结构 + integrity/checksums 完整性；不改一个字节）
  *   backup [--sections <a,b,c>] [--out <path>] [--dry-run] [--data-dir <dir>]
  *             离线文件级备份（导出目录内生成与 GUI 同结构的 ZIP，落盘后自检）
+ *   import --from <source> [--dry-run] [--out <path>] [--cwd <dir>] [--data-dir <dir>]
+ *             把本机已装的外部 agent 配置（Claude Code/Hermes/Cursor/Codex/Copilot/Antigravity）
+ *             翻译成标准 bundle v1 ZIP（--dry-run 只打印分区摘要，零写入）
  *   web [--port <n>] [--no-open] [--home <dir>] [--data-root <dir>] [--idle-timeout <分钟>]
  *             离线只读救急台（本机网页：实例/SafeMode/锁/快照/备份自检/磁盘/会话体检）
  *   help | --help | -h                    显示全部命令与说明
@@ -44,6 +47,7 @@ import {
 import { EnvironmentLockManager, runWithMutationLock, EnvironmentLockUnavailableError, OWNERSHIP_FILE } from '../utils/env-lock.ts';
 import { runSessionsRepair } from './sessions-repair.ts';
 import { runSessionsInspect } from './sessions-inspect.ts';
+import { runImportSource } from './import-source.ts';
 import { collectVerifyResults, readRunningInstances } from './actions.ts';
 import { Phase3Recovery, readSafeModeMarkerSync, safeModeMarkerPath } from '../core/phase3-host.ts';
 import {
@@ -64,7 +68,7 @@ import type { Manifest, SectionId } from '../schema/types.ts';
 
 export type CliCommand =
   | 'snapshots' | 'restore' | 'reinstall' | 'recover-stale-lock'
-  | 'verify' | 'backup' | 'sessions' | 'web' | 'help';
+  | 'verify' | 'backup' | 'import' | 'sessions' | 'web' | 'help';
 
 export interface CliOptions {
   command: CliCommand;
@@ -95,8 +99,12 @@ export interface CliOptions {
   json: boolean;
   /** --sections <a,b,c>：backup 要打包的离线分区白名单（缺省取默认分区） */
   sections?: string;
-  /** --out <path>：backup 输出 ZIP 路径（缺省写入导出目录，自动去重不覆盖） */
+  /** --out <path>：backup / import 输出 ZIP 路径（缺省写入导出目录，自动去重不覆盖） */
   out?: string;
+  /** --from <source>：import 的外部来源 id（六个之一） */
+  from?: string;
+  /** --cwd <dir>：import 的项目目录（契约 §8.2 的项目级路径；缺省 = 进程 cwd） */
+  cwd?: string;
   /** --home <dir>：sessions repair 要修复的 DSH home（缺省 $DSH_HOME） */
   home?: string;
   /** --fix：sessions repair 真的落盘（缺省只报告） */
@@ -141,6 +149,9 @@ const RESTORE_ONLY_FLAGS = new Set(['--id', '--dry-run', '--profile', '--setting
 
 /** 仅 reinstall 子命令允许的参数 */
 const REINSTALL_ONLY_FLAGS = new Set(['--yes', '--list', '--wipe-config', '--version']);
+
+/** 仅 import 允许的参数（--out/--dry-run 与 backup/restore 共用，故不在此表） */
+const IMPORT_ONLY_FLAGS = new Set(['--from', '--cwd']);
 
 /** 仅 web（离线救急台）允许的参数 */
 const WEB_ONLY_FLAGS = new Set(['--port', '--no-open', '--idle-timeout']);
@@ -230,6 +241,49 @@ function parseCliSessions(argv: readonly string[]): ParseResult {
   return { ok: true, options };
 }
 
+/**
+ * import 专用解析：`import --from <source> [--dry-run] [--out <path>] [--cwd <dir>] [--data-dir <dir>]`
+ *
+ * 与 sessions / recover-stale-lock 同样的姿态：只接受本动作真正有意义的参数（绝不悄悄忽略）。
+ * `--from` 的值在这里**不做词表校验**：未知来源要由运行层给出「可用来源清单」——
+ * 那需要真实注册表（CLI 与宿主共用同一份装配，见 src/foreign/registry.ts）。
+ */
+function parseCliImport(argv: readonly string[]): ParseResult {
+  const options: CliOptions = {
+    command: 'import', dryRun: false, profile: 'web', yes: false, list: false,
+    wipeConfig: false, json: false, positionals: [],
+  };
+  const rest = argv.slice(1);
+  for (let i = 0; i < rest.length; i += 1) {
+    const flag = rest[i]!;
+    if (flag === '--help' || flag === '-h') return { ok: true, options: { ...options, command: 'help' } };
+    if (flag === '--dry-run') {
+      options.dryRun = true;
+      continue;
+    }
+    const at = flag.indexOf('=');
+    const name = at >= 0 ? flag.slice(0, at) : flag;
+    const isValueFlag = name === '--from' || name === '--cwd' || name === '--out' || name === '--data-dir';
+    if (isValueFlag) {
+      const value = at >= 0 ? flag.slice(at + 1) : rest[i + 1];
+      if (value === undefined || value === '' || value.startsWith('-')) {
+        return { ok: false, error: '参数 ' + name + ' 缺少值 / missing value for ' + name };
+      }
+      if (name === '--from') options.from = value;
+      else if (name === '--cwd') options.cwd = value;
+      else if (name === '--out') options.out = value;
+      else options.dataDir = value;
+      if (at < 0) i += 1;
+      continue;
+    }
+    return { ok: false, error: '未知参数 / unknown flag: ' + flag };
+  }
+  if (options.from === undefined || options.from === '') {
+    return { ok: false, error: 'import 需要 --from <来源> / import requires --from <source>' };
+  }
+  return { ok: true, options };
+}
+
 /** 解析 CLI 参数（纯函数；help 返回 command:'help'，未知/缺值返回错误） */
 export function parseCli(argv: readonly string[]): ParseResult {  const command = argv[0];
   if (command === undefined) return { ok: false, error: '缺少子命令 / missing subcommand' };
@@ -237,10 +291,12 @@ export function parseCli(argv: readonly string[]): ParseResult {  const command 
     return { ok: true, options: { command: 'help', dryRun: false, profile: 'web', yes: false, list: false, wipeConfig: false, json: false, positionals: [] } };
   }
   if (command !== 'snapshots' && command !== 'restore' && command !== 'reinstall' && command !== 'sessions'
-    && command !== 'recover-stale-lock' && command !== 'verify' && command !== 'backup' && command !== 'web') {
+    && command !== 'recover-stale-lock' && command !== 'verify' && command !== 'backup' && command !== 'web'
+    && command !== 'import') {
     return { ok: false, error: `未知子命令 / unknown subcommand: ${command}` };
   }
   if (command === 'sessions') return parseCliSessions(argv);
+  if (command === 'import') return parseCliImport(argv);
   if (command === 'recover-stale-lock') {
     // recover-stale-lock：独立显式 recovery，不接受 destructive 执行参数（只能 --data-dir 定位锁目录）。
     // 只需 parseCliDataDir —— 它自己就会拒绝任何未知 flag。此前这里还有一道「逐 token 只许 --data-dir」的
@@ -268,6 +324,9 @@ export function parseCli(argv: readonly string[]): ParseResult {  const command 
       return { ok: false, error: `未知参数 / unknown flag: ${flag}` };
     }
     if (command !== 'verify' && VERIFY_ONLY_FLAGS.has(flag)) {
+      return { ok: false, error: `${command} 子命令不支持参数 / flag not allowed here: ${flag}` };
+    }
+    if (IMPORT_ONLY_FLAGS.has(flag)) {
       return { ok: false, error: `${command} 子命令不支持参数 / flag not allowed here: ${flag}` };
     }
     if (command !== 'backup' && BACKUP_ONLY_FLAGS.has(flag)) {
@@ -551,6 +610,15 @@ export function printUsage(io: CliIo = defaultIo): void {
       '      离线文件级备份（导出目录内生成与 GUI 同结构的 ZIP，落盘后自动自检）',
       '      / offline file-level backup（dropped ZIP is self-verified）',
       '      只打包离线可直读的分区；凭据类文件（凭据文件名 / .env / *.pem）永不进入备份。',
+      '  dsh-config-manager import --from <source> [--dry-run] [--out <path>] [--cwd <dir>]',
+      '                                [--data-dir <dir>]',
+      '      把本机已装的外部 agent 配置翻译成标准 bundle v1 ZIP（之后用导入流程导入）',
+      '      / translate a foreign agent config into a standard bundle ZIP',
+      '      来源 source：claude-code | hermes | cursor | codex | copilot | antigravity',
+      '      （未知来源 → 退出码 1 并列出可用来源）/ unknown source exits 1 and lists available sources.',
+      '      --dry-run 只打印分区摘要与未迁移项（零写入）；--cwd 给出项目级配置所在目录（缺省进程 cwd）。',
+      '      凭据值绝不进入产物：只保留字段名与「需在 DSH 补录」的引用名。',
+      '      退出码：转换出分区 → 0；未知来源 / 没有可导入内容 / 自检失败 → 1。',
       '  dsh-config-manager web [--port <n>] [--no-open] [--home <dir>] [--data-root <dir>]',
       '                        [--idle-timeout <分钟>]',
       '      启动离线只读救急台（本机网页）：实例心跳 / SAFE MODE / 残留锁 / 快照 / 备份产物',
@@ -585,7 +653,9 @@ export function printUsage(io: CliIo = defaultIo): void {
       '  --wipe-config      一并勾选数据类（settings/plugins/data）/ also wipe ~/.dsh data',
       '  --json             verify 输出机器可读 JSON / machine-readable output',
       '  --sections <list>  backup 分区白名单（逗号分隔；缺省 ' + DEFAULT_BACKUP_SECTIONS.join(',') + '）',
-      '  --out <path>       backup 输出 ZIP 路径（缺省自动命名，绝不覆盖既有文件）',
+      '  --out <path>       backup / import 输出 ZIP 路径（缺省自动命名，绝不覆盖既有文件）',
+      '  --from <source>    import 的外部来源 id（六个之一；缺省报错）',
+      '  --cwd <dir>        import 的项目目录（契约 §8.2 的项目级配置；缺省进程 cwd）',
       '  --home <dir>       sessions repair / web 的 DSH home（缺省 $DSH_HOME，即 ~/.dsh）',
       '  --port <n>         web：监听端口（缺省 0 = 内核随机分配；恒只绑 127.0.0.1）',
       '  --no-open          web：启动后不自动打开浏览器 / do not open the browser',
@@ -923,6 +993,21 @@ export async function runCli(
   }
   if (options.command === 'backup') {
     return runBackup(options, io, env);
+  }
+  // import：把外部 agent 配置翻译成标准 bundle（dry-run 零写入；只可能写导出目录，不碰 $DSH_HOME 配置）
+  if (options.command === 'import') {
+    return runImportSource(
+      {
+        from: options.from ?? '',
+        dryRun: options.dryRun,
+        exportsDir: resolveExportsDir(options.dataDir, env),
+        exporterVersion: CLI_EXPORTER_VERSION,
+        ...(options.out !== undefined ? { out: options.out } : {}),
+        ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+      },
+      io,
+      env,
+    );
   }
   if (options.command === 'sessions') {
     // 离线修复：不碰 $DSH_HOME 的其它部分、不需要环境锁（只读写会话目录，且默认 dry-run）

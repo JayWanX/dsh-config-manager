@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "remote": {
+      "serverUrl": "https://user:pw@mcp.example.com/sse"
+    },
+    "local": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "local-mcp"
+      ],
+      "env": {
+        "API_TOKEN": "sk-FIXTURE_TOKEN_DO_NOT_SHIP"
+      }
+    },
+    "legacy": {
+      "url": "https://legacy.example.com/mcp",
+      "type": "sse"
+    },
+    "empty": {
+      "disabled": true
+    }
+  }
+}

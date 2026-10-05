@@ -22,6 +22,7 @@ import {
 import { scanDiskUsage, type DiskUsageDirs, type DiskUsageReport } from '../core/disk-usage.ts'
 import { readSafeModeMarkerSync, safeModeMarkerPath } from '../core/phase3-host.ts'
 import { listSnapshots, type SnapshotMeta } from '../core/restore.ts'
+import { readInstalledVersion, resolveProfileDir } from '../core/plugin-cli.ts'
 import { DshProfileError, DshProfileManager } from '../profiles/dsh-profile-manager.ts'
 import { DshProfileLauncher, LAUNCHES_FILENAME, parseLaunches } from '../profiles/dsh-profile-launcher.ts'
 import { DshProfileRuntimeRegistry, parseRuntimeRecord, RUNTIME_STALE_MS } from '../profiles/dsh-profile-runtime.ts'
@@ -1100,6 +1101,28 @@ function isDangerousRestoreKind(kind: string): boolean {
   return kind === 'hostFileRestore' || kind === 'hostFileRemove' || kind === 'fileRestore' || kind === 'fileRemove' || kind === 'pluginRemove'
 }
 
+/** 本机 DSH 包名（T8-F3；与 core/restore.ts 的 `DSH_PACKAGE_NAME` 同值 —— 两处读的是同一个文件）。 */
+const DSH_PACKAGE_NAME = '@deepseek-ai/dsh'
+
+/**
+ * 目标档案当前的 DSH 版本（T8-F3；离线 CLI 的 best-effort 来源）。
+ *
+ * 为什么是这个来源：CLI 恰恰在 **DSH 已经起不来** 的场景下运行，没有「运行时权威版本」可问
+ * （那是宿主侧的东西：`HostContext.dshVersion` / `profileContext.installAnchor`）。这里与
+ * `core/restore.ts` 的兜底、档案页的 `DshProfileMeta.dshVersion` **读的是同一个文件**
+ * （`profiles/<p>/node_modules/@deepseek-ai/dsh/package.json`），所以显式传出不改变数值，
+ * 但把「版本判定来源」固定在一处（将来 CLI 若拿到更好的来源只改这里），且不再让 core 猜一次。
+ * 读不到 → undefined：core 按「版本未知」处理（不猜、不产出「版本不同」告警）。
+ */
+function currentProfileDshVersion(paths: RescuePaths): string | undefined {
+  try {
+    return readInstalledVersion(resolveProfileDir(paths.homeDir, paths.profile), DSH_PACKAGE_NAME) ?? undefined
+  } catch {
+    // 档案名非法 / 目录不可读 → 与「没装」同样处理：不猜版本（绝不因此让恢复计划失败）
+    return undefined
+  }
+}
+
 /**
  * 取某个快照的**恢复计划**（只读；与 CLI \`restore --dry-run\` 同一实现）。
  *
@@ -1114,6 +1137,7 @@ export async function planSnapshotRestore(paths: RescuePaths, snapshotId: string
       homeDir: paths.homeDir,
       profile: paths.profile,
       snapshotsRoot: paths.snapshotsDir,
+      currentDshVersion: currentProfileDshVersion(paths),
     })
     return {
       ok: true,
@@ -1165,6 +1189,7 @@ export async function runSnapshotRestore(paths: RescuePaths, snapshotId: string)
       homeDir: paths.homeDir,
       profile: paths.profile,
       snapshotsRoot: paths.snapshotsDir,
+      currentDshVersion: currentProfileDshVersion(paths),
     })
     return {
       ok: report.failed.length === 0,

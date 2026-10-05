@@ -38,6 +38,9 @@ import type { Manifest, SectionId } from '../schema/types.ts';
 import type { BackupScheduleStatus, BackupRunResult, BackupScheduleDraft } from '../ui/backup-schedule.ts';
 import type { BackupFileMeta } from '../sync/backup-files.ts';
 import type { DiskUsageCleanupResult, PluginUpdateCheckResult } from '../ui/types.ts';
+import type { SessionExportProbe } from './session-export/session-export-view.ts';
+import type { ForeignSkip } from '../foreign/types.ts';
+import type { ForeignSourcesResponse as ForeignSourcesViewInput } from '../ui/foreign-view.ts';
 import type { DiskUsageReport } from '../core/disk-usage.ts';
 import { zhUiT, type UiT } from '../ui/i18n.ts';
 import { failedSectionsFromResponse } from '../ui/export-flow.ts';
@@ -75,6 +78,42 @@ export interface ServiceStatus {
   bundles?: string[];
 }
 
+/**
+ * 外部 agent 来源发现响应（`GET /foreign-sources`）。
+ *
+ * 复用 `src/ui/foreign-view.ts` 的输入类型 —— 响应形状的**唯一权威**在那边（视图模型只读它）。
+ * 路径刻意在本文件重导出，避免组件同时 import 两处（同 `UploadResponse` 的做法）。
+ */
+export type ForeignSourcesResponse = ForeignSourcesViewInput
+
+/**
+ * 外部来源 → bundle 的响应（`POST /foreign-import`）。
+ *
+ * `zipPath`：受控临时目录里的标准 bundle v1 ZIP，直接喂给既有导入向导的 `analyzeImport`。
+ * `skipped` / `credentialRefs` **绝不含凭据值**（值在转换层已被剥离）。
+ */
+export interface ForeignImportResponse {
+  zipPath: string
+  name: string
+  /** 来源 id（六来源之一） */
+  source: string
+  /** 来源显示名的字典键（如 foreign.source.hermes） */
+  labelKey: string
+  /** 产物字节数（读不到时为 0，界面按「未知」处理） */
+  sizeBytes: number
+  /** 本次产出包内的分区（空分区不会被写入，也不出现在这里） */
+  sections: SectionId[]
+  /** 各分区的条目计数（机器可读；键形如 `mcp.servers`） */
+  counts: Record<string, number>
+  /** 未迁移项（只有机器码 + 位置名 + 条数） */
+  skipped: ForeignSkip[]
+  /** 凭据**引用名**（形如 `mcp:gitnexus:GITHUB_TOKEN`）；导入后由用户补录值 */
+  credentialRefs: string[]
+  /** 检测到的本机位置（相对 home；绝不回传绝对路径） */
+  detectedPaths: string[]
+  /** 冲突策略（用户决策：同 id 不覆盖、跳过并报码） */
+  conflictPolicy: string
+}
 /** export 端点响应（对齐 ExportFlow 的 ExportRunResult 前半部分；runId 为 m1 run 注册表标识） */
 export interface ExportResponse {
   zipPath: string;
@@ -783,6 +822,98 @@ export class ConfigManagerApi {
   async consult(input: { type: 'export-zip' | 'local-snapshot' | 'remote-snapshot' | 'profile'; id: string; snapshotId?: string }): Promise<ConsultReport> {
     // 只读咨询要读备份/快照内容：长操作档位。
     return postJson<ConsultReport>(CONFIG_MANAGER_API.consult, input, this.t, LONG_OPTS);
+  }
+
+  // ------------------------------------------------- 外部 agent 来源（t17）
+  /**
+   * GET /foreign-sources：六来源的本机检测结果（**只读**，零写入）。
+   *
+   * 未安装是正常状态（found=false），不是错误 —— 界面照常列出全部六条，
+   * 用户才知道「哪些查过了、本机确实没有」。
+   */
+  async foreignSources(opts: { projectDir?: string } = {}): Promise<ForeignSourcesResponse> {
+    const q = opts.projectDir !== undefined && opts.projectDir !== ''
+      ? query({ projectDir: opts.projectDir })
+      : ''
+    return getJson<ForeignSourcesResponse>(CONFIG_MANAGER_API.foreignSources + q, this.t, LONG_OPTS);
+  }
+
+  /**
+   * POST /foreign-import：把本机某个外部 agent 的配置翻译成标准 bundle v1 ZIP，
+   * 落到宿主受控临时目录并返回 zipPath —— 之后**完全复用既有导入向导**
+   * （analyzeImport → createImportPlan → executeImportPlan），不新建第二套向导。
+   *
+   * 为什么必须由宿主产包：转换要读本机文件系统并写 ZIP，浏览器半做不了
+   * （此前该能力只在 CLI 里，GUI 会在「点导入」之后断链）。
+   *
+   * `projectDir`：项目级真值位置（Cursor/Codex 的 <项目>/.cursor/**）。**缺省不传 = 不扫项目级** ——
+   * 宿主进程的 cwd 不是用户的项目，绝不猜。
+   *
+   * 响应**绝不含凭据值**：只有 skipped 机器码与凭据**引用名**（值在转换层已被剥离）。
+   */
+  async foreignImport(source: string, opts: { projectDir?: string } = {}): Promise<ForeignImportResponse> {
+    return postJson<ForeignImportResponse>(
+      CONFIG_MANAGER_API.foreignImport,
+      {
+        source,
+        ...(opts.projectDir !== undefined && opts.projectDir !== '' ? { projectDir: opts.projectDir } : {}),
+      },
+      this.t,
+      LONG_OPTS,
+    );
+  }
+
+  // ------------------------------------------------- F-2 官方 session.export 通道
+  /**
+   * GET /session-export（**只读**）：探测 DSH 官方 session.export 端的可用性。
+   *
+   * 为什么由宿主代探而不是浏览器直接打 DSH：见 src/routes/session-export.ts 的文件头 ——
+   * 该端点挂在带浏览器认证的 `/api` 前缀下，浏览器侧「401 / 404 / 连不上」分不开，
+   * 而「路由没注册」与「持久化后端缺服务」的处理方式**完全不同**（前者保守显示、后者隐藏入口）。
+   *
+   * 返回三态（**绝不二值化**）：`available` 显示 / `unavailable` 禁用并说明原因 / `unknown` 保守显示。
+   */
+  async sessionExportProbe(): Promise<SessionExportProbe> {
+    const body = await getJson<{ ok: boolean } & SessionExportProbe>(CONFIG_MANAGER_API.sessionExport, this.t);
+    return {
+      availability: body.availability,
+      ...(body.reason === undefined ? {} : { reason: body.reason }),
+      status: body.status,
+      path: body.path,
+      checkedAt: body.checkedAt,
+    };
+  }
+
+  /** F-2：原始日志 ZIP 的代理下载地址（探测与下载同一条路由，query 决定形态）。 */
+  sessionExportUrl(sessionId: string, opts: { includeDescendants?: boolean } = {}): string {
+    const descendants = opts.includeDescendants !== false ? 'true' : 'false';
+    return `${CONFIG_MANAGER_API.sessionExport}?sessionId=${encodeURIComponent(sessionId)}&includeDescendants=${descendants}`;
+  }
+
+  /**
+   * F-2：把某条会话的原始日志 ZIP 下载到本机（由 DSH 自己打包，含子会话与附件）。
+   *
+   * 复用**既有**的流式下载链路（openStream + saveDownloaded，与导出产物同一条）：
+   *  - 大 ZIP 不整本驻留内存（流式写优先，不可用时才 Blob 兜底）；
+   *  - 正文阶段是**空闲超时**（每读一块重置）—— 宿主卡死时明确失败而非永久转圈；
+   *  - 失败时把上游（DSH）的状态码与正文如实抛出（代理路由原样透传，见 src/routes/session-export.ts）。
+   *
+   * 为什么走本插件的代理而不是直连 DSH 的 `/api/session.export`：`openStream` 认得本插件的
+   * 错误信封；直连 DSH 时 401/404 只是一次没有解释的失败（而 404 也可能是「拼错路径」）。
+   */
+  async downloadSessionExport(
+    sessionId: string,
+    opts?: DownloadOptions,
+    onProgress?: (received: number, total: number) => void,
+  ): Promise<DownloadResult> {
+    const stream = await openStream(this.sessionExportUrl(sessionId), this.t);
+    try {
+      return await this.saveDownloaded(stream, 'dsh-session-' + sessionId + '.zip', opts, onProgress);
+    } catch (err) {
+      throw stream.mapTimeout(err);
+    } finally {
+      stream.close();
+    }
   }
 
   // ------------------------------------------------- P1-⑦/P2-⑬ 备份内容查看 / 差异对比

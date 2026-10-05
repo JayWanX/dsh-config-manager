@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "ideOnly": {
+      "command": "node",
+      "args": [
+        "ide.js"
+      ]
+    },
+    "remote": {
+      "serverUrl": "https://duplicate.example.com/sse"
+    }
+  }
+}

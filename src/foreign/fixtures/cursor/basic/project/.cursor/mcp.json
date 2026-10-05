@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "shared": {
+      "command": "npx",
+      "args": ["-y", "project-level-shared"]
+    },
+    "project-only": { "url": "https://project.example.com/mcp" }
+  }
+}

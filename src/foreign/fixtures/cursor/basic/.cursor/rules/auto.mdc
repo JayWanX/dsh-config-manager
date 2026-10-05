@@ -1,0 +1,7 @@
+---
+description: 匹配到文件才附带（Auto Attached）
+globs:
+  - "src/**/*.ts"
+---
+
+CURSOR_RULE_AUTO_BODY

@@ -65,6 +65,10 @@ export function snapshotRoutes(env: RoutesEnv): WebRoute[] {
         // Phase 4 统一恢复校验：所有 restore 入口传 snapshotsRoot → 同一验证强度（存在/READY/manifest/blob-hash/symlink/provenance）
         snapshotsRoot: snapshotsDir,
         environmentFingerprint: host.phase3Recovery?.recoveryEnvFingerprint ?? undefined,
+        // T8-F3：注入宿主**权威**的「当前 DSH 版本」（桌面端 = profileContext.installAnchor 那份运行时）。
+        // 不传的话 core 只能按磁盘依赖树 best-effort 探测，而桌面端磁盘上那份可能是过期的 hoisted 副本
+        // → 会把「版本相同」误报成「版本不同」。只影响这一条可见告警，不阻断恢复。
+        currentDshVersion: host.dshVersion,
       }
       try {
         if (dryRun) {

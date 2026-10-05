@@ -29,7 +29,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { FileSnapshotStore, createSnapshot, resolveFileTarget, verifySnapshot } from './backup.ts';
+import { FileSnapshotStore, createSnapshot, normalizeDshVersion, resolveFileTarget, verifySnapshot } from './backup.ts';
 import { makeContext, MemSnapshotStore } from '../adapters/test-helpers.ts';
 import type { ImportPlan, Snapshot, SnapshotStore } from './types.ts';
 import type { SectionId } from '../schema/types.ts';
@@ -307,4 +307,40 @@ test('t53(fixture): 文件类分区（skills）每条读两次，且 streaming �
   assert.equal(streaming.saved, 0, 'streaming 模式不得回退到 save(snapshot, eagerMap)');
   assert.equal(eager.streamed, 0, 'eager 模式不得走 saveStreaming');
   assert.equal(eager.saved, 1, 'eager 模式必须走既有 save(snapshot, eagerMap)');
+});
+
+/* ---------------- F-4：快照记录来源 DSH 版本（可选字段） ---------------- */
+
+test('F-4: 快照记录拍快照那一刻的本机 DSH 版本，并经 snapshot.json 往返（恢复读的就是这份）', async (t) => {
+  const dir = await tmpDir(t, 'f4');
+  const { ctx } = countingCtx();
+  await seedHostFiles(ctx);
+  const store = new FileSnapshotStore({ dir });
+
+  const snapshot = await createSnapshot({ ctx, plan: emptyPlan(), sourceZip: 'unit.zip', store, adapters: [] });
+  assert.equal(snapshot.dshVersion, '0.1.0-rc.6', '必须记录 HostContext.dshVersion')
+  const loaded = await store.load(snapshot.id);
+  assert.equal(loaded.dshVersion, '0.1.0-rc.6', '必须经 snapshot.json 往返落盘')
+  assert.equal((await verifySnapshot(dir, snapshot.id)).ok, true, '新增字段不得破坏 durable+verified（metadataHash 口径不变）');
+});
+
+test('F-4: 版本无法判定（unknown/空白）→ 不写该字段（绝不拿占位值当已知版本）', async (t) => {
+  const dir = await tmpDir(t, 'f4u');
+  const { ctx } = countingCtx();
+  ctx.dshVersion = 'unknown';
+  await seedHostFiles(ctx);
+  const store = new FileSnapshotStore({ dir });
+
+  const snapshot = await createSnapshot({ ctx, plan: emptyPlan(), sourceZip: 'unit.zip', store, adapters: [] });
+  assert.equal(snapshot.dshVersion, undefined);
+  const raw = JSON.parse(await fs.readFile(path.join(dir, snapshot.id, 'snapshot.json'), 'utf8')) as Record<string, unknown>;
+  assert.equal('dshVersion' in raw, false, '占位值绝不落盘（否则恢复时会误报「版本不同」）');
+});
+
+test('F-4: normalizeDshVersion 归一（去空白 / unknown 丢弃 / 非字符串不猜）', () => {
+  assert.equal(normalizeDshVersion(' 0.1.5-rc.1 '), '0.1.5-rc.1');
+  assert.equal(normalizeDshVersion('unknown'), undefined);
+  assert.equal(normalizeDshVersion('   '), undefined);
+  assert.equal(normalizeDshVersion(undefined), undefined);
+  assert.equal(normalizeDshVersion(42), undefined);
 });

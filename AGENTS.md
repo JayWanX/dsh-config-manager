@@ -269,7 +269,7 @@ UI 自查：DESIGN.md 一致(token/组件/spacing/radius/状态语义)、响应�
   （如 "DSH's plugin page"）必须转义，否则整行语法崩；③ `PaletteTitleKey` /
   `CompatibilityNoteKey` 这类**联合类型**的键不会被 tsc 的报错文本点名（只报类型名），
   必须**去类型定义处逐个抄**——只靠报错文本会永远修不完。
-- **Windows LF→CRLF 警告**：无害噪音。
+- **Windows LF→CRLF 警告**：EOL 已由仓库根 `.gitattributes`（`* text=auto eol=lf`）钉死（issue #70，2026-10-05）—— ubuntu / windows / macOS 三端检出同一份字节；**源码字面量守卫**仍须按既有先例在读取入口折 LF（`readFileSync(src,'utf8').replace(/\r\n/g,'\n')`），否则 CRLF 工作区（老检出 / 编辑器写 CRLF）会假红。已存在的 CRLF 工作区 git 会提示「CRLF will be replaced by LF」，内容无差异（`git diff` 为空）。
 - 根目录勿提交：`lib/dist/node_modules/outputs/my-video/.vibeskills/.agent-teams` 均已 gitignore。
 - `dist/` 需先创建再 `npm pack --pack-destination ./dist`（fresh checkout 否则 ENOENT）。
 - **client bundle 是 cjs + `window.__ModuleLoader__.load`**（tsdown.config.ts），改 format/入口会破坏加载器；CSS Modules 只认 `.module.css`。

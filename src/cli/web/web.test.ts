@@ -953,7 +953,9 @@ function runConsoleScript(cookie: string): {
     querySelectorAll: (sel: string) => (sel === '[data-dcm-theme]' ? buttons : []),
     addEventListener: (type: string, fn: (event: { target: unknown }) => void) => { if (type === 'click') clicks.push(fn) },
   }
-  const script = readFileSync(new URL('./client-script.ts', import.meta.url), 'utf8')
+  // issue #70：源码字面量守卫必须与检出 EOL 无关（Windows core.autocrlf=true ⇒ CRLF 工作区）。
+  // 仓库既有 11 处同款先例（readFileSync 后折 LF），这三处此前漏了。
+  const script = readFileSync(new URL('./client-script.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
   const body = /export const CONSOLE_SCRIPT = `([\s\S]*?)`\n/.exec(script)?.[1]
   assert.ok(body, 'client-script.ts 必须导出 CONSOLE_SCRIPT 模板字符串')
   // 只喂脚本真正会碰的浏览器 API（显式列出，不用 Proxy 兜底 —— 缺哪个就报错，别让假 DOM 悄悄骗过测试）

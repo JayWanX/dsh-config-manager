@@ -222,7 +222,8 @@ function readClientSources(): SourceFile[] {
       }
       if (!/\.tsx?$/.test(entry.name) || /\.test\.tsx?$/.test(entry.name)) continue;
       const rel = path.relative(ROOT, child).split(path.sep).join('/');
-      out.push({ rel, code: stripJsComments(fs.readFileSync(child, 'utf8'), true, false) });
+      // issue #70：锚点是含裸 \n 的源码字面量 ⇒ 读取入口统一折 LF，CRLF 检出下不变红。
+      out.push({ rel, code: stripJsComments(fs.readFileSync(child, 'utf8').replace(/\r\n/g, '\n'), true, false) });
     }
   };
   visit(path.join(ROOT, 'src/client'));
@@ -820,7 +821,7 @@ test('t11-2 气泡夹紧矩形 = 画布 ∪ 锚点（弹窗卡片伸出画布时
 });
 
 test('t11-3 ⓘ 焦点环只在气泡打开时绘制（程序化初始焦点不得画出「选中」蓝框）', () => {
-  const css = fs.readFileSync(path.join(ROOT, STYLE_FILE), 'utf8');
+  const css = fs.readFileSync(path.join(ROOT, STYLE_FILE), 'utf8').replace(/\r\n/g, '\n');
   const violations = findFocusRingViolations(css);
   assert.deepEqual(violations, [], '焦点环必须限定在 [data-open]：\n' + violations.join('\n'));
   const unscoped = mutate(css, '.infoHintBtn[data-open]:focus-visible', '.infoHintBtn:focus-visible');

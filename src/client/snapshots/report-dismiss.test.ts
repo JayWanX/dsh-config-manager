@@ -34,7 +34,8 @@ function stripComments(src: string): string {
     .join('\n')
 }
 
-const panelSrc = stripComments(fs.readFileSync(PANEL, 'utf8'))
+// issue #70：下面的窗口按字符数切片，CRLF 会多出 71 个 \r 把锚点挤出窗口 ⇒ 先折 LF。
+const panelSrc = stripComments(fs.readFileSync(PANEL, 'utf8').replace(/\r\n/g, '\n'))
 
 test('恢复报告：必须以 Modal 呈递，且退出按钮在 Modal.Footer 里', () => {
   // 锚点 = 恢复报告**自己的 Modal 开标签**。不能按 `report !== null` 定位：

@@ -1,0 +1,15 @@
+# 文本文件一律以 LF 落盘（issue #70）：
+# 仓库里大量「读源码 + 字面量锚点」的守卫（含 11 处 .replace(/\r\n/g,'\n') 先例）在 CRLF 检出下会假红。
+# eol=lf 会覆盖 Windows 的 core.autocrlf=true，保证 ubuntu / windows / macOS 三端检出一致。
+* text=auto eol=lf
+
+# 二进制：显式声明，避免 git 尝试文本化（截图 / 图标等）
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.tgz binary
+*.woff binary
+*.woff2 binary

@@ -39,7 +39,14 @@ import { Select } from '../common/Select.tsx'
 import { Skeleton } from '../common/Skeleton.tsx'
 import { InfoHint } from '../common/InfoHint.tsx'
 import { toast } from '../common/toast-store.ts'
+import { redact } from '../../security/redaction.ts'
 import css from '../config-manager.module.css'
+
+/**
+ * 宿主/错误文本渲染前统一过 redact（AGENTS.md §UI 硬性规则 7；client-F4）。
+ * 单列成一行：plan-text-redaction.test.ts 的「按渲染点」登记表需要一个唯一锚点。
+ */
+const redactErrorText = (err: unknown): string => redact(err instanceof Error ? err.message : String(err))
 
 /** 自定义档的星期选项（1=周一 … 7=周日，与 DSH 的 dayOfWeek 值域一致） */
 const WEEKDAY_OPTIONS = [1, 2, 3, 4, 5, 6, 7]
@@ -49,11 +56,13 @@ const MINUTE_OPTIONS = [0, 15, 30, 45]
 export interface BackupScheduleCardProps {
   api: ConfigManagerApi
   t: TranslateNS<'config-manager'>
+  /** 同步命名空间翻译器（跳过原因文案走 sync 字典；client-F1） */
+  syncT: TranslateNS<'config-manager-sync'>
   /** 「立即备份」完成后通知外层（首页刷新状态行、产物库重拉备份文件列表） */
   onBackupDone?: () => void
 }
 
-export function BackupScheduleCard({ api, t, onBackupDone }: BackupScheduleCardProps) {
+export function BackupScheduleCard({ api, t, syncT, onBackupDone }: BackupScheduleCardProps) {
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
   const [, setError] = useState<string | null>(null)
   const [draft, setDraft] = useState<BackupScheduleDraft>({ enabled: false, interval: '24h' })
@@ -139,7 +148,7 @@ export function BackupScheduleCard({ api, t, onBackupDone }: BackupScheduleCardP
       (err) => {
         if (!mountedRef.current) return
         setSaving(false)
-        toast.error(err instanceof Error ? err.message : String(err))
+        toast.error(redactErrorText(err))
       },
     )
   }
@@ -157,7 +166,7 @@ export function BackupScheduleCard({ api, t, onBackupDone }: BackupScheduleCardP
             res.run.zip !== undefined && res.run.zip !== ''
               ? res.run.zip
               : res.run.skipReason !== undefined
-                ? describeSkipReason(res.run.skipReason)
+                ? describeSkipReason(res.run.skipReason, syncT)
                 : formatRunTime(res.schedule.lastRunAt),
           )
           setRunning(false)
@@ -167,7 +176,7 @@ export function BackupScheduleCard({ api, t, onBackupDone }: BackupScheduleCardP
       (err) => {
         if (!mountedRef.current) return
         setRunning(false)
-        toast.error(err instanceof Error ? err.message : String(err))
+        toast.error(redactErrorText(err))
       },
     )
   }

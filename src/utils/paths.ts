@@ -106,8 +106,21 @@ export function isReservedInternalRel(relPath: string): boolean {
 }
 
 /**
+ * Windows 语义路径（盘符 "C:/"、"C:\\"；UNC 以两个斜杠或两个反斜杠开头）。
+ *
+ * 判据是**路径形状**而不是 process.platform：映射的来源可能是另一台机器导出的 Windows 路径
+ * （跨平台导入时在 Linux/macOS 上处理），形状决定它在自己的文件系统上大小写不敏感。
+ */
+const WINDOWS_STYLE_PATH_RE = /^[a-zA-Z]:[\\/]|^[\\/]{2}/;
+
+/**
  * 前缀批量映射（规范 §12）：把对象内所有字符串值中匹配 oldPrefix 的路径
  * 替换为 newPrefix（路径感知：必须落在段边界）。返回新对象（不改原对象）。
+ *
+ * **Windows 形状路径先折叠大小写再比较**（core-F4）：Windows 文件系统大小写不敏感，
+ * 用户手输 / 两台机器用户名大小写不同都会让 oldPrefix 与真实值只差大小写 —— 只做逐字比较
+ * 会让整条映射**静默失效**（目标机保留源机绝对路径，workspace.path 与会话 cwd 对不上）。
+ * POSIX 路径仍逐字比较（/home/Alice 与 /home/alice 是不同目录，不得误匹配）。
  */
 export function applyPrefixMappings(value: unknown, mappings: PathMapping[]): unknown {
   if (mappings.length === 0) return value;
@@ -117,11 +130,16 @@ export function applyPrefixMappings(value: unknown, mappings: PathMapping[]): un
       const oldNorm = normalizePath(m.oldPrefix);
       if (oldNorm === '') continue;
       const candidate = normalizePath(out);
-      if (candidate === oldNorm) {
+      // 只有两侧都是同一种大小写语义时才折叠：Windows 形状折叠，POSIX 保持逐字
+      const fold = WINDOWS_STYLE_PATH_RE.test(oldNorm) || WINDOWS_STYLE_PATH_RE.test(candidate);
+      const cmp = (v: string): string => (fold ? v.toLowerCase() : v);
+      if (cmp(candidate) === cmp(oldNorm)) {
         out = normalizePath(m.newPrefix);
         continue;
       }
-      if (candidate.startsWith(oldNorm + '/')) {
+      // 段边界：先按**原串**切出等长头部再比较（折叠可能改变长度，避免切错位置）
+      const head = candidate.slice(0, oldNorm.length);
+      if (candidate.length > oldNorm.length && candidate[oldNorm.length] === '/' && cmp(head) === cmp(oldNorm)) {
         const rest = candidate.slice(oldNorm.length); // 含前导 /
         out = normalizePath(normalizePath(m.newPrefix) + rest);
       }

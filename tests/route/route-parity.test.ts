@@ -228,3 +228,87 @@ test('W1 parity 解析器自检：少一条 / 改一条 / 改方法都会被检�
   // 解析器必须真的解析到 74 条（否则上面的 deepEqual 可能是「两边都空」的假绿）
   assert.equal(actual.length, 77, `解析到的路由数应为 77，实际 ${actual.length}`);
 });
+
+/** 单份源码里的真实路由声明数（与 declaredRoutes 同一解析口径）。 */
+function countDeclarations(text: string): number {
+  let n = 0;
+  const re = /endpoint\(\{([^{}]*)\}\)?\s*,/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const spec = m[1] as string;
+    const pathMatch = /path:\s*([^,]+?)\s*,/.exec(spec);
+    if (pathMatch === null || !/^\s*(?:'[^']*'|"[^"]*"|API\.\w+)\s*$/.test(pathMatch[1] as string)) continue;
+    if (!/methods:\s*\[[^\]]*\]/.test(spec)) continue;
+    n++;
+  }
+  return n;
+}
+
+/** 全部宿主路由源（src/index.ts + src/routes/*.ts）。 */
+function routeSources(): Array<{ file: string; text: string }> {
+  const out = [{ file: 'src/index.ts', text: fs.readFileSync(path.join(root, 'src/index.ts'), 'utf8') }];
+  const dir = path.join(root, 'src/routes');
+  for (const entry of fs.readdirSync(dir).sort()) {
+    if (!entry.endsWith('.ts') || entry.endsWith('.test.ts')) continue;
+    out.push({ file: 'src/routes/' + entry, text: fs.readFileSync(path.join(dir, entry), 'utf8') });
+  }
+  return out;
+}
+
+/**
+ * routes-F5 回归：**路由计数散文必须与真实声明数一致**。
+ *
+ * 为什么需要它：parity 快照钉住了「路由集合」，但源码注释里的**计数口径**（「保留的 N 条」
+ * 「buildRoutes() N 条」「其余 N 条」）此前长期漂移（写 8/57/61，实际 7/70）—— 而这段散文
+ * 正是「少一条即静默少一道围栏」这条安全不变量的叙述基础。这里把每个数字与真实声明数对账：
+ * 写错即红灯，逼着新增路由的人同步更新注释（与快照清单同一维护动作）。
+ */
+test('W1 parity：路由计数散文必须与真实声明数一致（routes-F5 回归）', () => {
+  const sources = routeSources();
+  const actual = declaredRoutes().length;
+  const indexSource = sources[0] as { file: string; text: string };
+  const indexCount = countDeclarations(indexSource.text);
+  const builtCount = actual - indexCount;
+  assert.equal(actual, 77, '真实声明总数应为 77');
+  assert.equal(indexCount, 7, 'src/index.ts 保留的声明应为 7');
+  assert.equal(builtCount, 70, 'buildRoutes 拆出的声明应为 70');
+
+  const claims: Array<{ file: string; label: string; stated: number; expected: number }> = [];
+  const collect = (file: string, text: string, re: RegExp, label: string, expected: number): void => {
+    for (const m of text.matchAll(re)) claims.push({ file, label, stated: Number(m[1]), expected });
+  };
+  for (const { file, text } of sources) {
+    collect(file, text, /保留的 (\d+) 条/g, 'src/index.ts 保留条数', indexCount);
+    collect(file, text, /buildRoutes\(\)[^0-9]{0,2}(\d+) 条/g, 'buildRoutes 条数', builtCount);
+    collect(file, text, /其余 (\d+) 条/g, '拆出条数', builtCount);
+  }
+
+  // routes-F5b（t87）：**AGENTS.md 的计数散文同样对账**。此前守卫只扫 src 源码注释与快照清单，
+  // AGENTS.md 写「合计 73 条 / 保留的 8 条」漂了一整轮也没人发现（t82 的 S2-1）—— 而这段散文
+  // 正是「少一条即静默少一道围栏」这条安全不变量的**对外叙述**，同样必须与真实声明数同源。
+  // 只做文本级断言（不引入新依赖）：数字写错 → 文件名 + 标签 + 应有值一起报出来。
+  const agentsText = fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8');
+  const agentsClaimsSpec: ReadonlyArray<readonly [RegExp, string, number]> = [
+    [/保留的 (\d+) 条/g, 'src/index.ts 保留条数', indexCount],
+    [/钉住的 (\d+) 条/g, 'src/index.ts 保留条数（窗口守卫）', indexCount],
+    [/其余 (\d+) 条/g, '拆出条数', builtCount],
+    [/合计 \*\*(\d+)\*\* 条/g, '合计条数', actual],
+    [/本插件 (\d+) 条路由/g, '插件路由总数', actual],
+    [/全部 (\d+) 条路由/g, '插件路由总数（影响面）', actual],
+  ];
+  for (const [re, label, expected] of agentsClaimsSpec) {
+    collect('AGENTS.md', agentsText, re, label, expected);
+  }
+  const agentsClaims = claims.filter((c) => c.file === 'AGENTS.md');
+  assert.ok(
+    agentsClaims.length >= agentsClaimsSpec.length,
+    'AGENTS.md 里至少要扫到 ' + String(agentsClaimsSpec.length) + ' 处路由计数声明（扫不到即假绿），实际 ' + String(agentsClaims.length),
+  );
+
+  assert.ok(claims.length >= 4, '至少要扫到 4 处计数声明（扫不到即假绿），实际 ' + String(claims.length));
+  assert.deepEqual(
+    claims.filter((c) => c.stated !== c.expected).map((c) => c.file + ': ' + c.label + ' 写 ' + String(c.stated) + '，应为 ' + String(c.expected)),
+    [],
+    '路由计数散文必须与真实声明数一致（写错即红灯）',
+  );
+});

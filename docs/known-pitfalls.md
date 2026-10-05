@@ -53,6 +53,30 @@
   `.dsh-module-fallback`**（后者是派生目录，单独搬运只会留下一堆悬空链接，DSH 启动时会重建），并让缺依赖回到
   回执里（`warnings: ['depsNotInstalled']` + `dsh plugin --profile <副本> install`），绝不静默成功；中途失败回滚目标目录。
   真机复核脚本：`outputs/profile-copy-verify/verify.mjs`（拷 cmtest → 数链接重指向 → 删探针副本）。
+- **复制档案的中断残留：标记先行 + 「只认自己的标记」**（cross-F3，t39；真路由 8/8 PASS 见
+  `outputs/bug-audit/cross-v3v8/VERIFY-t39-route.{mjs,log}`）。复制是「mkdir 目标 → 逐条 cp → 重写
+  package.json」的多步长事务，被强杀/断电会留下「有文件、无 package.json」的半截目录；既有口径
+  「有 package.json 才算 profile」会**跳过**它 —— 用户既看不见（不在列表），也删不掉（`requireProfile` → notFound）。
+  ① **标记先落盘**：`mkdir(dest)` 之后、拷第一个条目之前写 `.dcm-copy-in-progress.json`
+     （`PROFILE_COPY_MARKER_FILENAME`，`dsh-profile-shared.ts:192`；字段
+     `sourceName/newName/startedAt/includeNodeModules/pid`，`dsh-profile-manager.ts:215-222`，原子写 `mode 0o644`）。
+  ② **三种结局**：成功 → 删标记（`manager.ts:246-251`；删失败也无害，列表以 package.json 为准）；
+     抛错 → 整个目标目录回滚（`manager.ts:238-244`），磁盘上不留半截；**只有进程被强杀**才会把标记留在盘上
+     —— 这正是要辨识的情形。
+  ③ **可见 + 可删**：`list()` 对「无 package.json 但有标记」的目录产出 `incomplete: true` 条目
+     （`shape='generic'` ⇒ `isLaunchableShape` 恒假、**绝不给启动按钮**；`dir` 是目标绝对路径；
+     `copiedFrom`/`copyStartedAt` 仅在标记可解析且字段非空时出现），同一条判定也用于 `detail()` 与恢复面板的
+     `listIncompleteCopies()`（`manager.ts:406-469`）⇒ **不会「列表说没有、面板说有」**。
+     删除走既有 `POST /profiles/delete` → `remove()` → `requireManagedDir()`：**有 package.json 或有标记**都接受
+     （`manager.ts:344-367`），`managedProfile`（desktop）仍一律拒绝；删除进 mutation gate —— SAFE MODE 下 423
+     且**目录保持原位**（真路由实测：base 列 `[]` + 删除 404 `notFound` → 修复后列出条目 + 删除 200 且目录消失）。
+  ④ **读标记只判存在性**（`manager.ts:378-395`）：内容坏掉（手工改过/写盘中断）仍算半截副本 —— 宁可多报一个可疑残留，
+     也绝不把孤儿目录重新变成「查不到也删不掉」；`pid` 只作诊断（列表/面板都不消费它，也不据此判「是否还在写」——
+     pid 会复用）。
+  ⑤ **边界不放宽（最重要）**：既无 `package.json` 又无标记的目录仍**跳过**、`detail`/`remove` 仍报 `notFound`；
+     判据只有**我们自己的标记**，绝不引入「看着像残留就删」的启发式（否则会删掉用户手工建、还没装好的目录）。
+  ⑥ **残余限制（如实登记）**：修复（t39）之前就存在的**无标记**孤儿目录与「用户手工建的目录」在磁盘上**不可区分**，
+     没有安全的自动判据 → 唯一处置是用户手工删（t39 倾向不做显式清理通道）。
 - **pnpm 发布年龄**：`@latest` 装旧版是 pnpm 11 `minimumReleaseAge`（<30天被排除）；解决：精确版本装一次白名单，或 `pnpm-workspace.yaml` 设 `minimumReleaseAge: 0`。
 - **MemFs 测试**：内存 fs key 与宿主 path 解耦（win32 home 注入 cwd）。
 - **通配删除源文件之前，必须先确认目标里没有「未跟踪但在用」的文件**（2026-10-03 实测事故：
@@ -174,8 +198,19 @@ d`。
   ② **token 是这一层的边界，不是可选项**：kit 的 `isLoopbackRequest` 对「无 Origin 头的请求」直接放行
      （本机任何进程都满足），所以必须 启动时生成 32 字节随机 token → 只打印到当前终端 → `/?token=…` 换
      HttpOnly + SameSite=Strict 的会话 cookie（**用过即废**）；其余请求一律 403。
-  ③ **只读**：本阶段只暴露 GET（写方法 405），且打开任何页面**不产生任何写入**（`web.test.ts` 的 W-04 断言连目录都不建）。
-     写动作（恢复/清理/会话修复）留到后续阶段，且必须复用 CLI 现有的门（SAFE MODE → 环境锁 → DSH 在跑就拒绝）。
+  ③ **读路径只读、写路径有门**（旧口径「本阶段只暴露 GET，写动作留到后续阶段」已过期）：打开任何页面**不产生任何写入**
+     （`web.test.ts` 的 W-04 断言连目录都不建），但实现已有 **11 条 POST 写路由**：`/sessions/repair`、`/sessions/inline-repair`、
+     `/disk/cleanup`、`/lock/recover`、`/profiles/launch`、`/profiles/stop`、`/unlock/run`、`/restore/run`、`/export/run`、
+     `/reinstall/plan`、`/reinstall/run`（`src/cli/web/routes.ts:253-479`，唯一声明处）。`GET /healthz` 自报 `readOnly: false` +
+     `writes`（3 项能力名，既有契约刻意不动）+ `writeRoutes`（由已声明路由派生，cli-F6 修，杜绝手写清单漂移）。
+     **写路径的真实边界**：① 回环围栏（非回环 403，`server.ts:141`）；② 一次性 token → HttpOnly + SameSite=Strict 会话
+     cookie，之后**每个请求（含写）**都要 cookie，缺 token/cookie 一律 403（`server.ts:146-174`）；③ 方法白名单 405（HTML，
+     cli-F4）。**写动作各自过 CLI 同源的写入门**（`src/cli/actions.ts` 的 `checkWriteGates`：SAFE MODE → 残留锁 → DSH 未运行，
+     fail-closed）；`/reinstall/*` 另持环境锁 `runWithMutationLock({ op: 'console-reinstall' })`（`actions.ts:1365-1396`）。
+     两个**刻意例外**（都被测试钉住）：磁盘清理只碰可重建缓存（tmp / 过期导出产物 / market cache+work），故**不过**
+     SAFE MODE 门（`web.test.ts` W2-03「清理缓存不受该门影响」）；档案启动/停止是「DSH 起不来」时的出口，**不过** SAFE MODE
+     与「DSH 已停止」两道门（`web.test.ts` W3-04）。**不得据此写成「插件 API 无认证」**：这是救急台自己的 token 边界；
+     宿主插件路由的边界仍是 `src/routes/kit.ts` 的 `endpoint()` 围栏（见本文件「插件 HTTP API 的真实认证边界」一节）。
   ④ **判定不许重写**：网页与 CLI 共用 `src/cli/actions.ts`（只读动作层）—— `verify` 的收集、磁盘体检、会话体检、
      心跳/锁/SAFE MODE 读取都只有一份实现；CLI 只负责排版。**改判定就改 actions.ts**，不许在页面里再算一遍。
   附带的两个修正：**心跳候选根**（旧 `runningDshInstances` 把 `--data-dir`（快照目录）当 dataDir 用 → 缺省路径下
@@ -198,3 +233,90 @@ d`。
   ⓓ **git 源安装需要 `scripts.prepare`**（npm 上是预构建 `lib/`，git 安装是现构建）：本包已补 `prepare: npm run build`；
   **pnpm 11 仍会拦截**，用户必须在 profile 的 `pnpm-workspace.yaml` 里加 `allowBuilds`，键要**逐字照抄 pnpm 打印的那一行**（含 URL + sha，
   只写包名不生效）。三条门禁在 `tests/packaging-contract.test.ts` 的 `G-21`；README 中英各有「从 GitHub 源码安装」段。
+
+- **`skippedLinks` 的 `too-deep` 不再必然等于「链接」**（cli-F2 让普通目录超深可见 + t37 修正措辞，2026-10）：
+  深度上限 `MAX_DEPTH = 64`（`src/utils/recursive-walk.ts:42`）在 `walk()` 顶端判定；cli-F2 之前只在 `viaLink !== null` 时记
+  too-deep，**普通目录**超深时整块内容被裁掉却既不在 `skippedLinks` 也不在 `unreadableDirs` 里 —— 备份照样报成功但缺内容
+  （issue #37 同类症状）。cli-F2 起改为 `skippedLinks.push({ path: viaLink ?? rel(dir), reason: 'too-deep' })`（同文件 `:78-81`）；
+  于是 `too-deep` 既可能来自链接、也可能来自**普通目录**，措辞必须按真实来源分派（t37，`src/core/backup-plan.ts:196-199`）：
+  `too-deep` → 「层级超过上限未进备份（目录或链接目标超出深度上限） / nesting limit exceeded…」；
+  `loop` / `outside-home` / `broken` / `unreadable`（皆为链接特有原因）→ 保留「链接未进备份 / link NOT in this backup」。
+  修前实测（base 3f42a8b + cli-F2 增量 + 仅测试）：用例红，断言打印的 base 措辞是
+  `链接未进备份 / link NOT in this backup: skills/skills/d/d/…（too-deep）` —— 「为什么会缺内容」的原因被误述成链接问题。
+  回归护栏：`src/core/backup-plan.test.ts:150`（t37：70 层普通目录 + 指向 home 之外的 junction 两条对照，断言超深条目措辞匹配
+  「层级超过上限」且**不得**匹配「链接未进备份」，链接条目仍须是链接措辞）、`src/utils/recursive-walk.test.ts` 的 cli-F2 用例
+  （普通目录超深必须记 too-deep）。原始输出与证据：`outputs/bug-audit/message-t37/`。
+- **文件类分区「存在但读不到」必须显式失败，不得静默跳过**（ui-F2，t23；2026-10）：
+  收集内核（`src/adapters/file-collection.ts`）对 `ctx.fs.readFile` 失败是**上抛**的 —— 分区 `export()` 抛错由
+  `src/core/exporter.ts:340` 收敛成 `export.sectionFailed` + 一条 warning，属**分区级可见失败**（EACCES 从不静默）。
+  `pluginFiles`（`src/adapters/plugin-files.ts`）此前把「读不到」与「不存在」一视同仁地 `continue` → 同一类输入在基类与子类之间
+  出现两种语义（同一份 ACL 故障在一处是警告、在另一处是无声缺项）。修法：两个读失败分支改成
+  `if (await this.absentOnDisk(ctx, rel)) continue; throw err;`（`:60` / `:82`；`absentOnDisk` 在 `:102`）——
+  只有真不存在（ENOENT）才跳过，其余 errno 一律上抛。**判据方向不能反**：`exists()` 自己抛错时按「**存在**」处理
+  （读不到 ≠ 没有），否则一次 ACL 故障会把「读不到」降级成「本来就没有」。
+  回归护栏：`src/adapters/files.test.ts:517`、`:534`（白名单文件 / 约定配置目录里「存在但读不到」都必须显式失败；base 红 → 修复后绿）。
+- **清理时「缺失的可选目录」（ENOENT）不计入 `errors`**（e2e-F3，t14 修订；即 `AGENTS.md`「磁盘占用体检与手动清理的硬边界」的 ⑤）：
+  `src/core/cache-cleaner.ts` 四处可选目录（`:212-218` tmp、`:238-239` exports、`:297-300` market/cache、`:320-323` market/work）
+  一律 `if (!isENOENT(err)) result.errors += 1` —— **ENOENT（不存在）≠ 读失败**：全新安装时 `market/cache`、`market/work`
+  尚未创建，若计入 `errors`，前端就会在**本次真的删掉了文件**的那次清理里弹红色「清理失败 N 项」（真机 p9b：`errors` 恰等于缺失目录数，
+  `detail` 为空、无可操作信息）。其它 errno（EACCES / EBUSY / …）仍必须计数。判据单点在 `src/utils/guards.ts` 的 `isENOENT`。
+  回归护栏：`src/core/cache-cleaner.test.ts:334-337`（四个可选目录缺失 → `errors === 0`）与 `:344-362`
+  （「可选目录不存在时，真删了文件也不得报错」）。
+
+- **值形状判定（`matchSecretValuePattern`）的大小写边界**（t58-F1 / t72；即 `AGENTS.md`「值形状判定的大小写边界」那条，known-gaps **G-36**）：
+  `src/security/secret-scanner.ts` 的 `SECRET_VALUE_PATTERNS` 全是**大小写敏感**正则。**收口的是 `Bearer`**：RFC 7235 / 6750 规定 auth-scheme 名
+  **大小写不敏感**，所以 `Authorization: bearer <token>` / `BEARER <token>` 都是合法写法，改动前在「键名不敏感」的通道（MCP `headers:{'X-Custom':'bearer …'}`、`env`、url 段）
+  **明文进包且完全不可见**（`refs=[]`、`skipped=[]`）。现在由新增的 `bearer-token-anycase` 命中（scheme 用逐位大小写类 `[Bb][Ee][Aa][Rr][Ee][Rr]`，**刻意不给整条正则加 `i`**
+  —— 加了会让 token 侧「含大写」「含小写」两个 lookahead 互相等价而失效）。防英文散文过剥的边界：token 需**含非字母字符**、或**大小写混排**、或**长度 ≥ 24**，因此
+  `bearer credentials are required` / `bearer authentication failed` / `BEARER HEADER NOT SET` 都**不**命中；规范 `Bearer …` 仍由原条目命中（命中名 `bearer-token`、行为逐字不变）。
+  **厂商前缀（`sk-` / `AKIA` / `ghp_` / `github_pat_`）刻意保持大小写敏感**：`SK-…` / `Sk-…` / `akia…` / `GHP_…` / `GITHUB_PAT_…` **不会被剥离**（真实厂商形态大小写固定；
+  判定是全仓共用单一来源，加 `i` 会连带放宽日志脱敏 `src/utils/logger.ts`、导出/导入的字段值扫描、界面渲染前的 `redact()` 三条通道）—— 已知残余见 known-gaps G-36；其中「`redaction.ts` 另有独立重复表」一条**已由 t78 订正**：
+  `REDACTION_VALUE_PATTERNS` 现派生自 `secret-scanner.ts` 的 `SECRET_VALUE_PATTERNS`（单一来源，仅补 `g` flag），守卫 = `src/security/redaction.test.ts` 的 `t78-a`（结构）/ `t78-b`（行为）。
+  **仍存的差异**（如实保留）：显示层比 scanner **更宽** —— 示例/占位形态（`sk-your-key-here` / `Bearer example-token-here`）scanner **放行**、`redact()` **仍掩**；base 与现状同结果，属显示层**既有产品取舍**，由 `t78-f` 钉成 characterization。**要收先单独决策**，别顺手改。
+  另两条同批口径：① `env:{K:'<sk-…>'}` 这类**尖括号占位符在值形状通道同样被剥空**（降噪只看命中片段，而 `sk-…` 的命中片段不含尖括号；多剥是安全方向）；
+  ② `redactMcpSection` **自身**过滤非字符串载体（`env` 嵌套对象 / headers 数组 / `args` 对象元素按上游 `mcpEntryOf` 同口径**丢弃**，被滤空的字段直接删）—— 此前这条保证只活在上游，
+  而 `antigravity.ts:103` 是直连调用点。
+  证据：来源 = t58 评审（`outputs/bug-audit/review-foreign-envhdr/REVIEW-t58-t40-report.md` §1 的 payload 原文、`t58-pipeline-check.mjs` 的真实管道复现、BASE↔FIXED 谓词逐字对照）；
+  回归护栏 = `src/security/secret-scanner.test.ts`（`t72-a` 大小写命中 / `t72-b` 规范形态不变 / `t72-c` 过剥控制 / `t72-d` 厂商前缀边界钉事实）与 `src/foreign/mcp-value-shape.test.ts` 的 `t72-e/f/g`。
+
+
+---
+
+## t93 容量腾挪：从 `AGENTS.md` 下移的细节（与 `AGENTS.md` §📌 常见坑 **同序**）
+
+> AGENTS.md 与全局 `~/.dsh/AGENTS.md` 合计受 65536 B 预算约束（超限会让全局那份被整份丢弃）。按仓规「AGENTS.md 只留铁律/硬约束，证据与量化数据进本文件」，以下三段的**证据/行号/清单**自 AGENTS.md 下移；技术结论与铁律未变。
+
+### 1) 插件 HTTP API 的真实认证边界（下移自 AGENTS.md 同名条目）
+
+- **DSH 源码位置**：`@deepseek-ai/dsh-client-connection/lib/index.js` 的 `requestRejection()` **L553-556** = Host/Origin 403 + browserAuth 401，只被 `register()` **L605-618** 的 prefix 路由调用；`@deepseek-ai/dsh-host-webserver/lib/index.js` 的 `match()` **L321-331**：先查 exact 表，未命中才按 prefix 最长匹配。安装位置 `.../node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/{dsh-host-webserver,dsh-client-connection}/lib/index.js`。
+- **四路实测打点**：无 cookie 的 `GET /api/dsh-config-manager/status` → **200 + 完整 JSON**；DSH 自己的 `GET /api/<未认领路径>` 与 `GET /` 无 cookie → **401**（认证确实存在，只是不覆盖插件 exact 路由）；跨站 `Origin` → **403**，同源对照 → **200**（CSRF 围栏在生效）。
+- **复核路径**：线上复核 `powershell -NoProfile -File outputs/e2e-w2/run-e2e.ps1 -Strict`（本机无 pwsh 7，脚本支持 5.1；探针 `outputs/e2e-w2/probe.mjs`）；原始打点与结论见 `outputs/e2e-w2/FINDINGS.md` **§4 / §6 D1**。
+
+### 2) 离线救急台（下移自 AGENTS.md 同名条目）
+
+- **11 条 POST 写路由清单**（`src/cli/web/routes.ts:253-479`）：`/sessions/repair`、`/sessions/inline-repair`、`/disk/cleanup`、`/lock/recover`、`/profiles/launch`、`/profiles/stop`、`/unlock/run`、`/restore/run`、`/export/run`、`/reinstall/plan`、`/reinstall/run`。
+- **行号**：真实边界里的会话 cookie 判定在 `server.ts:141/167`；GET 打开页面零写入由 `web.test.ts` 的 **W-04** 钉住（连目录都不建）。
+- **两个已修的坑**：① 心跳候选根必须与 SAFE MODE 同一套 `resolveControlRoots`（旧实现把 `--data-dir` 当 dataDir → 缺省路径永远找不到心跳）；② 退出必须真退出（`close().finally(() => process.exit(0))`，测试注入 `shouldSelfExit: false`）。
+
+### 3) 值形状判定 / G-36：显示层细节 + t83 载荷形状守卫（下移/写实自 AGENTS.md 同名条目）
+
+- **附带两条口径**：`env:{K:'<sk-…>'}` 这类**尖括号占位符在值形状通道同样被剥空**（多剥是安全方向）；`redactMcpSection` **自身**过滤非字符串载体（`env` 嵌套对象 / `args` 对象元素按上游同口径**丢弃**，不再依赖调用方先过滤）。
+- **t78 订正（此前注记已不实）**：`src/security/redaction.ts` **不再有独立重复表** —— `REDACTION_VALUE_PATTERNS` 直接派生自 `secret-scanner.ts` 的 `SECRET_VALUE_PATTERNS`（同一份，仅补 `g` flag）；守卫 = `src/security/redaction.test.ts` 的 `t78-a`（结构：每个形状都在）/ `t78-b`（行为：scanner 判 secret 的语料 `redact()` 必须真掩）。**仍然存在的差异（不得写成「已彻底一致」）**：显示层比 scanner **更宽** —— 示例/占位形态（`sk-your-key-here` / `Bearer example-token-here`）scanner **放行**、`redact()` **仍掩**；base 与现状同结果，属显示层**既有产品取舍**，由 `t78-f` 钉成 characterization（t83 后其范围已收窄）。
+- **t83 载荷形状守卫（写实）**：`sk-` 由 `/sk-[A-Za-z0-9_-]{8,}/` 改为 **载荷形状守卫** `/sk-(?![a-z-]{1,24}(?![A-Za-z0-9_-]))[A-Za-z0-9_-]{8,}/` —— `sk-` 后若是 **1–24 个纯小写字母/连字符**（词形态）则放行；直接动因是修**既有过剥**：`task-management` / `risk-assessment` / `disk-space-report` / `mosk-abcdefgh` / `ask-management`（误剥 = 静默改写用户内容，属数据保真问题，实测 `redact('risk-assessment')` → `ri***REDACTED***`）。
+- **边界 ①（残余，如实登记）**：`sk-` + **≤24 个纯小写字母/连字符**（无数字、无大写）**不再命中**；**≥25 位**纯小写载荷仍命中（`t83-g` 钉成事实）。真实 OpenAI 形态（`sk-` + 40+ 位 base62，含数字/大写）与 `sk-proj-…` / `sk-ant-api03-…` 不受影响。
+- **边界 ②（为什么不用左词边界）**：左边界 `(?<![A-Za-z0-9])` 会漏剥 **`'p'.repeat(10000) + 'sk-<key>'`** 这种真实**长串内嵌**形态（密钥紧贴长串之后）⇒ **明文进包**；第一版左边界方案因此让 `t40-b` / `t40-c` / `t78-g` 变红。**取舍**：为治「词误剥」绝不能削弱「真检测」——载荷形状守卫两者兼得。
+- **其余模式未加任何边界，理由各异**：`AKIA` / `ghp_` / `github_pat_`（无自然语言触发词，普通文本不会产出这些前缀）、`jwt` / `pem`（加边界会与 `sk-` 同样削弱长串内嵌检出）、`bearer`（t72 已用 token 侧 guards 控制过剥）。守卫用例：`t83-a`（左邻字母数字的普通内容不被误剥）/ `t83-b`（被剥侧不削弱，含紧贴 `=`/`:`/引号）/ `t83-c`（t72 边界未回退）/ `t83-d`（未加边界的模式行为逐字不变）/ `t83-e`（`redact()` 通道同步受益）/ `t83-f`（1 万字符内嵌仍被剥）/ `t83-g`（残余边界钉事实）。
+
+### 4) 其余下移碎片（t93 第二批；与 AGENTS.md 同序）
+
+- **认证边界**：`recovery` 是本插件的**私有前缀**（不是 DSH 的 `/api`）；破坏性路由清单 = `/profiles/delete`、`/execute`、`/sync/rollback`、`/snapshots/delete`、`/recovery/**` 等。
+- **只读预览与导出同口径的实测收益**：本机会话树 941 个文件 / 528 MB，预览从 **2271 ms / RSS +306 MiB** 降到 **~0.4 s / 近零常驻**。
+- **已验证归档缓存的配套实测**：29 MiB 归档全量同步解压曾阻塞事件循环 **108 ms**（改走 `readEntryAsync` 后消除）。
+- **profile 切换两条路的实现细节**：`dsh --profile <名> --port <空闲端口>` detached + 从子进程日志抓带 token 的认证 URL + HTTP 探活 + 按 `process.kill(pid,0)` 判活。
+- **事件驱动递归遍历/救援/子代理复核路径**：真机四阶段验证复核 `outputs/rescue-e2e/`；子代理会话导出连带的复核 `outputs/subagent-fix/`。
+- **会话日志格式版本**：拒绝实现 = `refuseForeignFormatVersion` → `SessionFormatUnsupportedError`。
+- **救急台过期口径提醒**：旧文档曾写「只读（写方法 405）」——已过期，现在读路径只读、写路径有门（原因见 §2）。
+- **只读预览 vs 真实导出的量化数据（第二批）**：真机 agentInstructions 预览 4.8 s／4016 文件；self 预览 2460 文件／11.44 MB，而真实导出 1936 B；本机会话树 941 文件 / 528 MB 的预览已降至 ~0.4 s。
+- **`readSessionMeta` 缓存动机的量化数据**：`storages/session_projcache.json` = **1.57 MB**，每次预览 / 每次 `/plan` 都要解析，实测 **7.3 ms**。
+- **磁盘清理那次的原始症状（2026-09）**：`includeRecent` 只影响可重建区，但导出区仍按保留期回收 ⇒ 界面说「只清缓存」却删了备份；守卫 = `tests/route/disk-usage-routes.test.ts`。
+- **救援冲突的时间尺度**：`reconcileBundles` 约 **1.5 s** 内就把插件加回（文档正文表述为「秒级」）。

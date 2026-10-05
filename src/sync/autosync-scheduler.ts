@@ -19,7 +19,9 @@
  *    → 记 skipped(未配置) → return
  *  - Phase A: engine.merge() 三方合并 → 判定 needsReview（冲突/缺失依赖/Install/Error）
  *  - 冲突 → 跳过 + 写历史 skipped + conflictedSections[] → return
- *  - Phase B: 无冲突 → engine.applyMergePlan(apply) 写入本地
+ *  - Phase B: 无冲突 → 按 risk.ts 的 classifyMergePlan 分流（audit-sync sync-F5）：
+ *    低风险项自动应用；medium/high 项**不自动应用**并进 conflictedSections（待人工确认，绝不静默）
+ *    → engine.applyMergePlan(autoApply) 写入本地
  *  - Phase C: 完整双向 → engine.push() 上传
  *  - 收尾：写该通道 autosync-config（lastRunAt, lastRunStatus, consecutiveFailures, lastRunHistoryId）
  *
@@ -41,8 +43,9 @@ import type { AutosyncConfig, AutosyncInterval } from './autosync-config.ts';
 import { readSyncConfigFor, isGitConfig, isWebDavConfig, isS3Config, isGistConfig, SYNC_CHANNELS } from './sync-config.ts';
 import type { SyncConfig, SyncTransportType } from './sync-config.ts';
 import { readSyncHistory, appendAutosyncEntry } from './sync-history.ts';
+import { classifyMergePlan } from './risk.ts';
 import type { AutosyncHistoryEntry } from './sync-history.ts';
-import type { MergePlan, MergeSectionResult } from './merge.ts';
+import type { MergePlan } from './merge.ts';
 import type { SyncApplyPlan } from './risk.ts';
 
 /** 间隔 → ms 换算（§4.3） */
@@ -419,6 +422,9 @@ export class AutoSyncScheduler {
       }
 
       let appliedSections: SectionId[] = [];
+      // audit-sync sync-F5：被风险分级扣下、需人工确认的分区（medium/high）。在 Phase A 赋值、
+      // Phase C 与收尾写历史都要用，故声明在两者之外。
+      let deferredSections: SectionId[] = [];
 
       // Phase A: pull 合并（下载）—— 仅当远端有新快照才拉取（§3.2）。
       if (remoteNew) {
@@ -458,8 +464,15 @@ export class AutoSyncScheduler {
           return result;
         }
 
-        // 无冲突：构造 SyncApplyPlan（autoApply = 所有 useRemote/keepLocal 项；skipped = skip 项）
-        const apply = buildAutoApplyPlan(mergePlan);
+        // 无冲突：按 risk.ts 的风险分级契约分流（audit-sync sync-F5）。
+        // 此前用 buildAutoApplyPlan 无条件应用全部非冲突分区 → medium/high 分区（plugins/mcp/
+        // workspaces 等）在无用户确认时被自动写进本地，与 classifyMergePlan 的既定口径
+        // （低风险自动应用；medium/high → 待审）分叉，「首次同步强制预览」在自动路径上也形同虚设。
+        // firstSync 恒 false：真正的首次同步没有祖先基线，merge 已把两侧差异判成 conflict → 走人工确认。
+        const apply = classifyMergePlan(mergePlan, { firstSync: false });
+        // 待审项（medium/high：决策明确但不该自动应用）必须可见 —— 进历史 conflictedSections，
+        // 绝不静默丢弃；真正的冲突已在上方整轮跳过（reviewSections）。
+        deferredSections = apply.review.map((s) => s.id);
         if (apply.autoApply.length === 0) {
           // 远端快照无物可应用（全部 skip / 无变化）→ 无远端合并产出；若本地有改动则仅走上传。
           // 此处不立即返回，让 Phase C 依据 localDirty 决定是否上传本地改动。
@@ -526,11 +539,13 @@ export class AutoSyncScheduler {
           const result: AutosyncRunResult = {
             status: 'success', direction: appliedSections.length ? 'both' : 'push',
             appliedSections, pushedSnapshotId: pushReport.snapshotId, historyId,
+            ...(deferredSections.length > 0 ? { conflictedSections: deferredSections } : {}),
             consecutiveFailures: 0,
           };
           await this.appendHistory(channel, {
             direction: appliedSections.length ? 'both' : 'push', status: 'success',
             appliedSections, pushedSnapshotId: pushReport.snapshotId,
+            ...(deferredSections.length > 0 ? { conflictedSections: deferredSections } : {}),
             createdAt: nowIso, failureCountAtRun: 0,
           });
           await this.writeFinalConfig(cfg, result, nowIso, historyId, channel);
@@ -557,11 +572,13 @@ export class AutoSyncScheduler {
       const result: AutosyncRunResult = {
         status: 'success', direction: 'pull', appliedSections,
         ...(appliedSections.length === 0 ? { skipReason: 'unchanged' as const } : {}),
+        ...(deferredSections.length > 0 ? { conflictedSections: deferredSections } : {}),
         historyId, consecutiveFailures: 0,
       };
       await this.appendHistory(channel, {
         direction: 'pull', status: 'success', appliedSections,
         ...(appliedSections.length === 0 ? { skipReason: 'unchanged' as const } : {}),
+        ...(deferredSections.length > 0 ? { conflictedSections: deferredSections } : {}),
         createdAt: nowIso, failureCountAtRun: 0,
       });
       await this.writeFinalConfig(cfg, result, nowIso, historyId, channel);
@@ -629,28 +646,27 @@ export class AutoSyncScheduler {
   }
 }
 
-/** 从 MergePlan 构造 SyncApplyPlan（autoApply = 所有非 skip 非 conflict 项）。 */
+/**
+ * 从 MergePlan 构造 SyncApplyPlan —— **单一决策源 = risk.ts 的 classifyMergePlan**
+ * （audit-sync sync-F5）。
+ *
+ * 此前本函数自己写了一套「非 skip 非 conflict 一律 autoApply」的分流，绕过了风险分级：
+ * medium/high 分区（plugins/mcp/workspaces…）会在无人确认时被自动写进本地，与
+ * `classifyMergePlan`（低风险自动应用；medium/high → 待审）分叉；`merged === undefined`
+ * 的项还会被静默丢进 skipped。
+ *
+ * 现在委托 classifyMergePlan（firstSync=false：真正的首次同步没有祖先基线，merge 已把
+ * 两侧差异判成 conflict → 走人工确认），并把「决策明确但缺 merged 数据」的项保守改判为
+ * review —— 绝不静默应用空载荷。
+ */
 export function buildAutoApplyPlan(plan: MergePlan): SyncApplyPlan {
-  const autoApply: MergeSectionResult[] = [];
-  const review: MergeSectionResult[] = [];
-  const skipped: MergeSectionResult[] = [];
-  for (const s of plan.sections) {
-    if (s.decision === 'skip') {
-      skipped.push(s);
-      continue;
-    }
-    if (s.decision === 'conflict') {
-      review.push(s);
-      continue;
-    }
-    // useRemote / keepLocal：都有 merged 数据
-    if (s.merged !== undefined) {
-      autoApply.push(s);
-    } else {
-      skipped.push(s);
-    }
-  }
-  return { autoApply, review, skipped };
+  const split = classifyMergePlan(plan, { firstSync: false });
+  const autoApply = split.autoApply.filter((s) => s.merged !== undefined);
+  const review = [
+    ...split.review,
+    ...split.autoApply.filter((s) => s.merged === undefined),
+  ];
+  return { autoApply, review, skipped: split.skipped };
 }
 
 /**

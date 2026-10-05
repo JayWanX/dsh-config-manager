@@ -145,13 +145,15 @@ export async function readOpenclawSessions(
     return { files, readFindings: findings, extraCounts: { 'sessions.candidates': 0 } };
   }
 
+  // 触顶必须**可见**（audit-foreign F4）。
+  let truncated = false;
   for (const agent of await listDirNames(agentsDir)) {
     const sessionsDir = joinFor(platform, agentsDir, agent, 'sessions');
     if (!(await isDirectory(sessionsDir))) continue;
     const indexLabel = OPENCLAW_AGENTS_REL + '/' + agent + '/sessions/' + OPENCLAW_INDEX_NAME;
     const names = await readIndexNames(joinFor(platform, sessionsDir, OPENCLAW_INDEX_NAME), indexLabel, maxBytes, findings);
     for (const name of await listFileNames(sessionsDir, (n) => OPENCLAW_SESSION_FILE_RE.test(n))) {
-      if (files.length >= maxFiles) break;
+      if (files.length >= maxFiles) { truncated = true; break; }
       const label = OPENCLAW_AGENTS_REL + '/' + agent + '/sessions/' + name;
       const text = await readTextGuarded(joinFor(platform, sessionsDir, name), label, maxBytes, findings);
       if (text === null) continue;
@@ -165,6 +167,7 @@ export async function readOpenclawSessions(
     }
   }
 
+  if (truncated) findings.push({ code: 'source-unreadable', origin: 'openclaw', detail: 'max-sessions-reached', count: maxFiles });
   return { files, readFindings: findings, extraCounts: { 'sessions.candidates': files.length } };
 }
 

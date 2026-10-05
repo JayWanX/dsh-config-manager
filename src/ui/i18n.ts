@@ -386,6 +386,8 @@ export const uiZh = {
   'diskUsage.clean.expiredExportsDesc': '只删已超过保留期的导出 ZIP（定时备份不在此列）。',
   'diskUsage.clean.done': '已释放 {size}，删除 {count} 项',
   'diskUsage.clean.nothing': '没有可释放的内容',
+  // e2e-F3：目标目录不存在/已空**不是失败**（全新安装时 market/cache 尚未创建）
+  'diskUsage.clean.nothingAbsent': '没有需要清理的内容（目标目录不存在或已为空）',
   'diskUsage.clean.failed': '清理完成，但有 {count} 项失败（已跳过）',
   'diskUsage.clean.excluded': '本次未包含：{items}',
   'diskUsage.clean.excludedExpiredExports': '回收过期备份文件',
@@ -895,6 +897,7 @@ export const uiEn: Record<UiTextKey, string> = {
   'diskUsage.clean.expiredExportsDesc': 'Only exports past their retention window (scheduled backups are excluded).',
   'diskUsage.clean.done': 'Freed {size}, removed {count} item(s)',
   'diskUsage.clean.nothing': 'Nothing to reclaim',
+  'diskUsage.clean.nothingAbsent': 'Nothing to clean (the target directories are missing or already empty)',
   'diskUsage.clean.failed': 'Cleanup finished with {count} failure(s) (skipped)',
   'diskUsage.clean.excluded': 'Not included this time: {items}',
   'diskUsage.clean.excludedExpiredExports': 'Reclaim expired backups',

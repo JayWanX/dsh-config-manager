@@ -30,6 +30,7 @@
  *  - 只收普通文件：特殊文件（设备/FIFO/套接字）一律跳过；**目录 junction / 符号链接
  *    会被跟随**（issue #37：与 GUI 导出同一内核 `utils/recursive-walk.ts`），
  *    目标越出 homeDir 或断链的链接跳过但**写进 warnings**——绝不静默少收内容；
+ *    普通目录**超过层级上限**同样留痕（cli-F2），且告警措辞按**真实来源**分派（t37：链接类 vs 目录超深）；
  *  - 命中 `isReservedInternalRel` 的内部命名空间（locks/snapshots/transactions…）跳过；
  *  - `pluginFiles`（`dsh-ssh.json` 等第三方插件自有文件）**默认不收**：该分区与 GUI
  *    侧同为 deviceSpecific「任意文件直通、无内容过滤」，`dsh-ssh.json` 里是明文主机
@@ -41,6 +42,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { listRecursiveFollowingLinks } from '../utils/recursive-walk.ts';
+import type { SkippedLink } from '../utils/recursive-walk.ts';
 import { normalizePath, isPathSafe, isReservedInternalRel } from '../utils/paths.ts';
 import { SECTION_FILE_PREFIXES, SECTION_IDS, requireSectionMeta } from '../schema/config.ts';
 import type { SectionId } from '../schema/types.ts';
@@ -182,6 +184,22 @@ export interface BackupCollection {
 }
 
 /**
+ * skippedLinks 条目 → 用户可见告警（t37：cli-F2 的措辞残留）。
+ *
+ * 为什么必须按 reason 分派措辞：`loop` / `outside-home` / `broken` / `unreadable` 是**链接**特有的
+ * 跳过原因；而 `too-deep` 自 cli-F2 起对**普通目录**同样会记录（此前只有链接超深才记）—— 整块内容被
+ * 深度上限裁掉时若仍写成「链接未进备份」，用户看到的原因就与真实来源（目录层级超出上限）不符。
+ * 措辞里**不编具体层数**：上限常量住在 utils/recursive-walk.ts，本模块不 import 它的私有常量。
+ */
+function skippedLinkWarning(label: string, s: SkippedLink): string {
+  const at = `${label}/${s.path}（${s.reason}）`;
+  if (s.reason === 'too-deep') {
+    return `层级超过上限未进备份（目录或链接目标超出深度上限） / nesting limit exceeded, content NOT in this backup: ${at}`;
+  }
+  return `链接未进备份 / link NOT in this backup: ${at}`;
+}
+
+/**
  * 递归列出目录下全部普通文件（**相对 homeDir** 的 posix 路径，已排序）；目录不存在 → 空。
  *
  * issue #37：与 GUI 导出共用 `utils/recursive-walk.ts` —— **跟随**目录 junction / 符号链接，
@@ -196,7 +214,7 @@ async function listFilesRecursive(
 ): Promise<string[]> {
   const listing = await listRecursiveFollowingLinks(dirAbs, homeDir);
   for (const s of listing.skippedLinks) {
-    warnings.push(`链接未进备份 / link NOT in this backup: ${label}/${s.path}（${s.reason}）`);
+    warnings.push(skippedLinkWarning(label, s));
   }
   for (const dir of listing.unreadableDirs) {
     warnings.push(`目录读取失败，其内容未进备份 / directory unreadable, content NOT in this backup: ${dir}`);

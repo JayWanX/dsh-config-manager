@@ -260,7 +260,6 @@ export function marketRoutes(env: RoutesEnv): WebRoute[] {
         await fs.rm(dir, { force: true, recursive: true }).catch(() => undefined)
         writeJson(res, 200, {
           ok: true,
-          dir,
           zipPath: publishZip,
           manifestText: result.manifestText,
           sha256: result.sha256,

@@ -139,3 +139,38 @@ test('FILE_BASES：完整性由注册表派生校验（源码静态面；修复�
     'FILE_BASES 必须按注册表逐项校验「每个文件类分区都有基准目录」，而不是靠人工维护',
   );
 });
+
+/* ------------------------------------------------------------ skippedLinks 措辞（cli-F2 残留，t37） */
+
+/**
+ * cli-F2 修好后，recursive-walk 对**普通目录**超过深度上限也记 too-deep（原先只有链接记）。
+ * backup-plan 的告警前缀过去一律写「链接未进备份」→「内容为什么缺」的原因被误述成链接问题。
+ * 判据：普通目录超深 → 措辞指向层级上限；链接类跳过（越界/断链/自引用）→ 仍写「链接未进备份」。
+ */
+test('t37 skippedLinks 措辞：普通目录超深不得被描述成「链接」问题（修复前失败）', async () => {
+  const os = await import('node:os');
+  const { collectBackupEntries } = await import('./backup-plan.ts');
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'dcm-bp-'));
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'dcm-out-'));
+  try {
+    // (a) 普通目录超深：skills/d/d/…（70 层 > 内核 MAX_DEPTH=64）
+    let deepAbs = path.join(home, 'skills');
+    for (let i = 0; i < 70; i++) deepAbs = path.join(deepAbs, 'd');
+    await fs.mkdir(deepAbs, { recursive: true });
+    await fs.writeFile(path.join(deepAbs, 'leaf.json'), '{}');
+    // (b) 链接类跳过：junction 指向 home 之外（Windows 上建 junction 不需要管理员）
+    await fs.symlink(outside, path.join(home, 'skills', 'outlink'), 'junction');
+
+    const plan = await collectBackupEntries(home, ['skills']);
+    const depthLine = plan.warnings.find((w) => w.includes('（too-deep）'));
+    const linkLine = plan.warnings.find((w) => w.includes('outlink'));
+    assert.ok(depthLine !== undefined, '普通目录超深必须写进 warnings（绝不静默）：' + plan.warnings.join(' | '));
+    assert.ok(linkLine !== undefined, '链接越界必须写进 warnings：' + plan.warnings.join(' | '));
+    assert.match(depthLine, /层级超过上限/, '普通目录超深的原因必须指向层级上限，实际：' + depthLine);
+    assert.doesNotMatch(depthLine, /链接未进备份/, '普通目录超深不得被描述成链接问题，实际：' + depthLine);
+    assert.match(linkLine, /链接未进备份/, '链接类跳过仍必须是链接措辞，实际：' + linkLine);
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+    await fs.rm(outside, { recursive: true, force: true });
+  }
+});

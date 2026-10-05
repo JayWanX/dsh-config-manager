@@ -26,7 +26,11 @@ import {
   SYNC_CONFIG_FILE, SYNC_CONFIG_SCHEMA_VERSION, SYNC_CONFIG_SUPPORTED_VERSIONS, CLOUD_SYNC_CONFIG_FILE,
   validateWebDavUrl, type SyncConfig,
   SYNC_CHANNELS, channelOf, channelMap, isSyncTransportType, parseSyncChannel, clearSyncChannel,
+  S3_COMPAT_PROVIDERS, CLOUD_SYNC_PROVIDERS, cloudSecretRef,
 } from './sync-config.ts';
+// t88 跨侧常量守卫：共享零依赖常量 + 客户端镜像（见文件末尾的 t88 用例）
+import { S3_COMPAT_PROVIDERS as SHARED_S3_COMPAT_PROVIDERS, cloudSecretRefName } from '../utils/shared-constants.ts';
+import { S3_PROVIDERS as UI_S3_PROVIDERS } from '../ui/sync-settings-view.ts';
 
 test('writeSyncConfig + readSyncConfig（git 通道）：写入 v3 双命名空间形态（无另一通道时不写空命名空间）', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-sync-cfg-git2-'));
@@ -666,3 +670,72 @@ test('旧云端点文件（无 active）：唯一已保存的 S3 兼容商可推
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
+
+/**
+ * t88 跨侧常量守卫：宿主与客户端**同构常量**不得各写一份（t82 的 S2-2）。
+ *
+ * 背景：`ui/sync-settings-view.ts` 的 `S3_PROVIDERS` 与 `client/sync/sync-view.ts` 的 `cloudSecretRefName()`
+ * 曾是宿主 `sync-config.ts` 的 `S3_COMPAT_PROVIDERS` / `cloudSecretRef()` 的**手工镜像**，两侧零断言；
+ * 客户端的 `satisfies` 穷尽检查只能拦「宿主新增」，拦不住**改名 / 删除 / 换序** ⇒ 界面静默失配。
+ * 处置（t88 选 ①）= 两组常量都提到零依赖的 `utils/shared-constants.ts`（先例 = t32 的 SYNC_CHANNELS），
+ * 宿主只 re-export；本守卫 = 运行时逐字相等 + 源码级「只允许一处声明」（与 t32 守卫同风格）。
+ */
+test('t88 跨侧常量守卫：S3 兼容商清单与云端点密钥槽位引用只有一处声明，两侧必须逐字相等', async () => {
+  // ── ① 运行时：共享 = 宿主 re-export = 客户端镜像 ──
+  assert.deepEqual([...SHARED_S3_COMPAT_PROVIDERS], ['s3', 'oss', 'cos', 'minio', 'kodo'], '共享清单是唯一声明处（值本身也在此钉住）');
+  assert.deepEqual([...S3_COMPAT_PROVIDERS], [...SHARED_S3_COMPAT_PROVIDERS], '宿主必须 re-export 共享清单，不得再写一份');
+  assert.deepEqual([...CLOUD_SYNC_PROVIDERS], [...SHARED_S3_COMPAT_PROVIDERS, 'gist'], '云端点通道 = S3 兼容系 + gist');
+  assert.deepEqual([...UI_S3_PROVIDERS], [...SHARED_S3_COMPAT_PROVIDERS], 'UI 镜像必须等于共享清单（宿主改名/换序这里就红）');
+  const EXPECTED_REFS: Record<string, string> = {
+    s3: 'DSH_CONFIG_MANAGER_SYNC_S3_SECRET_ACCESS_KEY',
+    oss: 'DSH_CONFIG_MANAGER_SYNC_OSS_SECRET_ACCESS_KEY',
+    cos: 'DSH_CONFIG_MANAGER_SYNC_COS_SECRET_ACCESS_KEY',
+    minio: 'DSH_CONFIG_MANAGER_SYNC_MINIO_SECRET_ACCESS_KEY',
+    kodo: 'DSH_CONFIG_MANAGER_SYNC_KODO_SECRET_ACCESS_KEY',
+    gist: 'DSH_CONFIG_MANAGER_SYNC_GIST_TOKEN',
+  };
+  for (const p of CLOUD_SYNC_PROVIDERS) {
+    assert.equal(cloudSecretRef(p), EXPECTED_REFS[p], '槽位名是与用户可见文案绑定的对外事实，不得漂移：' + p);
+    assert.equal(cloudSecretRefName(p), cloudSecretRef(p), '客户端显示用的派生名必须与宿主同源：' + p);
+  }
+  assert.equal(
+    cloudSecretRefName('r2'),
+    'DSH_CONFIG_MANAGER_SYNC_R2_SECRET_ACCESS_KEY',
+    '未知通道仍按同规则派生（保持历史客户端行为，不因共享化收紧）',
+  );
+
+  // ── ② 源码级：字面量只允许出现在零依赖共享模块（测试文件除外：断言里必然要写期望值）──
+  const srcRoot = fileURLToPath(new URL('..', import.meta.url));
+  const files = (await collectSourceFiles(srcRoot)).filter((f) => !f.endsWith('.test.ts'));
+  const providerNeedle = "'s3', 'oss', 'cos', 'minio', 'kodo'";
+  const refNeedles = ['DSH_CONFIG_MANAGER_SYNC_S3_SECRET_ACCESS_KEY', 'DSH_CONFIG_MANAGER_SYNC_GIST_TOKEN'];
+  const providerHits: string[] = [];
+  const refHits: string[] = [];
+  for (const file of files) {
+    const rel = path.relative(srcRoot, file).split(path.sep).join('/');
+    const content = await fs.readFile(file, 'utf8');
+    content.split(String.fromCharCode(10)).forEach((line, i) => {
+      if (line.includes(providerNeedle)) providerHits.push(rel + ':' + (i + 1));
+      for (const needle of refNeedles) if (line.includes(needle)) refHits.push(needle + '@' + rel + ':' + (i + 1));
+    });
+  }
+  assert.equal(providerHits.length, 1, '兼容商字面量只允许声明一次: ' + JSON.stringify(providerHits));
+  assert.ok(providerHits[0]!.startsWith('utils/shared-constants.ts:'), '唯一声明处必须是零依赖共享模块: ' + providerHits[0]);
+  const strayRefs = refHits.filter((h) => !h.includes('@utils/shared-constants.ts:'));
+  assert.deepEqual(strayRefs, [], '槽位名字面量不得出现在共享模块之外（宿主/客户端都只能引用它）');
+  assert.equal(
+    refHits.filter((h) => h.includes('@utils/shared-constants.ts:')).length,
+    refNeedles.length,
+    '每个槽位名都要在共享模块里恰好声明一次',
+  );
+  // 宿主只 re-export；UI/客户端不得再声明字面量（防「哪天又抄回去」）
+  const cfgSrc = await fs.readFile(path.join(srcRoot, 'sync', 'sync-config.ts'), 'utf8');
+  assert.ok(cfgSrc.includes('export { S3_COMPAT_PROVIDERS, GIST_PROVIDER, CLOUD_SYNC_PROVIDERS };'), 'sync-config.ts 必须 re-export 兼容商清单');
+  const uiSrc = await fs.readFile(path.join(srcRoot, 'ui', 'sync-settings-view.ts'), 'utf8');
+  assert.ok(!uiSrc.includes(providerNeedle), 'UI 侧不得再抄一份兼容商字面量（必须是共享常量别名）');
+  const viewSrc = await fs.readFile(path.join(srcRoot, 'client', 'sync', 'sync-view.ts'), 'utf8');
+  assert.ok(
+    viewSrc.includes("export { cloudSecretRefName } from '../../utils/shared-constants.ts';"),
+    'client 侧必须 re-export 共享派生函数（不得自己再实现一遍）',
+  );
+});

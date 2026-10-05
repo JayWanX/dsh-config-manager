@@ -617,3 +617,80 @@ test('历史对话排序：宿主不提供 mtimeMs 门面 → 空 Map（调用�
   const at = await adapter.unitActivityTimes(ctx, section);
   assert.equal(at.size, 0);
 });
+
+/* ---------------- ui-F1（t23 回归）：未写盘的会话不得被判硬失败 ---------------- */
+
+/** 按真实宿主 DshSessionsFacade.relocateDir 的语义造门面：目录不在盘上 → rename 抛错 → unavailable。 */
+function ctxWithDiskAwareRelocate(
+  target: ReturnType<typeof makeContext>,
+  onDisk: ReadonlySet<string>,
+  cwd: string,
+): { moves: string[] } {
+  const calls = { moves: [] as string[] };
+  target.sessions = {
+    readLogCwd: () => cwd,
+    relocateDir: async (rel: string, key: string): Promise<SessionMoveResult> => {
+      calls.moves.push(rel);
+      if (!onDisk.has(rel)) return { moved: false, reason: 'unavailable' };
+      return { moved: true, to: '/root/' + key + '/' + (rel.split('/')[1] ?? '') };
+    },
+    rewriteLogDir: async (rel: string) => ({ ok: true as const, rewritten: [rel] }),
+  };
+  return calls;
+}
+
+/** 两个会话单元的载荷：session-a（已写盘）+ session-b（用户取消勾选 → 盘上不存在）。 */
+function twoUnitSection(
+  cwd: string,
+  key: string,
+): { version: number; files: { relativePath: string; data: Uint8Array; contentHash: string }[] } {
+  const section = layoutSection(cwd, key, 'session-a');
+  section.files.push({
+    relativePath: key + '/session-b/session.v3.jsonl.zstd',
+    data: bytes('B'),
+    contentHash: 'h2',
+  });
+  return section;
+}
+
+test('ui-F1：载荷里「用户取消勾选、盘上不存在」的会话不得被判硬失败（否则 anyFailed → 整笔回滚）', async () => {
+  const dst = makeContext('win32', 'C:\\Users\\bob');
+  // session-a 已写盘；session-b 取消勾选 → 盘上没有任何文件
+  await dst.fs.writeFile('sessions/--D-Old-proj--/session-a/session.v3.jsonl.zstd', bytes('A'));
+  const calls = ctxWithDiskAwareRelocate(dst, new Set(['--D-Old-proj--/session-a']), 'D:\\Other\\proj');
+  const results = await adapter.finalizeApply(
+    makeImportContext(dst, new Map([['sessions', twoUnitSection('D:\\Other\\proj', '--D-Old-proj--')]])),
+  );
+  const hardFailures = results.filter((r) => !r.ok && r.warning !== true);
+  // fallback 路径（本次导入一个会话都没走 applyItem）无法预知目录是否存在：两次都会**尝试**归位，
+  // 但「目录不存在」必须被跳过而不是记硬失败（attempt ≠ 失败）。
+  assert.equal(calls.moves.length, 2, '两次都尝试过归位（attempt ≠ 失败）');
+  assert.deepEqual(hardFailures, [], '未写入的会话不得记硬失败（analyzer 据此 anyFailed → 整体回滚）');
+  assert.equal(results.filter((r) => r.ok === true).length, 1, '写盘过的会话照常归位');
+});
+
+test('ui-F1：真实导入路径 —— 只 applyItem 过的会话参与收尾（用户保留的本机会话不被搬动）', async () => {
+  const dst = makeContext('win32', 'C:\\Users\\bob');
+  // 两个会话在盘上都在：session-b 是本机已有、用户在确认页选择保留的对话
+  await dst.fs.writeFile('sessions/--D-Old-proj--/session-a/session.v3.jsonl.zstd', bytes('A'));
+  await dst.fs.writeFile('sessions/--D-Old-proj--/session-b/session.v3.jsonl.zstd', bytes('B'));
+  const section = twoUnitSection('D:\\Other\\proj', '--D-Old-proj--');
+  const calls = ctxWithDiskAwareRelocate(
+    dst,
+    new Set(['--D-Old-proj--/session-a', '--D-Old-proj--/session-b']),
+    'D:\\Other\\proj',
+  );
+  const ctx = makeImportContext(dst, new Map([['sessions', section]]));
+  const applied = await adapter.applyItem({
+    id: 'sessions:--D-Old-proj--/session-a',
+    unitId: 'sessions:--D-Old-proj--/session-a',
+    kind: 'Create',
+    adapter: 'sessions',
+    description: '',
+    severity: 'info',
+    target: { adapter: 'sessions', ref: section.files[0]!.relativePath },
+  }, ctx);
+  assert.equal(applied.ok, true);
+  await adapter.finalizeApply(ctx);
+  assert.deepEqual(calls.moves, ['--D-Old-proj--/session-a'], 'finalize 不得搬动用户没勾选的会话');
+});

@@ -210,6 +210,11 @@ export interface JournalIo {
   readdirNames(dir: string): Promise<string[]>;
   readdirEntries(dir: string): Promise<Array<{ name: string; isDirectory(): boolean }>>;
   lstat(p: string): Promise<{ isSymbolicLink(): boolean } | null>;
+  /**
+   * stat 的 mtimeMs（cross-F2 的孤儿原子写判定用）。**可选**：注入 io 不提供时，
+   * 孤儿回收整段跳过（绝不因为「判不了年龄」去删可能正在写的文件）。
+   */
+  statMtimeMs?(p: string): Promise<number | null>;
   rm(p: string, opts: { recursive?: boolean; force?: boolean }): Promise<void>;
   exists(p: string): Promise<boolean>;
 }
@@ -222,6 +227,7 @@ const defaultIo: JournalIo = {
   async readdirNames(d) { try { return await fs.readdir(d); } catch { return []; } },
   async readdirEntries(d) { try { return await fs.readdir(d, { withFileTypes: true }); } catch { return []; } },
   async lstat(p) { try { return await fs.lstat(p); } catch { return null; } },
+  async statMtimeMs(p) { try { return (await fs.stat(p)).mtimeMs; } catch { return null; } },
   async rm(p, o) { await fs.rm(p, o); },
   async exists(p) { try { await fs.access(p); return true; } catch { return false; } },
 };
@@ -241,6 +247,36 @@ export function isJournalBasename(name: string): boolean {
   if (!UUID_BASENAME_RE.test(name)) return false;
   return !name.startsWith(TMP_PREFIX);
 }
+
+/**
+ * 原子写半成品判据（**有意保守宽判**，t65 / t60-O3）。
+ *
+ * 实际命名（`src/utils/atomic-write.ts:216`）是 `<TMP_PREFIX><base>.<pid>.<randomHex(8)>.tmp`
+ * （randomHex(8) = 16 个 hex 字符；base 可含点，如 `settings.json`）。这里**只按前缀 + 后缀**判，
+ * 比实际命名更宽 —— 有意为之，理由三条：
+ *   ① `.dshcm.` 是本插件**专属保留前缀**（atomic-write.ts 的注释即写明「专属，用于 orphan 识别，
+ *      不误删其他程序文件」）；transactions/ 下不会出现别的程序的文件；
+ *   ② 判据只在 journal 的**三个目录**（active / completed / quarantine）内生效，且还要同时满足
+ *      「年龄达到 STALE_JOURNAL_TEMP_MS」；这三处是插件私有状态目录，用户不会往里放东西；
+ *   ③ 旧版/未来版若改动 tmp 命名形态，宽判仍能收尾，不必与 atomic-write 的命名同步演进。
+ * 防跑偏护栏（由 journal.test.ts 的 t65-O3 用例钉住）：必须**同时**满足 `.dshcm.` 前缀与 `.tmp` 后缀；
+ * 缺任一者一律不删（`.dshcm.notes.json` 无 .tmp → 保留；`notes.tmp` 无前缀 → 保留）。
+ */
+export function isJournalTempBasename(name: string): boolean {
+  return name.startsWith(TMP_PREFIX) && name.endsWith('.tmp');
+}
+
+/**
+ * 孤儿原子写 tmp 的年龄阈值（cross-F2）：60 分钟。
+ *
+ * atomicWriteFile 的 tmp 生命周期是「毫秒级写 → rename」，任何**达到**（≥）一小时的都是被杀进程
+ * 留下的孤儿（本进程/其它进程的**在写** tmp 都是新鲜的）—— 保守窗口保证绝不误删在途文件。
+ *
+ * 边界口径（t65 / t60-O1）：判据是 `age >= STALE_JOURNAL_TEMP_MS` —— **恰好 60:00.000 即视为陈旧**
+ * （1ms 之差没有安全意义，阈值本身就取得极保守；「达到即收」比「再多等 1ms」更早收尾）。
+ * 该边界由 journal.test.ts 的 t65-O1 用例钉住（恰好 60:00.000 删 / 差 1ms 留）。
+ */
+export const STALE_JOURNAL_TEMP_MS = 60 * 60 * 1000
 
 function parseSafe(text: string): OperationJournal | null {
   try {
@@ -280,6 +316,38 @@ export class JournalStore {
     await this.io.mkdir(this.completedDir(), { recursive: true });
     await this.io.mkdir(this.quarantineDir(), { recursive: true });
     await this.io.mkdir(this.recoveryHistoryDir(), { recursive: true });
+    // 孤儿原子写半成品清理点（cross-F2）：中断导入/恢复会在 active/ 留下
+    // `.dshcm.<opId>.json.<pid>.<rand>.tmp` —— 它既不是 journal（isJournalBasename 显式排除
+    // TMP_PREFIX）、也没有任何读取路径，此前只能在 transactions/ 里越积越多（扫描时表现为
+    // unreadable 幽灵项）。任何一次 journal 操作都会经过 ensureDirs，顺手回收超过
+    // STALE_JOURNAL_TEMP_MS 的那些；尽力而为，绝不让回收失败影响 journal 读写。
+    await this.sweepStaleTemps().catch(() => 0);
+  }
+
+  /**
+   * 回收 active/completed/quarantine 三个目录里的孤儿原子写 tmp，返回删除条数。
+   * 只删「名字是 TMP_PREFIX…tmp」且年龄**达到**（≥）STALE_JOURNAL_TEMP_MS 的条目；
+   * 注入 io 未提供 statMtimeMs 时整体跳过（判不了年龄就不动可能正在写的文件）。
+   */
+  async sweepStaleTemps(nowMs: number = Date.now()): Promise<number> {
+    const mtimeOf = this.io.statMtimeMs?.bind(this.io);
+    if (mtimeOf === undefined) return 0;
+    let removed = 0;
+    for (const dir of [this.activeDir(), this.completedDir(), this.quarantineDir()]) {
+      for (const name of await this.io.readdirNames(dir)) {
+        if (!isJournalTempBasename(name)) continue;
+        const mtime = await mtimeOf(path.join(dir, name));
+        // 保留「尚未达到阈值」的；恰好等于阈值 → 删（t65-O1 边界，由 t65-O1 用例钉住）
+        if (mtime === null || nowMs - mtime < STALE_JOURNAL_TEMP_MS) continue;
+        try {
+          await this.io.rm(path.join(dir, name), { force: true });
+          removed += 1;
+        } catch {
+          /* 竞态删除/占用：留给下一次 */
+        }
+      }
+    }
+    return removed;
   }
 
   /** 写 journal（atomic + 0600 + symlink reject）。返回写入后的 journal。 */

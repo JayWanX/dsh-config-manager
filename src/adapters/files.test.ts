@@ -511,3 +511,65 @@ test('F23: self adapter 拒绝写内部 recovery/control-plane 保留区（但�
     assert.equal(await dst.fs.exists(rel), false, `不得写入保留路径 ${rel}`);
   }
 });
+
+/* ---------------- ui-F2 / ui-F5 / ui-F3（t23 回归） ---------------- */
+
+test('ui-F2：白名单文件「存在但读不到」必须显式失败，绝不静默丢内容', async () => {
+  const src = makeContext('win32', 'C:\\Users\\alice');
+  await src.fs.writeFile('dsh-ssh.json', Buffer.from('{"hosts":[]}', 'utf8'));
+  const realRead = src.fs.readFile.bind(src.fs);
+  src.fs.readFile = async (p: string) => {
+    if (String(p).endsWith('dsh-ssh.json')) {
+      const e = new Error('EACCES: permission denied, open dsh-ssh.json');
+      (e as { code?: string }).code = 'EACCES';
+      throw e;
+    }
+    return realRead(p);
+  };
+  const adapter = new PluginFilesAdapter(['dsh-ssh.json']);
+  // base：export 静默成功且该文件凭空消失（warnings 为空）→ 本断言在 base 上失败
+  await assert.rejects(() => adapter.export(src, { includeSecrets: false }), /EACCES/);
+});
+
+test('ui-F2：约定配置目录里「存在但读不到」的文件同样必须显式失败', async () => {
+  const src = makeContext('win32', 'C:\\Users\\alice');
+  await src.fs.writeFile('plugin-config/locked.json', Buffer.from('{}', 'utf8'));
+  const realRead = src.fs.readFile.bind(src.fs);
+  src.fs.readFile = async (p: string) => {
+    if (String(p).endsWith('locked.json')) {
+      const e = new Error('EACCES: permission denied, open plugin-config/locked.json');
+      (e as { code?: string }).code = 'EACCES';
+      throw e;
+    }
+    return realRead(p);
+  };
+  const adapter = new PluginFilesAdapter([], 'plugin-config');
+  await assert.rejects(() => adapter.export(src, { includeSecrets: false }), /EACCES/);
+});
+
+test('ui-F5：技能名等于 baseDir（skills）时，服务侧虚拟路径不得被二次剥前缀', async () => {
+  const src = makeContext('win32', 'C:\\Users\\alice');
+  src.skills = {
+    async list() {
+      return [{ name: 'skills', description: '外壳技能' }];
+    },
+    async get(name: string) {
+      return { name, description: name, content: 'body of ' + name };
+    },
+  };
+  const adapter = new SkillsAdapter();
+  // base：虚拟路径 skills/SKILL.md 被 relPathOf 二次剥成 SKILL.md → 回落磁盘读 → ENOENT（整分区失败）
+  const preview = await adapter.preview(src, { includeSecrets: false });
+  assert.deepEqual(preview.items?.map((u) => u.id), ['skills:skills']);
+  const out = await adapter.export(src, { includeSecrets: false });
+  assert.deepEqual(out.data.files.map((f) => f.relativePath), ['skills/SKILL.md']);
+  assert.match(Buffer.from(out.data.files[0]!.data).toString(), /name: 'skills'/);
+});
+
+test('ui-F3：pluginFiles 的 files 条目级形状校验（validate 不得放过 null / 非字符串 relativePath）', async () => {
+  const adapter = new PluginFilesAdapter();
+  assert.equal((await adapter.validate({ version: 1, files: [] })).valid, true);
+  assert.equal(((await adapter.validate({ version: 1, files: [null] } as never)).valid), false);
+  assert.equal((await adapter.validate({ version: 1, files: [{ relativePath: 42 }] } as never)).valid, false);
+  assert.equal((await adapter.validate({ version: 1, files: [{ relativePath: '' }] } as never)).valid, false);
+});

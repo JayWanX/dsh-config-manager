@@ -179,7 +179,11 @@ export function chatgptChainOf(mapping: unknown, currentNode: unknown): string[]
   return longestChain(nodes);
 }
 
-function recordsFromConversation(item: Record<string, unknown>, ignored: Record<string, number>): {
+function recordsFromConversation(
+  item: Record<string, unknown>,
+  ignored: Record<string, number>,
+  maxNodes: number,
+): {
   records: TranscriptRecord[];
   raw: number;
   createdAt: number | undefined;
@@ -189,7 +193,8 @@ function recordsFromConversation(item: Record<string, unknown>, ignored: Record<
   const records: TranscriptRecord[] = [];
   let idIndex = 0;
   for (const nodeId of chain) {
-    if (idIndex > MAX_NODES) break;
+    // 节点触顶绝不静默（audit-foreign F4）：逐类计数 → 下游 unsupported-session-record 可见。
+    if (idIndex >= maxNodes) { irBump(ignored, 'chatgpt:max-nodes'); break; }
     idIndex += 1;
     const node = isRecord(mapping) ? (mapping as Record<string, unknown>)[nodeId] : undefined;
     const message = messageOf(node);
@@ -221,11 +226,15 @@ function recordsFromConversation(item: Record<string, unknown>, ignored: Record<
   return { records, raw: chain.length, createdAt: epochMsOf(item['create_time']) };
 }
 
-function sessionOf(item: Record<string, unknown>, cwd: string | undefined): ChatgptSessionFile | undefined {
+function sessionOf(
+  item: Record<string, unknown>,
+  cwd: string | undefined,
+  maxNodes: number,
+): ChatgptSessionFile | undefined {
   const id = str(item['id']) ?? str(item['conversation_id']);
   if (id === undefined) return undefined;
   const ignored: Record<string, number> = {};
-  const parsed = recordsFromConversation(item, ignored);
+  const parsed = recordsFromConversation(item, ignored, maxNodes);
   const title = str(item['title']) ?? '';
   return {
     id,
@@ -242,8 +251,11 @@ function sessionOf(item: Record<string, unknown>, cwd: string | undefined): Chat
 }
 
 /** 读显式给出的 ChatGPT 导出包（无显式路径 → 空结果 + source-needs-explicit-path） */
-export async function readChatgpt(opts: RootProbeOptions): Promise<SessionReadOutcome<ChatgptSessionFile>> {
+export async function readChatgpt(
+  opts: RootProbeOptions & { readonly maxNodes?: number },
+): Promise<SessionReadOutcome<ChatgptSessionFile>> {
   const platform = normalizePlatform(opts.platform);
+  const maxNodes = opts.maxNodes ?? MAX_NODES;
   const explicit = chatgptExplicitPath(opts);
   if (explicit === undefined) {
     return {
@@ -276,7 +288,7 @@ export async function readChatgpt(opts: RootProbeOptions): Promise<SessionReadOu
   let notObjects = 0;
   for (const item of list) {
     if (!isRecord(item)) { notObjects += 1; continue; }
-    const file = sessionOf(item, derived ? cwdBase : undefined);
+    const file = sessionOf(item, derived ? cwdBase : undefined, maxNodes);
     if (file === undefined || seen.has(file.id)) continue;
     seen.add(file.id);
     files.push(file);

@@ -67,6 +67,8 @@
 | G-32 | SQLite 只读探测的**写副作用**（WAL 库被就地打开会新建 `<db>-shm`/`<db>-wal`）与 `immutable=1` 在 `-wal` 非空时**静默丢数据** | ✅ 已处置（`sqlite.ts` 三态打开计划 direct / immutable / copy + 1 GiB 上限 + **绝不退回就地打开**；四条残余风险见 §3） |
 | G-33 | 备份不到外壳的 MCP 与技能：patch 只读 home 层、技能不落目录（issue #71） | ✅ 已修复（patch 行按层读取并写回原层、技能经 `ctx.skills` 服务收编、快照与回滚记录层，见 §1） |
 | G-34 | GitHub Gist 通道**刻意不外置 blob**（一次 GET 全量返回 / 单文件超限截断 / 文件数上限三条限制）→ 大分区（会话）不适合走 gist | ⚠️ **刻意设计的能力边界，不是缺陷**（gist 定位 = 配置类分区的低门槛远端；界面缺「gist 不适合大分区」提示，建议见 §3） |
+| G-35 | 同步通道对**远端 404 的可靠性假设**：blob GC 只按索引条目收集引用 → ① **索引可读但陈旧**（孤儿快照文件在索引外）、② **引用者文件这一读 404 而远端其实仍在**，两种形态都会把**仍在用的 blob** 回收 → **内容不可恢复** | ⚠️ **未修复（已核实残余，非原任务引入）**：t42 已堵住 `delete()` 侧的「索引 404 真缺失」；`upload()` 侧仍待 **t66/t67**（登记时 pending）；根治需通道侧补列举原语（WebDAV PROPFIND / S3 ListObjectsV2），见 §3 |
+| G-36 | **值形状判定的大小写边界**：auth-scheme `bearer` 原为大小写敏感（`bearer` / `BEARER` 明文进包且 refs/skipped 皆空）；厂商前缀 `sk-` / `AKIA` / `ghp_` / `github_pat_` 的大小写变体（`SK-` / `akia` / `GHP_` …）**按决策不剥离** | ⚠️ **部分修复（t72）**：`bearer` 已按 RFC 7235 / 6750 大小写不敏感剥离（含过剥控制）；厂商前缀**刻意保持敏感**、登记为已知边界（见 §3 G-36） |
 
 ---
 
@@ -513,8 +515,33 @@
 | 影响与现状 | ① 这是**能力边界不是缺陷**：不外置不会让 gist 通道坏掉，只是推送体积 / 文件数受 GitHub 限制，超限时的表现是**截断**（不是静默成功）。② **UI 目前没有「gist 不适合大分区 / 会话」的提示**（表单只做字段校验与「密钥只写凭据槽位」说明）—— **建议**在 gist 表单加一条提示（zh/en 字典），并在「通道 = gist 且勾选 `sessions`」时给出风险提示；**本条目只登记建议，表单改动不在本任务的 inScope（未动 `src/**`）**。 |
 | 验证方式 | `src/sync/gist/gist-transport.test.ts`（含 `truncated: true` 回落 `raw_url` 的用例）；`src/sync/blob-store.test.ts`（外置只在 transport 传了 BlobSink 时启用 —— gist 不传，引擎看到的仍是普通 `FilesSection`）。 |
 
----
+### G-35 同步通道对**远端 404 的可靠性假设**：GC 把「读不到」当「没引用」（两种形态，**均不可恢复**）
 
+| 项 | 内容 |
+|---|---|
+| 现象 | 同步通道的 blob GC（`gcBlobStore`，WebDAV / S3 两侧同型）**只按索引条目收集引用**：遍历 `index.json` 里每个快照文件、汇总 `blobRefs`，再回收保护窗（`BLOB_GC_MIN_AGE_MS = 10 分钟`）之外的「无人引用」blob。**两种形态都会让仍在用的 blob 被判成无人引用并真的删除**：① **索引可读但陈旧**：集合里存在**不在索引中的孤儿快照文件**（`upload()` 先 PUT 快照文件、后 PUT 索引，两步之间失败留下，见下），它引用的 blob 不进引用集；② **引用者文件这一读返回 404**（索引里明明列着它）：被判成「文件不存在 ⇒ 自然没有引用」而跳过。两种形态后果相同：**blob 被删、快照文件仍在** → 该快照再被读回时缺 blob，**内容不可恢复**（DSH 无回收站；快照回滚不覆盖 blob 字节）。形态 ② 的额外隐患：这个 404 **可能只是这一轮读失败**（后端瞬时异常 / 最终一致性 / 对象被外部改动），远端其实还有这份快照 —— 被删掉的却是它引用的 blob。 |
+| 触发路径 | ① 孤儿：`upload()` 的写序是**先 PUT 快照文件、再 PUT 索引**（保证索引永不引用不存在的文件），两步之间失败（进程被杀 / 网络中断 / 后端 5xx / 重试耗尽）即留下孤儿快照文件；此后任意一次删除触发的 GC 都可能回收它引用的 blob。② 假 404：GC 那一轮里某个引用者 GET 恰好 404，而远端仍有该对象。两条路径都**不产生告警**（索引可读、非空、看起来正常）。 |
+| 当前缓解 | t42（N1）已把 **`delete()` 路径**纳入三态：索引 **404 真缺失** → 不写回索引、不触发 GC（目标快照仍按用户意图删除）；索引读失败（非 404 / 非法 JSON / 逐条非法）→ **显式抛错**；索引有条目但某快照文件读不出来（非 404）→ **本轮放弃 GC**。`gcBlobStore` 读引用时也分了岔（t20/t42）：**引用者非 404 失败 → 放弃本轮 GC**（t22 C4 实测零 blob DELETE），**引用者 404 → 按「文件不存在」安全跳过**（t22 C3 实测 blob 被删 ⇒ 就是形态 ②）。 |
+| `upload()` 现状（本行会随 t66 收窄） | **尚未纳入三态语义**（登记时核对工作区：`readIndexDetailed` / `indexMissing` 只出现在 `delete()`；`upload()` 仍只调 `readIndex()`，即索引 404 仍被当空集合，随后用合并结果覆盖 PUT 权威索引）。t22 的实测（`outputs/bug-audit/review-sync-t22/t22-upload.out.txt`：`索引被抹掉其它快照 = true ; 引用者文件仍在却删了 blob = true`）即这条路径。**修它的是 t66（sync-audit）/ t67（cli-audit，独立验证），登记时两者均为 pending** ⇒ 本行按「**仍待 t66**」记录；t66 落地后本条**只收窄、不消失**：`upload()` 抹掉索引条目那一半被堵住，但「先 PUT 快照、后 PUT 索引之间失败留下的孤儿」（形态 ①）与「假 404」（形态 ②）仍在 GC 侧未堵。**t66 完成后请把本行改为「`upload()` 已纳入三态（t66）」并复核形态 ①/② 是否仍复现。** |
+| 为什么现在不修 | 形态 ① 的根治必须在 GC 前**枚举集合内的全部快照文件**（不能只信索引），而两条通道都**没有**这个协议原语：WebDAV 侧本客户端**未实现 PROPFIND**（`src/sync/webdav/webdav-transport.ts` 文件头明写），S3 侧也**没有 ListObjectsV2 封装**（transport 只有单键 GET/PUT/DELETE）。补原语 = 改两条 transport 的读模型 + 夹具与真机复验，属独立工作项；t42 按「最小修复、不放大风险」只堵了 404 那条不可恢复路径。形态 ② 另有一条**更便宜的半边修法**（见根治方向 ④），是否接受其代价属产品取舍。 |
+| 根治方向 | ① 通道侧补「列举」原语：WebDAV `PROPFIND`（`Depth: 1`）+ S3 `ListObjectsV2`（前缀 `<col>/`，取 `*.json`，排除 `index.json` / `blobs-index.json` / `blobs/`）；② GC 的引用集改为**索引条目 ∪ 列举结果**（**列举失败即本轮放弃 GC**，与既有「读不出来就放弃」同口径）；③ 列举结果与索引的**差集必须可见**（告警：集合里有 N 个未登记的孤儿快照文件），否则孤儿永远只是「碰巧没被这轮 GC 掉」；④ 形态 ② 可先行单独收口：把「引用者 404」也升级成「本轮放弃 GC」（与 500 同口径，fail-closed），代价是索引里残留的已删快照会让 GC 多轮空转，直到下一次 `delete()` / `upload()` 修好索引。 |
+| 影响面 | **只在上述两条触发路径下发生**：正常 push / pull / 自动同步不会产生孤儿（索引与快照文件在同一次 `upload()` 里写完），形态 ② 需要一次假 404，因此触发概率低；但后果是**不可恢复的内容丢失**。与 G-19（跨版本把 blob 分区读成空）、G-20（墓碑不代本机删除）同属「同步通道的有损边界」，三条互不重叠。 |
+| 证据 | ① 残余的来源、代价与方案取舍：`outputs/bug-audit/sync-fix-n1/REPAIR-t42-report.md` §0「为什么不选 ②（GC 前枚举集合内全部快照文件）」+ §3 第 1 条。② **独立验证复现，修复树与 base 树逐字相同**（⇒ 既有行为、非 t42 引入）：`outputs/bug-audit/verify-sync-r2/attacks-FIXED.out.txt` 与 `attacks-BASE.out.txt` 的 `RESIDUAL/INFO A6`（WebDAV）与 `RESIDUAL/INFO A8b`（S3）两行，实测 `blob 还在=false 孤儿快照还在=true`；判定见 `outputs/bug-audit/verify-sync-r2/VERIFY-t44-report.md` §4 表（A6 / A8b）+ §7 O2。③ **形态 ② 与 fail-closed 对照**：`outputs/bug-audit/review-sync-t22/t22-attack.out.txt` 的 `观察 C3（索引说 ccc 存在、其文件却 404）` blobDEL 非空、`PASS C4`（引用者 GET 500 → blobDEL=[]）；同族打穿路径（`upload()`）见 `outputs/bug-audit/review-sync-t22/t22-upload.out.txt`；t22 的判定原文在团队任务 t22 的 output 字段（verdict = needs_revision）。 |
+| 验证方式 | 形态 ①：`node outputs/bug-audit/verify-sync-r2/VERIFY-t44-attacks.mjs`（构造「索引可读 + 孤儿快照在索引外 + blob 超保护窗」，两棵树对照即上一条证据的 `attacks-{FIXED,BASE}.out.txt`）。形态 ②：`node outputs/bug-audit/review-sync-t22/t22-counterexamples.mjs`（C3/C4 对照）；`upload()` 路径：`node outputs/bug-audit/review-sync-t22/t22-upload-residue.mjs`。 |
+### G-36 值形状判定的**大小写边界**：`bearer` 已按 RFC 收口，厂商前缀按决策保留（t58-F1 / t72，2026-10-05）
+
+| 项 | 内容 |
+|---|---|
+| 现象 | `src/security/secret-scanner.ts` 的 `SECRET_VALUE_PATTERNS` 全为大小写敏感正则。对脱敏面影响最大的是 `Bearer [A-Za-z0-9._~+/=-]{8,}`：**auth-scheme 名在 RFC 7235 / 6750 里是大小写不敏感的**，`Authorization: bearer <token>` / `BEARER <token>` 都是合法写法，但改动前既不命中值形状判定、也不被字段名通道兜住（键名不敏感时，如 MCP 的 `headers: {'X-Custom': 'bearer …'}`）⇒ **明文进包且完全不可见**（`refs=[]`、`skipped=[]`）。厂商前缀（`sk-` / `AKIA` / `ghp_` / `github_pat_`）的大小写变体（`SK-…` / `Sk-…` / `akia…` / `GHP_…` / `GITHUB_PAT_…`）同样不命中。 |
+| 归属（**非 t40 引入**） | 模式表在 `src/security/**`；t40（env/headers 值形状通道）只是**复用**同一条判定 —— 依据：`git diff --stat -- src/security/` 为空，且 BASE 与 FIXED 对同一输入的判定**逐字相同**（`sk-`→`openai-style-key` / `SK-`→`null`；`Bearer …`→`bearer-token` / `bearer`、`BEARER`→`null`；`ghp_…`→`github-token` / `GHP_…`→`null`；`AKIA…`→`aws-access-key` / `akia…`→`null`）。 |
+| 本轮处置（t72） | ① **`bearer` 收口**：新增 `bearer-token-anycase`（`bearer` 逐位大小写类；**不加 `i` flag**，否则 token 侧两个大小写 lookahead 会互相等价而失效）。为防英文散文过剥，token 需至少满足其一：含非字母字符 / 大小写混排 / 长度 ≥ 24 ⇒ `bearer credentials are required`、`BEARER HEADER NOT SET` 不命中。规范形态 `Bearer …` 仍由原条目命中（**命中名 `bearer-token` 与行为逐字不变**）。② **厂商前缀保持敏感**并按本条登记 + 在用例里**钉成事实**（`src/security/secret-scanner.test.ts` 的 `t72-d`）。 |
+| 为什么厂商前缀不一起改 `i` | 判定是**全仓共用**的单一事实源：日志脱敏（`src/utils/logger.ts`）、导出/导入的字段值扫描（core 的 `defaultSecretScanner`）、界面渲染前的 `redact()` 都吃它。给 `sk-` / `AKIA` / `ghp_` 加 `i` 会连带放宽这三条通道的**全部**判定（`sk-` 出现在普通文本里的概率远高于 `Bearer `），而收益有限（`SK-…` 不是真实厂商形态：OpenAI 恒为小写 `sk-`、AWS 恒为大写 `AKIA`、GitHub 恒为小写 `ghp_`）。**要收必须先单独决策**，不能顺手改。 |
+| 已知残余（如实登记） | ① scheme 用非规范大小写**且** token 是 8–23 个**纯字母、单一大小写**时，`bearer-token-anycase` 不命中（例如 `bearer abcdefgh`）；规范 `Bearer abcdefgh` 不受此限（原条目只要求 8+ 字符）。② 大小写变体的厂商前缀（`SK-…` 等）**仍会明文进包** —— 这是本条登记的核心边界。③ **已订正（t78，2026-10-05）**：`src/security/redaction.ts` **不再有第二份独立实现**—— `REDACTION_VALUE_PATTERNS` 现**派生自** `secret-scanner.ts` 的 `SECRET_VALUE_PATTERNS`（同一份，仅补 `g` flag），界面/日志侧 `redact()` 路径**已跟随单一来源**；防漂移守卫 = `src/security/redaction.test.ts` 的 `t78-a`（结构）/ `t78-b`（行为）。**仍存的差异（如实保留，不得写成「已彻底一致」）**：显示层比 scanner **更宽** —— 示例/占位形态（`sk-your-key-here` / `Bearer example-token-here`）scanner **放行**、`redact()` **仍掩**；base 与现状同结果，属显示层**既有产品取舍**，由 `t78-f` 钉成 characterization（t83 后范围收窄）。 |
+| 影响面 | ② 的暴露面 = 「第三方 agent 配置 / 用户设置里恰好用大写前缀写密钥」，概率低但**一旦发生即明文落盘**；① 的暴露面更小（纯字母小写 token）。两者都用 `refs`/`skipped` 为空证明**不可见**（用户侧零提示）。 |
+| 验证方式 | `node --test src/security/secret-scanner.test.ts`（`t72-a` 大小写变体命中 / `t72-b` 规范形态不变 / `t72-c` 过剥控制 / `t72-d` 厂商前缀边界钉事实）；真实管道：`node --test src/foreign/mcp-value-shape.test.ts` 的 `t72-e`（env/headers/args 三通道零残留 + 引用名/码可见）。 |
+| 证据 | 来源 = `outputs/bug-audit/review-foreign-envhdr/REVIEW-t58-t40-report.md`（t58 §1/§2 的 payload 原文与谓词对照）+ `t58-verify-probe.mjs` / `t58-pipeline-check.mjs`；修复与本条登记 = t72。 |
+
+---
 ## 4. 不是缺口、但已知的有损点
 
 来自 `tests/conformance/README.md` §3.2 与规格 §7.3：

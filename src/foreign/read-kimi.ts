@@ -442,12 +442,14 @@ export async function readKimiSessions(opts: KimiReadOptions): Promise<SessionRe
     files.push({ id: input.id, parsed: cwd === undefined ? parsed : { ...parsed, cwd } });
   };
 
+  // 触顶必须**可见**（audit-foreign F4）：两个代次共同一个上限，任一 break 都置标志。
+  let truncated = false;
   /* 旧 Kimi CLI：<root>/<md5(workdir)>/<sid>/{wire.jsonl,state.json} */
   if (await isDirectory(legacyRoot)) {
     for (const workDirName of await listDirNames(legacyRoot)) {
       const workDir = joinFor(platform, legacyRoot, workDirName);
       for (const sid of await listDirNames(workDir)) {
-        if (files.length >= maxFiles) break;
+        if (files.length >= maxFiles) { truncated = true; break; }
         const sessionDir = joinFor(platform, workDir, sid);
         const wirePath = joinFor(platform, sessionDir, KIMI_WIRE_NAME);
         if (!(await isFile(wirePath))) continue;
@@ -467,7 +469,7 @@ export async function readKimiSessions(opts: KimiReadOptions): Promise<SessionRe
     for (const workspaceId of await listDirNames(codeRoot)) {
       const workspaceDir = joinFor(platform, codeRoot, workspaceId);
       for (const sid of await listDirNames(workspaceDir)) {
-        if (files.length >= maxFiles) break;
+        if (files.length >= maxFiles) { truncated = true; break; }
         const sessionDir = joinFor(platform, workspaceDir, sid);
         const wirePath = joinFor(platform, sessionDir, ...KIMI_CODE_WIRE_PARTS);
         if (!(await isFile(wirePath))) continue;
@@ -482,5 +484,6 @@ export async function readKimiSessions(opts: KimiReadOptions): Promise<SessionRe
     }
   }
 
+  if (truncated) findings.push({ code: 'source-unreadable', origin: 'kimi', detail: 'max-sessions-reached', count: maxFiles });
   return { files, readFindings: findings, extraCounts: { 'sessions.candidates': files.length } };
 }

@@ -239,17 +239,14 @@ export const S3_PROVIDER_LABEL_KEY: Record<S3CompatProvider, SyncKey> = {
 };
 
 /**
+/**
  * 云端点密钥槽位引用名（**仅供提示文案显示**；值的读写全在宿主）。
  *
- * 与宿主 `sync-config.ts` 的 `cloudSecretRef()` **同构**：`DSH_CONFIG_MANAGER_SYNC_<PROVIDER>_SECRET_ACCESS_KEY`，
- * gist 为 `DSH_CONFIG_MANAGER_SYNC_GIST_TOKEN`。这里镜像一份是既有做法（见 sync-api.ts 的
- * SYNC_CREDENTIAL_REF）：client 不能运行时 import 宿主模块（会把 node:fs 带进产物）。
+ * t88：**不再本地镜像** —— 声明处与派生实现都在零依赖的 utils/shared-constants.ts
+ * （与宿主 sync-config.ts 的 cloudSecretRef() 读同一张表），本文件只 re-export，
+ * 既有 import 路径（./sync-view.ts）不变；结构守卫见 sync/sync-config.test.ts 的 t88。
  */
-export function cloudSecretRefName(provider: string): string {
-  return provider === 'gist'
-    ? 'DSH_CONFIG_MANAGER_SYNC_GIST_TOKEN'
-    : 'DSH_CONFIG_MANAGER_SYNC_' + provider.toUpperCase() + '_SECRET_ACCESS_KEY';
-}
+export { cloudSecretRefName } from '../../utils/shared-constants.ts';
 
 /**
  * 云端点校验码 → 字典键（键名与码同名，形如 `cloud.endpointRequired`）。

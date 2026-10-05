@@ -11,7 +11,8 @@ import fs from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import path from 'node:path';
 
-import type { ClaudeCodeInput, ClaudeSessionInput, ClaudeSkillInput, ForeignSkip } from './types.ts';
+import { dirWalkSkips, resolveLimit, type DirWalkStats } from './session-read.ts';
+import type { ClaudeCodeInput, ClaudeSessionInput, ClaudeSkillInput, ForeignLimitOverrides, ForeignSkip } from './types.ts';
 
 export interface ClaudeCodeReadOptions {
   /** 用户 home（含 .claude 目录 / .claude.json） */
@@ -24,6 +25,8 @@ export interface ClaudeCodeReadOptions {
   maxSessionFiles?: number;
   /** 单个会话文件的上限（默认 32 MiB）；超限即不读并计入 unreadable，绝不截断 */
   maxSessionFileBytes?: number;
+  /** 可选上限覆盖（t36，装配层透传；缺省 = 上面各默认值逐字不变） */
+  limits?: ForeignLimitOverrides;
 }
 
 export interface ClaudeCodeReadResult {
@@ -80,6 +83,7 @@ async function walkFiles(
   start: string,
   maxFiles: number,
   maxBytes: number,
+  stats?: DirWalkStats,
 ): Promise<SkillFile[]> {
   const out: SkillFile[] = [];
   const stack: string[] = [start];
@@ -93,7 +97,8 @@ async function walkFiles(
       continue;
     }
     for (const d of dirents) {
-      if (out.length >= maxFiles) break;
+      // t36：条数触顶不再静默 —— 置标志，由调用方推 max-skill-files-reached。
+      if (out.length >= maxFiles) { if (stats !== undefined) stats.truncatedFiles = true; break; }
       const full = path.join(cur, d.name);
       if (d.isSymbolicLink()) continue;
       if (d.isDirectory()) {
@@ -102,7 +107,12 @@ async function walkFiles(
       }
       if (!d.isFile()) continue;
       const st = await statOrNull(full);
-      if (st === null || st.size > maxBytes) continue;
+      if (st === null) continue;
+      if (st.size > maxBytes) {
+        // t36：字节上限触顶同样不静默（统计条数，由调用方推 too-large）。
+        if (stats !== undefined) stats.tooLargeCount = (stats.tooLargeCount ?? 0) + 1;
+        continue;
+      }
       try {
         const data = await fs.readFile(full);
         out.push({ relativePath: path.relative(root, full).split(path.sep).join('/'), data });
@@ -118,6 +128,7 @@ async function readSkills(
   skillsDir: string,
   maxFiles: number,
   maxBytes: number,
+  stats?: DirWalkStats,
 ): Promise<ClaudeSkillInput[]> {
   let dirents: Dirent[];
   try {
@@ -129,7 +140,7 @@ async function readSkills(
   for (const d of dirents) {
     if (!d.isDirectory()) continue;
     const dir = path.join(skillsDir, d.name);
-    const files = await walkFiles(dir, dir, maxFiles, maxBytes);
+    const files = await walkFiles(dir, dir, maxFiles, maxBytes, stats);
     if (files.length === 0) continue;
     out.push({ name: d.name, files });
   }
@@ -193,8 +204,8 @@ async function countCommands(commandsDir: string): Promise<number> {
 
 export async function readClaudeCode(opts: ClaudeCodeReadOptions): Promise<ClaudeCodeReadResult> {
   const home = opts.homeDir;
-  const maxFileBytes = opts.maxFileBytes ?? DEFAULT_MAX_FILE;
-  const maxSkillFiles = opts.maxSkillFiles ?? DEFAULT_MAX_SKILL_FILES;
+  const maxFileBytes = resolveLimit(opts.limits?.maxFileBytes, opts.maxFileBytes, DEFAULT_MAX_FILE);
+  const maxSkillFiles = resolveLimit(opts.limits?.maxSkillFiles, opts.maxSkillFiles, DEFAULT_MAX_SKILL_FILES);
   const skipped: ForeignSkip[] = [];
   const unreadable: string[] = [];
   const input: ClaudeCodeInput = {};
@@ -229,8 +240,11 @@ export async function readClaudeCode(opts: ClaudeCodeReadOptions): Promise<Claud
     skipped.push({ code: 'source-unreadable', origin: '.claude/CLAUDE.md' });
   }
 
-  const skills = await readSkills(path.join(claudeDir, 'skills'), maxSkillFiles, maxFileBytes);
+  const skillStats: DirWalkStats = {};
+  const skills = await readSkills(path.join(claudeDir, 'skills'), maxSkillFiles, maxFileBytes, skillStats);
   if (skills.length > 0) input.skills = skills;
+  // t36：技能文件遍历的条数/字节触顶必须可见（origin 只用包内相对标签）
+  skipped.push(...dirWalkSkips(skillStats, 'skills', maxSkillFiles));
 
   const commandCount = await countCommands(path.join(claudeDir, 'commands'));
   if (commandCount > 0) input.commandCount = commandCount;

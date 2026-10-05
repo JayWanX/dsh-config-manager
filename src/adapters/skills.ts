@@ -193,10 +193,20 @@ export class SkillsAdapter extends FileCollectionAdapter {
       }
       if (definition === undefined || typeof definition.content !== 'string') continue;
       this.serviceSkills.set(rel, definition);
-      extra.push(rel);
+      // ui-F5：listing.paths 是「含 baseDir」的路径（与磁盘清单同口径），服务侧算出来的是
+      // **分区内相对路径** —— 必须补回 baseDir 前缀再入列。否则技能名恰好等于 baseDir（`skills`，
+      // 合法技能名）时，虚拟路径 skills/SKILL.md 会在 collect() 里被 relPathOf() 二次剥前缀成
+      // SKILL.md：单元 id 变了、readMember 查不到服务定义 → 回落磁盘读 → ENOENT → 整个 skills
+      // 分区预览/导出失败（导出侧被 exporter 整块剔除）。
+      extra.push(this.listRelPathOf(rel));
     }
     if (extra.length === 0) return listing;
     return { ...listing, paths: [...listing.paths, ...extra] };
+  }
+
+  /** 分区内相对路径 → 枚举清单口径（含 baseDir；本分区 baseDir 恒为 `skills`，没有根分区形态）。 */
+  private listRelPathOf(rel: string): string {
+    return normalizePath(`${this.baseDir}/${rel}`);
   }
 
   /**

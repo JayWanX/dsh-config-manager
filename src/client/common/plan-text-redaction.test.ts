@@ -146,8 +146,9 @@ const RENDER_POINTS: RenderPoint[] = [
   {
     id: 'restore-plan-detail',
     file: 'src/client/snapshots/RestorePlanView.tsx',
-    redacted: R('（{redact(row.detail)}）'),
-    bare: R('（{row.detail}）'),
+    // client-F6：括号本身进字典（common.parens），宿主文本仍然先过 redact
+    redacted: R("{t('common.parens', { text: redact(row.detail) })}"),
+    bare: R("{t('common.parens', { text: row.detail })}"),
     why: '恢复计划行明细（宿主拼装）',
   },
   {
@@ -278,7 +279,128 @@ const RENDER_POINTS: RenderPoint[] = [
     bare: R('<Banner kind="error">{error}</Banner>'),
     why: 'release notes 拉取错误文本（GitHub 状态/网络响应）',
   },
+  /* ---------------- toast 错误文本渲染点（client-F4：T11 修复登记） ---------------- */
+  {
+    id: 'toast-error-text-recovery',
+    file: 'src/client/recovery/RecoveryPanel.tsx',
+    redacted: /const redactErrorText = \(err: unknown\): string => redact\(err instanceof Error \? err\.message : String\(err\)\)/,
+    bare: /const redactErrorText = \(err: unknown\): string => err instanceof Error \? err\.message : String\(err\)/,
+    why: '恢复面板的宿主/网络错误文本（13 处 toast）此前裸渲染',
+  },
+  {
+    id: 'toast-error-text-library',
+    file: 'src/client/library/LibraryActions.tsx',
+    redacted: /const redactErrorText = \(err: unknown\): string => redact\(err instanceof Error \? err\.message : String\(err\)\)/,
+    bare: /const redactErrorText = \(err: unknown\): string => err instanceof Error \? err\.message : String\(err\)/,
+    why: '产物库动作层错误文本（9 处）此前裸渲染',
+  },
+  {
+    id: 'toast-error-text-backup-schedule',
+    file: 'src/client/snapshots/BackupScheduleCard.tsx',
+    redacted: /const redactErrorText = \(err: unknown\): string => redact\(err instanceof Error \? err\.message : String\(err\)\)/,
+    bare: /const redactErrorText = \(err: unknown\): string => err instanceof Error \? err\.message : String\(err\)/,
+    why: '定时备份卡错误文本（2 处）此前裸渲染',
+  },
+  {
+    id: 'toast-error-text-export',
+    file: 'src/client/export/ExportView.tsx',
+    redacted: /const redactErrorText = \(err: unknown\): string => redact\(err instanceof Error \? err\.message : String\(err\)\)/,
+    bare: /const redactErrorText = \(err: unknown\): string => err instanceof Error \? err\.message : String\(err\)/,
+    why: '导出下载失败文本此前裸渲染',
+  },
+  {
+    id: 'toast-error-text-runs',
+    file: 'src/client/common/RunsCenter.tsx',
+    redacted: /const redactErrorText = \(err: unknown\): string => redact\(err instanceof Error \? err\.message : String\(err\)\)/,
+    bare: /const redactErrorText = \(err: unknown\): string => err instanceof Error \? err\.message : String\(err\)/,
+    why: '运行中心错误文本（2 处，同文件其它 3 处已脱敏）',
+  },
 ]
+
+/**
+ * VA-2 修复 + t56 边界修正：裸 toast 错误文本的**全文件**判据。
+ *
+ * 判据：`toast.error(` / `toast.warn(`（**含可选链** `toast?.error(`）的参数里出现
+ *  ① `.message`（未被 `redact…` 包装）—— 把 Error 原文交给 toast；或
+ *  ② `String(<标识符>)`（**未被 `redact…` 包装、且不在 `t(...)` 里**）—— 把非 Error 的原始值交给 toast，
+ *就记 1 处裸渲染。该判据不依赖登记表里的某个具体写法，所以「往已登记文件追加一个新的裸渲染点」也会被扫到（VA-2 的原始绕过手法）。
+ *
+ * t56 的两处修正（t46 反向攻击登记的 R1/R2）：
+ *  - **R1（逃逸，已修）**：`String(...)` 分支原先是变量名白名单（`err|e|error`），于是 `toast.error(String(problem))`
+ *    这种同样裸的写法逃逸 → 现在匹配**任意标识符**。**但不能一刀切**：`String(...)` 在 `t(...)` 里极常见且合法
+ *    （`t('import.failed', { count: String(failedCount) })` 是数值格式化，不是错误原文），所以 `String(...)` 只在
+ *    **不在 `t(...)` 内**时才判裸 —— 这是为「不把合法写法误伤」而做的窄化，不是放水。
+ *  - **R2（误报，已修）**：判定前先把**被 `redact(...)` / `redactErrorText(...)` 包住的片段**整段抹空（`blankRanges`），
+ *    于是 `toast.error(t('k', { detail: redact(err.message) }))` 不再被误报。抹空按位置进行（长度不变），
+ *    未被包装的 `.message` / `String(x)` 原样保留 ⇒ R1/R2 的修改不会互相抵消。
+ *
+ * R3（观察，部分处理）：可选链 `toast?.error(` 已纳入；**别名**形态（`const x = toast; x.error(...)`）仍不在扫描范围
+ * —— 覆盖它需要跨语句数据流分析（纯字符串扫描做不到），而当前仓库 0 处别名写法，宁可不做也不引入
+ * 「任何 `x.error` 都算违规」这种粗糙规则。
+ *
+ * 已知限制（如实登记）：`t('k', { message: String(problem) })`（把原始值经 `String` 塞进字典参数）不被判裸 ——
+ * 该形态与 `String(count)` 在源码上不可区分（需类型/数据流），当前仓库 0 处；`.message` 形态与 t 外的 `String(...)` 均已覆盖。
+ */
+const TOAST_CALL = /toast\??\.(?:error|warn)\s*\(/
+const NAKED_MESSAGE = /\.message\b/
+const NAKED_STRING = /String\s*\(\s*[A-Za-z_$][\w$]*\s*\)/
+
+/** 从 `argStart` 起做括号配平（跳过字符串字面量里的括号），返回配对右括号之后的下标（找不到则 src.length） */
+function closeParenAfter(src: string, argStart: number): number {
+  let depth = 1
+  let j = argStart
+  while (j < src.length && depth > 0) {
+    const ch = src[j]
+    if (ch === '"' || ch === "'" || ch === '`') {
+      j += 1
+      while (j < src.length && src[j] !== ch) { if (src[j] === '\\') j += 1; j += 1 }
+    } else if (ch === '(') depth += 1
+    else if (ch === ')') depth -= 1
+    j += 1
+  }
+  return j
+}
+
+/** 源码里与 `namePattern`（形如 `foo(`）匹配的全部调用区间 */
+function callRanges(src: string, namePattern: RegExp): { start: number; end: number; argStart: number }[] {
+  const re = new RegExp(namePattern.source, namePattern.flags.includes('g') ? namePattern.flags : namePattern.flags + 'g')
+  const out: { start: number; end: number; argStart: number }[] = []
+  for (let m = re.exec(src); m !== null; m = re.exec(src)) {
+    const argStart = m.index + m[0].length
+    out.push({ start: m.index, end: closeParenAfter(src, argStart), argStart })
+  }
+  return out
+}
+
+/** 把区间整段抹成空格（**长度不变**，保证其余字符的下标与相对位置不变） */
+function blankRanges(src: string, ranges: readonly { start: number; end: number }[]): string {
+  const chars = [...src]
+  for (const r of ranges) {
+    for (let i = r.start; i < r.end; i += 1) { if (chars[i] !== '\n' && chars[i] !== '\r') chars[i] = ' ' }
+  }
+  return chars.join('')
+}
+
+/** 统计源码里「把宿主/网络错误原文直接交给 toast」的调用数（0 = 合规） */
+function countNakedToast(src: string): number {
+  const redactMasked = blankRanges(src, callRanges(src, /\b(?:redactErrorText|redact)\s*\(/))
+  const tMasked = blankRanges(redactMasked, callRanges(src, /\bt\s*\(/))
+  let count = 0
+  for (const call of callRanges(src, TOAST_CALL)) {
+    const argsRedactMasked = redactMasked.slice(call.argStart, call.end)
+    const argsMasked = tMasked.slice(call.argStart, call.end)
+    if (NAKED_MESSAGE.test(argsRedactMasked) || NAKED_STRING.test(argsMasked)) count += 1
+  }
+  return count
+}
+
+/**
+ * 把匹配文本里最外层的 `redact(...)` 调用剥掉（支持一层嵌套），得到「被改裸后」的文本。
+ * 用于反死正则自检：凡是「剥掉 redact 包装即得裸形态」的登记点，bare 都必须能命中剥出来的文本。
+ */
+function unwrapRedact(text: string): string {
+  return text.replace(/redact\(((?:[^()]|\([^()]*\))*)\)/, '$1')
+}
 
 /** 读源码（每个点各自读一次，避免缓存掩盖变异） */
 function read(file: string): string {
@@ -299,8 +421,38 @@ test('安全守卫（按渲染点）：每个已登记的渲染点都必须过 r
       1,
       `[${p.id}] ${p.file}：期望恰好 1 处已脱敏渲染（${p.redacted}），实际 ${hits} 处 —— 少了 = 被改裸/被删，多了 = 请更新本登记表`,
     )
-    assert.doesNotMatch(src, p.bare, `[${p.id}] ${p.file}：存在裸渲染 ${p.bare}（${p.why}）`)
+    // VA-2 修复：必须用「命中数 == 0」判定 —— doesNotMatch 在 bare 被写歪成死正则时**恒真**（漏报）。
+    const bareHits = countMatches(src, p.bare)
+    assert.equal(bareHits, 0, `[${p.id}] ${p.file}：存在 ${bareHits} 处裸渲染（${p.bare}）—— ${p.why}`)
   }
+  // VA-2 修复：全文件子句，不依赖登记表里的某个具体写法 —— 往已登记文件**追加**一个新的裸渲染点也会被扫到。
+  for (const file of [...new Set(RENDER_POINTS.map((p) => p.file))]) {
+    const naked = countNakedToast(read(file))
+    assert.equal(naked, 0, `${file}：存在 ${naked} 处裸 toast 错误文本渲染（必须过 redact() / redactErrorText()）`)
+  }
+})
+
+test('安全守卫（按渲染点）：bare 正则不得是死代码（剥掉 redact(...) 包装后必须命中）', () => {
+  // VA-2 的机制：bare 曾被写成「比合法裸形态多一个右括号」的死正则 —— doesNotMatch 恒真 ⇒ 永远拦不住。
+  // 这里把每个点的 redacted 命中文本剥掉最外层 redact(...) 包装，再要求 bare 能命中它：
+  // 正则写歪即红灯（等价于对 30+ 个登记点做一次「变异 → 必须红」的自证）。
+  let checked = 0
+  for (const p of RENDER_POINTS) {
+    const src = read(p.file)
+    const m = new RegExp(p.redacted.source, p.redacted.flags.replace('g', '')).exec(src)
+    assert.notEqual(m, null, `[${p.id}] ${p.file}：redacted 未命中，无法做死正则自检`)
+    const matched = (m as RegExpExecArray)[0]
+    const naked = unwrapRedact(matched)
+    // 变量换名式登记点（bare 与 redacted 不是「同一段文本的去包装形态」）不适用本自检
+    if (naked === matched) continue
+    assert.match(
+      naked,
+      p.bare,
+      `[${p.id}] ${p.file}：bare 是死代码 —— 把「${matched}」剥成裸形态「${naked}」后 bare（${p.bare}）匹配不到`,
+    )
+    checked++
+  }
+  assert.ok(checked >= 20, `应有 >= 20 个「去包装」型登记点参与死正则自检（实际 ${checked}）`)
 })
 
 test('安全守卫（按渲染点）：登记表本身可用（file 存在、id 唯一、file/bare 成对）', () => {
@@ -318,4 +470,22 @@ test('安全守卫（按渲染点）：登记表本身可用（file 存在、id 
       `${p.file}：必须从 security/redaction.ts 导入 redact`,
     )
   }
+})
+
+test('安全守卫（按渲染点）：NAKED_TOAST_CALL 的两处边界（t56：R1 String 逃逸 / R2 嵌套 redact 误报）', () => {
+  const naked = (snippet: string): boolean => countNakedToast(snippet) > 0
+  // R1：任意变量名的 String(...) 都算裸（修复前只认 err|e|error → 逃逸）
+  assert.ok(naked('toast.error(String(problem))'), 'R1：String(problem) 必须判裸')
+  assert.ok(naked('toast.warn(String(cause))'), 'R1：toast.warn 同理')
+  assert.ok(naked('toast.error(err.message)'), '`.message` 形态仍判裸')
+  // R2：参数里**已经过** redact 包装的不算裸（修复前会误报）
+  assert.equal(naked("toast.error(t('k', { detail: redact(err.message) }))"), false, 'R2：嵌套 redact 不得误报')
+  assert.equal(naked('toast.error(redactErrorText(err))'), false, 'redactErrorText 包装合法')
+  assert.equal(naked('toast.error(redact(String(err)))'), false, 'redact 包裹 String(err) 合法')
+  // 合法形态与变量形态仍绿（与 t45 建立的判据一致；防「一律算违规」的粗糙规则）
+  assert.equal(naked("toast.error(t('recovery.sessions.repairFailed') + ': ' + redactErrorText(err))"), false, '合法：t(...) + redactErrorText')
+  assert.equal(naked("toast.error(t('k', { message }))"), false, '合法：变量（调用前已 redact）')
+  assert.equal(naked("toast.error(t('k'))"), false, '合法：纯字典文案')
+  // R3：可选链已纳入扫描
+  assert.ok(naked('toast?.error(String(problem))'), 'R3：toast?.error 已纳入')
 })

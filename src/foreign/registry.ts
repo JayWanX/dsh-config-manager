@@ -96,6 +96,10 @@ export function isForeignSourceId(v: string): v is ForeignSourceId {
  * `env` 只用于**位置覆盖**判定（CLAUDE_CONFIG_DIR / HERMES_HOME / CODEX_HOME / COPILOT_HOME），
  * 来源不得把 env 里的值写进产物（凭据铁律：值绝不进包）。
  */
+/** 可选上限覆盖：定义在叶子模块 types.ts（读器都 import 它，避免读器 → registry 的 type 环） */
+import type { ForeignLimitOverrides } from './types.ts';
+export type { ForeignLimitOverrides };
+
 export interface ForeignSourceContext {
   /** 用户 home（Windows = %USERPROFILE%，macOS/Linux = $HOME） */
   readonly homeDir: string;
@@ -123,6 +127,11 @@ export interface ForeignSourceContext {
    * 真值表离线算路径）时由调用方显式传入。
    */
   readonly platform?: ForeignPlatform;
+  /**
+   * 可选上限覆盖（t36，**additive**）：缺省 undefined = 各来源默认值逐字不变。
+   * 装配层（builtinForeignSources 的 build / sessionSourceOf）用 limitOverridesOf() 原样透传给读器。
+   */
+  readonly limits?: ForeignLimitOverrides;
 }
 
 /** 只读探测结果（GUI/CLI 的「本机装了什么」） */
@@ -474,7 +483,7 @@ export function builtinForeignSources(): readonly ForeignSource[] {
         return { found: probed.paths.length > 0, paths: probed.paths, skipped: probed.skipped };
       },
       async build(ctx) {
-        const read = await readClaudeCode({ homeDir: ctx.homeDir });
+        const read = await readClaudeCode({ homeDir: ctx.homeDir, ...(ctx.limits !== undefined ? { limits: ctx.limits } : {}) });
         // 会话转码版本必须由宿主解析后传入（绝不猜）；缺省 = 一条都不转并整批报码
         if (ctx.targetSessionFormatVersion !== undefined) {
           read.input.targetSessionFormatVersion = ctx.targetSessionFormatVersion;
@@ -511,7 +520,7 @@ export function builtinForeignSources(): readonly ForeignSource[] {
         };
       },
       async build(ctx) {
-        const read = await readHermes({ homeDir: ctx.homeDir, env: ctx.env });
+        const read = await readHermes({ homeDir: ctx.homeDir, env: ctx.env, ...(ctx.limits !== undefined ? { limits: ctx.limits } : {}) });
         return convertHermes(read.input);
       },
     },
@@ -551,6 +560,7 @@ export function builtinForeignSources(): readonly ForeignSource[] {
         const read = await readCursor({
           homeDir: ctx.homeDir,
           ...(ctx.projectDir !== undefined ? { projectDir: ctx.projectDir } : {}),
+          ...(ctx.limits !== undefined ? { limits: ctx.limits } : {}),
         });
         return convertCursor(read.input);
       },
@@ -581,7 +591,7 @@ export function builtinForeignSources(): readonly ForeignSource[] {
         };
       },
       async build(ctx) {
-        const read = await readCodex({ homeDir: ctx.homeDir, env: ctx.env });
+        const read = await readCodex({ homeDir: ctx.homeDir, env: ctx.env, ...(ctx.limits !== undefined ? { limits: ctx.limits } : {}) });
         return convertCodex(read.input);
       },
     },
@@ -610,7 +620,7 @@ export function builtinForeignSources(): readonly ForeignSource[] {
         };
       },
       async build(ctx) {
-        const read = await readCopilot({ homeDir: ctx.homeDir, env: ctx.env });
+        const read = await readCopilot({ homeDir: ctx.homeDir, env: ctx.env, ...(ctx.limits !== undefined ? { limits: ctx.limits } : {}) });
         return convertCopilot(read.input);
       },
     },

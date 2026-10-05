@@ -325,6 +325,19 @@ export const zh = {
   'checkpoint.rewind.confirm': '我确认：将用该检查点覆盖工作区 / 配置 / 会话（新建的文件不会被删除）',
   'checkpoint.delete': '删除检查点',
   'checkpoint.legacy.guard': '回滚前的保护点',
+  // t54：中断的档案复制残留（cross-F3）—— 独立形态 + 只给删除
+  'recovery.incomplete.title': '未完成的档案副本',
+  'recovery.incomplete.hint': '这些目录带「复制进行中」标记但没有 package.json，是复制被中断留下的半截副本；不能启动，只能删除（只列出有标记的目录 —— 用户手工建的目录不会出现在这里）。',
+  'recovery.incomplete.from': '来源：{name}',
+  'recovery.incomplete.startedAt': '开始于 {time}',
+  'recovery.incomplete.dir': '目录：{dir}',
+  'recovery.incomplete.delete': '删除残留',
+  'recovery.incomplete.deleteConfirm': '我确认：物理删除该残留目录（不可恢复）',
+  'recovery.incomplete.locked': '安全模式正在阻断写操作，删除未执行：{reason}',
+  'recovery.incomplete.unlock': '解除安全模式',
+  // t89：枚举失败 ≠ 没有残留（此前两者在界面上同形）
+  'recovery.incomplete.unreadable.title': '未能读取残留列表',
+  'recovery.incomplete.unreadable.hint': '本次枚举残留目录失败 —— 这不等于「没有残留」。请确认档案目录可读后重试。',
 } as const;
 
 export const en: Record<keyof typeof zh, string> = {
@@ -627,6 +640,18 @@ export const en: Record<keyof typeof zh, string> = {
   'checkpoint.rewind.confirm': 'I confirm: this checkpoint will overwrite the workspace / config / session (files created later are not deleted)',
   'checkpoint.delete': 'Delete checkpoint',
   'checkpoint.legacy.guard': 'Pre-rewind protection point',
+  'recovery.incomplete.title': 'Unfinished profile copy',
+  'recovery.incomplete.hint': 'These directories carry a "copy in progress" marker but no package.json: a half-finished copy left by an interrupted copy. They cannot be launched, only deleted (only marked directories are listed — hand-made directories never appear here).',
+  'recovery.incomplete.from': 'From: {name}',
+  'recovery.incomplete.startedAt': 'Started {time}',
+  'recovery.incomplete.dir': 'Directory: {dir}',
+  'recovery.incomplete.delete': 'Delete leftover',
+  'recovery.incomplete.deleteConfirm': 'I confirm: physically delete this leftover directory (irreversible)',
+  'recovery.incomplete.locked': 'Safe mode is blocking writes; the delete did not run: {reason}',
+  'recovery.incomplete.unlock': 'Clear safe mode',
+  // t89: an enumeration failure is not the same as "no leftovers" (previously rendered identically)
+  'recovery.incomplete.unreadable.title': 'Could not read the leftover list',
+  'recovery.incomplete.unreadable.hint': 'Enumerating leftover directories failed this time — this is not the same as "no leftovers". Check that the profiles directory is readable, then retry.',
 };
 
 /** 字典键联合（注册处 compile-time 校验）。 */

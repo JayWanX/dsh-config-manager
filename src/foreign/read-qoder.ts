@@ -145,11 +145,13 @@ export async function readQoderSessions(opts: QoderReadOptions): Promise<Session
     return { files, readFindings: findings, extraCounts: { 'sessions.candidates': 0 } };
   }
 
+  // 触顶必须**可见**（audit-foreign F4）。
+  let truncated = false;
   for (const project of await listDirNames(projectsDir)) {
     const projectDir = joinFor(platform, projectsDir, project);
     const derivedCwd = await derivedCwdOf(project, platform);
     for (const name of await listFileNames(projectDir, (n) => QODER_SESSION_FILE_RE.test(n))) {
-      if (files.length >= maxFiles) break;
+      if (files.length >= maxFiles) { truncated = true; break; }
       const label = QODER_PROJECTS_REL + '/' + project + '/' + name;
       const text = await readTextGuarded(joinFor(platform, projectDir, name), label, maxBytes, findings);
       if (text === null) continue;
@@ -167,6 +169,7 @@ export async function readQoderSessions(opts: QoderReadOptions): Promise<Session
     }
   }
 
+  if (truncated) findings.push({ code: 'source-unreadable', origin: 'qoder', detail: 'max-sessions-reached', count: maxFiles });
   const extraSkips: ForeignSkip[] = subagents > 0
     ? [{ code: 'unsupported-session-record', origin: 'subagents', detail: 'subagent-transcript', count: subagents }]
     : [];

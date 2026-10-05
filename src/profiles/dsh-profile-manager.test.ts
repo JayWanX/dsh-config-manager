@@ -392,3 +392,40 @@ test('模板清单：与官方 shipped template 的 bundle 组合一致（含 ba
   assert.equal(byId.get('acp')?.patchReload, 'startup')
   assert.equal(byId.get('web')?.patchReload, 'live')
 })
+
+/**
+ * routes-F2 回归：保留名/独占名的**大小写变体**必须与原名同罪。
+ *
+ * 现场：Windows / macOS 默认文件系统大小写不敏感，而 checkProfileName 原先用
+ * \`RESERVED_PROFILE_NAMES.includes(trimmed)\` 做**精确**比较 —— \`Desktop\` / \`Web\` 直接绕过
+ * 保留名校验建出目录；随后 remove / rename 又按大小写不敏感的 isManagedProfileName 以
+ * managedProfile 拒绝同一个名字 → **建得出来、删不掉**，甚至占用 Electron desktop 的目录名。
+ */
+test('routes-F2 回归：保留名大小写不敏感（大小写变体一律 reservedName，不得建出删不掉的档案）', async () => {
+  for (const reserved of RESERVED_PROFILE_NAMES) {
+    const variants = [reserved.toUpperCase(), reserved.charAt(0).toUpperCase() + reserved.slice(1)]
+    for (const variant of variants) {
+      assert.equal(checkProfileName(variant), 'reservedName', '大小写变体必须按保留名拒绝: ' + variant)
+    }
+  }
+  // 反向控制：以保留名为前缀的普通名不得被误伤
+  assert.equal(checkProfileName('desktop-prod'), null)
+  assert.equal(checkProfileName('webapp'), null)
+  assert.equal(checkProfileName('Headless2'), null)
+
+  const { mgr, home, cleanup } = makeManager()
+  try {
+    mgr.create('work', 'base')
+    for (const bad of ['Desktop', 'DESKTOP', 'Web', 'Headless']) {
+      assert.throws(() => mgr.create(bad, 'base'), (e: unknown) => e instanceof DshProfileError && e.code === 'reservedName', 'create(' + bad + ') 必须按保留名拒绝')
+      assert.throws(() => mgr.rename('work', bad), (e: unknown) => e instanceof DshProfileError && e.code === 'reservedName', 'rename(work -> ' + bad + ') 必须按保留名拒绝')
+      await assert.rejects(mgr.copy('work', bad), (e: unknown) => e instanceof DshProfileError && e.code === 'reservedName', 'copy(work -> ' + bad + ') 必须按保留名拒绝')
+    }
+    assert.deepEqual(mgr.list().map((p) => p.name), ['work'], '被拒的名字不得在磁盘上留下目录（大小写不敏感 FS 上 Desktop 就是 profiles/desktop）')
+    assert.equal(existsSync(join(home, 'profiles', 'desktop')), false, '不得建出 Electron 独占档案的目录')
+    // 同一条不变量：已被拒绝的名字不可能成为「删不掉的档案」
+    assert.throws(() => mgr.remove('Desktop'), (e: unknown) => e instanceof DshProfileError && e.code === 'managedProfile')
+  } finally {
+    cleanup()
+  }
+})

@@ -514,7 +514,7 @@ win32 | darwin | linux | freebsd | openbsd | aix | sunos | android | cygwin | ha
 | `prompts` | `prompts` 必须是数组 | `src/schema/config.ts` 的 `validateSectionData`（`array` 分支） |
 | `workspaces` | `workspaces` 必须是数组 | `src/schema/config.ts` 的 `validateSectionData`（`array` 分支） |
 | `credentialsStatus` | `credentials` 必须是数组 | `src/schema/config.ts` 的 `validateSectionData`（`array` 分支） |
-| 文件类 6 个 | `files` 必须是数组（仅内存模型路径会走到） | `src/schema/config.ts` 的 `validateSectionData`（`files` 分支） |
+| 文件类 6 个 | `files` 必须是数组；**每条记录的 `relativePath` 必须是非空字符串**（adapter `validate()` 逐条判，取证见 §3.3.1 B 之后的「写侧硬约束」） | `src/schema/config.ts` 的 `validateSectionData`（`files` 分支）+ `src/adapters/file-collection.ts:409-410` / `src/adapters/plugin-files.ts:178-179`（error 码 `adapter.validate.fileRelativePath`） |
 
 **所有分区**（除文件类在 ZIP 内无 JSON 的情形）都要求 `version === 1`（`src/schema/versions.ts` 的 `sectionDataVersionIssue`（`version === 1` 判定））。但**校验强度按「低于 / 等于 / 高于 1」三档不同**，这一点极易误读：
 
@@ -564,6 +564,20 @@ win32 | darwin | linux | freebsd | openbsd | aix | sunos | android | cygwin | ha
 1. **归档条目名与 `relativePath` 不是同一根字符串**：条目名含前缀、`relativePath` 不含前缀。第三方 exporter 必须写 `prefix + relativePath`，第三方 importer 必须 `slice(prefix.length)`。
 2. **`relativePath` 保留原样、目标路径被归一化**：`custom/skills/probe//empty-seg.md` → `relativePath = 'probe//empty-seg.md'` → 目标文件实际落在 `skills/probe/empty-seg.md`。**同一个文件在 `FilesSection` 里的 `relativePath` 与它最终落盘的位置不是字面相等**——第三方做幂等比对时若拿 `relativePath` 当目标键，必须自己用 `path.join` 归一化，否则第二次导入会误判为「新增」。
 3. **反斜杠是平台相关陷阱**：`isPathSafe` 允许中段 `\`（见 §1.5 / §3.3.2 的 C10），而 `path.join` 在 Windows 上把 `\` 当分隔符、在 POSIX 上当普通字符。因此同一个条目 `custom/skills/probe/back\slash.md` 在 Windows 目标上落到 `skills/probe/back/slash.md`，在 Linux 目标上落到 `skills/probe/back\slash.md`（单文件名字面含反斜杠）。**跨平台不一致**。
+
+> **写侧硬约束：`relativePath` 必须是非空字符串**（t25 独立复核登记、本版补写）
+>
+> §3.3.1 A/B 讲了条目名怎么构造、`relativePath` 怎么还原，但**没有把「`relativePath` 允许长什么样」写成必须条件**。第三方 exporter 必须满足：`FilesSection.files[]` 的 `relativePath` 是**非空字符串**；且 `prefix + relativePath` 拼出的条目名必须过 `isPathSafe`——不得以 `/` 或 `\` 开头、不得含 `\0`、不得是盘符（`C:\` / `C:/`）或 UNC（`\\`）、不得含 `..` 段。写侧约定用 `/`；**中段 `\` 仍被接受**（那是 C/D 已登记的平台相关缺口，本节不加码）。
+>
+> 两条独立路径，都必须满足（判据与后果都不同）：
+>
+> | 载体 | 判据（实现） | 不满足的后果 |
+> |---|---|---|
+> | 分区载荷 `FilesSection.files[].relativePath`（6 个文件类分区：`skills` / `agentPresets` / `agentInstructions` / `pluginFiles` / `sessions` / `self`） | 各 adapter 的 `validate()` 逐条判「对象且 `relativePath` 是非空字符串」，否则记 error **`adapter.validate.fileRelativePath`**（文案：`文件记录必须含非空 relativePath`）——`src/adapters/file-collection.ts:409-410`（基类，5 个子类共用）、`src/adapters/plugin-files.ts:178-179`（`pluginFiles` 自己那份） | 该分区被从计划中**剔除**并记一条 error（`src/core/analyzer.ts` 的 `analyzeBundle`，见 §3.3 第二道校验），**不是静默跳过** |
+> | `plugins` 分区 `patchFiles[].relativePath` | `validateSectionData` 的 `array` 分支在 `validatePatchFiles` 闸下直接判：`typeof rel !== 'string' \|\| rel === '' \|\| !isPathSafe(rel)` → error（`src/schema/config.ts:122-125`；规则本体 `src/utils/paths.ts:33-42`） | 第一道校验失败 → **抛错中断整个导入**（`src/core/analyzer.ts` 的 `extractSections`） |
+> | 归档条目名 `prefix + relativePath` | 写侧 `zipToBuffer` 的 `isPathSafe` 闸（`src/utils/zip.ts:244`）、CLI 备份的同一闸（`src/core/backup-plan.ts:277`，不安全则跳过该条目并计入 `excludedCount`）；读侧 `parseZip` 条目名闸（`src/utils/zip.ts:502`） | 读侧抛 `ZipSafetyError` → **整个 bundle 被拒**（§3.3.1 C 的 L1） |
+>
+> 为什么这条不能省：**「按前缀扫描」这条读路径上不可能出现空 `relativePath`**（`extractSections` 要求 `name !== prefix`，`rel === ''` 直接 `continue`，见 §3.3.1 B 步骤 3），所以第三方若只照抄「扫条目名」，不会意识到**分区载荷/内存模型**（自己构造 `FilesSection`）与 `patchFiles` 这两条路径对 `relativePath` 有更强的要求；而空串一旦进入 `relativePath`，§3.3.1 B 步骤 5 的计划项 id / `target.ref` 就会得到 `'<section>:'` 这种**身份缺失**的引用，前缀映射与 `projectKey` 类逻辑会把空串当成「没有身份」的键（t25 观察 ① 的原始依据）。
 
 ##### C. 非法路径（Zip Slip 类）的处理：三层，边界必须写清
 

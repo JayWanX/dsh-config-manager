@@ -27,7 +27,8 @@ const LOCALES = path.join(ROOT, 'src', 'client', 'locales.ts')
 
 /** 剥掉块注释与行注释（注释里的同名文字会造成假阳性，见 AGENTS.md 的 bundle 扫描教训）。 */
 function stripComments(src: string): string {
-  return src
+  // issue #70：CRLF 检出下按行切分 / 定长窗口都会失真 —— 一律先归一 LF。
+  return src.replace(/\r\n?/g, '\n')
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .split('\n')
     .filter((line) => !line.trim().startsWith('//'))
@@ -42,7 +43,9 @@ test('恢复报告：必须以 Modal 呈递，且退出按钮在 Modal.Footer �
   // ② 别处也有含该子串的表达式（如咨询弹窗的 `consult.report !== null`）⇒ 宽匹配会飘。
   const start = panelSrc.indexOf('<Modal open={report !== null}')
   assert.ok(start > 0, '找不到恢复报告 Modal（<Modal open={report !== null}>）')
-  const block = panelSrc.slice(start, start + 900)
+  // issue #70：不再用「start + 900 字符」定长窗口（CRLF 下每行多 1 字节 → 覆盖的逻辑行数变少，
+  // Windows CI 上 Footer 断言会假红）。改成自锚点起按行切片，与换行风格解耦。
+  const block = panelSrc.slice(start).split('\n').slice(0, 30).join('\n')
   assert.match(block, /<Modal[\s\S]{0,200}title=\{t\('snapshots\.reportTitle'\)\}/, '报告必须走 Modal（Radix a11y + 正确层级）')
   assert.match(block, /<Modal\.Footer>[\s\S]{0,300}t\('snapshots\.reportDone'\)/, '退出按钮必须在 Modal.Footer 且文案来自字典')
 })
@@ -61,3 +64,22 @@ test('恢复报告：snapshots.reportDone 在 zh / en 两套字典中都必须�
   const hits = [...locales.matchAll(/'snapshots\.reportDone':/g)]
   assert.equal(hits.length, 2, `snapshots.reportDone 必须 zh/en 各一条（实际 ${hits.length} 条）`)
 })
+
+test('issue #70（CRLF 检出）：报告守卫必须与换行风格解耦', () => {
+  const raw = fs.readFileSync(PANEL, 'utf8');
+  // 两侧都从归一 LF 的同一份文本派生（否则对已是 CRLF 的输入会得到 \r\r\n → 归一后变双换行）
+  const lf = raw.replace(/\r\n?/g, '\n');
+  // 剥注释结果必须与换行风格无关（原实现保留 \r，按行切分与定长窗口都会失真）
+  assert.equal(
+    stripComments(lf),
+    stripComments(lf.replace(/\n/g, '\r\n')),
+    'stripComments 必须先归一 LF，否则 CRLF 检出下守卫失真',
+  );
+  const crlf = stripComments(lf.replace(/\n/g, '\r\n'));
+  const start = crlf.indexOf('<Modal open={report !== null}');
+  assert.ok(start > 0, 'CRLF 下仍必须命中报告 Modal 锚点');
+  // 按行切片（不再是 start+900 定长窗口）→ 与换行风格无关
+  const block = crlf.slice(start).split('\n').slice(0, 30).join('\n');
+  assert.match(block, /<Modal[\s\S]{0,200}title=\{t\('snapshots\.reportTitle'\)\}/, 'CRLF 下报告标题断言必须成立');
+  assert.match(block, /<Modal\.Footer>[\s\S]{0,300}t\('snapshots\.reportDone'\)/, 'CRLF 下退出按钮断言必须成立');
+});

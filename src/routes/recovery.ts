@@ -53,11 +53,51 @@ function readRepairExpect(value: unknown): { size: number; mtimeMs: number } | u
   return { size, mtimeMs }
 }
 
+/** 残留条目（只回传界面需要的四个字段；内部字段 markerReadable 这类不外泄）。 */
+type IncompleteCopyPayload = { name: string; dir: string; sourceName: string | null; startedAt: string | null }
+
+/**
+ * t54：中断的档案复制残留（cross-F3）。
+ *
+ * 数据源**只有** t39 的 `DshProfileManager.listIncompleteCopies*` —— 不在这里重新枚举目录：
+ * 「什么算残留」必须保持一份实现（判据 = 我们自己的标记文件；绝不引入「看着像残留就删」的启发式）。
+ * 读目录失败时回空数组：恢复面板的首要职责是把 incident 说清楚，
+ * 绝不因为残留枚举失败而让 /recovery/status 整页 500。
+ *
+ * t89（S2-3）：失败**仍不 500**（t54 口径不变），但必须把「这是失败」传给界面 ——
+ * 否则「枚举失败」与「确实没有残留」在响应里完全同形（都是 `incompleteCopies: []`）。
+ * 因此回传 `unreadable`，由调用方决定是否置 `incompleteCopiesUnreadable`。
+ * 优先用新宿主/新引擎的 scan（能给出失败事实）；旧宿主/替身只有 listIncompleteCopies
+ * ⇒ 拿不到失败事实，按「读到了」处理（绝不凭空误报失败）。
+ */
+function incompleteCopiesOf(profiles: {
+  listIncompleteCopiesScan?(): { copies: IncompleteCopyPayload[]; unreadable: boolean }
+  listIncompleteCopies(): IncompleteCopyPayload[]
+}): { copies: IncompleteCopyPayload[]; unreadable: boolean } {
+  const pick = (c: IncompleteCopyPayload): IncompleteCopyPayload => ({
+    name: c.name,
+    dir: c.dir,
+    sourceName: c.sourceName,
+    startedAt: c.startedAt,
+  })
+  try {
+    const scan = profiles.listIncompleteCopiesScan
+    if (typeof scan === 'function') {
+      const r = scan.call(profiles)
+      return { copies: (Array.isArray(r.copies) ? r.copies : []).map(pick), unreadable: r.unreadable === true }
+    }
+    return { copies: profiles.listIncompleteCopies().map(pick), unreadable: false }
+  } catch {
+    return { copies: [], unreadable: true }
+  }
+}
+
 export function recoveryRoutes(env: RoutesEnv): WebRoute[] {
   const {
     dataDir,
     host,
     makeRecoveryExecutors,
+    profiles,
     recoveryOrchestrator,
     sessionHealth,
     tryAppendHistory,
@@ -74,7 +114,15 @@ export function recoveryRoutes(env: RoutesEnv): WebRoute[] {
       if (segments[0] === 'status') {
         if (req.method !== 'GET') { writeJson(res, 405, { error: 'method not allowed' }); return }
         const r = await recoveryOrchestrator.status()
-        writeJson(res, r.status, r.body)
+        // t54：把「中断的档案复制残留」（cross-F3）一并回传 —— 它们此前既不在档案列表里、
+        // 删除又报 notFound，用户在本页既看不到、也没有出口。只读、只追加一个字段（旧客户端忽略之）。
+        const incomplete = incompleteCopiesOf(profiles)
+        writeJson(res, r.status, {
+          ...r.body,
+          incompleteCopies: incomplete.copies,
+          // t89：枚举失败时显式可见（缺省不新增键 ⇒ 读到时响应逐字与 t54 相同）
+          ...(incomplete.unreadable ? { incompleteCopiesUnreadable: true } : {}),
+        })
         return
       }
       // T4：会话体检（**只读**）。GET /recovery/sessions?limit=N

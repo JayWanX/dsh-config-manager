@@ -166,15 +166,19 @@ test('upload：幂等 MKCOL → PUT <id>.json → 合并写回 index.json，返�
   const meta = await t.upload(sampleSnapshot());
   assert.deepEqual(meta, computeSnapshotMeta(sampleSnapshot()));
 
-  // 请求顺序：MKCOL snapshots → GET index（跳过判定）→ PUT <id>.json → PUT index（meta 最后落盘）
+  // 请求顺序：MKCOL snapshots → GET index（跳过判定）→ **GET blobs-index（三态探针：index 404 时必须先
+  // 自证远端没有历史内容，t66）** → PUT <id>.json → PUT index（meta 最后落盘）。
+  // 注意：探针那一跳是 t66 新增的**请求顺序契约**，不是放宽断言 —— 写路径的 body/顺序断言逐字保留。
   assert.equal(calls[0]!.method, 'MKCOL', '应先创建 snapshots 集合');
   assert.equal(calls[0]!.url, 'https://dav.example.com/dav/config/dsh-config-manager/');
   assert.equal(calls[1]!.method, 'GET', '应先读 index 做快照级跳过判定');
   assert.match(calls[1]!.url, /index\.json$/);
-  assert.equal(calls[2]!.method, 'PUT', '再写快照文件');
-  assert.match(calls[2]!.url, /snap-001\.json$/);
-  assert.equal(calls[3]!.method, 'PUT', '最后写 index（meta 最后落盘）');
-  assert.match(calls[3]!.url, /index\.json$/);
+  assert.equal(calls[2]!.method, 'GET', 'index 404 → 必须先做三态探针（t66）');
+  assert.match(calls[2]!.url, /blobs-index\.json$/);
+  assert.equal(calls[3]!.method, 'PUT', '再写快照文件');
+  assert.match(calls[3]!.url, /snap-001\.json$/);
+  assert.equal(calls[4]!.method, 'PUT', '最后写 index（meta 最后落盘）');
+  assert.match(calls[4]!.url, /index\.json$/);
 });
 
 test('upload：MKCOL 405（已存在集合）→ 幂等成功', async () => {

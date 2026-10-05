@@ -44,6 +44,23 @@ import { stripJsComments } from '../../utils/bundle-scan.ts';
 /** 仓库根（本文件位于 <root>/src/client/common/）。 */
 const ROOT = path.resolve(import.meta.dirname, '../../..');
 
+/**
+ * 换行归一（issue #70）。
+ *
+ * 为什么必须在读取处做：Windows 检出（core.autocrlf=true / CI windows-latest）落的是 CRLF，
+ * 而本文件的锚点与扫描器大量含 "\n" 字面量 —— CRLF 下 code.indexOf('\n  }\n') 恒为 -1，
+ * 扫描器会拿到整段文件当函数体（end=-1 分支）而**静默变弱**，锚点则直接 assert 失败（硬红）。
+ * 先例：tests/route/route-parity.test.ts 同样在读取处归一。
+ */
+function normalizeEol(text: string): string {
+  return text.replace(/\r\n?/g, '\n');
+}
+
+/** 样式表源码（读入即归一 LF，与 readClientSources 同一口径）。 */
+function readStyleSource(): string {
+  return normalizeEol(fs.readFileSync(path.join(ROOT, STYLE_FILE), 'utf8'));
+}
+
 /** 一份「已剥注释」的客户端源码。 */
 interface SourceFile {
   /** 仓库相对 POSIX 路径。 */
@@ -222,7 +239,7 @@ function readClientSources(): SourceFile[] {
       }
       if (!/\.tsx?$/.test(entry.name) || /\.test\.tsx?$/.test(entry.name)) continue;
       const rel = path.relative(ROOT, child).split(path.sep).join('/');
-      out.push({ rel, code: stripJsComments(fs.readFileSync(child, 'utf8'), true, false) });
+      out.push({ rel, code: normalizeEol(stripJsComments(fs.readFileSync(child, 'utf8'), true, false)) });
     }
   };
   visit(path.join(ROOT, 'src/client'));
@@ -654,6 +671,7 @@ test('t9-3 负向自检：合成片段在「拆掉 portal / 挂 body / 删掉气
  *  ④ 卸载时移除监听，且依赖数组带 `pinned`（少了它监听永远挂不上 / 挂上不摘）。
  */
 function findPinnedDismissViolations(code: string): string[] {
+  code = normalizeEol(code);
   const violations: string[] = [];
   const start = code.indexOf('if (!pinned) return');
   if (start < 0) {
@@ -737,6 +755,7 @@ const STYLE_FILE = 'src/client/config-manager.module.css';
 
 /** t11-1 违规扫描：聚焦通道只认「用户自己把焦点移过来」。 */
 function findFocusGateViolations(code: string): string[] {
+  code = normalizeEol(code);
   const violations: string[] = [];
   const start = code.indexOf('const onFocus = (event: ReactFocusEvent<HTMLButtonElement>): void => {');
   if (start < 0) {
@@ -763,6 +782,7 @@ function findFocusGateViolations(code: string): string[] {
 
 /** t11-2 违规扫描：气泡夹紧矩形必须并进锚点（只放宽、不收紧），画布仍是原基准。 */
 function findAnchorClampViolations(code: string): string[] {
+  code = normalizeEol(code);
   const violations: string[] = [];
   const start = code.indexOf('const anchor = btn.getBoundingClientRect()');
   const end = code.indexOf('setPlacement', start);
@@ -781,6 +801,7 @@ function findAnchorClampViolations(code: string): string[] {
 
 /** t11-3 违规扫描：ⓘ 的 :focus-visible 焦点环必须限定在气泡打开时（[data-open]）。 */
 function findFocusRingViolations(css: string): string[] {
+  css = normalizeEol(css);
   const violations: string[] = [];
   const rules = [...css.matchAll(/^\.infoHintBtn([^{]*):focus-visible\s*\{/gm)];
   if (rules.length === 0) {
@@ -820,7 +841,7 @@ test('t11-2 气泡夹紧矩形 = 画布 ∪ 锚点（弹窗卡片伸出画布时
 });
 
 test('t11-3 ⓘ 焦点环只在气泡打开时绘制（程序化初始焦点不得画出「选中」蓝框）', () => {
-  const css = fs.readFileSync(path.join(ROOT, STYLE_FILE), 'utf8');
+  const css = readStyleSource();
   const violations = findFocusRingViolations(css);
   assert.deepEqual(violations, [], '焦点环必须限定在 [data-open]：\n' + violations.join('\n'));
   const unscoped = mutate(css, '.infoHintBtn[data-open]:focus-visible', '.infoHintBtn:focus-visible');
@@ -833,4 +854,26 @@ test('t11-3 ⓘ 焦点环只在气泡打开时绘制（程序化初始焦点不�
     '.infoHintBtn[data-open]:hover {\n  outline:',
   );
   assert.ok(findFocusRingViolations(removed).length >= 1, '删掉焦点环必须报红（不得「删掉即绿灯」）');
+});
+
+test('t11-4（issue #70，CRLF 检出）：扫描器与锚点必须与换行风格解耦', () => {
+  const hint = readClientSources().find((f) => f.rel === INFO_HINT_FILE);
+  assert.ok(hint !== undefined, INFO_HINT_FILE + ' 必须存在');
+  // 读取即归一：源码与样式表里不得残留 \r（否则 "\n" 锚点在 Windows 检出 / CI 下全灭）
+  assert.ok(!hint.code.includes('\r'), 'readClientSources 必须归一 LF');
+  assert.ok(!readStyleSource().includes('\r'), '样式读取必须归一 LF');
+  const crlf = hint.code.replace(/\n/g, '\r\n');
+  const cssCrlf = readStyleSource().replace(/\n/g, '\r\n');
+  assert.deepEqual(findPinnedDismissViolations(crlf), [], 'CRLF 下固定态扫描不得失真');
+  assert.deepEqual(findFocusGateViolations(crlf), [], 'CRLF 下聚焦门禁扫描不得失真');
+  assert.deepEqual(findAnchorClampViolations(crlf), [], 'CRLF 下夹紧扫描不得失真');
+  assert.deepEqual(findFocusRingViolations(cssCrlf), [], 'CRLF 下焦点环扫描不得失真');
+  // 负向自检：CRLF 输入下同样必须报红 —— 原实现 code.indexOf('\n  }\n') 在 CRLF 下返回 -1，
+  // 扫描器会把整段文件当函数体（静默变弱）或直接 assert 失败（硬红），两者都不是守法。
+  const lfBroken = hint.code.replace("    return () => { document.removeEventListener('mousedown', onMouseDown, true) }\n", '');
+  assert.ok(findPinnedDismissViolations(lfBroken).length >= 1, 'LF 下负向自检必须报红');
+  const crlfBroken = crlf.replace("    return () => { document.removeEventListener('mousedown', onMouseDown, true) }\r\n", '');
+  assert.ok(findPinnedDismissViolations(crlfBroken).length >= 1, 'CRLF 下负向自检必须报红（issue #70 的静默变弱）');
+  const crlfNoGate = crlf.replace('      if (!(from instanceof Node) || !dialog.contains(from)) return\r\n', '');
+  assert.ok(findFocusGateViolations(crlfNoGate).length >= 1, 'CRLF 下删掉 early return 必须报红');
 });

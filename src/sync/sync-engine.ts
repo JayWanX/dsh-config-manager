@@ -927,13 +927,15 @@ export class SyncEngine {
    *  - **加密快照仍要密码**：`prepareSnapshot` 会在缺密码时明确报错，绝不静默产出空包；
    *  - **墓碑剔除同样生效**：与 pull 一致，已删除的会话不随包复活。
    */
-  async downloadSnapshot(opts: { snapshotId?: string; password?: string; dir: string; name?: string }): Promise<{ path: string; snapshotId: string }> {
+  async downloadSnapshot(opts: { snapshotId?: string; password?: string; dir: string; name?: string }): Promise<{ path: string; snapshotId: string; tombstonedSessions?: number }> {
     const metas = await this.transport.list()
     if (metas.length === 0) throw new Error(this.msg('sync.remoteEmpty'))
     const targetId = opts.snapshotId ?? metas[metas.length - 1]!.id
     const snapshot = await this.transport.download(targetId)
     await this.prepareSnapshot(snapshot, opts.password)
-    this.stripTombstonedSessions(snapshot)
+    // audit-sync sync-F6：剔除结果必须**可见**（与 pull/preview 同一口径）。
+    // 此前返回值丢弃了它 —— 产物里少了哪些会话，调用方与用户都无从得知（绝不静默少带）。
+    const tombstonedSessions = this.stripTombstonedSessions(snapshot).length
     const portableIds = this.pullSectionIds()
     const zipPath = await this.snapshotToZip(snapshot, portableIds)
     // snapshotToZip 产出在临时目录；搬到调用方指定目录（同盘 rename，跨盘退化为复制）
@@ -947,7 +949,7 @@ export class SyncEngine {
       await fs.copyFile(zipPath, dest)
       await fs.rm(path.dirname(zipPath), { recursive: true, force: true }).catch(() => undefined)
     }
-    return { path: dest, snapshotId: targetId }
+    return { path: dest, snapshotId: targetId, ...(tombstonedSessions > 0 ? { tombstonedSessions } : {}) }
   }
 
   /**

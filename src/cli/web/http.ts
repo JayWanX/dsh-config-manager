@@ -13,6 +13,11 @@
  * 全部 403**（实测 Chrome 154：no-referrer → null；same-origin/strict-origin/默认策略 → 正常）。
  * same-origin 的强度并不降低：跨源请求仍然一个字节的 Referer 都不带（第三方零泄漏），
  * 而带一次性 token 的启动地址走 server.ts 的 302，那一步单独保持 `no-referrer`。
+ *
+ * `frame-ancestors 'none'` **必须显式写**（cli-F3）：它**不被** `default-src` 覆盖 —— 只写
+ * `default-src 'none'` 时页面仍可被 iframe。SameSite=Strict 的判据是 **site**（忽略端口），
+ * 本机另一个 127.0.0.1:<其它端口> 的页面同 site，iframe 里 cookie 照送 → 可点劫写动作。
+ * 一并给 `X-Frame-Options: DENY`（老浏览器）。
  */
 import type { ServerResponse } from 'node:http'
 import { consoleScriptCspHash } from './client-script.ts'
@@ -23,8 +28,9 @@ export function writeHtml(res: ServerResponse, status: number, html: string): vo
     'content-type': 'text/html; charset=utf-8',
     'referrer-policy': 'same-origin',
     'cache-control': 'no-store',
+    'x-frame-options': 'DENY',
     'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
-      + "script-src " + consoleScriptCspHash() + "; base-uri 'none'; form-action 'self'",
+      + "script-src " + consoleScriptCspHash() + "; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
   })
   res.end(html)
 }

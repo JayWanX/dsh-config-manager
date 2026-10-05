@@ -27,7 +27,8 @@ import * as yaml from 'js-yaml';
 
 import { isRecord } from '../utils/guards.ts';
 import { splitFrontmatter } from './kernel.ts';
-import type { ForeignSkip } from './types.ts';
+import { dirWalkSkips, resolveLimit, type DirWalkStats } from './session-read.ts';
+import type { ForeignLimitOverrides, ForeignSkip } from './types.ts';
 import type { CursorInput, CursorRuleActivation, CursorRuleInput, CursorScope, CursorSkillInput } from './cursor.ts';
 
 export interface CursorHomeOptions {
@@ -52,6 +53,8 @@ export interface CursorReadOptions extends CursorHomeOptions {
   maxSkillFiles?: number;
   /** 技能数上限（默认 500） */
   maxSkills?: number;
+  /** 可选上限覆盖（t36，装配层透传；缺省 = 上面各默认值逐字不变） */
+  limits?: ForeignLimitOverrides;
 }
 
 export interface CursorReadResult {
@@ -228,6 +231,7 @@ async function walkFiles(
   start: string,
   maxFiles: number,
   maxBytes: number,
+  stats?: DirWalkStats,
 ): Promise<{ relativePath: string; data: Uint8Array }[]> {
   const out: { relativePath: string; data: Uint8Array }[] = [];
   const stack: string[] = [start];
@@ -241,7 +245,8 @@ async function walkFiles(
       continue;
     }
     for (const d of dirents) {
-      if (out.length >= maxFiles) break;
+      // t36：条数触顶不再静默 —— 置标志，由调用方推 max-skill-files-reached。
+      if (out.length >= maxFiles) { if (stats !== undefined) stats.truncatedFiles = true; break; }
       if (d.isSymbolicLink()) continue;
       const full = path.join(cur, d.name);
       if (d.isDirectory()) {
@@ -250,7 +255,11 @@ async function walkFiles(
       }
       if (!d.isFile()) continue;
       const st = await statOrNull(full);
-      if (st === null || st.size > maxBytes) continue;
+      if (st === null) continue;
+      if (st.size > maxBytes) {
+        if (stats !== undefined) stats.tooLargeCount = (stats.tooLargeCount ?? 0) + 1;
+        continue;
+      }
       try {
         const data = await fs.readFile(full);
         out.push({ relativePath: path.relative(root, full).split(path.sep).join('/'), data });
@@ -272,10 +281,13 @@ async function findSkillUnits(
   maxFiles: number,
   maxBytes: number,
   maxSkills: number,
+  stats?: DirWalkStats & { truncated?: boolean },
 ): Promise<CursorSkillInput[]> {
   const out: CursorSkillInput[] = [];
   const visit = async (dir: string, parents: string[]): Promise<void> => {
-    if (out.length >= maxSkills || parents.length > MAX_SKILL_DEPTH) return;
+    // 技能数触顶绝不静默（audit-foreign F4）：置标志，由调用方推一条 source-unreadable。
+    if (out.length >= maxSkills) { if (stats !== undefined) stats.truncated = true; return; }
+    if (parents.length > MAX_SKILL_DEPTH) return;
     let dirents: Dirent[];
     try {
       dirents = await fs.readdir(dir, { withFileTypes: true });
@@ -287,11 +299,11 @@ async function findSkillUnits(
       .map((d) => d.name)
       .sort();
     for (const name of dirs) {
-      if (out.length >= maxSkills) break;
+      if (out.length >= maxSkills) { if (stats !== undefined) stats.truncated = true; break; }
       const child = path.join(dir, name);
       if (await hasSkillMd(child)) {
         // 自带 SKILL.md 就是一个技能单元：它的子目录只作资产（walkFiles 递归带走），不再单独成技能
-        const files = await walkFiles(child, child, maxFiles, maxBytes);
+        const files = await walkFiles(child, child, maxFiles, maxBytes, stats);
         if (files.length === 0) continue;
         const unit: CursorSkillInput = { name, files };
         if (parents.length > 0) unit.category = parents.join('/');
@@ -323,9 +335,9 @@ async function legacyScopes(homeDir: string, projectDir: string | undefined): Pr
 export async function readCursor(opts: CursorReadOptions): Promise<CursorReadResult> {
   const home = resolveCursorHome(opts);
   const projectDir = opts.projectDir;
-  const maxFileBytes = opts.maxFileBytes ?? DEFAULT_MAX_FILE;
-  const maxSkillFiles = opts.maxSkillFiles ?? DEFAULT_MAX_SKILL_FILES;
-  const maxSkills = opts.maxSkills ?? DEFAULT_MAX_SKILLS;
+  const maxFileBytes = resolveLimit(opts.limits?.maxFileBytes, opts.maxFileBytes, DEFAULT_MAX_FILE);
+  const maxSkillFiles = resolveLimit(opts.limits?.maxSkillFiles, opts.maxSkillFiles, DEFAULT_MAX_SKILL_FILES);
+  const maxSkills = resolveLimit(opts.limits?.maxSkills, opts.maxSkills, DEFAULT_MAX_SKILLS);
   const readFindings: ForeignSkip[] = [];
   const unreadable: string[] = [];
   const input: CursorInput = {};
@@ -360,12 +372,18 @@ export async function readCursor(opts: CursorReadOptions): Promise<CursorReadRes
 
   /* skills/**​/SKILL.md：项目级在前（同名先到先得 → 项目级胜出并报 skill-id-conflict） */
   const skills: CursorSkillInput[] = [];
+  const skillStats: DirWalkStats & { truncated?: boolean } = {};
   if (projectCursorDir !== undefined) {
-    skills.push(...(await findSkillUnits(path.join(projectCursorDir, 'skills'), maxSkillFiles, maxFileBytes, maxSkills)));
+    skills.push(...(await findSkillUnits(path.join(projectCursorDir, 'skills'), maxSkillFiles, maxFileBytes, maxSkills, skillStats)));
   }
   if (homeStat !== null) {
-    skills.push(...(await findSkillUnits(path.join(home, 'skills'), maxSkillFiles, maxFileBytes, maxSkills)));
+    skills.push(...(await findSkillUnits(path.join(home, 'skills'), maxSkillFiles, maxFileBytes, maxSkills, skillStats)));
   }
+  if (skillStats.truncated === true) {
+    readFindings.push({ code: 'source-unreadable', origin: 'skills', detail: 'max-skills-reached', count: maxSkills });
+  }
+  // t36：技能文件遍历的条数/字节触顶同样必须可见（与 max-skills-reached 同族，共用同一口径）
+  readFindings.push(...dirWalkSkips(skillStats, 'skills', maxSkillFiles));
   if (skills.length > 0) input.skills = skills;
 
   /* 旧式 .cursorrules：只 stat（正文连内存都不进） */

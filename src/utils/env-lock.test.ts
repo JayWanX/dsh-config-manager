@@ -1041,6 +1041,61 @@ test('§11-c26 withMutationLock/runWithMutationLock：无 port 直接执行不�
   }
 });
 
+/* ------------------------------------------------ t69：未注入端口也不得 fail-open（SAFE MODE 阻断） */
+
+/**
+ * t69 回归（来源：t59 的观察项 O2）：`runWithMutationLock(port === undefined)` 修前**根本不问 isBlocked**
+ * —— 未注入锁端口的环境里 SAFE MODE 的阻断态形同虚设。判定必须与有端口路径同源（withMutationLock
+ * 第一步就问 isBlocked），阻断 → 同一条 EnvironmentLockUnavailableError（reason='blocked'，不新造语义）。
+ */
+test('t69-a 未注入端口 + SAFE MODE 阻断 → 必须拒绝（修前会放行 = fail-open）', async () => {
+  let ran = false;
+  await assert.rejects(
+    () =>
+      runWithMutationLock(undefined, { op: 'import-apply', isBlocked: () => true }, async () => {
+        ran = true;
+        return 'should-not-run';
+      }),
+    (e) => e instanceof EnvironmentLockUnavailableError && e.reason === 'blocked' && e.op === 'import-apply',
+  );
+  assert.equal(ran, false, '阻断态下 handler 绝不执行');
+});
+
+test('t69-b 未注入端口 + 未阻断 → 照常放行（防过度加严）', async () => {
+  const seen: (null | object)[] = [];
+  const v = await runWithMutationLock(undefined, { op: 'import-apply', isBlocked: () => false }, async (ctx) => {
+    seen.push(ctx);
+    return 'ok';
+  });
+  assert.equal(v, 'ok');
+  assert.deepEqual(seen, [null], '未阻断时照旧不锁定、ctx=null');
+});
+
+test('t69-c 未注入端口 + 未给 isBlocked → 照常放行（§11-c26 既有行为不变）', async () => {
+  let ran = false;
+  const v = await runWithMutationLock(undefined, { op: 'import-apply' }, async (ctx) => {
+    ran = true;
+    assert.equal(ctx, null);
+    return 'ok';
+  });
+  assert.equal(v, 'ok');
+  assert.equal(ran, true);
+});
+
+test('t69-d 有端口 + 阻断 → 与未注入端口同一条拒绝语义（reason=blocked，有端口路径语义未变）', async () => {
+  let ran = false;
+  await assert.rejects(
+    () =>
+      runWithMutationLock({} as never, { op: 'restore', isBlocked: () => true }, async () => {
+        ran = true;
+        return 1;
+      }),
+    // 阻断判定发生在 acquire 之前（withMutationLock 第一步）→ 端口对象根本不会被使用，reason 必须是 'blocked'
+    (e) => e instanceof EnvironmentLockUnavailableError && e.reason === 'blocked' && e.op === 'restore',
+  );
+  assert.equal(ran, false);
+});
+
 /* ------------------------------------------------ L3 回归：release 必须 drain 在途 heartbeat 写 */
 
 /**

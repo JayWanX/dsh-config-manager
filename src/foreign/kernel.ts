@@ -15,6 +15,7 @@
 import * as yaml from 'js-yaml';
 
 import { defaultSecretScanner } from '../core/exporter.ts';
+import { matchSecretValuePattern, REDACTED_PLACEHOLDER } from '../security/secret-scanner.ts';
 import { isRecord } from '../utils/guards.ts';
 import type { McpSection, McpServerEntry, WorkspaceRecord, WorkspacesSection } from '../schema/types.ts';
 import type { ForeignSectionOut, ForeignSkip, ForeignSkipCode } from './types.ts';
@@ -176,7 +177,116 @@ function serverNameOfHit(path: string, section: McpSection): string | null {
   return section.servers[idx]?.serverName ?? null;
 }
 
-/** 剥离 MCP 里的凭据：URL userinfo + 字段名扫描（与导出侧同一个扫描器） */
+/** 整值剥离：非空且命中**真值形状**（含示例形态降噪）→ 置空（与 args 同一条判据）。
+ *
+ * 口径澄清（t72 / t58-F3）：降噪判定作用在**命中片段**上，而 `sk-…` 这类命中片段**本身不含尖括号**
+ * ⇒ `env:{K:'<sk-abcdefgh1234>'}` 的整值仍会被剥空。**这是有意保留的口径**：值形状通道只认「形状」，
+ * 尖括号占位符也按真实形状处理（多剥是安全方向；漏剥才是缺陷）。 */
+function redactValueShapeWhole(value: string | undefined): { value: string | undefined; redacted: number } {
+  if (value === undefined || value === '') return { value, redacted: 0 };
+  if (matchSecretValuePattern(value) === null) return { value, redacted: 0 };
+  return { value: REDACTED_PLACEHOLDER, redacted: 1 };
+}
+
+/** 字符串映射（env / headers）逐值剥离：返回原对象（未命中）或新对象 */
+function redactValueShapeMap(
+  map: Record<string, string> | undefined,
+): { map: Record<string, string> | undefined; redacted: number } {
+  if (map === undefined) return { map, redacted: 0 };
+  let redacted = 0;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(map)) {
+    if (v !== '' && matchSecretValuePattern(v) !== null) {
+      out[k] = REDACTED_PLACEHOLDER;
+      redacted += 1;
+    } else {
+      out[k] = v;
+    }
+  }
+  return redacted === 0 ? { map, redacted: 0 } : { map: out, redacted };
+}
+
+/**
+ * 非字符串载体归一化（t72 / t58-F2）：env / headers 只留字符串值、args 只留字符串元素，被滤空的
+ * 字段直接删掉 —— 与上游 `mcpEntryOf`（`stringMapOf` / `stringArrayOf`）**同口径**。
+ *
+ * 为什么要在本函数里再做一次：这条保证此前只活在上游调用方（`mcpSectionFromEntries` / `mcpEntryOf`），
+ * 而 `redactMcpSection` 是 **exported** 的（`antigravity.ts` 直连它）—— 将来任何直连调用方省掉过滤，
+ * 都会把 `env:{A:{nested:'sk-…'}}` 这类**非字符串载体**连同明文一起原样写进包（值形状判定对它们无意义）。
+ * 语义选择：**丢弃**（不是置空）—— 非字符串载体是契约外形态，留着就等于把不可信结构带进包。
+ */
+function withStringCarriersOnly(s: McpServerEntry): McpServerEntry {
+  const out: McpServerEntry = { ...s };
+  if (out.env !== undefined) {
+    const env = stringMapOf(out.env);
+    if (Object.keys(env).length > 0) out.env = env;
+    else delete out.env;
+  }
+  if (out.headers !== undefined) {
+    const headers = stringMapOf(out.headers);
+    if (Object.keys(headers).length > 0) out.headers = headers;
+    else delete out.headers;
+  }
+  if (out.args !== undefined) {
+    const args = stringArrayOf(out.args);
+    if (args.length > 0) out.args = args;
+    else delete out.args;
+  }
+  return out;
+}
+
+/**
+ * URL 里的值形状片段：**逐段**判定（path 的每个段 / query 的 `k=v` 的 v / 无 = 的整段）。
+ * userinfo 由 stripUserInfo 负责，这里不重复。逐段判定刻意不需要「命中片段」文本
+ * （公开 API 只给模式名）→ 命中即把该段置空，URL 其余部分保持可用；若剥离后整串仍是真值形状
+ * （secret 落在 authority 这类没被逐段覆盖的位置）→ 整串置空兜底。
+ */
+function redactValueShapeInUrl(url: string): { url: string; redacted: number } {
+  const q = url.indexOf('?');
+  const beforeQuery = q >= 0 ? url.slice(0, q) : url;
+  const query = q >= 0 ? url.slice(q + 1) : null;
+  let redacted = 0;
+  let head = beforeQuery;
+  const schemeIdx = beforeQuery.indexOf('://');
+  const authorityStart = schemeIdx >= 0 ? schemeIdx + 3 : 0;
+  const slashIdx = beforeQuery.indexOf('/', authorityStart);
+  if (slashIdx >= 0) {
+    const segments = beforeQuery.slice(slashIdx + 1).split('/').map((seg): string => {
+      if (seg !== '' && matchSecretValuePattern(seg) !== null) {
+        redacted += 1;
+        return REDACTED_PLACEHOLDER;
+      }
+      return seg;
+    });
+    head = beforeQuery.slice(0, slashIdx + 1) + segments.join('/');
+  }
+  let out = head;
+  if (query !== null) {
+    const parts = query.split('&').map((pair): string => {
+      const eq = pair.indexOf('=');
+      if (eq < 0) {
+        if (pair !== '' && matchSecretValuePattern(pair) !== null) {
+          redacted += 1;
+          return REDACTED_PLACEHOLDER;
+        }
+        return pair;
+      }
+      const value = pair.slice(eq + 1);
+      if (value !== '' && matchSecretValuePattern(value) !== null) {
+        redacted += 1;
+        return pair.slice(0, eq + 1) + REDACTED_PLACEHOLDER;
+      }
+      return pair;
+    });
+    out = head + '?' + parts.join('&');
+  }
+  if (matchSecretValuePattern(out) !== null) {
+    return { url: REDACTED_PLACEHOLDER, redacted: redacted + 1 };
+  }
+  return { url: out, redacted };
+}
+
+/** 剥离 MCP 里的凭据：URL userinfo + 字段名扫描（与导出侧同一个扫描器）+ 值形状判定 */
 export function redactMcpSection(section: McpSection, refs: string[], skipped: ForeignSkip[]): McpSection {
   const servers = section.servers.map((s): McpServerEntry => {
     if (s.url === undefined) return s;
@@ -193,7 +303,59 @@ export function redactMcpSection(section: McpSection, refs: string[], skipped: F
     refs.push(name === null ? 'mcp:' + h.field : 'mcp:' + name + ':' + h.field);
   }
   if (hits.length > 0) skipped.push({ code: 'mcp-credential-redacted', count: hits.length });
-  return clean;
+  /**
+   * 值形状判定（第三类漏口的统一出口，t40）。
+   *
+   * 上面那个扫描器是**字段名黑名单**：键名不敏感时（`FOO` / `X-Custom`），即使值就是
+   * `sk-…` / `ghp_…` 也一律放行 —— env / headers / args（字符串数组）/ command / cwd
+   * 都能把明文带进包；url 的 userinfo 另有 stripUserInfo 兜住，但 **query / path 里的值同样漏**
+   * （audit t18 新发现 = env/headers；t40 复核出 url-query / url-path / command / cwd 同族）。
+   * 这里按**与扫描器同一条**值形状判定（matchSecretValuePattern，含示例形态降噪）逐条剥离：
+   * 命中即置空、逐字段报 mcp-credential-redacted（origin=<server>:<field>）、并留一个引用名让用户补录。
+   * 只做值形状判定：`--password hunter2xyz` 这类非形状弱口令不在本判定内，
+   * 与扫描器对其它字段的保守档口径一致。
+   */
+  const noteValueShapeHit = (serverName: string, field: string, count: number): void => {
+    const ref = 'mcp:' + serverName + ':' + field;
+    if (!refs.includes(ref)) refs.push(ref);
+    skipped.push({ code: 'mcp-credential-redacted', origin: serverName + ':' + field, count });
+  };
+  const serversWithSafeValues = clean.servers.map((raw): McpServerEntry => {
+    const s = withStringCarriersOnly(raw);
+    const url = s.url === undefined ? { url: undefined, redacted: 0 } : redactValueShapeInUrl(s.url);
+    const command = redactValueShapeWhole(s.command);
+    const cwd = redactValueShapeWhole(s.cwd);
+    const env = redactValueShapeMap(s.env);
+    const headers = redactValueShapeMap(s.headers);
+    let args = s.args;
+    let argsRedacted = 0;
+    if (s.args !== undefined && s.args.length > 0) {
+      const mapped = s.args.map((a): string => {
+        if (a !== '' && matchSecretValuePattern(a) !== null) { argsRedacted += 1; return REDACTED_PLACEHOLDER; }
+        return a;
+      });
+      if (argsRedacted > 0) args = mapped;
+    }
+    if (url.redacted > 0) noteValueShapeHit(s.serverName, 'url', url.redacted);
+    if (command.redacted > 0) noteValueShapeHit(s.serverName, 'command', command.redacted);
+    if (cwd.redacted > 0) noteValueShapeHit(s.serverName, 'cwd', cwd.redacted);
+    if (env.redacted > 0) noteValueShapeHit(s.serverName, 'env', env.redacted);
+    if (headers.redacted > 0) noteValueShapeHit(s.serverName, 'headers', headers.redacted);
+    if (argsRedacted > 0) noteValueShapeHit(s.serverName, 'args', argsRedacted);
+    const changed =
+      url.redacted > 0 || command.redacted > 0 || cwd.redacted > 0 || env.redacted > 0 || headers.redacted > 0 || argsRedacted > 0;
+    if (!changed) return s;
+    return {
+      ...s,
+      ...(url.url !== undefined ? { url: url.url } : {}),
+      ...(command.value !== undefined ? { command: command.value } : {}),
+      ...(cwd.value !== undefined ? { cwd: cwd.value } : {}),
+      ...(env.map !== undefined ? { env: env.map } : {}),
+      ...(headers.map !== undefined ? { headers: headers.map } : {}),
+      ...(args !== undefined ? { args } : {}),
+    };
+  });
+  return { ...clean, servers: serversWithSafeValues };
 }
 
 /**
@@ -282,6 +444,26 @@ export function collectSkills(
 
 /* ---------------- ④ 会话转码结果的归集 ---------------- */
 
+/**
+ * 工作区标题 = cwd 的最后一段（**两种分隔符都认**）。
+ *
+ * 为什么不能只 split('/')：Windows 记录里的 cwd 是反斜杠形态，按 '/' 切会得到整条绝对路径当标题
+ * （audit-foreign F3 —— 同一份产物里两条同类记录标题还不一致）。先去掉尾部同一族分隔符，
+ * 再取最后一段；空路径退回原串。
+ */
+export function workspaceTitleOf(cwd: string): string {
+  const isSep = (ch: string): boolean => ch === '/' || ch === BACKSLASH;
+  let end = cwd.length;
+  while (end > 0 && isSep(cwd.charAt(end - 1))) end -= 1;
+  const trimmed = cwd.slice(0, end);
+  let cut = -1;
+  for (let i = trimmed.length - 1; i >= 0; i--) {
+    if (isSep(trimmed.charAt(i))) { cut = i; break; }
+  }
+  const tail = cut < 0 ? trimmed : trimmed.slice(cut + 1);
+  return tail === '' ? cwd : tail;
+}
+
 /** 转码产物（结构上兼容 claude-sessions.ts 的 TranscodedSession） */
 export interface KernelTranscodedSession {
   id: string;
@@ -355,13 +537,18 @@ export function collectSessionSections<TFile extends { id: string }>(
         opts.skipped.push({ code: 'unsupported-session-record', origin: file.id, detail: entry[0], count: entry[1] });
       }
     }
-    const existing = workspaces.get(session.cwd);
+    // 记录 id 由 **projectKey(cwd)** 派生（多对一：分隔符 run 会被折叠），所以键必须用**派生 id**、
+    // 不能用 cwd 原串 —— 否则「同一目录的两种写法」（Windows 的反斜杠/正斜杠、posix 的 /a//b）
+    // 会产出两条**同 id** 记录，而下游 applyItem 按 id find 恒取第一条 → 后一条永远写不进去
+    // （audit-foreign F2）。同 id 归并成一条：path/title 取先到者（两种写法指向同一目录），
+    // sessionIds 合并。
+    const workspaceId = opts.workspaceIdPrefix + ':' + (session.relativePath.split('/')[0] ?? '');
+    const existing = workspaces.get(workspaceId);
     if (existing === undefined) {
-      const segments = session.cwd.split('/');
-      workspaces.set(session.cwd, {
-        id: opts.workspaceIdPrefix + ':' + session.relativePath.split('/')[0],
+      workspaces.set(workspaceId, {
+        id: workspaceId,
         path: session.cwd,
-        title: segments[segments.length - 1] ?? session.cwd,
+        title: workspaceTitleOf(session.cwd),
         sessionIds: [session.id],
       });
     } else if (!existing.sessionIds.includes(session.id)) {

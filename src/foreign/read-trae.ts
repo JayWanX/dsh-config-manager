@@ -189,12 +189,21 @@ function safeFragment(key: string): string {
  * 判据（全部满足才认）：① 是对象；② 有消息数组且至少一条带角色字段；③ 有字符串 id（否则铸稳定兜底 id）。
  * 不满足的节点只**继续下钻**（不计数 —— 存储值里绝大多数是 UI 状态）；满足的节点不再下钻（避免重复计数）。
  */
-export function traeSessionsOfValue(value: unknown, storageKey: string, platform: ForeignPlatform): RawSession[] {
+export function traeSessionsOfValue(
+  value: unknown,
+  storageKey: string,
+  platform: ForeignPlatform,
+  findings?: ForeignSkip[],
+  maxNodes: number = MAX_NODES,
+): RawSession[] {
   const out: RawSession[] = [];
   const seenIds = new Set<string>();
   let nodes = 0;
+  let truncatedNodes = false;
   const visit = (node: unknown, depth: number, fallbackId: string): void => {
-    if (depth > MAX_DEPTH || nodes > MAX_NODES || !isRecord(node)) return;
+    // 节点触顶绝不静默（audit-foreign F4 的 trae 面）：置标志后由外层推一条 source-unreadable。
+    if (nodes > maxNodes) { truncatedNodes = true; return; }
+    if (depth > MAX_DEPTH || !isRecord(node)) return;
     nodes += 1;
     const messages = messageArrayOf(node);
     if (messages !== undefined) {
@@ -229,6 +238,9 @@ export function traeSessionsOfValue(value: unknown, storageKey: string, platform
     }
   };
   visit(value, 0, safeFragment(storageKey));
+  if (truncatedNodes && findings !== undefined) {
+    findings.push({ code: 'source-unreadable', origin: storageKey, detail: 'max-nodes-reached', count: maxNodes });
+  }
   return out;
 }
 
@@ -312,7 +324,7 @@ export async function readTrae(
         findings.push({ code: 'source-unreadable', origin: key, detail: 'item-json-error' });
         continue;
       }
-      for (const raw of traeSessionsOfValue(parsedValue, key, platform)) {
+      for (const raw of traeSessionsOfValue(parsedValue, key, platform, findings)) {
         if (files.length >= maxFiles) { truncated = true; break; }
         if (seen.has(raw.id)) continue;
         seen.add(raw.id);

@@ -19,7 +19,8 @@ import type { Dirent } from 'node:fs';
 import path from 'node:path';
 import * as yaml from 'js-yaml';
 
-import type { ForeignSkip, HermesInput, HermesSkillInput } from './types.ts';
+import { dirWalkSkips, resolveLimit, type DirWalkStats } from './session-read.ts';
+import type { ForeignLimitOverrides, ForeignSkip, HermesInput, HermesSkillInput } from './types.ts';
 
 export interface HermesHomeOptions {
   /** 用户 home（Windows 一般传 %USERPROFILE%） */
@@ -61,6 +62,8 @@ export interface HermesReadOptions extends HermesHomeOptions {
   maxSkillFiles?: number;
   /** 技能数上限（默认 500） */
   maxSkills?: number;
+  /** 可选上限覆盖（t36，装配层透传；缺省 = 上面各默认值逐字不变） */
+  limits?: ForeignLimitOverrides;
 }
 
 export interface HermesReadResult {
@@ -104,6 +107,7 @@ async function walkFiles(
   start: string,
   maxFiles: number,
   maxBytes: number,
+  stats?: DirWalkStats,
 ): Promise<{ relativePath: string; data: Uint8Array }[]> {
   const out: { relativePath: string; data: Uint8Array }[] = [];
   const stack: string[] = [start];
@@ -117,7 +121,8 @@ async function walkFiles(
       continue;
     }
     for (const d of dirents) {
-      if (out.length >= maxFiles) break;
+      // t36：条数触顶不再静默 —— 置标志，由调用方推 max-skill-files-reached。
+      if (out.length >= maxFiles) { if (stats !== undefined) stats.truncatedFiles = true; break; }
       const full = path.join(cur, d.name);
       if (d.isSymbolicLink()) continue;
       if (d.isDirectory()) {
@@ -126,7 +131,11 @@ async function walkFiles(
       }
       if (!d.isFile()) continue;
       const st = await statOrNull(full);
-      if (st === null || st.size > maxBytes) continue;
+      if (st === null) continue;
+      if (st.size > maxBytes) {
+        if (stats !== undefined) stats.tooLargeCount = (stats.tooLargeCount ?? 0) + 1;
+        continue;
+      }
       try {
         const data = await fs.readFile(full);
         out.push({ relativePath: path.relative(root, full).split(path.sep).join('/'), data });
@@ -157,6 +166,7 @@ async function readSkills(
   maxFiles: number,
   maxBytes: number,
   maxSkills: number,
+  stats?: DirWalkStats & { truncated?: boolean },
 ): Promise<HermesSkillInput[]> {
   let categories: Dirent[];
   try {
@@ -165,13 +175,14 @@ async function readSkills(
     return [];
   }
   const out: HermesSkillInput[] = [];
+  // 技能数触顶绝不静默（audit-foreign F4）：置标志，由调用方推一条 source-unreadable。
   for (const c of categories) {
-    if (out.length >= maxSkills) break;
+    if (out.length >= maxSkills) { if (stats !== undefined) stats.truncated = true; break; }
     if (!c.isDirectory() || c.isSymbolicLink()) continue;
     if (c.name.startsWith('.')) continue;
     const catDir = path.join(skillsDir, c.name);
     if (await hasSkillMd(catDir)) {
-      const files = await walkFiles(catDir, catDir, maxFiles, maxBytes);
+      const files = await walkFiles(catDir, catDir, maxFiles, maxBytes, stats);
       if (files.length > 0) out.push({ name: c.name, files });
       continue;
     }
@@ -182,12 +193,12 @@ async function readSkills(
       continue;
     }
     for (const s of subs) {
-      if (out.length >= maxSkills) break;
+      if (out.length >= maxSkills) { if (stats !== undefined) stats.truncated = true; break; }
       if (!s.isDirectory() || s.isSymbolicLink()) continue;
       if (s.name.startsWith('.')) continue;
       const skillDir = path.join(catDir, s.name);
       if (!(await hasSkillMd(skillDir))) continue;
-      const files = await walkFiles(skillDir, skillDir, maxFiles, maxBytes);
+      const files = await walkFiles(skillDir, skillDir, maxFiles, maxBytes, stats);
       if (files.length === 0) continue;
       out.push({ name: s.name, files, category: c.name });
     }
@@ -215,9 +226,9 @@ async function memoryFileNames(memoriesDir: string): Promise<string[]> {
 export async function readHermes(opts: HermesReadOptions): Promise<HermesReadResult> {
   const resolved = resolveHermesHome(opts);
   const home = resolved.home;
-  const maxFileBytes = opts.maxFileBytes ?? DEFAULT_MAX_FILE;
-  const maxSkillFiles = opts.maxSkillFiles ?? DEFAULT_MAX_SKILL_FILES;
-  const maxSkills = opts.maxSkills ?? DEFAULT_MAX_SKILLS;
+  const maxFileBytes = resolveLimit(opts.limits?.maxFileBytes, opts.maxFileBytes, DEFAULT_MAX_FILE);
+  const maxSkillFiles = resolveLimit(opts.limits?.maxSkillFiles, opts.maxSkillFiles, DEFAULT_MAX_SKILL_FILES);
+  const maxSkills = resolveLimit(opts.limits?.maxSkills, opts.maxSkills, DEFAULT_MAX_SKILLS);
   const readFindings: ForeignSkip[] = [];
   const unreadable: string[] = [];
   const input: HermesInput = {};
@@ -271,7 +282,13 @@ export async function readHermes(opts: HermesReadOptions): Promise<HermesReadRes
   }
 
   /* skills/（两层分类） */
-  const skills = await readSkills(path.join(home, 'skills'), maxSkillFiles, maxFileBytes, maxSkills);
+  const skillStats: DirWalkStats & { truncated?: boolean } = {};
+  const skills = await readSkills(path.join(home, 'skills'), maxSkillFiles, maxFileBytes, maxSkills, skillStats);
+  if (skillStats.truncated === true) {
+    readFindings.push({ code: 'source-unreadable', origin: 'skills', detail: 'max-skills-reached', count: maxSkills });
+  }
+  // t36：技能文件遍历的条数/字节触顶同样必须可见（与 max-skills-reached 同族）
+  readFindings.push(...dirWalkSkips(skillStats, 'skills', maxSkillFiles));
   if (skills.length > 0) input.skills = skills;
 
   /* memories/（只列名） */

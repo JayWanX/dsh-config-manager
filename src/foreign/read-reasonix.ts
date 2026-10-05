@@ -124,17 +124,24 @@ async function readReasonixSession(
 }
 
 /** 读全部 reasonix 会话（多根；同 id 先到先得，不覆盖 —— 与全局「同 id 只允许一条」同口径） */
-export async function readReasonix(opts: RootProbeOptions): Promise<SessionReadOutcome<ReasonixSessionFile>> {
+export async function readReasonix(
+  opts: RootProbeOptions & { readonly maxFiles?: number },
+): Promise<SessionReadOutcome<ReasonixSessionFile>> {
   const findings: ForeignSkip[] = [];
   const files: ReasonixSessionFile[] = [];
   const seen = new Set<string>();
+  const maxFiles = opts.maxFiles ?? MAX_FILES;
+  // walkFiles 只回数组、不报是否触顶 → 每个根多要一条：拿到 maxFiles+1 条即**证明**触顶（audit-foreign F4）。
+  let truncated = false;
   let walked = 0;
   for (const root of reasonixSessionRoots(opts)) {
-    const found = await walkFiles(root, {
+    const foundAll = await walkFiles(root, {
       match: (name) => name.endsWith('.jsonl'),
       maxDepth: MAX_DEPTH,
-      maxFiles: MAX_FILES,
+      maxFiles: maxFiles + 1,
     });
+    if (foundAll.length > maxFiles) truncated = true;
+    const found = foundAll.length > maxFiles ? foundAll.slice(0, maxFiles) : foundAll;
     for (const entry of found) {
       walked += 1;
       if (seen.has(stemOf(entry.name))) continue;
@@ -145,5 +152,6 @@ export async function readReasonix(opts: RootProbeOptions): Promise<SessionReadO
     }
   }
   files.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  if (truncated) findings.push({ code: 'source-unreadable', origin: 'reasonix', detail: 'max-sessions-reached', count: maxFiles });
   return { files, readFindings: findings, extraCounts: { 'reasonix.files': walked } };
 }

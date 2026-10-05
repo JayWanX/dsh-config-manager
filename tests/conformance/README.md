@@ -213,6 +213,7 @@ import { rebuildBundle } from './tests/conformance/corpus.ts';
 | `FC-02` | 未知顶层字段 / 已知对象内未知子字段 → 保留且无副作用 |
 | `FC-03` | 分区数据 `version > 1` → 跳过该分区并告警、不阻断；`version` 损坏仍硬失败（**G-05 已修复**） |
 | `FC-04` | 语义回归：`missingSections` 只统计「已知分区但文件缺失」，与「未知分区」互不串味 |
+| `FC-05` | **分区载荷层**的 `relativePath` 硬约束（规格 §3.3.1 写侧硬约束，t52 用例化）：6 个文件类分区的 `validate()` 对「空串 / 非字符串 / 缺键」一律给 error `adapter.validate.fileRelativePath`（文案 `文件记录必须含非空 relativePath`）+ `valid=false`，正向对照必须通过；**后果接线**用源码守卫钉住「先 validate → error 记进 `adapterIssues` → `if (!v.valid) continue`（不调 analyzeImport）」且 `adapterIssues` 并入 **errors**（不是 warnings、不是静默），守卫自带 3 份突变自证 |
 | `ENC-01` | 加密往返：正确密码、密码与明文不落盘、无解密结果拒绝执行、凭据按值恢复 |
 | `ENC-02` | 加密往返：错误密码 `BAD_PASSWORD` + 解密失败路径零写入 |
 | `VER-01` | `schemaVersion=2` → `isTooNew` 硬失败 + 可操作错误 + 零写入 |

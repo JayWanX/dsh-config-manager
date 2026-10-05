@@ -35,6 +35,15 @@ export interface DshProfileMeta {
   patchBytes: number
   /** 是否当前正在运行的 profile */
   isCurrent: boolean
+  /**
+   * cross-F3：该条目是**中断的档案复制**留下的半截副本（无 package.json，只有进行中标记）。
+   * 界面据此把它渲染成「未完成的副本」并给出去向（`dir`）+ 删除入口，而不是当成正常档案。
+   */
+  incomplete?: true
+  /** 半截副本的来源档案名（仅 incomplete 时有值） */
+  copiedFrom?: string
+  /** 半截副本的复制开始时刻（ISO；仅 incomplete 时有值） */
+  copyStartedAt?: string
   issues: DshProfileIssue[]
   /** package.json 的 mtime（毫秒）；不可读 = null */
   updatedAtMs: number | null
@@ -172,6 +181,47 @@ export const DSH_PROFILE_TEMPLATES: readonly DshProfileTemplate[] = [
 ]
 
 /**
+ * 「档案复制进行中」标记文件名（cross-F3）：复制**开始前**写进目标目录，成功或回滚时移除。
+ *
+ * 为什么需要它：复制是「mkdir 目标 → 逐条 cp → 重写 package.json」的多步长事务；进程被强杀
+ * （或断电）会留下「有文件、无 package.json」的半截副本 —— 而档案列表按「有 package.json 才算
+ * profile」的既有口径会**跳过**它，于是用户既看不到、也删不掉（删除走 requireProfile 报 notFound），
+ * 恢复面板又因为没有 snapshotId 给不出回滚入口。显式标记让半截副本成为一个可列出、可物理删除的
+ * 独立可辨识条目（`DshProfileMeta.incomplete`）。
+ */
+export const PROFILE_COPY_MARKER_FILENAME = '.dcm-copy-in-progress.json'
+
+/** 半截副本标记的内容（诊断 + 界面呈现「从哪个档案复制、什么时候开始」）。 */
+export interface DshProfileCopyMarker {
+  /** 源档案名 */
+  sourceName: string
+  /** 目标档案名（= 目录名） */
+  newName: string
+  /** 复制开始时刻（ISO） */
+  startedAt: string
+  /** 是否连带 node_modules */
+  includeNodeModules: boolean
+  /** 写入标记的进程 pid（诊断：进程已不在 ⇒ 已中断的残留） */
+  pid: number
+}
+
+/**
+ * 中断的档案复制留下的半截副本（只读视图；`dir` 是**目标绝对路径**，供用户定位与删除）。
+ */
+export interface DshProfileIncompleteCopy {
+  /** 目标档案名（= 目录名） */
+  name: string
+  /** 目标目录绝对路径 */
+  dir: string
+  /** 源档案名（标记缺失/损坏时 = null —— 仍可辨识与删除，绝不静默忽略） */
+  sourceName: string | null
+  /** 复制开始时刻（标记缺失/损坏时 = null） */
+  startedAt: string | null
+  /** 标记内容是否可解析（false = 只有标记文件但内容坏了） */
+  markerReadable: boolean
+}
+
+/**
  * Desktop（Electron 外壳）**独占管理**的保留档案名。
  *
  * 硬事实（DSH 0.1.5-rc.1 / 0.2.0-rc.2 的 `@deepseek-ai/dsh/lib/bin.js`）：普通 dsh CLI 对
@@ -271,6 +321,10 @@ export function checkProfileName(name: string): DshProfileErrorCode | null {
   if (trimmed.length > 64) return 'invalidNameInput'
   if (trimmed.includes('/') || trimmed.includes('\\') || trimmed.includes('\0')) return 'invalidNameInput'
   if (trimmed === '.' || trimmed === '..' || trimmed === 'node_modules') return 'invalidNameInput'
-  if (RESERVED_PROFILE_NAMES.includes(trimmed)) return 'reservedName'
+  // routes-F2：保留名比较必须**大小写不敏感**。Windows / macOS 的默认文件系统大小写不敏感，
+  // 而 isManagedProfileName（desktop 独占档案）本来就是大小写不敏感 —— 用 includes 做精确比较
+  // 会让 Desktop / Web 这类变体绕过保留名校验，建出一个「插件自己删不掉」的目录
+  // （remove/rename 会以 managedProfile 拒绝），甚至占用 Electron desktop 的档案目录名。
+  if (RESERVED_PROFILE_NAMES.some((reserved) => reserved.toLowerCase() === trimmed.toLowerCase())) return 'reservedName'
   return null
 }

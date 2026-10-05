@@ -135,6 +135,63 @@ export interface WalkOptions {
   readonly maxFiles?: number;
 }
 
+/**
+ * 目录走盘（技能目录等）的**触顶统计**（t36）。
+ *
+ * 为什么要有它：各来源的目录走盘只回数组、不报是否触顶，于是「单目录文件数上限」
+ * （maxSkillFiles=200）与「单文件字节上限」触顶时是**静默丢内容**（audit-foreign F4 的同族残余：
+ * qwen 等 9 个会话源已在 t17 报码，技能文件遍历还没报）。走盘把统计交回调用方，
+ * 由调用方用 dirWalkSkips() 换成与既有码同族的可见条目。
+ */
+export interface DirWalkStats {
+  /** 命中条目数上限（= 至少还有一个候选文件没被收） */
+  truncatedFiles?: boolean;
+  /** 因单文件字节上限被跳过的文件数 */
+  tooLargeCount?: number;
+}
+
+/** 目录走盘的条数触顶 detail（与 max-sessions-reached / max-skills-reached 同族） */
+export const MAX_SKILL_FILES_REACHED = 'max-skill-files-reached';
+
+/** 单文件字节上限触顶的 detail（与各读盘层既有的 too-large 同名同义） */
+export const DIR_WALK_TOO_LARGE = 'too-large';
+
+/**
+ * 把一次目录走盘的触顶统计转成 skipped 条目（各来源共用同一口径）。
+ * 无触顶 → 空数组（不产生噪声）；origin 一律是**包内相对标签**，绝不含机器路径或值。
+ */
+export function dirWalkSkips(
+  stats: DirWalkStats | undefined,
+  origin: string,
+  maxFiles: number,
+): ForeignSkip[] {
+  if (stats === undefined) return [];
+  const out: ForeignSkip[] = [];
+  if (stats.truncatedFiles === true) {
+    out.push({ code: 'source-unreadable', origin, detail: MAX_SKILL_FILES_REACHED, count: maxFiles });
+  }
+  const tooLarge = stats.tooLargeCount ?? 0;
+  if (tooLarge > 0) {
+    out.push({ code: 'source-unreadable', origin, detail: DIR_WALK_TOO_LARGE, count: tooLarge });
+  }
+  return out;
+}
+
+/**
+ * 解析一个可选上限：**上下文覆盖 > 读器显式选项 > 默认值**（t36 透传面的唯一口径）。
+ * 只用安全正整数（脏值一律落到下一档），因此「不给覆盖」与改造前**逐字同行为**。
+ */
+export function resolveLimit(
+  override: number | undefined,
+  explicit: number | undefined,
+  fallback: number,
+): number {
+  const usable = (v: number | undefined): boolean => typeof v === 'number' && Number.isSafeInteger(v) && v > 0;
+  if (usable(override)) return override as number;
+  if (usable(explicit)) return explicit as number;
+  return fallback;
+}
+
 /** 相对路径统一成 POSIX 形态（包内相对路径与位置标签都是 POSIX） */
 export function toPosixPath(p: string): string {
   return p.split(path.sep).join('/');

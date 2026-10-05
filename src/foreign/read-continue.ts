@@ -295,8 +295,10 @@ export async function readContinueSessions(
     sessionsDir,
     (name) => name.endsWith('.json') && name !== CONTINUE_INDEX_NAME,
   );
+  // 触顶必须**可见**（audit-foreign F4）。
+  let truncated = false;
   for (const name of sessionFiles) {
-    if (files.length >= maxFiles) break;
+    if (files.length >= maxFiles) { truncated = true; break; }
     const text = await readTextGuarded(joinFor(platform, sessionsDir, name), name, maxBytes, findings);
     if (text === null) continue;
     const outcome = parseContinueSession(text);
@@ -312,6 +314,7 @@ export async function readContinueSessions(
     files.push({ id, parsed });
   }
 
+  if (truncated) findings.push({ code: 'source-unreadable', origin: 'continue', detail: 'max-sessions-reached', count: maxFiles });
   return { files, readFindings: findings, extraCounts: { 'sessions.candidates': files.length } };
 }
 

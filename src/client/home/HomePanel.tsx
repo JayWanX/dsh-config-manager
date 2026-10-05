@@ -70,6 +70,8 @@ export interface HomePanelProps {
   syncApi: SyncApi
   historyApi: HistoryApi
   t: TranslateNS<'config-manager'>
+  /** 同步命名空间翻译器（透传给自动备份卡：跳过原因文案走 sync 字典；client-F1） */
+  syncT: TranslateNS<'config-manager-sync'>
   /** 「活动」入口打开 Shell 的只读面板（完整迁移历史） */
   openActivity?: () => void
   /**
@@ -179,7 +181,7 @@ function dirOf(path: string): string {
 /**
  * 总览页（控制中心）：状态条 + 动作工具栏 + 备份位置 + 分区构成 + 最近活动。
  */
-export function HomePanel({ api, syncApi, historyApi, t, openActivity, openForeignImport }: HomePanelProps) {
+export function HomePanel({ api, syncApi, historyApi, t, syncT, openActivity, openForeignImport }: HomePanelProps) {
   /**
    * 「定时备份」不再是独立页签 —— 设置卡并进本页（§7）。
    * 状态行的「定时备份」段点击**开这个弹窗**，而不是跳页：
@@ -600,6 +602,7 @@ export function HomePanel({ api, syncApi, historyApi, t, openActivity, openForei
           <BackupScheduleCard
             api={api}
             t={t}
+            syncT={syncT}
             onBackupDone={() => {
               // 备份完成后刷新状态行与最近活动（它们都在本页的数据里）
               setScheduleOpen(false)

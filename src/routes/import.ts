@@ -18,10 +18,26 @@ import { atomicWriteFile } from '../utils/atomic-write.ts'
 import { randomBytes } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import fs from 'node:fs/promises'
-import { basename, join, resolve } from 'node:path'
+import { basename, isAbsolute, join, relative, resolve } from 'node:path'
 
 /** Cap on raw upload bodies (staged to the controlled tmp dir). 原先在 index.ts，随路由一起迁入本组。 */
 const MAX_UPLOAD_BYTES = 256 * 1024 * 1024
+
+/** /decrypt-archive 写出的明文备份副本名前缀（全仓唯一创建点 = 本文件的 decrypt-archive 分支）。 */
+const DECRYPTED_PLAINTEXT_PREFIX = 'decrypted-'
+
+/**
+ * 该路径是否是 /decrypt-archive 解出的**明文备份副本**（e2e-F2「用完即清」的对象）。
+ *
+ * 判据 = 落在受控 tmpDir 内 + basename 以 `decrypted-` 开头（该前缀全仓只有本文件使用）。
+ * 不依赖进程内台账：宿主重启后接续导入的明文同样应被清掉；暂存上传（upload-…）与市场暂存
+ * （market-… 与 publish-…）不是「明文副本」语义，由 tmpDir 的保留期清理兜底，不在本函数范围。
+ */
+export function isDecryptedPlaintextArtifact(zipPath: string, tmpDir: string): boolean {
+  const rel = relative(tmpDir, zipPath)
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return false
+  return basename(zipPath).startsWith(DECRYPTED_PLAINTEXT_PREFIX)
+}
 
 export function importRoutes(env: RoutesEnv): WebRoute[] {
   const {
@@ -288,6 +304,12 @@ export function importRoutes(env: RoutesEnv): WebRoute[] {
         })
         // 结束写结果：导入结果落账（供 /progress 查询与刷新恢复）
         runs.finish(runId, result)
+        // e2e-F2：明文备份副本「用完即清」—— 导入**成功**后立刻删掉 /decrypt-archive 解出的明文 ZIP
+        //（AGENTS.md 与 decrypt-archive 注释都写「用完即清」，此前成功路径没有任何删除点）。
+        // 失败/取消保留：用户可能用同一个 zipPath 重试；从未执行的残留由 tmpDir 的 24h 保留期清理兜底。
+        if (result.ok && isDecryptedPlaintextArtifact(zipPath, tmpDir)) {
+          await fs.rm(zipPath, { force: true }).catch(() => undefined)
+        }
         // Phase 6：迁移历史（best-effort）。sections 从导入计划的 items[].adapter 去重派生。
         const importSections = Array.from(
           new Set(plan.items.map((i) => (i as { adapter?: string }).adapter).filter((s): s is string => typeof s === 'string' && s !== '')),

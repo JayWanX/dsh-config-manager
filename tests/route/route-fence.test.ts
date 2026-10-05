@@ -18,7 +18,7 @@ import { endpoint, registerRoutes, requireJsonObject, RouteError, routeSpecOf, t
 
 const root = path.resolve(import.meta.dirname, '../..');
 
-/** 宿主路由源：src/index.ts（保留的 8 条）+ src/routes/*.ts（拆出去的 61 条）。 */
+/** 宿主路由源：src/index.ts（保留的 7 条）+ src/routes/*.ts（拆出去的 70 条）。 */
 function routeSources(): Array<{ file: string; text: string }> {
   const out = [{ file: 'src/index.ts', text: fs.readFileSync(path.join(root, 'src/index.ts'), 'utf8') }];
   const dir = path.join(root, 'src/routes');
@@ -180,7 +180,7 @@ test('buildRoutes：70 条拆出的路由全部产出、全部经 kit、路径�
   // 只构造路由表：组文件在构建期只解构 env，并调用 withMutationGate 包裹 handler（其余依赖都在 handler 内）
   // → 用一个「withMutationGate 恒等包裹、其余成员为空对象」的代理即可，不需要真宿主依赖树。
   const routes = buildRoutes(stubEnv());
-  assert.equal(routes.length, 70, '拆出的路由数应为 70（其余 8 条留在 index.ts；路由总数见 parity 快照的 77 条）');
+  assert.equal(routes.length, 70, '拆出的路由数应为 70（其余 7 条留在 index.ts；路由总数见 parity 快照的 77 条）');
   for (const route of routes) {
     assert.notEqual(routeSpecOf(route), undefined, '未经 kit 的路由: ' + route.path);
   }

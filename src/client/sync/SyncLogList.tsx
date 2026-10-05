@@ -142,7 +142,7 @@ function OperationRow({ row, t }: { row: SyncHistoryEntry; t: TranslateNS<'confi
  * 全部取值来自 `projectAutosyncEntry` 的投影 —— 本组件不自己拼文案。
  */
 function AutosyncRow({ entry, t }: { entry: AutosyncHistoryEntry; t: TranslateNS<'config-manager-sync'> }): ReactNode {
-  const row = projectAutosyncEntry(entry)
+  const row = projectAutosyncEntry(entry, t)
   return (
     <tr>
       {/* 与人为操作行一致的时间呈现（等宽 11px 单行 + title 完整本地时间） */}

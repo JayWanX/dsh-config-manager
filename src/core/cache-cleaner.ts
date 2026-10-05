@@ -2,9 +2,10 @@
  * 缓存自动清理（cache-cleaner）
  *
  * 只清理「可重建 / 一次性」的缓存与临时文件，绝不触碰用户数据与安全网：
- *   - tmpDir 下过期的 `.zip`（upload-* / market-* / publish-* / decrypted-* /
- *     export-plain-* 等导入/导出/市场暂存，以及 SyncEngine 遗留的临时目录
- *     dsh-sync-pull-*）——保留期内文件不删（供「刷新恢复导入」等跨请求流程继续消费）；
+ *   - tmpDir 下**整块**可回收的暂存产物（upload-* / market-* / publish-* / decrypted-* /
+ *     export-plain-* 等导入/导出/市场暂存、SyncEngine 遗留的 dsh-sync-pull-* 临时目录、
+ *     以及原子写半成品 `*.tmp` / `.dshcm.*`）——保留期内文件不删
+ *     （自动清理沿用保留期，供「刷新恢复导入」等跨请求流程继续消费；手动清理忽略保留期）；
  *   - exportsDir 下过期的导出产物 `.zip`（导出时用户已通过浏览器下载/另存到本地，
  *     host 端只是暂存副本，按保留期回收）；
  *   - market/cache/<url-hash>/（市场 index 缓存与条目缓存，refresh/download 可重建）；
@@ -20,6 +21,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { Dirent, Stats } from 'node:fs'
+import { isENOENT } from '../utils/guards.ts'
 
 /** 临时文件缺省保留期：24 小时（覆盖跨会话「刷新恢复导入」窗口，昨天的残留自动清） */
 export const TMP_RETENTION_DEFAULT_MS = 24 * 60 * 60 * 1000
@@ -30,8 +32,18 @@ export const EXPORTS_RETENTION_DEFAULT_MS = 7 * 24 * 60 * 60 * 1000
 /** 市场缓存/工作副本缺省保留期：7 天（重建成本 = 一次网络拉取） */
 export const MARKET_RETENTION_DEFAULT_MS = 7 * 24 * 60 * 60 * 1000
 
-/** SyncEngine 在 zipDir（即 tmpDir）下 mkdtemp 的目录前缀（用完即删，崩溃残留由清理兜底） */
-const SYNC_TMP_DIR_PREFIX = 'dsh-sync-pull-'
+/**
+ * 原子写半成品判据（**单一事实源**，cross-F1）。
+ *
+ * 这些名字只可能来自「写盘 → rename」中途被强杀留下的孤儿：`src/utils/atomic-write.ts` 产出
+ * `.dshcm.<base>.<pid>.<rand>.tmp`，导出/打包侧产出 `<base>.zip.tmp-hso-<rand>`。
+ * 它们没有任何读取路径（`journal.ts` 的 isJournalBasename 显式排除 TMP_PREFIX），
+ * 因此在**可回收分区**里发现它们就必须清掉 —— 否则 /disk-usage 把整块分区算进「可回收」，
+ * 而清理按钮永远删不掉它们（界面数字与按钮效果长期不一致）。
+ */
+export function isAtomicTempName(name: string): boolean {
+  return name.startsWith('.dshcm.') || name.endsWith('.tmp') || name.includes('.tmp-hso-')
+}
 
 export interface CacheCleanupOptions {
   /** 临时目录（$DSH_HOME/dsh-config-manager/tmp） */
@@ -177,25 +189,30 @@ export async function cleanupCaches(opts: CacheCleanupOptions): Promise<CacheCle
   const wanted = opts.sections ?? ['tmp', 'exports', 'marketCache', 'marketWork']
   const result = emptyCleanupResult()
 
-  // 1) tmpDir：过期（或 includeRecent 时全部）.zip（导入/导出/市场/解密暂存）
-  //    与 SyncEngine 遗留的 dsh-sync-pull-* 临时目录。
+  // 1) tmpDir：**整块可回收**（cross-F1）。
+  //    为什么是「整块」而不是只认 *.zip / dsh-sync-pull-*：/disk-usage 对 tmp 的 policy 是
+  //    regenerable，可回收数字 = 整个目录递归 sizeBytes（src/core/disk-usage.ts 的
+  //    `reclaimableBytes` 累计），手动清理的既定语义也是「可重建区忽略保留期整块清掉」
+  //    （AGENTS.md 磁盘体检硬边界 ③：tmp 现在就能整块清掉）。此前只删两类名字，于是中断导出
+  //    残留的原子写半成品（`export-plain-*.zip.tmp-hso-*`）既被算进「可回收」又永远删不掉，
+  //    且 removed===0 让前端提前返回 —— 用户连失败提示都看不到。
+  //    保留期语义不变：自动清理只删超期项，`includeRecent`（手动）忽略保留期。
   if (wanted.includes('tmp')) {
   try {
     const entries = await fs.readdir(opts.tmpDir, { withFileTypes: true })
     result.sections.push('tmp')
     for (const entry of entries) {
       const target = path.join(opts.tmpDir, entry.name)
-      const isTmpish =
-        (entry.isFile() && entry.name.endsWith('.zip')) ||
-        (entry.isDirectory() && entry.name.startsWith(SYNC_TMP_DIR_PREFIX))
-      if (!isTmpish) continue
       if (includeRecent || await isExpired(target, tmpRetentionMs, nowMs)) {
         await removeEntry(target, `tmp/${entry.name}`, result)
       }
     }
-  } catch {
+  } catch (err) {
     // tmpDir 不存在/不可读 → 跳过（尽力而为）
-    result.errors += 1
+    // e2e-F3：可选目录**不存在**（ENOENT）不是失败 —— 全新安装时 market/cache、market/work 尚未创建，
+    // 此前一律 +1 会让「本次真删了文件」的清理被前端渲染成红色「清理失败 N 项」（detail 为空、无可操作信息）。
+    // 真正的读失败（EACCES/EBUSY/…）仍必须计入 errors（「读不到 ≠ 没有」） 。
+    if (!isENOENT(err)) result.errors += 1
   }
   }
 
@@ -215,9 +232,9 @@ export async function cleanupCaches(opts: CacheCleanupOptions): Promise<CacheCle
         await removeEntry(target, `exports/${entry.name}`, result)
       }
     }
-  } catch {
-    // exportsDir 不存在/不可读 → 跳过
-    result.errors += 1
+  } catch (err) {
+    // exportsDir 不存在/不可读 → 跳过（ENOENT 不算失败，见上）
+    if (!isENOENT(err)) result.errors += 1
   }
   }
 
@@ -228,6 +245,12 @@ export async function cleanupCaches(opts: CacheCleanupOptions): Promise<CacheCle
     result.sections.push('marketCache')
     for (const hash of hashes) {
       const hashDir = path.join(opts.marketCacheRoot, hash)
+      // 根级原子写半成品：不是 hash 目录 → 会被下面的 isDirectory 跳过，但 /disk-usage 的
+      // 递归统计把它算在这个分区里 ⇒ 必须就地回收（cross-F1 同类）。
+      if (isAtomicTempName(hash) && (includeRecent || await isExpired(hashDir, marketRetentionMs, nowMs))) {
+        await removeEntry(hashDir, `market/cache/${hash}`, result)
+        continue
+      }
       let st
       try {
         st = await fs.stat(hashDir)
@@ -239,6 +262,16 @@ export async function cleanupCaches(opts: CacheCleanupOptions): Promise<CacheCle
       const indexFile = path.join(hashDir, 'index.json')
       if (includeRecent || await isExpired(indexFile, marketRetentionMs, nowMs)) {
         await removeEntry(indexFile, `market/cache/${hash}/index.json`, result)
+      }
+
+      // 原子写半成品（index.json 写入中途被杀）也必须清：否则 hash 目录永远非空、回收不掉，
+      // 而 /disk-usage 照旧把它计入可回收（cross-F1 同类不同区）。
+      for (const name of await fs.readdir(hashDir).catch(() => [] as string[])) {
+        if (!isAtomicTempName(name)) continue
+        const tmpFile = path.join(hashDir, name)
+        if (includeRecent || await isExpired(tmpFile, marketRetentionMs, nowMs)) {
+          await removeEntry(tmpFile, `market/cache/${hash}/${name}`, result)
+        }
       }
 
       const itemsDir = path.join(hashDir, 'items')
@@ -259,9 +292,9 @@ export async function cleanupCaches(opts: CacheCleanupOptions): Promise<CacheCle
         await removeEntry(hashDir, `market/cache/${hash}`, result)
       }
     }
-  } catch {
-    // marketCacheRoot 不存在/不可读 → 跳过
-    result.errors += 1
+  } catch (err) {
+    // marketCacheRoot 不存在/不可读 → 跳过（ENOENT 不算失败，见上）
+    if (!isENOENT(err)) result.errors += 1
   }
   }
 
@@ -272,15 +305,19 @@ export async function cleanupCaches(opts: CacheCleanupOptions): Promise<CacheCle
     result.sections.push('marketWork')
     for (const hash of hashes) {
       const workDir = path.join(opts.marketWorkRoot, hash)
+      if (isAtomicTempName(hash) && (includeRecent || await isExpired(workDir, marketRetentionMs, nowMs))) {
+        await removeEntry(workDir, `market/work/${hash}`, result)
+        continue
+      }
       const st = await fs.stat(workDir).catch(() => null)
       if (st === null || !st.isDirectory()) continue
       if (includeRecent || await isExpired(workDir, marketRetentionMs, nowMs)) {
         await removeEntry(workDir, `market/work/${hash}`, result)
       }
     }
-  } catch {
-    // marketWorkRoot 不存在/不可读 → 跳过
-    result.errors += 1
+  } catch (err) {
+    // marketWorkRoot 不存在/不可读 → 跳过（ENOENT 不算失败，见上）
+    if (!isENOENT(err)) result.errors += 1
   }
   }
 

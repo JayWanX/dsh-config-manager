@@ -5,7 +5,11 @@
  * 方案 A 扩展：/sync/history 现返回 { entries: SyncHistoryEntry[] }（快照 kind=apply
  * + 自动同步 kind=autosync），投影需统一处理两源，并生成自动同步跳过冲突的可读明细。
  */
-import type { AutosyncHistoryEntry, SyncHistoryEntry } from './sync-api.ts';
+import type { AutosyncHistoryEntry, SyncHistoryEntry } from './sync-api.ts'
+import type { TranslateNS } from '../client-types.ts'
+
+/** 同步命名空间翻译器（本文件的标签一律走它 —— 硬编码中文在英文界面下会原样透出）。 */
+export type SyncTranslate = TranslateNS<'config-manager-sync'>;
 
 /** 兼容旧快照条目（manifest.json 投影）。 */
 export interface SnapshotHistoryEntry {
@@ -53,37 +57,52 @@ export function formatDateTimeFull(iso: string): string {
 
 /* ---------------------------------------------------------------- 自动同步记录投影 */
 
-/** 自动同步执行记录的方向可读标签。 */
-export function directionLabel(direction: AutosyncHistoryEntry['direction']): string {
+/**
+ * 自动同步执行记录的方向可读标签。
+ *
+ * client-F1：文案一律走字典（history.autosyncPull/Push/Both 早已存在且英文值就绪）——
+ * 此前返回硬编码中文，英文界面下这一格恒为中文。
+ */
+export function directionLabel(direction: AutosyncHistoryEntry['direction'], t: SyncTranslate): string {
   switch (direction) {
-    case 'pull': return '下载';
-    case 'push': return '上传';
-    default: return '双向';
+    case 'pull': return t('history.autosyncPull');
+    case 'push': return t('history.autosyncPush');
+    default: return t('history.autosyncBoth');
   }
 }
 
-/** 自动同步执行状态可读标签。 */
-export function autosyncStatusLabel(status: AutosyncHistoryEntry['status']): string {
+/** 自动同步执行状态可读标签（client-F1：走 autosync.* 字典键）。 */
+export function autosyncStatusLabel(status: AutosyncHistoryEntry['status'], t: SyncTranslate): string {
   switch (status) {
-    case 'success': return '成功';
-    case 'skipped': return '已跳过';
-    case 'partial': return '部分成功';
-    default: return '失败';
+    case 'success': return t('autosync.success');
+    case 'skipped': return t('autosync.skipped');
+    case 'partial': return t('autosync.partial');
+    default: return t('autosync.failed');
   }
 }
 
-/** 跳过原因 → 可读描述（host 透传语义；未知原因回退原串）。 */
-export function describeSkipReason(reason: string | undefined): string {
+/**
+ * 跳过原因 → 可读描述（host 透传语义；未知原因回退原串）。
+ *
+ * client-F1（部分修复）：conflict / no-remote / not-configured / network 四类走已存在的
+ * history.autosyncReason* 字典键；encrypted / mutation-locked / 未知 三类**仍为字面中文**
+ * —— 它们在 sync-locales.ts 里没有对应键，而该文件在外部团队在改清单内（不可写）。
+ * 补键后这里一并字典化，见 findings.md 的 client-F1 defer 段。
+ */
+export function describeSkipReason(reason: string | undefined, t: SyncTranslate): string {
   switch (reason) {
-    case 'conflict': return '冲突项被跳过';
-    case 'no-remote': return '远端无快照';
-    case 'not-configured': return '未配置仓库';
-    case 'network': return '网络问题';
+    case 'conflict': return t('history.autosyncReasonConflict');
+    case 'no-remote': return t('history.autosyncReasonNoRemote');
+    case 'not-configured': return t('history.autosyncReasonNotConfigured');
+    case 'network': return t('history.autosyncReasonNetwork');
+    // F1 残留（需新增 sync-locales 键 history.autosyncReasonEncrypted）
     case 'encrypted': return '远端快照已加密，自动同步跳过（请手动同步）';
     // issue #31：宿主侧的分类锁判定（LOCKED/STALE/UNKNOWN）统一以 'mutation-locked' 落历史，
     // 客户端拿不到细分 reason → 文案必须同时覆盖「活锁占用」与「残留锁需回收」两种可能，
     // 并给出可操作方向（否则界面只显示裸 token，用户无从判断要不要处理）。
+    // F1 残留（需新增 sync-locales 键 history.autosyncReasonMutationLocked）
     case 'mutation-locked': return '环境锁被占用（另一项任务进行中，或存在需回收的残留锁）';
+    // F1 残留（需新增 sync-locales 键 history.autosyncReasonUnknown）
     default: return reason ?? '未知';
   }
 }
@@ -165,19 +184,19 @@ export function summarizeSyncHistory(rows: readonly SyncHistoryEntry[]): SyncHis
   return { total: rows.length, snapshots, autosync, failed, skipped };
 }
 
-/** 自动同步记录 → 展示行投影。 */
-export function projectAutosyncEntry(entry: AutosyncHistoryEntry): AutosyncHistoryRow {
-  const parts: string[] = [directionLabel(entry.direction), autosyncStatusLabel(entry.status)];
-  if (entry.skipReason !== undefined) parts.push(describeSkipReason(entry.skipReason));
+/** 自动同步记录 → 展示行投影（client-F1：全部标签经 t 取字典）。 */
+export function projectAutosyncEntry(entry: AutosyncHistoryEntry, t: SyncTranslate): AutosyncHistoryRow {
+  const parts: string[] = [directionLabel(entry.direction, t), autosyncStatusLabel(entry.status, t)];
+  if (entry.skipReason !== undefined) parts.push(describeSkipReason(entry.skipReason, t));
   return {
     id: entry.createdAt,
     createdAt: entry.createdAt,
-    direction: directionLabel(entry.direction),
-    status: autosyncStatusLabel(entry.status),
+    direction: directionLabel(entry.direction, t),
+    status: autosyncStatusLabel(entry.status, t),
     summary: parts.join(' · '),
     badgeKind: autosyncBadgeKind(entry.status),
     // E：跳过原因从摘要串里拆出来，单独走第二行小字（摘要串保留以兼容既有测试/调用方）
-    skipReasonText: entry.skipReason !== undefined ? describeSkipReason(entry.skipReason) : undefined,
+    skipReasonText: entry.skipReason !== undefined ? describeSkipReason(entry.skipReason, t) : undefined,
     conflictedSections: entry.conflictedSections,
     appliedSections: entry.appliedSections,
     error: entry.error,

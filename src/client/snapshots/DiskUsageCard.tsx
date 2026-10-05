@@ -18,7 +18,7 @@
  * 与原实现一致，**排版与注释措辞是重建的**。教训见 AGENTS.md「常见坑」的通配套。
  */
 import { useEffect, useRef, useState } from 'react'
-import { diskUsageViewModel } from '../../ui/disk-usage-view.ts'
+import { cleanupOutcome, diskUsageViewModel } from '../../ui/disk-usage-view.ts'
 import { formatBytes } from '../../ui/report.ts'
 import { redact } from '../../security/redaction.ts'
 import type { ConfigManagerApi } from '../api.ts'
@@ -101,12 +101,16 @@ export function DiskUsageCard({ api, infoHintLabel, onBackupsChanged }: DiskUsag
         setConfirmOpen(false)
         setReport(result.report)
         if (includeExpired) onBackupsChanged?.()
-        if (result.freedBytes === 0 && result.removed === 0) {
-          toast.ok(t('diskUsage.clean.nothing'))
-          return
+        // e2e-F3：呈现判定在 ui/disk-usage-view.ts（「目录不存在」不是失败）；组件只按 kind 挑 toast
+        const outcome = cleanupOutcome(
+          { removed: result.removed, freedBytes: result.freedBytes, errors: result.errors, report: result.report, requested: result.requested },
+          { t, formatBytes },
+        )
+        if (outcome.okText !== '') toast.ok(outcome.okText)
+        if (outcome.warnText !== '') {
+          if (outcome.warnKind === 'error') toast.error(outcome.warnText)
+          else toast.warn(outcome.warnText)
         }
-        toast.ok(t('diskUsage.clean.done', { size: formatBytes(result.freedBytes), count: String(result.removed) }))
-        if (result.errors > 0) toast.error(t('diskUsage.clean.failed', { count: String(result.errors) }))
       },
       (err) => {
         if (!mountedRef.current) return

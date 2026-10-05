@@ -1,5 +1,6 @@
 /**
- * 救急台路由（阶段 2）：**只读页面 + 三个显式写动作**。
+ * 救急台路由（阶段 2）：**只读页面 + 一组显式写动作**（写路由不在此处计数 —— 清单以
+ * `GET /healthz` 的 `writeRoutes` 为准：它由路由声明派生，与实现同源、不会漂移）。
  *
  * 每条路由都经 `src/routes/kit.ts` 的 `endpoint()` 声明（围栏 / 方法白名单 / 统一错误映射一份实现）。
  *
@@ -11,7 +12,7 @@
  * 副作用描述与确认文案都在服务端渲染，前端 JS 不参与决策（原本也没有前端 JS）。
  */
 import { randomUUID } from 'node:crypto'
-import { endpoint, RouteError, writeJson } from '../../routes/kit.ts'
+import { endpoint, routeSpecOf, RouteError, writeJson } from '../../routes/kit.ts'
 import type { ServerResponse } from 'node:http'
 import type { WebRoute } from '../../routes/kit.ts'
 import {
@@ -26,6 +27,7 @@ import type { SessionHealthScanResult } from '../../utils/session-health-scan.ts
 import { createExec } from './exec.ts'
 import { writeHtml } from './http.ts'
 import {
+  escCapability,
   renderDiskPage, renderExportPage, renderHomePage, renderLockPage, renderMessagePage,
   renderProfilesPage, renderReinstallPage, renderRestorePage, renderResultPage, renderSessionsPage,
   renderUnlockPage, renderVerifyPage, verifyIdOf,
@@ -133,14 +135,21 @@ export function buildConsoleRoutes(context: ConsoleContext): WebRoute[] {
   // 本地别名：救急台的每条路由都带上 HTML 错误渲染器（kit 的统一出口仍在，只是形状换成页面）
   const consoleEndpoint: typeof endpoint = (spec, handler) =>
     endpoint({ ...spec, errorRenderer: renderConsoleError }, handler)
+  /**
+   * /healthz 的写路由自述：**由已声明的路由派生**（数组构造完再赋值），杜绝手写清单漂移（cli-F6：
+   * 此前只列 3 项能力名，与真实 11 条写路由不符）。
+   */
+  let writeRoutes: string[] = []
 
-  return [
+  const routes: WebRoute[] = [
     // ---------------------------------------------------------------- 只读
     consoleEndpoint({ path: '/healthz', methods: ['GET'] }, (_req, res) => {
       writeJson(res, 200, {
         ok: true, service: 'dcm-rescue-console', readOnly: false, version, startedAt: context.startedAt,
         // 写能力与只读页的区分：脚本/自检据此判断这台服务能做什么
         writes: ['sessions-repair', 'disk-cleanup', 'recover-stale-lock'],
+        // 全部写路由（由声明派生，cli-F6）
+        writeRoutes,
       })
     }),
 
@@ -340,7 +349,8 @@ export function buildConsoleRoutes(context: ConsoleContext): WebRoute[] {
       const lines = result.ok
         ? [
           result.message,
-          ...(result.url === undefined ? [] : ['认证 URL：' + result.url]),
+          // 能力 URL：必须原样（含 token）—— 过 esc() 会被 redact 抹掉，链接点开必然 401（cli-F1）
+          ...(result.url === undefined ? [] : [{ html: '认证 URL：<code>' + escCapability(result.url) + '</code>' }]),
           ...(result.port === undefined ? [] : ['端口：' + String(result.port)]),
           ...(result.pid === undefined ? [] : ['PID：' + String(result.pid)]),
           ...(result.logFile === undefined ? [] : ['日志：' + result.logFile]),
@@ -497,6 +507,15 @@ export function buildConsoleRoutes(context: ConsoleContext): WebRoute[] {
       res.end()
     }),
   ]
+  // 自述与实现同源：从已声明的路由读回（routeSpecOf），非 GET 方法按声明原样列出
+  writeRoutes = routes
+    .flatMap((route) => {
+      const spec = routeSpecOf(route)
+      if (spec === undefined) return []
+      return spec.methods.filter((method) => method !== 'GET').map((method) => method + ' ' + spec.path)
+    })
+    .sort()
+  return routes
 }
 
 export { renderMessagePage }

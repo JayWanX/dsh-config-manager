@@ -175,12 +175,30 @@ const SKELETON = '<div class="skeleton" aria-hidden="true">'
  * 失败原因直接渲染出来，里面可能夹带形如 `"apiKey": "…"` / `?token=…` 的内容（§7 纪律：
  * 展示文本渲染前一律过 `redact()`，插件 UI 与 CLI 都遵守，这里不能例外）。
  */
-export function esc(value: string): string {
-  return redact(value)
+function escapeHtml(value: string): string {
+  return value
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
+}
+
+export function esc(value: string): string {
+  return escapeHtml(redact(value))
+}
+
+/**
+ * **只转义、不脱敏**的展示出口：唯一用途是救急台**有意**回传给终端用户的「能力 URL」
+ * （启动器从子进程日志抓到的带 token 的认证 URL）。
+ *
+ * 为什么必须与 esc() 分开（cli-F1）：esc() 先过安全侧 redact()，而 redact 的 URL_QUERY_RE
+ * 会把 `?token=…` 的值抹成 ***REDACTED*** —— 那正是认证 URL 的形态，于是页面给出一条必然
+ * 401 的死链（/profiles 的「打开实例」入口 + 启动结果页）。这些 URL 与终端里打印的 bootstrap
+ * URL 同一性质：只给拿到会话 cookie 的人，本来就该原样可见。
+ * 纪律：**只允许**用于本层自己签发/抓取的能力 URL；其余一切文本仍走 esc()。
+ */
+export function escCapability(value: string): string {
+  return escapeHtml(value)
 }
 
 export function formatBytes(bytes: number): string {
@@ -792,7 +810,8 @@ export function renderConfirmForm(options: {
 /** 写动作结果页（完成 / 失败共用；结果如实逐条列）。 */
 export function renderResultPage(
   title: string,
-  lines: readonly string[],
+  /** 逐条结果：默认过 esc()（脱敏+转义）；`{ html }` 仅用于已自行转义的能力 URL 行 */
+  lines: readonly Cell[],
   version: string,
   paths: RescuePaths,
   kind: 'ok' | 'bad' | 'warn' | string,
@@ -802,7 +821,7 @@ export function renderResultPage(
   const chrome: PageChrome = { version, paths, active: 'home' }
   const tone = kind === 'ok' ? 'ok' : kind === 'bad' ? 'bad' : 'warn'
   const body = banner(tone, title, lines.length === 0 ? '（无更多信息）' : '')
-    + section('逐条结果', '<ul class="resultList">' + lines.map((l) => '<li>' + esc(l) + '</li>').join('') + '</ul>')
+    + section('逐条结果', '<ul class="resultList">' + lines.map((l) => '<li>' + cellHtml(l) + '</li>').join('') + '</ul>')
     + '<p class="backRow"><a href="' + esc(backHref) + '" data-dcm-back>← 返回上一页并恢复原位置</a>'
     + ' · <a href="/">返回首页</a> · <a href="/sessions">会话体检</a> · <a href="/disk">磁盘占用</a></p>'
   return renderLayout(chrome, body, paths.homeDir + ' · 写动作结果')
@@ -1081,7 +1100,8 @@ export function renderProfilesPage(
     row.running
       ? (row.owned ? '运行中（本插件启动）' : '运行中（外部实例）') + (row.port === null ? '' : ' · :' + String(row.port))
       : '未运行',
-    { html: row.url === null ? '—' : '<a href="' + esc(row.url) + '">打开实例</a>' },
+    // 能力 URL：必须原样（含 token）—— 过 esc() 会被 redact 抹掉，链接点开必然 401（cli-F1）
+    { html: row.url === null ? '—' : '<a href="' + escCapability(row.url) + '">打开实例</a>' },
   ])
   parts.push(section('本机档案（' + String(outcome.rows.length) + '）',
     renderTable(['档案', '形态', '构成', '依赖', '实例状态', '入口'], rows)))

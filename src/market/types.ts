@@ -242,11 +242,11 @@ export interface MarketPreparePayload {
   mode?: MarketPublishMode;
 }
 
-/** POST /market/prepare 响应：条目包生成结果（manifest 文本 + 校验摘要 + 发布目录） */
+/** POST /market/prepare 响应：条目包生成结果（manifest 文本 + 校验摘要） */
 export interface MarketPrepareResponse {
   ok: boolean;
-  /** 发布目录（受控临时区，含 items/<id>/manifest.json + config.zip；懒 GC 与下载临时区同款） */
-  dir: string;
+  // routes-F4：原 `dir` 字段已删除。发布中间目录（tmpDir/publish-<id>-*）在**打包成 zipPath 之后即被删除**
+  // （防 publish-* 在 tmpDir 无限累积），回传一个已不存在的路径等于契约说谎；该字段全仓零消费者。
   /** 发布目录打包 zip 路径（受控临时区，供 /download 端点下载；懒 GC 清理） */
   zipPath: string;
   /** items/<id>/manifest.json 内容（pretty JSON，可直接复制/写入） */

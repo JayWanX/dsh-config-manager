@@ -20,6 +20,7 @@ import { msgOf, zhMsg } from '../core/messages.ts';
 import type { MsgFunc } from '../core/messages.ts';
 import { stringifyJsonSafe } from '../utils/json.ts';
 import { isPathSafe, normalizePath } from '../utils/paths.ts';
+import { isENOENT } from '../utils/guards.ts';
 import { PLUGIN_PATCH_REF_PREFIX } from '../core/backup.ts';
 import { readEffectivePatchLines, resolveWriteLayer, USER_PATCH_FILE } from '../core/patch-layers.ts';
 import { parsePnpmPatchedDependencies, sanitizePnpmWorkspacePatches } from './pnpm-workspace.ts';
@@ -480,7 +481,12 @@ export class PluginsAdapter implements ConfigAdapter<PluginsSection> {
       if (rel === '' || !isPathSafe(rel) || set.has(rel)) continue;
       try {
         if (await ctx.target.fs.exists(`${profileDir}/${rel}`)) set.add(rel);
-      } catch { /* 读不到 = 视为不存在 */ }
+      } catch (err) {
+        // t81 / t23 口径：**读不到 ≠ 没有**。只有 ENOENT 才是「本来就没有」；EACCES/EBUSY/IO 一律上抛，
+        // 否则会把「声明在、文件也在」的 patch 当作不存在 → 从将要写入的 pnpm-workspace.yaml 里剔除
+        // （issue #35 的症状：目标机 pnpm 从此拒绝一切 add）。存在性探测自身失败不得降级成「不存在」。
+        if (!isENOENT(err)) throw err;
+      }
     }
     return set;
   }
@@ -676,7 +682,10 @@ export class PluginsAdapter implements ConfigAdapter<PluginsSection> {
         if (rel === '' || !isPathSafe(rel) || available.has(rel)) continue;
         try {
           if (await ctx.target.fs.exists(`${profileDir}/${rel}`)) available.add(rel);
-        } catch { /* 读不到 = 视为不存在 */ }
+        } catch (err) {
+          // 同上（t81 / t23）：探测失败必须上抛，绝不把它降级成「声明不可满足」而写瘦 pnpm-workspace.yaml。
+          if (!isENOENT(err)) throw err;
+        }
       }
       const clean = sanitizePnpmWorkspacePatches(text, (rel) => available.has(rel));
       try {
@@ -773,9 +782,31 @@ export class PluginsAdapter implements ConfigAdapter<PluginsSection> {
     return validateJsonSection<PluginsSection>('plugins', data, msg, (section, issues) => {
       if (!Array.isArray(section.plugins)) {
         issues.push({ path: 'plugins', message: msg('adapter.validate.array', { subject: 'plugins' }), severity: 'error' });
+      } else {
+        // ui-F3：条目级形状必须与 analyzeImport 的假设对齐（它直接读 p.name / p.version）。
+        // 只校验「是数组」会放过 plugins:[null]，analyzeImport 抛内部 TypeError → 整包被拦下。
+        for (const [i, raw] of section.plugins.entries()) {
+          const p = raw as unknown;
+          if (p === null || typeof p !== 'object') {
+            issues.push({ path: `plugins[${i}]`, message: msg('adapter.validate.recordObject', { subject: 'plugin' }), severity: 'error' });
+            continue;
+          }
+          const name = (p as { name?: unknown }).name;
+          if (typeof name !== 'string' || name === '') {
+            issues.push({ path: `plugins[${i}].name`, message: msg('adapter.validate.requiredField', { subject: 'plugins[].name' }), severity: 'error' });
+          }
+        }
       }
       if (section.patch !== undefined && !Array.isArray(section.patch)) {
         issues.push({ path: 'patch', message: msg('adapter.validate.array', { subject: 'patch' }), severity: 'error' });
+      } else if (Array.isArray(section.patch)) {
+        // ui-F3：patch 条目在 analyzeImport 里被读 pl.raw / pl.lineId（isManagedElsewhere(pl.raw)）。
+        for (const [i, raw] of section.patch.entries()) {
+          const pl = raw as unknown;
+          if (pl === null || typeof pl !== 'object') {
+            issues.push({ path: `patch[${i}]`, message: msg('adapter.validate.recordObject', { subject: 'patch line' }), severity: 'error' });
+          }
+        }
       }
       if (section.pnpmWorkspace !== undefined && section.pnpmWorkspace !== null && typeof section.pnpmWorkspace !== 'string') {
         issues.push({ path: 'pnpmWorkspace', message: msg('adapter.validate.string', { subject: 'pnpmWorkspace' }), severity: 'error' });

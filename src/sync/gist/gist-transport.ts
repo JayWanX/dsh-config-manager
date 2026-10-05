@@ -36,6 +36,7 @@ import type {
   SyncRetryOptions, SyncSnapshot, SyncSnapshotMeta, SyncTransport, SyncTransportErrorOptions,
 } from '../transport.ts';
 import { gistMsg } from './messages.ts';
+import { composeMsg } from '../s3/messages.ts';
 
 /** 快照 id 安全字符集：字母数字开头，仅 . _ -；防文件名注入 */
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -170,7 +171,9 @@ export class GistTransport implements SyncTransport {
   };
 
   constructor(options: GistTransportOptions) {
-    const msg = options.msg ?? gistMsg;
+    // t90（同 t79 口径）：宿主 msg 是 **core 目录**的翻译器，`sync.gist.*` 键只在本地目录里
+    //（core 命中 0）⇒ 直接用会显示裸键名。composeMsg = 宿主优先 → 本地目录兜底 → 两边都没有才回退键名。
+    const msg = composeMsg(options.msg, gistMsg);
     const gistId = typeof options.gistId === 'string' ? options.gistId.trim() : '';
     if (gistId === '') throw new GistTransportError(msg('sync.gist.gistIdRequired'));
     if (!GIST_ID_RE.test(gistId)) throw new GistTransportError(msg('sync.gist.gistIdInvalid', { id: gistId }));

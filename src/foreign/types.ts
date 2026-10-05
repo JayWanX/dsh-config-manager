@@ -253,6 +253,29 @@ export interface HermesInput {
   readFindings?: ForeignSkip[];
 }
 
+/**
+ * 可选上限覆盖（t36）：宿主路由 / CLI **将来**放开上限时的**唯一通道**。
+ *
+ * 语义：缺省（不传）= 各来源读盘层的默认值**逐字不变**；只有显式给了某个键才覆盖它。
+ * 字段 = 各读盘层**已经存在**的可选上限（不新造语义）；装配层把上下文的 limits 原样透传进读器。
+ */
+export interface ForeignLimitOverrides {
+  /** 单文件读取上限（字节；超过即不读并报 source-unreadable/too-large） */
+  readonly maxFileBytes?: number;
+  /** 单个技能目录的文件数上限（超过即报 source-unreadable/max-skill-files-reached） */
+  readonly maxSkillFiles?: number;
+  /** 技能数上限（超过即报 source-unreadable/max-skills-reached） */
+  readonly maxSkills?: number;
+  /** instructions/*.instructions.md 的文件数上限（Copilot 专用） */
+  readonly maxInstructionFiles?: number;
+  /** 会话条数上限（超过即报 max-sessions-reached） */
+  readonly maxSessionFiles?: number;
+  /** 目录走盘的文件数上限（reasonix / trae 的会话遍历） */
+  readonly maxFiles?: number;
+  /** 单会话节点数上限（chatgpt / trae；超过即逐类计数） */
+  readonly maxNodes?: number;
+}
+
 export interface ForeignImportResult {
   source: ForeignSourceId;
   sections: ForeignSectionOut[];

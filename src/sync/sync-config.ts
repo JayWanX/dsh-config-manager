@@ -29,6 +29,16 @@ import type { MsgFunc } from '../core/messages.ts';
 import { parseJsonSafe, stringifyJsonSafe } from '../utils/json.ts';
 import { atomicWriteFile } from '../utils/atomic-write.ts';
 import { SYNC_CHANNELS } from '../utils/shared-constants.ts';
+// t88：S3 兼容商清单 / 云端点密钥槽位引用也来自同一个零依赖模块（客户端镜像必须与宿主同源）。
+// 注意：上面那条**单独一行**的 SYNC_CHANNELS import 是 t32 源码守卫的字面断言
+// （`sync-config.test.ts` 的 t32），不要合并进下面这条，否则那条守卫会红。
+import {
+  S3_COMPAT_PROVIDERS,
+  GIST_PROVIDER,
+  CLOUD_SYNC_PROVIDERS,
+  CLOUD_SECRET_REFS,
+} from '../utils/shared-constants.ts';
+import type { S3CompatProvider, GistProvider, CloudSyncProvider } from '../utils/shared-constants.ts';
 import type { SigV4DialectId } from './s3/sigv4.ts';
 
 export const SYNC_CONFIG_FILE = 'sync-config.json';
@@ -499,20 +509,12 @@ export const CLOUD_SYNC_CONFIG_FILE = 'sync-cloud-config.json';
 /** 云端点配置 schema 版本。 */
 export const CLOUD_SYNC_CONFIG_SCHEMA_VERSION = 1;
 /**
- * S3 兼容系通道枚举（**唯一声明处**）：五家共用同一份 SigV4 实现，
- * 差异只有 endpoint / region / 寻址风格 / 签名方言（见 \`src/sync/s3/s3-providers.ts\` 的变体表）。
+ * S3 兼容系通道枚举（**唯一声明处已迁到零依赖的 `utils/shared-constants.ts` 的 S3_COMPAT_PROVIDERS**，t88）：
+ * 五家共用同一份 SigV4 实现，差异只有 endpoint / region / 寻址风格 / 签名方言
+ * （见 src/sync/s3/s3-providers.ts 的变体表）。
  */
-export const S3_COMPAT_PROVIDERS = ['s3', 'oss', 'cos', 'minio', 'kodo'] as const;
-/** S3 兼容系通道类型 */
-export type S3CompatProvider = (typeof S3_COMPAT_PROVIDERS)[number];
-/** 非 S3 系的云端点通道（GitHub Gist，走 REST） */
-export const GIST_PROVIDER = 'gist' as const;
-/** Gist 通道类型 */
-export type GistProvider = typeof GIST_PROVIDER;
-/** 云端点通道枚举（S3 兼容系 ×5 + gist） */
-export const CLOUD_SYNC_PROVIDERS = [...S3_COMPAT_PROVIDERS, GIST_PROVIDER] as const;
-/** 云端点通道类型 */
-export type CloudSyncProvider = (typeof CLOUD_SYNC_PROVIDERS)[number];
+export { S3_COMPAT_PROVIDERS, GIST_PROVIDER, CLOUD_SYNC_PROVIDERS };
+export type { S3CompatProvider, GistProvider, CloudSyncProvider };
 
 /** 通道值守卫（请求体 / 磁盘 JSON 的原始输入校验）。 */
 export function isCloudSyncProvider(value: unknown): value is CloudSyncProvider {
@@ -530,19 +532,13 @@ export function isGistProvider(value: unknown): value is GistProvider {
 }
 
 /**
- * 密钥槽位引用（值只写不回读）。
- * 命名与既有 \`syncPasswordRef\` 同族：\`DSH_CONFIG_MANAGER_SYNC_<CHANNEL>_<KIND>\`。
+/**
+ * 取某云端点通道的密钥槽位引用（不涉及任何值）。
+ *
+ * 表本身在零依赖的 utils/shared-constants.ts（**唯一声明处**，t88）：客户端要显示同一个名字
+ * （cloudSecretRefName()），两侧各写一份时「宿主改名、界面还提示旧名」不会红。
+ * 命名与既有 syncPasswordRef 同族：DSH_CONFIG_MANAGER_SYNC_<CHANNEL>_<KIND>。
  */
-const CLOUD_SECRET_REFS: Record<CloudSyncProvider, string> = {
-  s3: 'DSH_CONFIG_MANAGER_SYNC_S3_SECRET_ACCESS_KEY',
-  oss: 'DSH_CONFIG_MANAGER_SYNC_OSS_SECRET_ACCESS_KEY',
-  cos: 'DSH_CONFIG_MANAGER_SYNC_COS_SECRET_ACCESS_KEY',
-  minio: 'DSH_CONFIG_MANAGER_SYNC_MINIO_SECRET_ACCESS_KEY',
-  kodo: 'DSH_CONFIG_MANAGER_SYNC_KODO_SECRET_ACCESS_KEY',
-  gist: 'DSH_CONFIG_MANAGER_SYNC_GIST_TOKEN',
-};
-
-/** 取某云端点通道的密钥槽位引用（不涉及任何值）。 */
 export function cloudSecretRef(provider: CloudSyncProvider): string {
   return CLOUD_SECRET_REFS[provider];
 }

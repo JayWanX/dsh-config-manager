@@ -328,3 +328,13 @@ test('issue #45 ②：宿主不支持会话登记 → 明确提示并可执行�
   assert.match(results[0]?.message ?? '', /sessions repair/);
 });
 
+
+/* ---------------- ui-F3（t23 回归）：workspaces.validate 的必需字段校验 ---------------- */
+
+test('ui-F3：workspaces 记录缺 sessionIds 必须在 validate 阶段报错（而不是 analyzeImport 内部 TypeError）', async () => {
+  const adapter = new WorkspacesAdapter();
+  // 合法控制组：id/path/sessionIds 齐备
+  assert.equal((await adapter.validate({ version: 1, workspaces: [{ id: 'ws-1', path: '/p', sessionIds: [] }] })).valid, true);
+  assert.equal((await adapter.validate({ version: 1, workspaces: [{ id: 'ws-1', path: '/p' }] } as never)).valid, false);
+  assert.equal((await adapter.validate({ version: 1, workspaces: [null] } as never)).valid, false);
+});

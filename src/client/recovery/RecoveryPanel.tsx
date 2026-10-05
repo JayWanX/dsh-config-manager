@@ -50,6 +50,7 @@ import {
 } from '../session-export/session-export-view.ts'
 import { runStore, type RecoveryStoreSlice } from '../run-store.ts'
 import type { CrashReport, IncidentApi, RescueStatus } from './incident-api.ts'
+import { IncompleteCopiesSection } from './IncompleteCopiesSection.tsx'
 import {
   isSnapshotTrusted, isVerdictAttention, isVerdictSuccess, toRecoveryPreviewView,
   toRecoveryView,
@@ -58,7 +59,14 @@ import {
   formatRecoveryTime,
   rescueHintKey,
 } from './recovery-view.ts'
+import { redact } from '../../security/redaction.ts'
 import css from '../config-manager.module.css'
+
+/**
+ * 宿主/错误文本渲染前统一过 redact（AGENTS.md §UI 硬性规则 7；client-F4）。
+ * 单列成一行：plan-text-redaction.test.ts 的「按渲染点」登记表需要一个唯一锚点。
+ */
+const redactErrorText = (err: unknown): string => redact(err instanceof Error ? err.message : String(err))
 
 export interface RecoveryPanelProps {
   /** 事故处置（崩溃归因 + 救援模式）API；与 recoveryApi 同属「事故恢复」子 tab */
@@ -393,7 +401,7 @@ function SessionHealthDialog(props: SessionHealthDialogProps) {
     api.downloadSessionExport(sessionId)
       .then((result) => { toast.ok(t('sessions.zip.done', { name: result.filename })) })
       // 错误文本走 toast（与本节其它动作同一口径；http 层已脱敏）。
-      .catch((err) => { toast.error(t('sessions.zip.failed') + ': ' + (err instanceof Error ? err.message : String(err))) })
+      .catch((err) => { toast.error(t('sessions.zip.failed') + ': ' + redactErrorText(err)) })
       .finally(() => { setZipBusy(null) })
   }
   /** 预览得到的修复计划（应用前必须显式确认；ok=false 时也在这里显示拒绝原因） */
@@ -414,7 +422,7 @@ function SessionHealthDialog(props: SessionHealthDialogProps) {
     setPlan(null)
     recoveryApi.repairSession(unitId, false)
       .then((result) => { setPlan({ unitId, result }); setBusy(null) })
-      .catch((err) => { toast.error(err instanceof Error ? err.message : String(err)); setBusy(null) })
+      .catch((err) => { toast.error(redactErrorText(err)); setBusy(null) })
   }
 
   /**
@@ -487,7 +495,7 @@ function SessionHealthDialog(props: SessionHealthDialogProps) {
         }
         setBusy(null)
       })
-      .catch((err) => { toast.error(err instanceof Error ? err.message : String(err)); setBusy(null) })
+      .catch((err) => { toast.error(redactErrorText(err)); setBusy(null) })
   }
 
   const doRollback = async (): Promise<void> => {
@@ -505,7 +513,7 @@ function SessionHealthDialog(props: SessionHealthDialogProps) {
         setRollbackTarget(null)
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err))
+      toast.error(redactErrorText(err))
       setRollbackTarget(null)
     } finally {
       setBusy(null)
@@ -859,13 +867,13 @@ export function RecoveryPanel(props: RecoveryPanelProps) {
     incidentApi.rescueOn().then(
       (res) => {
         setRescueBusy(false)
-        if (!res.ok) { toast.error(res.message ?? t('common.unknownError')); return }
+        if (!res.ok) { toast.error(redact(res.message ?? t('common.unknownError'))); return }
         toast.ok(t('recovery.rescue.on'))
         loadIncident()
       },
       (err) => {
         setRescueBusy(false)
-        toast.error(err instanceof Error ? err.message : String(err))
+        toast.error(redactErrorText(err))
       },
     )
   }
@@ -876,13 +884,13 @@ export function RecoveryPanel(props: RecoveryPanelProps) {
     incidentApi.rescueOff().then(
       (res) => {
         setRescueBusy(false)
-        if (!res.ok) { toast.error(res.message ?? t('common.unknownError')); return }
+        if (!res.ok) { toast.error(redact(res.message ?? t('common.unknownError'))); return }
         toast.ok(t('recovery.rescue.off'))
         loadIncident()
       },
       (err) => {
         setRescueBusy(false)
-        toast.error(err instanceof Error ? err.message : String(err))
+        toast.error(redactErrorText(err))
       },
     )
   }
@@ -923,7 +931,7 @@ export function RecoveryPanel(props: RecoveryPanelProps) {
         patch({ running: false })
         runStore.stopRunWatch('recovery')
         // 确认弹窗已关闭 → 用 Toast 送达（写 panel state 将无渲染点）
-        toast.error(err instanceof Error ? err.message : String(err))
+        toast.error(redactErrorText(err))
         return null
       },
     ).then((verifyResult) => {
@@ -950,7 +958,7 @@ export function RecoveryPanel(props: RecoveryPanelProps) {
       (err) => {
         patch({ running: false })
         runStore.stopRunWatch('recovery')
-        toast.error(err instanceof Error ? err.message : String(err))
+        toast.error(redactErrorText(err))
         return null
       },
     ).then((verifyResult) => {
@@ -977,7 +985,7 @@ export function RecoveryPanel(props: RecoveryPanelProps) {
       },
       (err) => {
         patch({ running: false })
-        toast.error(err instanceof Error ? err.message : String(err))
+        toast.error(redactErrorText(err))
       },
     )
   }
@@ -997,7 +1005,7 @@ export function RecoveryPanel(props: RecoveryPanelProps) {
       },
       (err) => {
         setLockBusy(false)
-        toast.error(err instanceof Error ? err.message : String(err))
+        toast.error(redactErrorText(err))
       },
     )
   }
@@ -1020,7 +1028,7 @@ export function RecoveryPanel(props: RecoveryPanelProps) {
       },
       (err) => {
         setSafeModeBusy(false)
-        toast.error(err instanceof Error ? err.message : String(err))
+        toast.error(redactErrorText(err))
       },
     )
   }
@@ -1072,6 +1080,30 @@ export function RecoveryPanel(props: RecoveryPanelProps) {
             {rescue.active
               ? <Button variant="danger" disabled={rescueBusy} loading={rescueBusy} onClick={exitRescue}>{t('recovery.rescue.exit')}</Button>
               : <Button variant="danger" disabled={rescueBusy} onClick={() => { setRescueConfirmOpen(true) }}>{t('recovery.rescue.enter')}</Button>}
+          </div>
+        </Card>
+      )}
+
+      {/* t54：中断的档案复制残留（cross-F3）—— 独立形态 + 只给删除；删除走既有 POST /profiles/delete，
+          被 SAFE MODE 拦下（423 mutation-locked）时给原因与本页出口（safe-mode/clear）。 */}
+      {view !== null && view.incompleteCopies.length > 0 && (
+        <IncompleteCopiesSection
+          rows={view.incompleteCopies}
+          t={t}
+          diskApi={props.diskApi}
+          recoveryApi={props.recoveryApi}
+          onChanged={load}
+        />
+      )}
+
+      {/* t89：残留**枚举失败** —— 与上面「有残留」和「暂无残留」都不同形：显式告知「读不到 ≠ 没有」，
+          并给唯一的可行动作（重试 = 重拉 /recovery/status）。判定在 recovery-view.ts 的纯函数里，这里只装配。 */}
+      {view !== null && view.incompleteCopiesNotice === 'unreadable' && (
+        <Card>
+          <SectionTitle title={t('recovery.incomplete.unreadable.title')} />
+          <Banner kind="warn">{t('recovery.incomplete.unreadable.hint')}</Banner>
+          <div className={css.actionRow}>
+            <Button onClick={load}>{t('common.retry')}</Button>
           </div>
         </Card>
       )}

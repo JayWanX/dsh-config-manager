@@ -30,7 +30,7 @@ export interface AutosyncHistoryEntry {
   status: 'success' | 'skipped' | 'failed' | 'partial';
   /** 跳过原因（冲突项 / 缺失依赖 / Install / 错误 / 无远端 / 网络） */
   skipReason?: string;
-  /** 被跳过的冲突分区 id（冲突跳过时列出） */
+  /** 被跳过、需要人工确认的分区 id（双向冲突，或风险分级 medium/high 而被扣下的项） */
   conflictedSections?: SectionId[];
   /** 本次自动合并实际写入的分区 */
   appliedSections?: SectionId[];

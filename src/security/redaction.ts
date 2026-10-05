@@ -11,7 +11,7 @@
  * 幂等性：替换产物 `***REDACTED***` 不匹配任何模式，重复 redact 结果不变；
  * JSON 行的引号结构保留（输出仍是合法 JSON）。
  */
-import { DEFAULT_SECRET_FIELD_NAMES, isSensitiveFieldName } from './secret-scanner.ts';
+import { DEFAULT_SECRET_FIELD_NAMES, isSensitiveFieldName, SECRET_VALUE_PATTERNS } from './secret-scanner.ts';
 
 export const REDACTED = '***REDACTED***';
 
@@ -25,15 +25,31 @@ const COLON_FIELD_RE = /([A-Za-z0-9_.\-]+)\s*:\s*([^,;}]+)/g;
 
 /* ---------------- 值形状模式（包含式，字段名无关） ---------------- */
 
-const VALUE_PATTERNS: { name: string; re: RegExp }[] = [
-  { name: 'openai-key', re: /sk-[A-Za-z0-9_-]{8,}/g },
-  { name: 'jwt', re: /eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g },
-  { name: 'aws-access-key', re: /AKIA[0-9A-Z]{16}/g },
-  { name: 'github-token', re: /gh[pousr]_[A-Za-z0-9]{20,}/g },
-  { name: 'github-pat', re: /github_pat_[A-Za-z0-9_]{20,}/g },
-  { name: 'pem-private-key', re: /-----BEGIN [A-Za-z0-9 ]*PRIVATE KEY-----/g },
-  { name: 'bearer-token', re: /Bearer [A-Za-z0-9._~+/=-]{8,}/g },
+/**
+ * 显示层**额外**的 PEM 头（**superset**，t78）。
+ *
+ * 为什么只留这一条本地规则：scanner 的 `pem-private-key` 只认算法标签白名单
+ * （`RSA` / `EC` / `OPENSSH` / `DSA` / `ENCRYPTED`），而**显示层掩码**宁可多掩 ——
+ * `-----BEGIN FOO PRIVATE KEY-----`（自定义/异体标签，OpenSSL 允许）在日志里同样是私钥头，
+ * 放行才是泄漏。它只会**放宽**判定（scanner 命中的它必然命中），因此不构成第二份漂移源。
+ */
+const GENERIC_PEM_HEADER_RE = /-----BEGIN [A-Za-z0-9 ]*PRIVATE KEY-----/g;
+
+/**
+ * 值形状模式（**单一来源**，G-36 残余 ③ 于 t78 收口）：
+ * 表内容 = `secret-scanner.ts` 的 `SECRET_VALUE_PATTERNS`（**同一份**，含 t72 的
+ * `bearer-token-anycase`），本模块只做两件不改语义的事：① 复制成**带 `/g`** 的新实例
+ * （replace 需要 `/g`；新实例也避免共享正则的 lastIndex 跨调用泄漏）；
+ * ② 追加上面那条**只放宽**的通用 PEM 头。
+ *
+ * 于是本条修正了「两份独立表会持续漂移」（本队已多次抓到的「同一语义两套实现」）：
+ * scanner 侧新增/收窄形状时，redact() 自动跟随（漂移守卫见 `redaction.test.ts` 的 t78 组）。
+ */
+export const REDACTION_VALUE_PATTERNS: readonly { name: string; re: RegExp }[] = [
+  ...SECRET_VALUE_PATTERNS.map((p) => ({ name: p.name, re: new RegExp(p.re.source, 'g') })),
+  { name: 'pem-private-key-generic', re: GENERIC_PEM_HEADER_RE },
 ];
+const VALUE_PATTERNS = REDACTION_VALUE_PATTERNS;
 
 /** URL query 中的敏感参数值（保留参数名，只替换值） */
 const URL_QUERY_RE = /([?&](?:token|api[_-]?key|key|secret|access[_-]?token|password|auth)=)([^&\s"']+)/gi;

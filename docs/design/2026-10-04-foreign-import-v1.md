@@ -351,7 +351,11 @@ FOREIGN_CONFLICT_POLICY = 'skip-no-overwrite'（ForeignConflictPolicy 是**单�
   session-unsafe-id、session-empty、session-unparsable、unsupported-session-record（以上 v1 既有）+
   session-id-conflict、skill-id-conflict、sessions-not-migrated、memory-report-only、
   skill-category-flattened、legacy-rules-file、instructions-merged、
-  instructions-override-selected、source-empty-file、source-location-overridden（本次新增）。
+  instructions-override-selected、source-empty-file、source-location-overridden、
+  **session-cwd-derived、source-needs-explicit-path**（本次新增：后两码由档 B 会话类来源使用 ——
+  cwd 只能从源侧目录名**推导**（推导结果必须在本机真实存在，推不出来按「缺少 cwd」跳过）/ 该来源
+  **没有可自动探测的根**，必须由用户显式给出导出文件路径，自动探测永不命中；两码已在
+  `src/foreign/types.ts:162,167` 的 ForeignSkipCode 里，且 zh/en 字典有 `foreign.skip.<码>` 文案）。
 
 ### 8.6 六来源共同的安全不变量（与 §4 同源，逐来源点名）
 

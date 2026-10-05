@@ -6,6 +6,9 @@ lib/
 dist/
 *.tsbuildinfo
 
+# Node.js 模块编译缓存（NODE_COMPILE_CACHE 指向相对路径时落在 cwd；纯本地工具产物、内容是 V8 不透明 blob）
+node-compile-cache/
+
 # Vibe governance / team runtime state (local only, contains absolute paths)
 .vibeskills/
 .agent-teams/

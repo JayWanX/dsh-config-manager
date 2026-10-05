@@ -54,8 +54,11 @@ export class PluginFilesAdapter implements ConfigAdapter<FilesSection> {
         const data = await ctx.fs.readFile(rel);
         files.push({ relativePath: rel, data, contentHash: sha256Hex(data) });
         seen.add(rel);
-      } catch {
-        /* 白名单文件不存在则跳过 */
+      } catch (err) {
+        // ui-F2：白名单文件**不存在**是正常形态（按需创建 → 跳过）；**读不到**（权限/竞态/断链）
+        // 绝不能静默丢内容 —— 与文件集合基类同一语义：整分区显式失败，导出报告可见。
+        if (await this.absentOnDisk(ctx, rel)) continue;
+        throw err;
       }
     }
     // 2) 约定配置目录递归收集（相对 ~/.dsh 根的完整路径；与白名单文件去重）
@@ -74,8 +77,10 @@ export class PluginFilesAdapter implements ConfigAdapter<FilesSection> {
         try {
           const data = await ctx.fs.readFile(rel);
           files.push({ relativePath: rel, data, contentHash: sha256Hex(data) });
-        } catch {
-          continue;
+        } catch (err) {
+          // ui-F2：同上 —— 目录遍历刚点到的文件却读不到，是真实的读取失败，不是「不存在」。
+          if (await this.absentOnDisk(ctx, rel)) continue;
+          throw err;
         }
       }
     }
@@ -85,6 +90,21 @@ export class PluginFilesAdapter implements ConfigAdapter<FilesSection> {
       counts: { files: files.length },
       warnings: linkWarnings(msgOf(ctx), this.displayName, listing),
     };
+  }
+
+  /**
+   * 读失败之后判定「这个路径本来就不存在」还是「存在但读不到」（ui-F2）。
+   *
+   * 为什么不用错误码：门面错误的形状并不统一（内存 mock 与各平台 EACCES 文案不同），
+   * 而 `exists()` 是 FileSystemFacade 契约里唯一稳定的存在性判据。`exists()` 自己也失败时
+   * 按「存在」处理（保守：宁可让这次导出显式失败，也不静默丢一个文件）。
+   */
+  private async absentOnDisk(ctx: HostContext, rel: string): Promise<boolean> {
+    try {
+      return (await ctx.fs.exists(rel)) === false;
+    } catch {
+      return false;
+    }
   }
 
   /** 单元清单（零 I/O）：逐文件单元，id 与导入侧 `pluginFiles:<relPath>` 一致。 */
@@ -148,6 +168,16 @@ export class PluginFilesAdapter implements ConfigAdapter<FilesSection> {
     return validateJsonSection<FilesSection>('pluginFiles', data, msg, (section, issues) => {
       if (!Array.isArray(section.files)) {
         issues.push({ path: 'files', message: msg('adapter.validate.array', { subject: 'files' }), severity: 'error' });
+        return;
+      }
+      // ui-F3：条目级形状校验必须与 analyzeImport 的假设对齐（它直接读 file.relativePath）。
+      // 只校验「是数组」会放过 files:[null] / relativePath:42 这类畸形，analyzeImport 抛内部
+      // TypeError → ImportAnalysis.valid=false → 整包被拦下，用户看到的是内部异常文本。
+      for (const [i, f] of section.files.entries()) {
+        const entry = f as unknown;
+        if (entry === null || typeof entry !== 'object' || typeof (entry as { relativePath?: unknown }).relativePath !== 'string' || (entry as { relativePath: string }).relativePath === '') {
+          issues.push({ path: `files[${i}]`, message: msg('adapter.validate.fileRelativePath'), severity: 'error' });
+        }
       }
     });
   }

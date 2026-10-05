@@ -15,7 +15,7 @@
  * 说明：变体默认值是**按各方官方文档定的**，本批次未对真机端点做联网验证（写作用域与
  * 环境都不允许），因此每个默认都可被覆盖，且验证期报错会指向具体可改的配置项。
  */
-import { sigV4Dialect } from './sigv4.ts';
+import { sigV4Dialect, uriEncode } from './sigv4.ts';
 import type { SigV4Dialect, SigV4DialectId } from './sigv4.ts';
 import {
   S3_COMPAT_PROVIDERS, isS3CompatProvider, validateCloudBucket, validateCloudEndpoint,
@@ -179,7 +179,11 @@ export function resolveS3Target(input: S3TargetInput): S3TargetResult {
 
 /** 某 key 的对象访问地址（path-style 或 virtual-host）。 */
 export function objectUrl(target: S3Target, key: string): string {
-  const encodedKey = key.split('/').map((seg) => encodeURIComponent(seg)).join('/');
+  // audit-sync sync-F7：逐段编码必须与 SigV4 的规范化口径（sigv4.uriEncode：RFC 3986
+  // 未保留字符集 A-Za-z0-9-_.~ 之外一律 %XX）**逐字一致**，否则 ! ' ( ) * 这类
+  // encodeURIComponent 不编码的字符会让「实际发出的 path」与「签名的 canonicalURI」分叉
+  // （签名被服务端判为不匹配），也会让同一 key 在不同实现下指向不同对象。
+  const encodedKey = key.split('/').map((seg) => uriEncode(seg, true)).join('/');
   const basePath = target.endpoint.pathname.replace(/\/+$/, '');
   const origin = target.endpoint.origin;
   if (target.pathStyle) return origin + basePath + '/' + target.bucket + '/' + encodedKey;

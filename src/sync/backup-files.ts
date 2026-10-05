@@ -260,6 +260,11 @@ export async function pruneAutoBackupsByPolicy(
   if (isDefaultRetentionPolicy(policy)) {
     return pruneAutoBackups(exportsDir, policy.keepLast)
   }
+  // audit-sync sync-F4（P2）：三层全关（0/0/0）= **不自动清理**（与 retentionPolicySummary 的
+  // 自述「三层均未启用（策略等价于不自动清理）」、远端 prune 的「刚 push 恒保留」保护同一口径）。
+  // 此前该策略会删光全部 auto 产物（含本轮刚生成的那一份），用户把 keepLast 拉到 0 就等于
+  // 静默不再保留任何定时备份。
+  if (policy.keepLast <= 0 && policy.keepMonthly <= 0 && policy.keepYearly <= 0) return []
   const metas = await listBackupFiles(exportsDir)
   const auto = metas.filter((m) => m.source === 'auto')
   if (auto.length === 0) return []

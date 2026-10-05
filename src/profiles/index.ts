@@ -35,7 +35,7 @@ export {
 } from './process-control.ts';
 
 export {
-  DSH_PROFILE_TEMPLATES, RESERVED_PROFILE_NAMES,
+  DSH_PROFILE_TEMPLATES, RESERVED_PROFILE_NAMES, PROFILE_COPY_MARKER_FILENAME,
   classifyShape, checkProfileName, isLaunchableShape,
   type DshProfileMeta, type DshProfileDetail,
   type DshProfileTemplate, type DshProfileShape, type DshProfilePatchReload,
@@ -44,4 +44,5 @@ export {
   type DshProfileLaunchRecord, type DshProfileLaunchResult, type DshProfileLaunchWarning,
   type DshProfileRunningView, type DshProfileStopOutcome,
   type DshProfileCopyWarning, type DshProfileCopyResult,
+  type DshProfileCopyMarker, type DshProfileIncompleteCopy,
 } from './dsh-profile-shared.ts';

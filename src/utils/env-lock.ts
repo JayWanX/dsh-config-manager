@@ -254,9 +254,14 @@ export async function runWithMutationLock<T>(
   opts: { op: string; target?: string; parentContext?: MutationLockContext; isBlocked?: () => boolean },
   fn: (ctx: MutationLockContext | null) => Promise<T>,
 ): Promise<T> {
-  if (port === undefined) return fn(null)
+  // t69：判定一律走 withMutationLock（它**第一步**就问 isBlocked?.()），不再对 port===undefined 短路。
+  // 修前那一行 `if (port === undefined) return fn(null)` 让「未注入锁端口」直接绕过 SAFE MODE 判定 ⇒
+  // 阻断态下仍放行写操作（fail-open）：生产恒注入端口（src/index.ts:3680）故当前不可达，但语义必须与
+  // 「阻断态 fail-closed、动态探测」的既有口径一致 —— **未注入端口 ≠ 允许在阻断态下写**。
   const { context, release, reason, detail } = await withMutationLock(port, opts)
   if (context === null) {
+    // 无锁环境（未注入端口）且**未阻断**：照旧不锁定、直接执行（无端口不是「不得执行」）。
+    if (port === undefined && reason === undefined) return fn(null)
     throw new EnvironmentLockUnavailableError(opts.op, reason ?? 'locked', detail)
   }
   try {

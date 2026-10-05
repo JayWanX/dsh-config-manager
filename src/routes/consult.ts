@@ -6,8 +6,11 @@
  */
 
 import { endpoint, readJsonBody, writeJson } from './kit.ts'
+import { isENOENT } from '../utils/guards.ts'
+import { redact } from '../security/redaction.ts'
 import type { WebRoute } from './kit.ts'
 import type { RoutesEnv } from './context.ts'
+import { isControlledPath } from '../index.ts'
 import { buildLocalSnapshotSource, readExportZipSource } from '../core/consult-source.ts'
 import { FileSnapshotStore, verifySnapshot } from '../core/index.ts'
 import { computeConsultReport } from '../core/migration-consult.ts'
@@ -17,12 +20,36 @@ import type { SectionId } from '../schema/types.ts'
 import fs from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
+/** 受控区内「存在但读不了」的 fs 错误码（→ 400）。 */
+const CONSULT_UNREADABLE_CODES: readonly string[] = ['EACCES', 'EPERM', 'EISDIR', 'EBADF', 'EINVAL']
+
+/**
+ * routes-R1（t47）：受控区**内**的读失败也必须结构化 —— 此前 fs 原文会原样回给浏览器
+ * （`ENOENT: no such file or directory, open 'C:\…\staging\staged.zip '`），既泄漏服务端绝对路径，
+ * 又把「路径不可用」误报成 5xx。与 /snapshots/pin（e2e-F4）同一口径：**机器可读码 + 固定文案**，
+ * 永不回显原始 message（含目录自身 → EISDIR 这类「存在但读不了」）。
+ *
+ * 覆盖 t30 登记的 5 种形态：尾随空格 / 尾随点 / ADS `x.zip:evil` / 区内不存在的文件 → 404；
+ * 目录自身 → 400。
+ */
+function consultSourceFailure(error: unknown): { status: number; body: { error: string; code: string } } {
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined
+  if (isENOENT(error) || code === 'ENOTDIR') {
+    return { status: 404, body: { error: 'consult source not found', code: 'consult-source-not-found' } }
+  }
+  if (typeof code === 'string' && CONSULT_UNREADABLE_CODES.includes(code)) {
+    return { status: 400, body: { error: 'consult source is not readable', code: 'consult-source-unreadable' } }
+  }
+  return { status: 500, body: { error: 'consult failed', code: 'consult-failed' } }
+}
+
 export function consultRoutes(env: RoutesEnv): WebRoute[] {
   const {
     host,
     makeImporter,
     makeSyncEngine,
     prepareSync,
+    roots,
     snapshotsDir,
   } = env
   return [
@@ -64,12 +91,21 @@ export function consultRoutes(env: RoutesEnv): WebRoute[] {
               errors: analysis.errors,
             }
           } catch (err) {
-            return { ok: false, itemCount: 0, fatalConflicts: 0, warnings: 0, sections: [], errors: [err instanceof Error ? err.message : String(err)] }
+            // t53：这批文本会进 200 报告的诊断项（用户据此知道「为什么不能迁移」）—— 保留可读性，
+            // 但**出响应体前必须过 redact()**（与 UI 展示层同一道，不落 secret）。
+            return { ok: false, itemCount: 0, fatalConflicts: 0, warnings: 0, sections: [], errors: [redact(err instanceof Error ? err.message : String(err))] }
           }
         }
 
         let data: ConsultSourceData
         if (type === 'export-zip') {
+          // routes-F3：与 /analyze、/plan、/execute、/decrypt-archive、/market/prepare、/me/upload、/me/update、
+          // /download 同一口径 —— 请求里的路径必须落在受控暂存区（roots = [exportsDir, tmpDir]）。
+          // 此前这里把请求体里的 id 直接当路径交给 fs.readFile，任意绝对路径都会被打开。
+          if (!isControlledPath(id, roots)) {
+            writeJson(res, 400, { error: 'id must reference a staged archive (export dir or upload staging area)' })
+            return
+          }
           data = await readExportZipSource(ref, id, { computeMigratability })
         } else if (type === 'remote-snapshot') {
           // 用持久化 sync 配置构建引擎，下载快照 → 临时 ZIP → 读取（try/finally 清理）。
@@ -85,7 +121,13 @@ export function consultRoutes(env: RoutesEnv): WebRoute[] {
           const engine = makeSyncEngine(syncCfg)
           const preview = await engine.preview({ snapshotId: ref.snapshotId ?? id })
           if (!preview.ok || preview.zipPath === '') {
-            writeJson(res, 400, { error: preview.message ?? '远端快照不可用' })
+            // t53：上游（git/webdav）失败文本可能含**远端 URL / 路径** —— 与 t47 的 consultSourceFailure
+            // 同一口径：响应体只给结构化码 + 固定文案，**绝不回显原始 message**；细节只进日志（过 redact）。
+            const detail = typeof preview.message === 'string' ? preview.message : ''
+            if (detail !== '') {
+              console.warn('[dsh-config-manager] consult remote-snapshot preview failed: ' + redact(detail))
+            }
+            writeJson(res, 400, { error: 'remote snapshot unavailable', code: 'consult-remote-unavailable' })
             return
           }
           try {
@@ -126,7 +168,8 @@ export function consultRoutes(env: RoutesEnv): WebRoute[] {
               errors: [],
             }
           } catch (err) {
-            restorePlan.errors = [err instanceof Error ? err.message : String(err)]
+            // t53：同 computeMigratability —— 进 200 报告的诊断文本，出响应体前过 redact()。
+            restorePlan.errors = [redact(err instanceof Error ? err.message : String(err))]
           }
           data = buildLocalSnapshotSource(ref, {
             sections: snapshotSections,
@@ -144,7 +187,9 @@ export function consultRoutes(env: RoutesEnv): WebRoute[] {
         const report = computeConsultReport(data, target, { allowBlock: true })
         writeJson(res, 200, report)
       } catch (error) {
-        writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        // routes-R1（t47）：只回结构化码，绝不回显 fs 原文/绝对路径（见 consultSourceFailure）。
+        const failure = consultSourceFailure(error)
+        writeJson(res, failure.status, failure.body)
       }
     }),
   ]

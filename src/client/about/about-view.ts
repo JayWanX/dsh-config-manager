@@ -15,6 +15,7 @@
  * 判定（是否真的有新版本、给不给终端命令）全在这里，面板只映射 kind → 文案与 Badge。
  */
 import type { PluginUpdateCheckResult } from '../../ui/types.ts';
+import type { ConfigManagerKey } from '../locales.ts';
 
 /** 插件的公开元数据（静态常量，来源见设计文档 §3 信息表） */
 export interface AboutMeta {
@@ -183,15 +184,16 @@ export const ABOUT_LINKS: AboutLinks = deriveAboutLinks(ABOUT_META.repoUrl);
  *  DSH 挂了也能用；文案与命令见 README.md「CLI — the first line of defense」。 */
 export const ABOUT_CLI: {
   installCommand: string;
-  commands: { command: string; description: string }[];
+  /** client-F5：说明文案走字典键（此前硬编码中文，英文界面恒为中文） */
+  commands: { command: string; descriptionKey: ConfigManagerKey }[];
   docsUrl: string;
 } = {
   installCommand: 'npm install -g dsh-config-manager@latest --omit=peer',
   commands: [
-    { command: 'dsh-config-manager help', description: '列出全部 CLI 命令与用法（离线可用）' },
-    { command: 'dsh-config-manager snapshots', description: '列出本机回滚快照（无需 DSH 运行）' },
-    { command: 'dsh-config-manager restore [--id <id>] [--dry-run]', description: '恢复到导入前状态（离线）' },
-    { command: 'dsh-config-manager reinstall [--yes] [--wipe-config]', description: '一键重装 DSH（救援）' },
+    { command: 'dsh-config-manager help', descriptionKey: 'about.cli.help' },
+    { command: 'dsh-config-manager snapshots', descriptionKey: 'about.cli.snapshots' },
+    { command: 'dsh-config-manager restore [--id <id>] [--dry-run]', descriptionKey: 'about.cli.restore' },
+    { command: 'dsh-config-manager reinstall [--yes] [--wipe-config]', descriptionKey: 'about.cli.reinstall' },
   ],
   docsUrl: 'https://github.com/xiajiajun516/dsh-config-manager#-cli--the-first-line-of-defense-when-dsh-is-broken',
 };

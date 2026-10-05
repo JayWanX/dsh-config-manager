@@ -20,6 +20,7 @@ import {
   EXPORTS_RETENTION_DEFAULT_MS,
   MARKET_RETENTION_DEFAULT_MS,
 } from './cache-cleaner.ts';
+import { scanDiskUsage } from './disk-usage.ts';
 
 /** 建独立临时数据目录，返回 { root, tmpDir, exportsDir, marketCacheRoot, marketWorkRoot, cleanup } */
 async function makeDataDir(): Promise<{
@@ -330,7 +331,72 @@ test('容错：目录不存在 → 不抛错、removed=0', async () => {
       marketWorkRoot: path.join(d.root, 'no-such-work'),
     });
     assert.equal(report.removed, 0);
-    assert.equal(report.errors, 4, '四个缺失目录各记一次尽力而为跳过');
+    // e2e-F3（t14 修订）：四个缺失目录**不再计入 errors**。原断言 `errors === 4` 钉住的正是被真机
+    // 判定为缺陷的行为（全新安装时 market/cache、market/work 尚未创建 → 前端误报「清理失败 N 项」）。
+    // ENOENT（不存在）≠ 读失败：真正的 EACCES/EBUSY 仍然计数（见下一条用例）。
+    assert.equal(report.errors, 0, '可选目录不存在不计入 errors');
+  } finally {
+    await d.cleanup();
+  }
+});
+
+/**
+ * R2（t41）：isENOENT 门**两侧**都要有持久回归 —— 目录**不存在**（ENOENT）不计错；
+ * 目录**存在却读不动**（tmpDir 指向文件 → ENOTDIR）**必须**计错。只钉一侧的话，
+ * 将来把门放宽成「吞掉一切错误」就没人拦了（「读不到 ≠ 没有」是本仓库的既有硬约束）。
+ * base sha 3f42a8b 上本用例红：前半段 errors=4（ENOENT 也被计错）。
+ */
+test('R2：目录不存在（ENOENT）不计错，但存在却读不动（ENOTDIR）必须计错', async () => {
+  const d = await makeDataDir();
+  try {
+    const notADir = path.join(d.root, 'tmp-is-a-file');
+    await fs.writeFile(notADir, 'not a directory');
+    const unreadable = await cleanupCaches({
+      tmpDir: notADir,
+      exportsDir: path.join(d.root, 'no-such-exports'),
+      marketCacheRoot: path.join(d.root, 'no-such-cache'),
+      marketWorkRoot: path.join(d.root, 'no-such-work'),
+      includeRecent: true,
+    });
+    assert.ok(
+      unreadable.errors >= 1,
+      '存在却读不动（ENOTDIR）必须计入 errors，实际 errors=' + String(unreadable.errors),
+    );
+    assert.equal(unreadable.removed, 0);
+
+    const missing = await cleanupCaches({
+      tmpDir: path.join(d.root, 'no-such-tmp'),
+      exportsDir: path.join(d.root, 'no-such-exports'),
+      marketCacheRoot: path.join(d.root, 'no-such-cache'),
+      marketWorkRoot: path.join(d.root, 'no-such-work'),
+    });
+    assert.equal(missing.errors, 0, '目录不存在（ENOENT）不得计入 errors');
+  } finally {
+    await d.cleanup();
+  }
+});
+
+/**
+ * e2e-F3 回归（真机 p9b）：全新安装形态 —— 可选目录 market/cache / market/work 还没被创建，
+ * 而本次清理**真的删掉了文件**。修前 errors 恰等于缺失目录数，前端于是弹红色「清理失败 N 项」
+ * 而 detail 为空（无可操作信息）。
+ */
+test('e2e-F3：可选目录不存在时，真删了文件也不得报错', async () => {
+  const d = await makeDataDir();
+  try {
+    await fs.rm(d.marketCacheRoot, { recursive: true, force: true });
+    await fs.rm(d.marketWorkRoot, { recursive: true, force: true });
+    await fs.writeFile(path.join(d.tmpDir, 'upload-a.zip'), Buffer.alloc(10));
+    const report = await cleanupCaches({
+      tmpDir: d.tmpDir,
+      exportsDir: d.exportsDir,
+      marketCacheRoot: d.marketCacheRoot,
+      marketWorkRoot: d.marketWorkRoot,
+      includeRecent: true,
+    });
+    assert.equal(report.removed, 1, '本次真的删掉了 1 个文件');
+    assert.equal(report.errors, 0, '缺失的可选目录不得计入 errors（修前 = 2）');
+    assert.equal(report.detail.length, 1, 'detail 只应有真实删除记录');
   } finally {
     await d.cleanup();
   }
@@ -426,3 +492,56 @@ test('缺省（无 includeRecent）仍只清超期项：保留期内的 tmp 文�
   }
 });
 
+
+test('cross-F1：/disk-usage 报为可回收的 tmp 残留，cleanup 必须真的删掉（界面数字 = 按钮效果）', async () => {
+  const d = await makeDataDir();
+  try {
+    // t33 真实杀进程实验的实际残留命名（导出中断的原子写半成品）+ 常规暂存物
+    await fs.writeFile(path.join(d.tmpDir, 'export-plain-dd381e1b.zip.tmp-hso-99d4cf9c5f8e'), Buffer.alloc(14046, 7));
+    await fs.writeFile(path.join(d.tmpDir, '.dshcm.demo.json.1504.1bbe1211075cd69d.tmp'), 'partial');
+    await fs.mkdir(path.join(d.tmpDir, 'dsh-sync-pull-abc'), { recursive: true });
+    await fs.writeFile(path.join(d.tmpDir, 'dsh-sync-pull-abc', 'inner.zip'), 'y');
+    await fs.writeFile(path.join(d.tmpDir, 'upload-legacy.zip'), 'z');
+
+    const dirs = {
+      dataDir: d.root,
+      exportsDir: d.exportsDir,
+      snapshotsDir: path.join(d.root, 'snapshots'),
+      syncDir: path.join(d.root, 'sync'),
+      marketCacheDir: d.marketCacheRoot,
+      marketWorkDir: d.marketWorkRoot,
+      tmpDir: d.tmpDir,
+      logsDir: path.join(d.root, 'logs'),
+      bootStateDir: path.join(d.root, 'boot-state'),
+      migrationHistoryDir: path.join(d.root, 'migration-history'),
+      transactionsDir: path.join(d.root, 'transactions'),
+      locksDir: path.join(d.root, 'locks'),
+      vaultDir: path.join(d.root, 'vault'),
+    };
+    const policy = {
+      exportsRetentionMs: EXPORTS_RETENTION_DEFAULT_MS,
+      marketRetentionMs: MARKET_RETENTION_DEFAULT_MS,
+      tmpRetentionMs: TMP_RETENTION_DEFAULT_MS,
+    };
+    const before = await scanDiskUsage({ dirs, policy });
+    assert.equal(before.areas.tmp.policy, 'regenerable');
+    assert.ok(before.areas.tmp.sizeBytes > 0, '前置：tmp 有字节');
+
+    const r = await cleanupCaches({
+      tmpDir: d.tmpDir,
+      exportsDir: d.exportsDir,
+      marketCacheRoot: d.marketCacheRoot,
+      marketWorkRoot: d.marketWorkRoot,
+      sections: ['tmp'],
+      includeRecent: true,
+    });
+    assert.ok(r.removed >= 4, '清理必须真删（tmp 顶层 4 条：残留半成品 ×2 + sync 临时目录 + 暂存 zip；实际 removed=' + String(r.removed) + '）');
+
+    const after = await scanDiskUsage({ dirs, policy });
+    assert.equal(after.areas.tmp.sizeBytes, 0, '/disk-usage 报为可回收的 tmp 字节必须在 cleanup 后全部消失');
+    assert.equal(after.areas.tmp.fileCount, 0, '被计数的 tmp 条目也必须是 0');
+    assert.deepEqual(await fs.readdir(d.tmpDir), [], 'tmp 目录必须被整块清空');
+  } finally {
+    await d.cleanup();
+  }
+});

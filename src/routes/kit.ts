@@ -8,9 +8,10 @@
  * - 「每条路由首行 guard」这条安全不变量此前**只写在注释里**，零测试覆盖；
  * - 3 条 prefix 路由自造围栏（裸 isLoopbackRequest + 自判方法）。
  *
- * 计数口径（三路一致 = 65，勿再照抄审计初稿的 66 —— 那是计数口径 overcount）：
- *   HEAD 的 routesList 65 条 ＝ 现行 `endpoint()` 声明 65 条 ＝ 运行期 `buildRoutes()` 57 条 + `src/index.ts` 保留的 8 条。
- * （此后按同一口径顺延：加入 `/profiles/launch` 后为 68 = `buildRoutes()` 60 条 + 保留的 8 条。）
+ * 计数口径（三路一致 = 77，勿再照抄旧审计初稿的计数 —— 那是计数口径 overcount）：
+ *   路由快照 77 条 ＝ 现行 `endpoint()` 声明 77 条 ＝ 运行期 `buildRoutes()` 70 条 + `src/index.ts` 保留的 7 条。
+ * 增删路由后必须同步这段计数、`src/routes/index.ts` 的头注释与 parity 快照清单；`tests/route/route-parity.test.ts`
+ * 的「路由计数散文」守卫会拿真实声明数逐条对账（写错即红灯）。
  *
  * 现在：`endpoint()` 是唯一入口，注册点（`registerRoutes`）兜底断言每条路由都出自本 kit。
  * 新增一条路由 = 在所属组文件里加一条 `endpoint({ path, methods, kind? }, handler)` 声明，

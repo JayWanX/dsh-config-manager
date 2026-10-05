@@ -76,7 +76,9 @@ export async function listRecursiveFollowingLinks(baseDir: string, homeDir: stri
     const real = await realpathSafe(dir);
     if (!isSameOrChild(real ?? path.resolve(dir), homeReal)) return false;
     if (depth > MAX_DEPTH) {
-      if (viaLink !== null) skippedLinks.push({ path: viaLink, reason: 'too-deep' });
+      // 深度上限必须**可见**（cli-F2）：此前只对链接记 too-deep —— **普通目录**超深时整块内容
+      // 被裁掉却既不在 skippedLinks 也不在 unreadableDirs 里，备份照样报成功（issue #37 同类症状）。
+      skippedLinks.push({ path: viaLink ?? rel(dir), reason: 'too-deep' });
       return false;
     }
     // 去重只针对**链接**：链接目标已经进过（自引用 / 两条链接指向同一处）→ 跳过。

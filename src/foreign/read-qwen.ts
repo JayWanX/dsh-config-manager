@@ -98,11 +98,13 @@ export async function readQwenSessions(opts: QwenReadOptions): Promise<SessionRe
     return { files, readFindings: findings, extraCounts: { 'sessions.candidates': 0 } };
   }
 
+  // 触顶必须**可见**（audit-foreign F4）：静默 break 会让「报成功但条目缺失」。
+  let truncated = false;
   // slug 只当遍历键：编码语义未经取证 → 不参与 cwd 推导（见文件头）
   for (const slug of await listDirNames(projectsDir)) {
     const slugDir = joinFor(platform, projectsDir, slug);
     for (const name of await listFileNames(slugDir, (n) => QWEN_SESSION_FILE_RE.test(n))) {
-      if (files.length >= maxFiles) break;
+      if (files.length >= maxFiles) { truncated = true; break; }
       const label = QWEN_PROJECTS_REL + '/' + slug + '/' + name;
       const text = await readTextGuarded(joinFor(platform, slugDir, name), label, maxBytes, findings);
       if (text === null) continue;
@@ -110,5 +112,6 @@ export async function readQwenSessions(opts: QwenReadOptions): Promise<SessionRe
     }
   }
 
+  if (truncated) findings.push({ code: 'source-unreadable', origin: 'qwen', detail: 'max-sessions-reached', count: maxFiles });
   return { files, readFindings: findings, extraCounts: { 'sessions.candidates': files.length } };
 }

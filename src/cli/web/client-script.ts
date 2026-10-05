@@ -239,6 +239,18 @@ export const CONSOLE_SCRIPT = `(function () {
   else boot();
 })();`
 
+/**
+ * 从本文件的**源码文本**里抽出 CONSOLE_SCRIPT 模板串（测试用；**唯一实现**）。
+ *
+ * 为什么要归一化换行（cli-F5）：Windows 上 `core.autocrlf=true` 的检出会让闭引号后面是
+ * `\r\n`，只认 `\n` 的正则失配 → 测试在自己的检出上假红（R3-04）。抽取逻辑收在这里，
+ * web.test.ts 与 script-anchor.test.ts 共用，避免第二份口径再次漂移。
+ */
+export function extractConsoleScriptSource(source: string): string | undefined {
+  const lf = source.split('\r\n').join('\n')
+  return /export const CONSOLE_SCRIPT = `([\s\S]*?)`\n/.exec(lf)?.[1]
+}
+
 const SCRIPT_HASH = "'sha256-" + createHash('sha256').update(CONSOLE_SCRIPT, 'utf8').digest('base64') + "'"
 
 /** 该脚本的 CSP hash-source（含引号，可直接拼进 script-src）。 */

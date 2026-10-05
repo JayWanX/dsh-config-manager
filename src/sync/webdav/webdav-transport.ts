@@ -27,6 +27,7 @@
  */
 import { requestOnce, type RawResponse } from '../../utils/proxy.ts';
 import { zhMsg } from '../../core/messages.ts';
+import { composeMsg } from '../s3/messages.ts';
 import type { MsgFunc } from '../../core/messages.ts';
 import { deserializeSnapshot, serializeSnapshot } from '../snapshot-json.ts';
 import { BLOB_SECTIONS, gcBlobs, isBlobRefsSection, isFilesSectionLike, referencedBlobHashes, refsToSection, sectionToBlobRefs } from '../blob-store.ts';
@@ -323,7 +324,10 @@ export class WebDavTransport implements SyncTransport {
 
   /** 上传快照：幂等 MKCOL → 快照级跳过判定（同 id 且内容全等则免上传）→ PUT <id>.json
    *  → 合并写回 index.json；返回远端 meta（跳过时）或 computeSnapshotMeta。
-   *  序列化经 snapshot-json：文件类分区字节以 base64 传输（JSON 无法直传 Uint8Array）。 */
+   *  序列化经 snapshot-json：文件类分区字节以 base64 传输（JSON 无法直传 Uint8Array）。
+   *
+   * **写路径三态（audit-sync sync-N1 / t66）**：索引 404 只是「缺信息」—— 远端已有历史内容时
+   * 一律**中止本次上传（零写入）**，绝不按空集合做读改写（见下方实现处注释）。 */
   async upload(snapshot: SyncSnapshot): Promise<SyncSnapshotMeta> {
     this.assertSafeId(snapshot.id);
     const pwd = await this.passwordOnce();
@@ -333,7 +337,24 @@ export class WebDavTransport implements SyncTransport {
     // 加密快照（computeSnapshotMeta.sections 为空对象）经 sectionsEqual 判定为「无法比较」
     // → 必须照常上传，绝不跳过。
     const meta = computeSnapshotMeta(snapshot);
-    const idxBefore = await this.readIndex(pwd);
+    // audit-sync sync-N1 覆盖面补全（t66，来自 t22 的 C7）：upload 也是写路径，**不接受 404 = 空集合**。
+    const { entries: idxBefore, missing: indexMissing } = await this.readIndexDetailed(pwd);
+    if (indexMissing && await this.remoteHasPriorContent(pwd)) {
+      // 索引 404 只是**缺信息**（不是「远端没有快照」）：远端已有历史内容时，按空索引做读改写会把
+      // 权威 index.json PUT 成只有本条目 → 其余快照从列表整体消失，随后 delete + GC 会回收**仍被
+      // 现存快照文件引用**的 blob（不可恢复）。这里**在写任何字节之前**显式中止（零写入）。
+      // 唯一放行的 404 情形 = 索引与 blob 仓索引都不存在（全新远端）→ 首次推送的既有行为逐字不变。
+      const url = this.indexUrl();
+      throw new WebDavTransportError(
+        this.o.msg('sync.webdav.requestFailed', {
+          method: 'GET',
+          url,
+          status: 404,
+          err: 'index.json missing while remote already has content',
+        }),
+        { kind: 'protocol', retryable: false },
+      );
+    }
     const existing = idxBefore.find((m) => m.id === snapshot.id);
     if (existing !== undefined && sectionsEqual(existing, meta)) {
       return existing;
@@ -389,19 +410,26 @@ export class WebDavTransport implements SyncTransport {
     this.assertSafeId(id);
     const pwd = await this.passwordOnce();
     const idxUrl = this.indexUrl();
-    // 先读现有 index（不存在 → 空），以便摘除条目
-    let idx: SyncSnapshotMeta[] = [];
-    try {
-      idx = await this.readIndex(pwd);
-    } catch {
-      idx = []; // index 缺失/损坏时按无条目处理（不阻塞删除）
-    }
+    // 先读现有 index（不存在 → 空），以便摘除条目。
+    // audit-sync sync-F1（P0）：**读不出来 ≠ 远端没有快照** —— 按空索引继续会把 index.json
+    // 覆盖成 []（其余快照从列表整体消失、hasNewRemoteSnapshot 恒 false），并让随后的
+    // gcBlobStore 以空引用集回收，删掉仍被其它快照引用的会话 blob（不可恢复）。
+    // 索引不可读时一律中止本次删除：宁可让它显式失败，也不制造不可恢复的远端状态。
+    // audit-sync sync-N1（P0）：写路径**不接受 404 = 空集合** —— 索引真缺失（404）时「远端一条快照都没有」
+    // 是**缺信息**而非事实，沿用空索引继续会把 index.json 覆盖成 []（其余快照从列表整体消失）并让
+    // gcBlobStore 以空引用集回收，删掉仍被现存快照文件引用的会话 blob（不可恢复）。
+    // 与 F1 同口径：宁可显式失败，也不制造不可恢复的远端状态。list() 仍保留「404 = 空集合」语义。
+    const { entries: idx, missing: indexMissing } = await this.readIndexDetailed(pwd);
     // delete 快照文件：404 = 不存在，视为成功
     const url = this.snapshotUrl(id);
     const res = await this.send('DELETE', url, pwd);
     if (!res.ok && res.status !== 404) {
       throw new WebDavTransportError(await this.failText('DELETE', url, res, pwd), classifyHttpStatus(res.status));
     }
+    // audit-sync sync-N1（P0）：索引真缺失（404）= **缺信息**而不是「集合为空」。此时「哪些 blob
+    // 无人引用」无从证明 —— 一律**不写回 index.json、不触发 blob GC**，其余快照与其引用的 blob
+    // 原样保留（宁可留垃圾，不可删在用的）。目标快照文件已按用户意图删除（404 视为成功）。
+    if (indexMissing) return;
     // 若 index 中无该 id，则无需写回
     const remaining = idx.filter((m) => m.id !== id);
     if (remaining.length === idx.length && res.status === 404) {
@@ -419,8 +447,12 @@ export class WebDavTransport implements SyncTransport {
 
   /* ---------------- P1-4：内容寻址 blob 仓 ---------------- */
 
+  // audit-sync sync-F3（P1）：一律以 snapshotsBase()（**无尾斜杠**）为基准拼 blob 路径。
+  // snapshotsColUrl() 自带尾斜杠，再拼一层会产生空路径段（…/dsh-config-manager//blobs/…），
+  // 与 docs/spec/sync-channel-v1.md §3 的 <col>/blobs/<sha256> 及其它通道（git/s3）不一致；
+  // 不归并空路径段的 WebDAV 服务端会直接拒绝 MKCOL/PUT，使 sessions 外置整体不可用。
   private blobsColUrl(): string {
-    return `${this.snapshotsColUrl()}/${BLOBS_SEG}`;
+    return `${this.snapshotsBase()}/${BLOBS_SEG}`;
   }
 
   private blobUrl(hash: string): string {
@@ -428,7 +460,7 @@ export class WebDavTransport implements SyncTransport {
   }
 
   private blobsIndexUrl(): string {
-    return `${this.snapshotsColUrl()}/${BLOBS_INDEX_FILE}`;
+    return `${this.snapshotsBase()}/${BLOBS_INDEX_FILE}`;
   }
 
   /** 幂等创建 blobs 集合（405/301 等「已存在」语义一律视为成功，与 ensureCollection 同口径）。 */
@@ -446,6 +478,38 @@ export class WebDavTransport implements SyncTransport {
     const index = await this.readBlobIndex(pwd);
     for (const [hash, at] of fresh) index[hash] = at;
     await this.writeBlobIndex(pwd, index);
+  }
+
+  /**
+   * 远端是否已存在历史内容（t66）。判据 = **blob 仓索引文件存在**：它是本通道在远端唯一的、
+   * 无需目录列举就能读到的「这里以前写过」证据（WebDAV 的 PROPFIND 在本客户端未实现，见 BLOBS_SEG 注释）。
+   *
+   * 失败安全：读不出来（网络 / 5xx / 非法 JSON）一律当作**有内容** —— 宁可让这次上传显式失败，
+   * 也不冒「把权威索引写成只有本条目」的风险（与「宁可留垃圾，不可删在用的」同口径）。
+   *
+   * 已知残余（如实登记）：远端只有**未外置**的历史快照、索引又缺失时，本判据看不出内容（无列举
+   * 能力 ⇒ 无法自证），此时仍走读改写路径。C7 的伤害面（blob 被回收）恰由本判据覆盖。
+   */
+  private async remoteHasPriorContent(pwd: string): Promise<boolean> {
+    const url = this.blobsIndexUrl();
+    let res: WebDavResponse;
+    try {
+      res = await this.send('GET', url, pwd);
+    } catch {
+      return true; // 网络层读不出来 → 按有内容（失败安全）
+    }
+    // 明确「这个资源不存在 / 不允许」的状态 = 没有证据；其余非 2xx（5xx 等）判不出来 → 按有内容（失败安全）。
+    // 405/403/501 归入「没有证据」：部分 WebDAV 服务端对缺失资源回 405 而不是 404（既有用例就是这种服务端）。
+    if (res.status === 404 || res.status === 405 || res.status === 403 || res.status === 501) return false;
+    if (!res.ok) return true;
+    try {
+      const parsed = parseJsonSafe(await res.text());
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+      // 证据 = **至少一条合法 blob 记录**（哈希形状）；空对象 / 非 blob-index 的 200 响应都不算「写过了」。
+      return Object.keys(parsed as Record<string, unknown>).some((k) => BLOB_HASH_RE.test(k));
+    } catch {
+      return true; // 体读不出来 ⇒ 判不了 ⇒ 按有内容
+    }
   }
 
   /** 读取 blob 索引（哈希 → 写入时间 ms）；缺失/损坏 → 空（GC 只会「少删」，不会误删）。 */
@@ -561,7 +625,10 @@ export class WebDavTransport implements SyncTransport {
     const referenced = new Set<string>();
     for (const meta of remaining) {
       const res = await this.send('GET', this.snapshotUrl(meta.id), pwd);
-      if (!res.ok) continue;
+      // 索引有条目但快照文件 404 ⇒ 该文件不存在，不可能引用任何 blob（安全跳过）。
+      // 其它失败 ⇒ **读不出来 ≠ 没引用**，本轮直接放弃（与「宁可留垃圾，不可删在用的」同口径；sync-N1 同族）。
+      if (res.status === 404) continue;
+      if (!res.ok) return;
       let snap: SyncSnapshot;
       try {
         snap = deserializeSnapshot(await res.text());
@@ -579,7 +646,8 @@ export class WebDavTransport implements SyncTransport {
   }
 
   private validateOptions(options: WebDavTransportOptions): void {
-    const msg = options.msg ?? zhMsg;
+    // t79：宿主 msg 若缺某个键（其目录不含该键），回退 core zh 文案 —— 绝不把裸键名露给用户。
+    const msg = options.msg === undefined ? zhMsg : composeMsg(options.msg, zhMsg);
     if (typeof options.baseUrl !== 'string' || options.baseUrl.trim() === '') {
       throw new WebDavTransportError(msg('sync.webdav.baseUrlRequired'));
     }
@@ -644,15 +712,29 @@ export class WebDavTransport implements SyncTransport {
     throw new WebDavTransportError(await this.failText('MKCOL', url, res, pwd), classifyHttpStatus(res.status));
   }
 
-  /** 读 index（缺失 → []；非法 → 抛错）。 */
-  private async readIndex(pwd: string): Promise<SyncSnapshotMeta[]> {
+  /**
+   * 读 index。**三态语义**（audit-sync sync-N1 / t66）：
+   *  - 200 + 合法数组 → 返回条目（list 用）；
+   *  - 404 → 缺索引：`missing = true`（**缺信息**，不是「集合为空」）；
+   *    写路径（**upload / delete**）一律不得据此做读改写 —— upload 在「远端已有内容」时显式中止，
+   *    delete 直接返回（不写索引、不触发 GC）；list 仍保留「404 = 空集合」语义；
+   *  - 其它非 2xx / 非法 JSON / 逐条非法 → 抛错（F1/F2 语义，绝不回落成空）。
+   */
+  /**
+   * 读 index 的**带缺失标志**版本（audit-sync sync-N1）：
+   *  - 404 → `missing = true`（**缺信息**，不是事实）；
+   *  - 其它非 2xx / 非法 JSON / 逐条非法 → 抛错（F1/F2 语义，绝不回落成空）。
+   * 写路径（**upload / delete**）必须用本方法：`missing` 时既不写回索引、也不触发 GC
+   * （upload 另加「远端已有内容 ⇒ 显式中止」的判据，见 upload() 注释）。
+   */
+  private async readIndexDetailed(pwd: string): Promise<{ entries: SyncSnapshotMeta[]; missing: boolean }> {
     const url = this.indexUrl();
     const res = await this.send('GET', url, pwd);
-    if (res.status === 404) return [];
+    if (res.status === 404) return { entries: [], missing: true };
     if (!res.ok) {
       throw new WebDavTransportError(await this.failText('GET', url, res, pwd), classifyHttpStatus(res.status));
     }
-    return this.parseIndex(await res.text(), url, pwd);
+    return { entries: this.parseIndex(await res.text(), url, pwd), missing: false };
   }
 
   private parseIndex(raw: string, url: string, pwd: string): SyncSnapshotMeta[] {

@@ -233,12 +233,15 @@ export async function readGeminiSessions(opts: GeminiReadOptions): Promise<Sessi
     return { files, readFindings: findings, extraCounts: { 'sessions.candidates': 0 } };
   }
 
-  // <history>/<slot>/chats/session-*.json = 根下 3 层
-  const walked = await walkFiles(historyDir, {
+  // <history>/<slot>/chats/session-*.json = 根下 3 层。walkFiles 只回数组、不报是否触顶 →
+  // 多要一条：拿到 maxFiles+1 条即**证明**触顶（audit-foreign F4，绝不静默截断）。
+  const walkedAll = await walkFiles(historyDir, {
     match: (name) => GEMINI_SESSION_FILE_RE.test(name),
     maxDepth: 3,
-    maxFiles,
+    maxFiles: maxFiles + 1,
   });
+  const truncated = walkedAll.length > maxFiles;
+  const walked = truncated ? walkedAll.slice(0, maxFiles) : walkedAll;
   for (const entry of walked) {
     const label = GEMINI_HISTORY_REL + '/' + entry.rel;
     const text = await readTextGuarded(entry.abs, label, maxBytes, findings);
@@ -251,5 +254,6 @@ export async function readGeminiSessions(opts: GeminiReadOptions): Promise<Sessi
     files.push({ id: outcome.id ?? stemOf(entry.name), parsed: outcome.parsed });
   }
 
+  if (truncated) findings.push({ code: 'source-unreadable', origin: 'gemini', detail: 'max-sessions-reached', count: maxFiles });
   return { files, readFindings: findings, extraCounts: { 'sessions.candidates': files.length } };
 }

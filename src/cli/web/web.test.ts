@@ -4,7 +4,8 @@
  * 钉住的语义（这些是安全边界，不是实现细节）：
  *  - **一次性 token**：不带 token 的请求一律 403；token 只能换一次会话 cookie；
  *  - **cookie 不可猜**：换到 cookie 后可以正常访问页面，伪造 cookie 仍然 403；
- *  - **只读**：只暴露 GET，任何写方法一律 405（kit 的方法白名单）；
+ *  - **页面只读、写动作显式**：页面只用 GET 渲染；写动作是独立的 POST 表单（一次性 action token
+ *    + 安全门），任何不在声明内的方法一律 405 —— 且必须渲染成 HTML 错误页而不是裸 JSON（cli-F4）；
  *  - **只在本机**：非回环来源一律 403（kit 的围栏）；
  *  - **不写盘**：打开首页/磁盘/会话页不产生任何文件（零写入）。
  */
@@ -954,7 +955,8 @@ function runConsoleScript(cookie: string): {
     addEventListener: (type: string, fn: (event: { target: unknown }) => void) => { if (type === 'click') clicks.push(fn) },
   }
   const script = readFileSync(new URL('./client-script.ts', import.meta.url), 'utf8')
-  const body = /export const CONSOLE_SCRIPT = `([\s\S]*?)`\n/.exec(script)?.[1]
+  // 源码锚点必须与检出形态无关：Windows core.autocrlf=true 的 CRLF 检出下换行是 \r\n（cli-F5）
+  const body = /export const CONSOLE_SCRIPT = `([\s\S]*?)`\n/.exec(script.split('\r\n').join('\n'))?.[1]
   assert.ok(body, 'client-script.ts 必须导出 CONSOLE_SCRIPT 模板字符串')
   // 只喂脚本真正会碰的浏览器 API（显式列出，不用 Proxy 兜底 —— 缺哪个就报错，别让假 DOM 悄悄骗过测试）
   const win = {
@@ -1001,3 +1003,101 @@ test('R3-04 主题脚本的真行为：cookie 解析 / 非法值回落自动 / �
   assert.equal(clicky.attrs['data-theme'], 'auto')
   assert.match(clicky.cookieNow(), /dcm-theme=auto/)
 })
+/* ------------------------------------------------ t26 新增回归（cli-F1/F3/F4/F6/F7） */
+
+/** 造一条「本插件启动的实例」台账（pid = 当前进程，isProcessAlive 必然为真）。 */
+async function seedLaunchedInstance(paths: RescuePaths, name: string, url: string): Promise<void> {
+  const profileDir = path.join(paths.homeDir, 'profiles', name)
+  await fs.mkdir(profileDir, { recursive: true })
+  await fs.writeFile(path.join(profileDir, 'package.json'), JSON.stringify({
+    name, version: '0.0.0', dependencies: {},
+    dsh: { profile: { bundles: ['@deepseek-ai/dsh-web-app'] } },
+  }))
+  await fs.mkdir(paths.dataDir, { recursive: true })
+  await fs.writeFile(path.join(paths.dataDir, 'launches.json'), JSON.stringify({
+    version: 1,
+    launches: [{
+      name, port: 3099, pid: process.pid, url,
+      logFile: path.join(paths.dataDir, 'launch.log'), startedAt: new Date().toISOString(),
+    }],
+  }))
+}
+
+test('cli-F1 救急台回传的授权 URL 不得被脱敏抹掉（入口链接逐字节等于台账 URL）', async () => {
+  await withConsole(async (handle, paths) => {
+    const authUrl = 'http://127.0.0.1:3099/?token=probe-token-abc123'
+    await seedLaunchedInstance(paths, 'probe-demo', authUrl)
+    const { cookie } = await bootstrap(handle)
+    const res = await fetch(handle.url.replace(/\/$/, '') + '/profiles', { headers: { cookie: cookie! } })
+    assert.equal(res.status, 200)
+    const html = await res.text()
+    // 修复前：redact() 的 URL_QUERY_RE 把 token 值换成 ***REDACTED***，点开必然 401
+    assert.ok(html.includes('<a href="' + authUrl + '">打开实例</a>'), '入口链接必须带真实 token')
+    assert.doesNotMatch(html, /token=\*\*\*REDACTED\*\*\*/)
+  })
+})
+
+test('cli-F3 页面必须禁止被 iframe 嵌入（frame-ancestors + X-Frame-Options）', async () => {
+  await withConsole(async (handle) => {
+    const { cookie } = await bootstrap(handle)
+    const res = await fetch(handle.url, { headers: { cookie: cookie! } })
+    assert.equal(res.status, 200)
+    const csp = res.headers.get('content-security-policy') ?? ''
+    assert.match(csp, /frame-ancestors 'none'/, 'default-src 不覆盖 frame-ancestors，必须显式声明')
+    assert.equal(res.headers.get('x-frame-options'), 'DENY')
+    // 403 极简页走同一个写出点，也必须带上
+    const anon = await fetch(handle.url)
+    assert.equal(anon.status, 403)
+    assert.match(anon.headers.get('content-security-policy') ?? '', /frame-ancestors 'none'/)
+    assert.equal(anon.headers.get('x-frame-options'), 'DENY')
+  })
+})
+
+test('cli-F4 方法不被允许时必须是 HTML 错误页，不得吐插件 API 形状的裸 JSON', async () => {
+  await withConsole(async (handle) => {
+    const { cookie } = await bootstrap(handle)
+    const res = await fetch(handle.url, { method: 'POST', headers: { cookie: cookie! } })
+    assert.equal(res.status, 405)
+    const body = await res.text()
+    assert.match(body, /<html lang="zh-CN">/, '405 必须渲染成页面')
+    assert.ok(!body.startsWith('{"error"'), '不得是 kit 的 JSON 出口')
+    // 方法判定不得改变「路由未命中」语义
+    const nope = await fetch(handle.url.replace(/\/$/, '') + '/nope', { method: 'POST', headers: { cookie: cookie! } })
+    assert.equal(nope.status, 404)
+  })
+})
+
+test('cli-F6 /healthz 的写路由自述必须与真实声明同源且完整', async () => {
+  await withConsole(async (handle) => {
+    const { cookie } = await bootstrap(handle)
+    const res = await fetch(handle.url.replace(/\/$/, '') + '/healthz', { headers: { cookie: cookie! } })
+    const payload = await res.json() as { writes: string[]; writeRoutes?: string[] }
+    assert.deepEqual(payload.writes, ['sessions-repair', 'disk-cleanup', 'recover-stale-lock'], '既有 writes 契约不变')
+    assert.ok(Array.isArray(payload.writeRoutes), '/healthz 必须自述全部写路由')
+    const declared = payload.writeRoutes as string[]
+    for (const line of [
+      'POST /sessions/repair', 'POST /sessions/inline-repair', 'POST /disk/cleanup', 'POST /lock/recover',
+      'POST /profiles/launch', 'POST /profiles/stop', 'POST /unlock/run', 'POST /restore/run',
+      'POST /export/run', 'POST /reinstall/plan', 'POST /reinstall/run',
+    ]) {
+      assert.ok(declared.includes(line), '缺写路由自述: ' + line + ' → ' + declared.join(','))
+    }
+    assert.ok(!declared.some((line) => line.startsWith('GET ')), 'GET 路由不得混进写自述')
+  })
+})
+
+test('cli-F7 //x 形态的请求目标不得被解析成首页', async () => {
+  await withConsole(async (handle) => {
+    const { cookie } = await bootstrap(handle)
+    // 协议相对目标：修复前 new URL('//evil') 得到 authority=evil / pathname='/' → 冒充首页
+    const evil = await fetch(handle.url.replace(/\/$/, '') + '//evil', { headers: { cookie: cookie! } })
+    assert.equal(evil.status, 404, '//evil 不是合法页面，不得返回首页')
+    // //disk 折叠成 /disk：必须是**磁盘页**（有该页专属的 section 标题），不是首页
+    const disk = await fetch(handle.url.replace(/\/$/, '') + '//disk', { headers: { cookie: cookie! } })
+    assert.equal(disk.status, 200)
+    assert.match(await disk.text(), /磁盘占用（只读体检）/, '//disk 必须落到磁盘页而不是首页')
+    const home = await fetch(handle.url, { headers: { cookie: cookie! } })
+    assert.equal(home.status, 200)
+  })
+})
+

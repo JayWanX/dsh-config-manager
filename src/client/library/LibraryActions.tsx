@@ -30,7 +30,14 @@ import { toast } from '../common/toast-store.ts'
 import { ConsultCard } from '../consult/ConsultCard.tsx'
 import { RestorePlanView } from '../snapshots/RestorePlanView.tsx'
 import { BackupInspectView } from './BackupInspectView.tsx'
+import { redact } from '../../security/redaction.ts'
 import css from '../config-manager.module.css'
+
+/**
+ * 宿主/错误文本渲染前统一过 redact（AGENTS.md §UI 硬性规则 7；client-F4）。
+ * 单列成一行：plan-text-redaction.test.ts 的「按渲染点」登记表需要一个唯一锚点。
+ */
+const redactErrorText = (err: unknown): string => redact(err instanceof Error ? err.message : String(err))
 
 /** 一次待执行的行内动作（由 LibraryPanel 冒泡上来）。 */
 export interface LibraryActionTarget {
@@ -165,7 +172,7 @@ export function LibraryActions({ api, syncApi, t, target, onDone, onChanged, onO
             onDone()
           },
           (err) => {
-            const message = err instanceof Error ? err.message : String(err)
+            const message = redactErrorText(err)
             if (mounted.current) setPull({ row, mode: 'pull', phase: 'failed', error: message })
             toast.error(message)
           },
@@ -220,11 +227,11 @@ export function LibraryActions({ api, syncApi, t, target, onDone, onChanged, onO
               if (!mounted.current) return
               setPull(null)
               void api.download(staged.zipPath)
-                .catch((err) => { toast.error(err instanceof Error ? err.message : String(err)) })
+                .catch((err) => { toast.error(redactErrorText(err)) })
                 .finally(() => { if (mounted.current) onDone() })
             },
             (err) => {
-              const message = err instanceof Error ? err.message : String(err)
+              const message = redactErrorText(err)
               if (mounted.current) setPull({ row, mode: 'download', phase: 'failed', error: message })
               toast.error(message)
             },
@@ -236,7 +243,7 @@ export function LibraryActions({ api, syncApi, t, target, onDone, onChanged, onO
         // 备份文件是**可再生成的产物**，多一步选路径没有收益。
         // api.download 缺省即此语义（Blob + <a download>）；不要传 saveDialog: true。
         void api.download(row.ref.path ?? '')
-          .catch((err) => { toast.error(err instanceof Error ? err.message : String(err)) })
+          .catch((err) => { toast.error(redactErrorText(err)) })
           .finally(() => { if (mounted.current) { setBusy(false); onDone() } })
         return
       }
@@ -256,7 +263,7 @@ export function LibraryActions({ api, syncApi, t, target, onDone, onChanged, onO
         api.consult(input).then(
           (rep) => { if (mounted.current) setConsult({ row, loading: false, error: null, report: rep }) },
           (err) => {
-            const message = err instanceof Error ? err.message : String(err)
+            const message = redactErrorText(err)
             if (mounted.current) setConsult({ row, loading: false, error: message, report: null })
             // Toast 与弹窗内错误都给：弹窗可能被立刻关掉，Toast 保证反馈不丢
             toast.error(message)
@@ -293,7 +300,7 @@ export function LibraryActions({ api, syncApi, t, target, onDone, onChanged, onO
     runStoreWatch()
     api.restoreSnapshot(snapshotId, false).then(
       (res) => { if (mounted.current) { setRunning(false); setReport(res.report ?? null); setPlan(null); onChanged() } },
-      (err) => { if (mounted.current) { setRunning(false); setPlan(null) } toast.error(err instanceof Error ? err.message : String(err)) },
+      (err) => { if (mounted.current) { setRunning(false); setPlan(null) } toast.error(redactErrorText(err)) },
     ).finally(() => { runStoreStopWatch() })
   }
 
@@ -304,14 +311,14 @@ export function LibraryActions({ api, syncApi, t, target, onDone, onChanged, onO
     if (row.kind === 'snapshot') {
       api.deleteSnapshot(row.ref.snapshotId ?? '').then(
         () => { toast.ok(t('snapshots.deleted')); done() },
-        (err) => { if (mounted.current) setConfirmDelete(null); toast.error(err instanceof Error ? err.message : String(err)) },
+        (err) => { if (mounted.current) setConfirmDelete(null); toast.error(redactErrorText(err)) },
       )
       return
     }
     if (row.kind === 'backup-file') {
       api.deleteBackupFile(fileNameOf(row)).then(
         () => { toast.ok(t('backupFiles.deleted', { name: fileNameOf(row) })); done() },
-        (err) => { if (mounted.current) setConfirmDelete(null); toast.error(err instanceof Error ? err.message : String(err)) },
+        (err) => { if (mounted.current) setConfirmDelete(null); toast.error(redactErrorText(err)) },
       )
       return
     }
@@ -326,7 +333,7 @@ export function LibraryActions({ api, syncApi, t, target, onDone, onChanged, onO
           done()
         } catch (err) {
           if (mounted.current) setConfirmDelete(null)
-          toast.error(err instanceof Error ? err.message : String(err))
+          toast.error(redactErrorText(err))
         }
       })()
     }
@@ -501,11 +508,11 @@ export function LibraryActions({ api, syncApi, t, target, onDone, onChanged, onO
         <Modal.Body scroll>
           {report !== null && (
             <>
-              {reportLine(t('snapshots.restored'), report.restored)}
-              {reportLine(t('snapshots.removedPlugins'), report.removedPlugins)}
-              {reportLine(t('snapshots.manualHints'), report.manualHints, true)}
-              {reportLine(t('snapshots.failed'), report.failed.map((f) => `${f.item}: ${f.reason}`), true)}
-              {reportLine(t('snapshots.skipped'), report.skipped)}
+              {reportLine(t('snapshots.restored'), report.restored, t)}
+              {reportLine(t('snapshots.removedPlugins'), report.removedPlugins, t)}
+              {reportLine(t('snapshots.manualHints'), report.manualHints, t, true)}
+              {reportLine(t('snapshots.failed'), report.failed.map((f) => `${f.item}: ${f.reason}`), t, true)}
+              {reportLine(t('snapshots.skipped'), report.skipped, t)}
             </>
           )}
         </Modal.Body>
@@ -621,12 +628,12 @@ function runStorePatchImport(row: ArtifactRow): void {
 function runStoreWatch(): void { runStore.watchRunning('restore', 500) }
 function runStoreStopWatch(): void { runStore.stopRunWatch('restore') }
 
-function reportLine(title: string, items: string[], warn = false) {
+function reportLine(title: string, items: string[], t: TranslateNS<'config-manager'>, warn = false) {
   if (items.length === 0) return null
   return (
     <div className={css.inspectGroup} key={title}>
       <div className={css.groupHeader}>
-        <strong className={warn ? css.warnText : undefined}>{title}（{items.length}）</strong>
+        <strong className={warn ? css.warnText : undefined}>{title}{t('common.parens', { text: String(items.length) })}</strong>
       </div>
       <div className={css.reportScroll}>
         <ul className={css.reportList}>

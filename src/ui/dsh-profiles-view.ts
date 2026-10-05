@@ -260,6 +260,100 @@ export function shapeLabelKey(shape: DshProfileShape): 'profiles.shape.web' | 'p
   return 'profiles.shape.generic'
 }
 
+/* ---------------- cross-F3：中断的档案复制残留（半截副本） ---------------- */
+
+/**
+ * 该条目是否为「中断的档案复制」留下的半截副本。
+ *
+ * 判据**只有**宿主 `list()` 显式给出的 `incomplete: true` —— 绝不从 shape / bundles / 缺包名去猜：
+ * 「generic + 空 bundles」同样可能是用户手工建的空档案，猜错就会把真档案标成残留（进而隐藏它的启动/改名入口）。
+ */
+export function isIncompleteProfileCopy(profile: Pick<DshProfileMeta, 'incomplete'>): boolean {
+  return profile.incomplete === true
+}
+
+/** 残留行的来源事实（读不到一律 null，**不臆造**：host 上标记损坏时就是没有来源可讲）。 */
+export interface IncompleteCopyFacts {
+  /** 从哪个档案复制出来的 */
+  copiedFrom: string | null
+  /** 复制开始时刻（原样 ISO 字符串；展示格式化由调用方决定） */
+  startedAt: string | null
+  /** 目标目录绝对路径（界面按既有脱敏口径 redact 后展示） */
+  dir: string | null
+}
+
+export function incompleteCopyFacts(
+  profile: Pick<DshProfileMeta, 'copiedFrom' | 'copyStartedAt' | 'dir' | 'incomplete'>,
+): IncompleteCopyFacts {
+  const text = (value: unknown): string | null => (typeof value === 'string' && value.trim() !== '' ? value : null)
+  return {
+    copiedFrom: text(profile.copiedFrom),
+    startedAt: text(profile.copyStartedAt),
+    dir: text(profile.dir),
+  }
+}
+
+/**
+ * 行内可用动作 —— 残留行**只留删除**（判据集中在纯函数层，组件不得各写一份）。
+ *
+ * 为什么必须掐掉启动/停止/复制/改名：半截副本没有 package.json，`shape` 恒为 generic（`isLaunchableShape` 恒假），
+ * 点「启动」必然以 notLaunchable 失败；改名/复制对它也没有意义（源清单都没写完）。把它伪装成普通档案 =
+ * 给用户一排注定失败的按钮（t50 的原始症状）。
+ * 只读详情（信息区）保留：残留行最有用的信息（目录 / 来源 / 时间）就在那里。
+ */
+export interface ProfileRowCapabilities {
+  /** 信息区可点开只读详情 */
+  detail: boolean
+  /** 「启动 / 停止 / 当前」那一格是否出现 */
+  launchOrStop: boolean
+  duplicate: boolean
+  rename: boolean
+  /** 删除：普通档案与残留行都保留（残留行的唯一动作） */
+  delete: boolean
+}
+
+export function profileRowCapabilities(profile: Pick<DshProfileMeta, 'incomplete'>): ProfileRowCapabilities {
+  const incomplete = isIncompleteProfileCopy(profile)
+  return {
+    detail: true,
+    launchOrStop: !incomplete,
+    duplicate: !incomplete,
+    rename: !incomplete,
+    delete: true,
+  }
+}
+
+/**
+ * 残留行展示用的开始时刻文本：可解析则格式化为本地时间，不可解析则原样回显（**绝不显示空** ——
+ * 那会让「未完成的副本」看起来像没有来源信息的正常档案）。null = host 没给该字段。
+ */
+export function incompleteCopyStartedAtText(startedAt: string | null): string | null {
+  if (startedAt === null) return null
+  const ms = Date.parse(startedAt)
+  if (Number.isNaN(ms)) return startedAt
+  return formatProfileTime(ms) || startedAt
+}
+
+/**
+ * 行内形态徽章 → i18n key：残留行必须显式标成「未完成的副本」，不得伪装成「自定义（generic）」档案。
+ * 返回类型保持字面量联合（`t()` 的编译期键校验才会生效）。
+ */
+export function profileShapeLabelKey(
+  profile: Pick<DshProfileMeta, 'shape' | 'incomplete'>,
+): ReturnType<typeof shapeLabelKey> | 'profiles.shape.incomplete' {
+  return isIncompleteProfileCopy(profile) ? 'profiles.shape.incomplete' : shapeLabelKey(profile.shape)
+}
+
+/**
+ * 列表概览里的「未完成的副本」计数（与档案计数**分开**呈现）。
+ *
+ * 刻意不改 `summarizeProfiles`：那会动到既有 summary 断言（total/generic 的口径）；
+ * 残留清单是独立一类信息，单独给一行计数即可。
+ */
+export function countIncompleteProfileCopies(profiles: readonly Pick<DshProfileMeta, 'incomplete'>[]): number {
+  return profiles.filter(isIncompleteProfileCopy).length
+}
+
 /** issue → i18n key。 */
 export function issueLabelKey(issue: DshProfileIssue): 'profiles.issue.manifestInvalid' | 'profiles.issue.patchTooLarge' {
   return issue === 'manifestInvalid' ? 'profiles.issue.manifestInvalid' : 'profiles.issue.patchTooLarge'

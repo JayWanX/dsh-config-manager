@@ -91,6 +91,7 @@ import { projectKeyOf, sessionIdKey } from './core/session-select.ts'
 import { PROJECT_KEY_RE, readLogCwdFromBytes, rewriteSessionLogDir } from './utils/session-log.ts'
 import { probeSessionFormats, resolveSessionFormatVersion } from './utils/session-format.ts'
 import { atomicCopyFile, atomicWriteFile } from './utils/atomic-write.ts'
+import { isENOENT } from './utils/guards.ts'
 import { EnvironmentLockManager, runWithMutationLock, EnvironmentLockUnavailableError, type MutationLockContext } from './utils/env-lock.ts'
 import { activeProxySummary } from './utils/proxy.ts'
 import { listRecursiveFollowingLinks } from './utils/recursive-walk.ts'
@@ -224,9 +225,9 @@ export interface Config {
 /* ---------------------------------------------------------------- constants */
 
 /**
- * 本文件保留的 8 条路由的路径（被源码级守卫按文件窗口钉住，见下方 routesList 注释）。
+ * 本文件保留的 7 条路由的路径（被源码级守卫按文件窗口钉住，见下方 routesList 注释）。
  *
- * 其余 57 条路由的路径**声明在各自的组文件里**（src/routes/*.ts 的 endpoint({ path, methods })）——
+ * 其余 70 条路由的路径**声明在各自的组文件里**（src/routes/*.ts 的 endpoint({ path, methods })）——
  * 新增一条 API 只需那一条声明，不再有「常量表 + 路由对象」两处要同步。
  */
 export const API = {
@@ -1240,8 +1241,17 @@ export class DshFileSystemFacade implements FileSystemFacade {
     try {
       await fs.access(this.abs(relPath))
       return true
-    } catch {
-      return false
+    } catch (err) {
+      // t85 / t23 口径：**读不到 ≠ 没有**。只有 ENOENT 才是「按需创建、本来就没有」；
+      // EACCES / EPERM / EBUSY / EMFILE / ENOTDIR… 一律**按「存在」处理**（返回 true）。
+      //
+      // 为什么选「按存在处理」而不是上抛：本方法是 FileSystemFacade 的**布尔端口**，全部消费点
+      // 都按「exists() 恒返回布尔、不抛」来写（消费点清单见 t85 交付物），其中多处处于只读/预览
+      // 路径（backup / market / sync-ancestor / plugin-files）—— 上抛会把「探测失败」变成这些调用点
+      // 未预期的错误面；而 t23 立的规矩正是「判定『不存在』的探测自身失败时按『存在』处理」。
+      // 保守方向也是安全方向：true ⇒ 调用方不创建 / 不删除 / 不剔除声明，绝不造成有损副作用。
+      // ENOENT 必须仍为 false，否则会破坏「按需创建 / 本来就没有」的既有语义。
+      return !isENOENT(err)
     }
   }
 
@@ -1589,11 +1599,15 @@ export async function tryDecryptCredentials(
   if (!archive.has('security/secrets.enc')) return undefined
   const blob = archive.readEntry('security/secrets.enc')
   const plaintext = await decryptCredentials(blob, manifest.security.encryption, password)
+  // e2e-F1：**解密成功**（GCM 已认证）之后的「没有可识别 ref」必须回**空 Map**，而不是 undefined ——
+  // undefined 是「没有解密 / 不适用」的语义，会被 analyzer 的安全阀判成「未提供密码」而拒绝导入
+  // （真机：导出机没有可导出的凭据值 → secrets.enc 明文 0 字节 → yaml.load('') 抛错 → undefined → 400）。
+  // 与同步侧 `fromYaml`（src/security/credentials-yaml.ts，其测试断言 fromYaml('').size === 0）同口径。
   let parsed: unknown
   try {
-    parsed = yaml.load(plaintext)
+    parsed = plaintext.trim() === '' ? null : yaml.load(plaintext)
   } catch {
-    return undefined
+    parsed = null
   }
   // 解析口径与同步引擎共用（security/credentials-yaml.ts）：顶层 refs 块（DSH v1 布局）
   // 与预发布扁平布局都认，records 等嵌套结构忽略（issue #39）。
@@ -3154,9 +3168,9 @@ function makeRoutes(deps: RoutesDeps): { routes: WebRoute[]; scheduler: AutoSync
   }
 
   /**
-   * 路由表：本文件只保留被源码级守卫按**文件窗口**钉住的 8 条（host-entry 审计 F-04 记录的
+   * 路由表：本文件只保留被源码级守卫按**文件窗口**钉住的 7 条（host-entry 审计 F-04 记录的
    * tests/host/**、src/core/model-tools.test.ts、src/core/phase1-wiring.test.ts 的窗口断言）。
-   * 其余 57 条已按域拆到 src/routes/*.ts，由 buildRoutes 组装。
+   * 其余 70 条已按域拆到 src/routes/*.ts，由 buildRoutes 组装。
    * 注册顺序不影响匹配：命名路由必须互不相同（webServer 契约）。
    */
   const routeEnv: RouteEnvInferred = makeRouteEnv()

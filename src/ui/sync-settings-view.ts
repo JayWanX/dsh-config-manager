@@ -12,7 +12,7 @@
 import type { SectionId } from '../schema/types.ts'
 import type { Selection } from './selection-model.ts'
 // 通道枚举：唯一声明处是**零依赖**的 utils/shared-constants.ts（宿主 sync-config.ts 只是 re-export）。
-import { SYNC_CHANNELS } from '../utils/shared-constants.ts'
+import { SYNC_CHANNELS, S3_COMPAT_PROVIDERS } from '../utils/shared-constants.ts'
 // 仅取**类型**：宿主错误码 / 兼容商枚举是唯一声明处，客户端镜像它们并按穷尽检查钉住漂移。
 // type-only 引用打包时被完全擦除，不会把 sync-config.ts 的 node:fs 带进浏览器产物。
 import type { CloudConfigIssueCode, S3CompatProvider, SyncTransportType } from '../sync/sync-config.ts'
@@ -319,10 +319,12 @@ export function buildSyncConfigBody(form: SyncFormSnapshot): SyncPushBody | null
 /* ------------------------------------------------ 云端点通道（s3 / gist）表单逻辑 */
 
 /**
- * S3 兼容商清单（**客户端镜像**；声明处 = 宿主 `S3_COMPAT_PROVIDERS`）。
- * 下面的穷尽检查保证宿主新增 / 改名兼容商时这里编译失败，而不是界面上少一个选项。
+/**
+ * S3 兼容商清单（t88：**不再是客户端副本**，直接用零依赖共享常量 S3_COMPAT_PROVIDERS；
+ * 宿主 sync-config.ts 只是它的 re-export）。下面的穷尽检查保留为双保险：
+ * 宿主若新增兼容商而共享清单没同步，编译仍然失败；结构/运行时守卫见 sync-config.test.ts 的 t88。
  */
-export const S3_PROVIDERS = ['s3', 'oss', 'cos', 'minio', 'kodo'] as const satisfies readonly S3CompatProvider[]
+export const S3_PROVIDERS = S3_COMPAT_PROVIDERS
 type MissingProvider = Exclude<S3CompatProvider, (typeof S3_PROVIDERS)[number]>
 const s3ProvidersAreExhaustive: MissingProvider extends never ? true : never = true
 void s3ProvidersAreExhaustive

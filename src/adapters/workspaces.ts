@@ -36,6 +36,51 @@ function reasonOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * 按记录 id 归并工作区记录（audit-foreign foreign-F2；与上游内核 FIX-foreign 同一口径）。
+ *
+ * 为什么必须归并：记录 id 由 `projectKeyOf(path)` 派生（多对一 —— 分隔符 run 会被折叠），
+ * 同一目录的两种写法（Windows 反斜杠/正斜杠、posix `/a/b` 与 `/a//b`）会产出**同一个 id 的两条记录**。
+ * 不归并的话：计划里出现同 id 的两条 Create（一次决策命中两条）、applyItem 按 id 只能取到第一条
+ * → 第二条记录的 path/title/sessionIds 静默消失（analysis.valid 仍为 true，零告警）。
+ *
+ * 归并规则：`sessionIds` 取**并集**（按 `sessionIdKey` 裸键去重，保持先到顺序；两种命名形态
+ * 指向同一条会话时只留一条），`path`/`title` 取**先到者**（与内核侧一致）。
+ * 返回顺序 = 首次出现顺序；`duplicateCount` 供调用方在计划里显式标注（绝不静默）。
+ */
+function mergeWorkspaceRecordsById(
+  records: readonly WorkspaceRecord[],
+): Array<{ rec: WorkspaceRecord; duplicateCount: number }> {
+  const order: string[] = [];
+  const byId = new Map<string, { rec: WorkspaceRecord; duplicateCount: number }>();
+  for (const rec of records) {
+    // 纵深防御（t73 的 F2）：非对象记录直接跳过。第三方包可能带 null；validate 已拒（workspaces[]），
+    // 生产不可达 —— 但归并是**新增**调用点，不让它成为又一条内部 TypeError 的来源。
+    const raw: unknown = rec;
+    if (raw === null || typeof raw !== 'object') continue;
+    // 只接受字符串元素（t73 的 F1）：`sessionIdKey` 的入参契约是字符串，数字/null 元素会让它抛
+    // TypeError（base 上这些元素根本不经过 sessionIdKey —— 归并去重是新增调用点）。非法元素丢弃。
+    const ids = Array.isArray(rec.sessionIds)
+      ? rec.sessionIds.filter((sid): sid is string => typeof sid === 'string')
+      : [];
+    const hit = byId.get(rec.id);
+    if (hit === undefined) {
+      byId.set(rec.id, { rec: { ...rec, sessionIds: [...ids] }, duplicateCount: 1 });
+      order.push(rec.id);
+      continue;
+    }
+    hit.duplicateCount += 1;
+    const seen = new Set(hit.rec.sessionIds.map((s) => sessionIdKey(s)));
+    for (const sid of ids) {
+      const key = sessionIdKey(sid);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      hit.rec.sessionIds.push(sid);
+    }
+  }
+  return order.map((id) => byId.get(id)!);
+}
+
 export class WorkspacesAdapter implements ConfigAdapter<WorkspacesSection> {
   readonly id = 'workspaces' as const;
   readonly displayName = 'Workspaces';
@@ -72,7 +117,11 @@ export class WorkspacesAdapter implements ConfigAdapter<WorkspacesSection> {
   async analyzeImport(data: WorkspacesSection, ctx: ImportContext): Promise<PlanItem[]> {
     const msg = ctx.msg;
     const items: PlanItem[] = [];
-    for (const rec of data.workspaces) {
+    // audit-foreign foreign-F2（适配器侧加固）：同一 id 的多条记录（同一目录的多种写法 → 同一个
+    // 派生 id）必须先**归并**再规划。否则会产出同 id 的两条 Create（用户一次决策命中两条，
+    // 逐条决策语义错乱），且 applyItem 按 id 只能取到第一条 → 第二条记录的 path/title/sessionIds
+    // 静默消失。归并口径与上游内核一致：sessionIds 取并集（按裸键去重），path/title 取先到者。
+    for (const { rec, duplicateCount } of mergeWorkspaceRecordsById(data.workspaces)) {
       const id = `workspace:${rec.id}`;
       /** issue #45：本工作区拥有的会话 id 随计划项带上（导入选择器据此联动勾选会话） */
       const ownedSessions = {
@@ -80,22 +129,33 @@ export class WorkspacesAdapter implements ConfigAdapter<WorkspacesSection> {
         // 第二判据：sessionIds 覆盖不到的会话按「cwd 目录键相同」认领（与导出侧同一口径）
         projectKey: projectKeyOf(rec.path),
       };
+      // 归并发生时的可见标注（raw key=value，与既有 detail 的 current=/imported= 同风格；
+      // 绝不静默：计划里看得见「这条是被归并过的」）
+      const mergeDetail = duplicateCount > 1
+        ? `duplicateIdRecords=${duplicateCount} mergedSessionIds=${rec.sessionIds.length}`
+        : '';
       const existing = (await ctx.target.workspace.listRecords()).find((r) => r.id === rec.id);
       if (!existing) {
         items.push({
           id, kind: 'Create', adapter: 'workspaces',
           ...ownedSessions,
+          ...(mergeDetail !== '' ? { detail: mergeDetail } : {}),
           description: msg('adapter.workspaceCreate', { title: rec.title ?? rec.id, path: rec.path }), severity: 'info',
           target: { adapter: 'workspaces', ref: rec.id },
         });
       } else if (isDeepStrictEqual(existing, rec)) {
-        items.push({ id, kind: 'Skip', adapter: 'workspaces', ...ownedSessions, description: msg('adapter.workspaceSame', { id: rec.id }), severity: 'info' });
+        items.push({
+          id, kind: 'Skip', adapter: 'workspaces', ...ownedSessions,
+          ...(mergeDetail !== '' ? { detail: mergeDetail } : {}),
+          description: msg('adapter.workspaceSame', { id: rec.id }), severity: 'info',
+        });
       } else {
         items.push({
           id, kind: 'Conflict', adapter: 'workspaces',
           ...ownedSessions,
           description: msg('adapter.workspaceDiff', { id: rec.id }),
-          detail: `current=${JSON.stringify(existing)} imported=${JSON.stringify(rec)}`.slice(0, 200),
+          detail: (`current=${JSON.stringify(existing)} imported=${JSON.stringify(rec)}`
+            + (mergeDetail !== '' ? ' ' + mergeDetail : '')).slice(0, 200),
           severity: 'warning', target: { adapter: 'workspaces', ref: rec.id },
         });
       }
@@ -118,8 +178,19 @@ export class WorkspacesAdapter implements ConfigAdapter<WorkspacesSection> {
     const ref = item.target?.ref;
     if (!ref) return { ok: false, message: ctx.msg('adapter.missingTargetRef') };
     const data = ctx.sections.get('workspaces') as WorkspacesSection | undefined;
-    const rec = data?.workspaces.find((r) => r.id === ref);
-    if (!rec) return { ok: false, message: ctx.msg('adapter.workspaceMissing', { ref }) };
+    // audit-foreign foreign-F2（适配器侧加固）：同一 id 可能有多条记录（同一目录的多种写法派生同一 id）。
+    // 此前 find() 恒取第一条 → 第二条记录的 path/title/sessionIds 静默丢失（analysis.valid 仍为 true、
+    // 零告警）。这里取**全部**同 id 记录并按同一口径归并后写入 —— 绝不静默丢弃。同 id 的两条计划项
+    // 即便都执行，也只是重复写同一条归并结果（幂等）。
+    // t73 的 F2（纵深防御，两入口行为一致）：非数组 / 含 null 记录的畸形载荷一律不当成记录集 ——
+    // `r.id` 直接取会在 null 上抛（validate 已拒 ⇒ 生产不可达，但这里也不让它成为新的内部 TypeError 来源）。
+    const allRecords = data === undefined || !Array.isArray(data.workspaces) ? [] : data.workspaces;
+    const sameIdRecords = allRecords.filter((r) => {
+      const raw: unknown = r;
+      return raw !== null && typeof raw === 'object' && r.id === ref;
+    });
+    const rec = sameIdRecords.length === 0 ? undefined : mergeWorkspaceRecordsById(sameIdRecords)[0]?.rec;
+    if (rec === undefined) return { ok: false, message: ctx.msg('adapter.workspaceMissing', { ref }) };
     const notes: string[] = [];
     // issue #45 已知缺口①：备份里的工作区路径在本机不存在时，DSH registry.create() 的
     // realpath 直接 ENOENT → 只留一句非致命警告，工作区（以及它的会话归属）全丢。
@@ -196,6 +267,27 @@ export class WorkspacesAdapter implements ConfigAdapter<WorkspacesSection> {
         for (const w of section.workspaces as WorkspaceRecord[]) {
           if (w === null || typeof w !== 'object' || typeof w.id !== 'string' || typeof w.path !== 'string') {
             issues.push({ path: 'workspaces[]', message: msg('adapter.validate.workspaceIdentity'), severity: 'error' });
+            continue;
+          }
+          // ui-F3：sessionIds 是会话可见性的必需字段（docs/spec/bundle-format-v1.md §6），
+          // 而 analyzeImport / finalizeImport 直接读 rec.sessionIds.length —— 缺它有两条后果：
+          // ① validate 放过后 analyzeImport 抛内部 TypeError → 整包被拦下且文案不可行动；
+          // ② 即便绕过，工作区记录也失去会话归属。这里按「必需数组」显式报出字段名。
+          if (!Array.isArray(w.sessionIds)) {
+            issues.push({ path: `workspaces.${String(w.id)}.sessionIds`, message: msg('adapter.validate.array', { subject: 'sessionIds' }), severity: 'error' });
+          } else {
+            // t73 的 F1：**元素级**校验 —— 归并去重会对每个元素调 sessionIdKey（字符串契约），
+            // 非字符串元素会让 analyzeImport / applyItem 抛内部 TypeError（validate 放行 ⇒ 整包被拦、文案不可行动）。
+            // 这里显式报出下标，让这种包在 validate 阶段就被拦下。
+            w.sessionIds.forEach((sid, i) => {
+              if (typeof sid !== 'string') {
+                issues.push({
+                  path: `workspaces.${String(w.id)}.sessionIds[${i}]`,
+                  message: msg('adapter.validate.string', { subject: `sessionIds[${i}]` }),
+                  severity: 'error',
+                });
+              }
+            });
           }
         }
       }

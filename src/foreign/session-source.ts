@@ -41,7 +41,7 @@ import type {
   SynthesisStats,
 } from './session-ir.ts';
 import { isRecord } from '../utils/guards.ts';
-import type { ForeignEvidenceKind, ForeignImportResult, ForeignSectionOut, ForeignSkip, ForeignSkipCode, ForeignSourceId } from './types.ts';
+import type { ForeignEvidenceKind, ForeignImportResult, ForeignLimitOverrides, ForeignSectionOut, ForeignSkip, ForeignSkipCode, ForeignSourceId } from './types.ts';
 
 /* ---------------- ① 归一记录（各来源只负责产出这个） ---------------- */
 
@@ -517,6 +517,11 @@ export interface RootProbeOptions {
   readonly platform: string;
   /** 显式项目目录（crush 的每项目一库 / chatgpt 的显式导出文件都靠它，缺省不猜） */
   readonly projectDir?: string | undefined;
+  /**
+   * 可选上限覆盖（t36）：宿主路由 / CLI 将来放开上限时的通道。
+   * 缺省 = 各读器自己的选项与默认值**逐字不变**；读器用 resolveLimit(覆盖, 显式, 默认) 取值。
+   */
+  readonly limits?: ForeignLimitOverrides | undefined;
 }
 
 /** 读盘上下文（read-*.ts 的唯一入口形状） */
@@ -588,6 +593,8 @@ export function sessionSourceOf<TFile extends { id: string }>(
         platform: ctx.platform ?? process.platform,
         ...(ctx.projectDir !== undefined ? { projectDir: ctx.projectDir } : {}),
         targetFormatVersion: ctx.targetSessionFormatVersion,
+        // t36：上下文里的可选上限**原样**透传（不再固定只传 5 个字段）；不给就一个键都不加
+        ...(ctx.limits !== undefined ? { limits: ctx.limits } : {}),
       });
       return buildSessionSourceResult<TFile>(wiring.id, {
         files: read.files,

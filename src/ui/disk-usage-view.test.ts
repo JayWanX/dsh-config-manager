@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { diskUsageViewModel, formatRetention } from './disk-usage-view.ts';
+import { cleanupOutcome, diskUsageViewModel, formatRetention } from './disk-usage-view.ts';
 import { makeUiT } from './i18n.ts';
 import { formatBytes } from './report.ts';
 import type { DiskUsageArea, DiskUsageReport } from '../core/disk-usage.ts';
@@ -116,4 +116,66 @@ test('diskUsageViewModel：英文界面下所有标签来自 en 字典（不回�
   assert.equal(vm.rows.find((r) => r.id === 'tmp')?.label, 'Temporary staging');
   assert.equal(vm.clean.actions.find((a) => a.id === 'tmp-market')?.label, 'Clear temp & marketplace cache');
   assert.equal(vm.summary.files, en('diskUsage.files', { count: '0' }));
+});
+
+test('ui-F4：expired-exports 动作只算 exports 的过期体积（可重建区的过期字节不得混入按钮）', () => {
+  const vm = diskUsageViewModel(makeReport({
+    exports: { sizeBytes: 5000, fileCount: 2, expiredBytes: 900, expiredCount: 1 },
+    tmp: { sizeBytes: 100, expiredBytes: 700, expiredCount: 2 },
+    marketCache: { sizeBytes: 200, expiredBytes: 600, expiredCount: 3 },
+  }), { t: zh, formatBytes });
+  assert.ok(vm !== null);
+  const expAction = vm.clean.actions.find((a) => a.id === 'expired-exports');
+  assert.ok(expAction !== undefined);
+  // base：900 + 700 + 600 = 2200（虚高，宿主该动作只删 exports）
+  assert.equal(expAction.bytes, 900, '宿主 expired-exports 只删 exports；tmp/market 走 tmp-market 动作');
+  assert.equal(vm.clean.expired, formatBytes(900));
+});
+
+/* ---------------- e2e-F3：清理回执的呈现判定（「仅缺失目录」≠「真失败」） ---------------- */
+
+test('cleanupOutcome：目标目录不存在/已空 → 不报失败，且与「真失败」同输入不同语义', () => {
+  // 现场：全新安装只清缓存，market/cache 等可选目录尚未创建 —— 老宿主把它计成 errors
+  const missingOnly = cleanupOutcome(
+    { removed: 0, freedBytes: 0, errors: 3, report: makeReport({ tmp: { sizeBytes: 0 }, marketCache: { sizeBytes: 0 }, marketWork: { sizeBytes: 0 } }), requested: ['tmp'] },
+    { t: zh, formatBytes },
+  );
+  assert.equal(missingOnly.kind, 'nothing-absent', '缺失目录不得判成失败');
+  assert.equal(missingOnly.warnText, '', '不得弹红色「清理失败 N 项」');
+  assert.match(missingOnly.okText, /没有需要清理/);
+  // core 侧修好后 ENOENT 不再计入 errors → 同一现场落到 nothing（成功语义）
+  const fixedHost = cleanupOutcome({ removed: 0, freedBytes: 0, errors: 0, report: makeReport(), requested: ['tmp'] }, { t: zh, formatBytes });
+  assert.equal(fixedHost.kind, 'nothing');
+  assert.equal(fixedHost.warnText, '');
+  // 真失败：一件都没删成，但目标区**仍有内容**（文件还在）
+  const realFailure = cleanupOutcome(
+    { removed: 0, freedBytes: 0, errors: 2, report: makeReport({ tmp: { sizeBytes: 4096, fileCount: 3 } }), requested: ['tmp'] },
+    { t: zh, formatBytes },
+  );
+  assert.equal(realFailure.kind, 'failed');
+  assert.equal(realFailure.okText, '');
+  assert.equal(realFailure.warnKind, 'error');
+  assert.match(realFailure.warnText, /2 项/);
+  assert.notEqual(realFailure.kind, missingOnly.kind, '两种输入必须得到不同呈现语义');
+});
+
+test('cleanupOutcome：部分成功 / 全成 / 无报告时保守', () => {
+  const partial = cleanupOutcome({ removed: 3, freedBytes: 1024, errors: 1, requested: ['tmp'] }, { t: zh, formatBytes });
+  assert.equal(partial.kind, 'partial');
+  assert.notEqual(partial.okText, '');
+  assert.notEqual(partial.warnText, '');
+  assert.equal(partial.warnKind, 'warn');
+  const cleaned = cleanupOutcome({ removed: 3, freedBytes: 1024, errors: 0, requested: ['tmp'] }, { t: zh, formatBytes });
+  assert.equal(cleaned.kind, 'cleaned');
+  assert.equal(cleaned.warnText, '');
+  // 老宿主/测试没带 report：无法证明「本来就没东西」→ 保守按真失败（绝不谎报成功）
+  const noReport = cleanupOutcome({ removed: 0, freedBytes: 0, errors: 1, requested: ['tmp'] }, { t: zh, formatBytes });
+  assert.equal(noReport.kind, 'failed');
+});
+
+test('cleanupOutcome：英文界面文案来自 en 字典（含新增的 nothingAbsent 键）', () => {
+  const absent = cleanupOutcome({ removed: 0, freedBytes: 0, errors: 1, report: makeReport(), requested: ['tmp'] }, { t: en, formatBytes });
+  assert.equal(absent.okText, en('diskUsage.clean.nothingAbsent'));
+  const real = cleanupOutcome({ removed: 0, freedBytes: 0, errors: 2, report: makeReport({ tmp: { sizeBytes: 10 } }), requested: ['tmp'] }, { t: en, formatBytes });
+  assert.equal(real.warnText, en('diskUsage.clean.failed', { count: '2' }));
 });

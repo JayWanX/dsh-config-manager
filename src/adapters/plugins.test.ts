@@ -515,3 +515,55 @@ test('plugins: preview 的条目级白名单与 export 一致（含原子组全�
   assert.equal(dropped.section.data.patchFiles, undefined);
 });
 
+
+/* ---------------- ui-F3（t23 回归）：plugins.validate 的条目级形状校验 ---------------- */
+
+test('ui-F3：plugins 载荷里的 plugins[] / patch[] 条目必须是对象（否则 analyzeImport 抛内部 TypeError）', async () => {
+  const adapter = new PluginsAdapter('dsh-config-manager');
+  assert.equal((await adapter.validate({ version: 1, plugins: [], patch: [] })).valid, true);
+  assert.equal((await adapter.validate({ version: 1, plugins: [null], patch: [] } as never)).valid, false);
+  assert.equal((await adapter.validate({ version: 1, plugins: [{ name: 42 }], patch: [] } as never)).valid, false);
+  assert.equal((await adapter.validate({ version: 1, plugins: [], patch: [null] } as never)).valid, false);
+});
+
+test('t81 / t23 口径：patch 文件存在性探测读失败（非 ENOENT）必须上抛，不得当作「不存在」而剔除声明', async () => {
+  // 与 issue #35 用例同构：两条声明，源机只带第一条的 patch 文件 ⇒ 第二条会在**目标侧**走存在性探测
+  // （若声明已被 patchFiles 满足，探测根本不会被调用，测不到本口径）。
+  const ws = [
+    'allowBuilds:',
+    '  ssh2: true',
+    'patchedDependencies:',
+    '  dsh-approval-gate: patches/dsh-approval-gate.patch',
+    '  dsh-not-carried: patches/dsh-not-carried.patch',
+    '',
+  ].join('\n');
+  const src = makeContext('win32', 'C:\\Users\\alice', 'web');
+  await src.fs.writeFile('profiles/web/pnpm-workspace.yaml', new TextEncoder().encode(ws));
+  await src.fs.writeFile('profiles/web/patches/dsh-approval-gate.patch', new TextEncoder().encode('diff --git a/x b/x\n'));
+  const adapter = new PluginsAdapter();
+  const out = await adapter.export(src, { includeSecrets: false });
+
+  // ① 探测读失败（EACCES）→ 必须上抛（fail-closed）；不得静默当「不存在」。
+  const dst = makeContext('linux', '/home/bob', 'web');
+  const ctx = makeImportContext(dst, new Map([['plugins', out.data]]));
+  ctx.target.fs.exists = async () => {
+    const e = new Error('EACCES: permission denied, access') as Error & { code?: string };
+    e.code = 'EACCES';
+    throw e;
+  };
+  await assert.rejects(() => adapter.analyzeImport(out.data, ctx), /EACCES|permission/);
+
+  // ② 对照：真不存在（ENOENT）仍按既有语义「没有」→ 不抛、声明被剔除且可见（既有行为不变）。
+  const dst2 = makeContext('linux', '/home/bob', 'web');
+  const ctx2 = makeImportContext(dst2, new Map([['plugins', out.data]]));
+  ctx2.target.fs.exists = async () => {
+    const e = new Error('ENOENT: no such file or directory') as Error & { code?: string };
+    e.code = 'ENOENT';
+    throw e;
+  };
+  const items = await ctx2 === undefined ? [] : await adapter.analyzeImport(out.data, ctx2);
+  assert.ok(
+    items.some((i) => i.id === 'plugins:pnpm-workspace-dropped' && i.kind === 'Warning'),
+    'ENOENT 仍应视为「不存在」（保留既有剔除语义与可见告警）',
+  );
+});

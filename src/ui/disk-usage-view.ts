@@ -129,7 +129,11 @@ export function diskUsageViewModel(report: DiskUsageReport | null, deps: DiskUsa
     const expiredBytes = entry.expiredBytes ?? 0
     totalBytes += entry.sizeBytes
     totalFiles += entry.fileCount
-    expiredBytesTotal += expiredBytes
+    // ui-F4：只有 exports 的过期字节属于「回收过期备份文件」动作 —— 宿主 cleanup 的
+    // expired-exports 只删 exports/**（cache-cleaner 显式注释「includeRecent 不作用于本区」）；
+    // tmp / market 的过期项已由 tmp-market（整块清）覆盖，混进这里会让按钮/确认框数字虚高，
+    // 且这些字节在行上（只有 retained 区渲染 expired）根本没有对应文本。
+    if (area === 'exports') expiredBytesTotal += expiredBytes
     if (entry.policy === 'regenerable') reclaimableBytes += entry.sizeBytes
     rows.push({
       id: area,
@@ -177,3 +181,91 @@ export function diskUsageViewModel(report: DiskUsageReport | null, deps: DiskUsa
     },
   }
 }
+/* ------------------------------------------------------------------ 清理回执判定 */
+
+/**
+ * 清理回执的呈现分类（e2e-F3 / client 侧）。
+ *
+ * 为什么需要它：宿主回执只有 `removed` / `freedBytes` / `errors` / `detail` 四个数字/列表，
+ * 而 `errors > 0` 有两种完全不同的现场：
+ *  ① **真失败** —— 目标区里还有东西（rm 失败/占用），必须报出来；
+ *  ② **目标不存在/已空** —— 全新安装时 market/cache、market/work 尚未创建，或清理前就已经没有内容；
+ *     这不是失败，用红色「清理失败 N 项」呈现会让用户以为自己弄坏了什么。
+ * 判据只在**一份**实现里（本函数）：用回执里带回来的**清理后体检报告**看目标区是否仍有内容。
+ * 组件只按 kind 挑 toast —— AGENTS.md §UI 分层铁律 1（逻辑放 src/ui/）。
+ */
+export type CleanupOutcomeKind = 'nothing' | 'nothing-absent' | 'cleaned' | 'partial' | 'failed'
+
+export interface CleanupOutcome {
+  kind: CleanupOutcomeKind
+  /** 成功/中性文案（ok toast）；空串 = 不弹 */
+  okText: string
+  /** 需注意文案（warn/error toast）；空串 = 不弹 */
+  warnText: string
+  /** warnText 的语义色：'warn' = 部分条目被跳过；'error' = 一件都没清成 */
+  warnKind: 'warn' | 'error'
+}
+
+export interface CleanupOutcomeInput {
+  /** 删除条目数 */
+  removed: number
+  /** 释放字节数 */
+  freedBytes: number
+  /** 单项失败数（宿主已把「可选目录不存在」排除在外） */
+  errors: number
+  /** 清理后重新体检的报告（缺省 = 老宿主/测试没带 → 保守按真失败呈现） */
+  report?: DiskUsageReport | null
+  /** 本次请求实际覆盖的动作（缺省 = 只清可重建缓存） */
+  requested?: readonly string[]
+}
+
+/** 请求动作 → 该动作会碰到的子区（与 routes/backup.ts 的分区白名单同源）。 */
+const REQUEST_AREAS: Record<string, readonly DiskUsageArea[]> = {
+  tmp: ['tmp', 'marketCache', 'marketWork'],
+  'expired-exports': ['exports'],
+}
+
+/** 目标区清理后是否**仍有内容**（判「真失败」还是「本来就没东西」）。 */
+function targetStillHasContent(report: DiskUsageReport | null | undefined, requested: readonly string[]): boolean {
+  // 没有「清理后体检报告」就无法证明「本来就没东西」→ **保守**按「还有内容」处理（宁可报失败，不谎报成功）
+  if (report === null || report === undefined) return true
+  for (const action of requested) {
+    for (const area of REQUEST_AREAS[action] ?? []) {
+      const entry = report.areas[area]
+      if (entry !== undefined && entry.sizeBytes > 0) return true
+    }
+  }
+  return false
+}
+
+/**
+ * 清理回执 → 呈现分类（纯函数）。
+ *
+ * - `nothing`：一件都没删、也没有失败 → 「没有可释放的内容」（成功语义）；
+ * - `nothing-absent`：有失败计数但目标区**已空** → 归为「没有需要清理的内容（目标目录不存在或已为空）」，
+ *   **不报失败**（e2e-F3 的用户现场）；
+ * - `cleaned`：全成；
+ * - `partial`：删到了一些又失败了若干 → 成功 + 「N 项失败（已跳过）」；
+ * - `failed`：一件都没删成、目标区**仍有内容** → 真失败。
+ */
+export function cleanupOutcome(input: CleanupOutcomeInput, deps: DiskUsageViewDeps): CleanupOutcome {
+  const { t, formatBytes } = deps
+  const done = t('diskUsage.clean.done', { size: formatBytes(input.freedBytes), count: String(input.removed) })
+  const failed = t('diskUsage.clean.failed', { count: String(input.errors) })
+  if (input.removed === 0 && input.freedBytes === 0 && input.errors === 0) {
+    return { kind: 'nothing', okText: t('diskUsage.clean.nothing'), warnText: '', warnKind: 'warn' }
+  }
+  if (input.errors === 0) {
+    return { kind: 'cleaned', okText: done, warnText: '', warnKind: 'warn' }
+  }
+  if (input.removed > 0) {
+    return { kind: 'partial', okText: done, warnText: failed, warnKind: 'warn' }
+  }
+  // 一件都没删成：看目标区是否还有内容 —— 没有内容就不是失败
+  const stillHas = targetStillHasContent(input.report, input.requested ?? ['tmp'])
+  if (!stillHas) {
+    return { kind: 'nothing-absent', okText: t('diskUsage.clean.nothingAbsent'), warnText: '', warnKind: 'warn' }
+  }
+  return { kind: 'failed', okText: '', warnText: failed, warnKind: 'error' }
+}
+

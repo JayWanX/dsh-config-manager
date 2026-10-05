@@ -23,7 +23,8 @@ import fs from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import path from 'node:path';
 
-import type { ForeignSkip } from './types.ts';
+import { dirWalkSkips, resolveLimit, type DirWalkStats } from './session-read.ts';
+import type { ForeignLimitOverrides, ForeignSkip } from './types.ts';
 import type { CopilotInput, CopilotSkillInput } from './copilot.ts';
 
 export interface CopilotHomeOptions {
@@ -60,6 +61,8 @@ export interface CopilotReadOptions extends CopilotHomeOptions {
   maxSkills?: number;
   /** instructions/*.instructions.md 的文件数上限（默认 100） */
   maxInstructionFiles?: number;
+  /** 可选上限覆盖（t36，装配层透传；缺省 = 上面各默认值逐字不变） */
+  limits?: ForeignLimitOverrides;
 }
 
 export interface CopilotReadResult {
@@ -124,6 +127,7 @@ async function walkFiles(
   start: string,
   maxFiles: number,
   maxBytes: number,
+  stats?: DirWalkStats,
 ): Promise<{ relativePath: string; data: Uint8Array }[]> {
   const out: { relativePath: string; data: Uint8Array }[] = [];
   const stack: string[] = [start];
@@ -137,13 +141,18 @@ async function walkFiles(
       continue;
     }
     for (const d of dirents) {
-      if (out.length >= maxFiles) break;
+      // t36：条数触顶不再静默 —— 置标志，由调用方推 max-skill-files-reached。
+      if (out.length >= maxFiles) { if (stats !== undefined) stats.truncatedFiles = true; break; }
       const full = path.join(cur, d.name);
       if (d.isSymbolicLink()) continue;
       if (d.isDirectory()) { stack.push(full); continue; }
       if (!d.isFile()) continue;
       const st = await statOrNull(full);
-      if (st === null || st.size > maxBytes) continue;
+      if (st === null) continue;
+      if (st.size > maxBytes) {
+        if (stats !== undefined) stats.tooLargeCount = (stats.tooLargeCount ?? 0) + 1;
+        continue;
+      }
       try {
         const data = await fs.readFile(full);
         out.push({ relativePath: path.relative(root, full).split(path.sep).join('/'), data });
@@ -176,6 +185,7 @@ async function readSkillsLevel(
   category: string | undefined,
   out: CopilotSkillInput[],
   limits: SkillLimits,
+  stats?: DirWalkStats & { truncated?: boolean },
 ): Promise<void> {
   if (depth > 4) return;
   let dirents: Dirent[];
@@ -188,17 +198,18 @@ async function readSkillsLevel(
     .filter((d) => d.isDirectory() && !d.isSymbolicLink() && !d.name.startsWith('.'))
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   for (const d of dirs) {
-    if (out.length >= limits.maxSkills) return;
+    // 技能数触顶绝不静默（audit-foreign F4）：置标志，由调用方推一条 source-unreadable。
+    if (out.length >= limits.maxSkills) { if (stats !== undefined) stats.truncated = true; return; }
     const full = path.join(dir, d.name);
     if (await hasSkillMd(full)) {
-      const files = await walkFiles(full, full, limits.maxFiles, limits.maxBytes);
+      const files = await walkFiles(full, full, limits.maxFiles, limits.maxBytes, stats);
       if (files.length === 0) continue;
       const unit: CopilotSkillInput = { name: d.name, files };
       if (category !== undefined) unit.category = category;
       out.push(unit);
       continue;
     }
-    await readSkillsLevel(full, depth + 1, category ?? d.name, out, limits);
+    await readSkillsLevel(full, depth + 1, category ?? d.name, out, limits, stats);
   }
 }
 
@@ -229,10 +240,10 @@ async function readInstructionFiles(
 export async function readCopilot(opts: CopilotReadOptions): Promise<CopilotReadResult> {
   const resolved = resolveCopilotHome(opts);
   const home = resolved.home;
-  const maxFileBytes = opts.maxFileBytes ?? DEFAULT_MAX_FILE;
-  const maxSkillFiles = opts.maxSkillFiles ?? DEFAULT_MAX_SKILL_FILES;
-  const maxSkills = opts.maxSkills ?? DEFAULT_MAX_SKILLS;
-  const maxInstructionFiles = opts.maxInstructionFiles ?? DEFAULT_MAX_INSTRUCTION_FILES;
+  const maxFileBytes = resolveLimit(opts.limits?.maxFileBytes, opts.maxFileBytes, DEFAULT_MAX_FILE);
+  const maxSkillFiles = resolveLimit(opts.limits?.maxSkillFiles, opts.maxSkillFiles, DEFAULT_MAX_SKILL_FILES);
+  const maxSkills = resolveLimit(opts.limits?.maxSkills, opts.maxSkills, DEFAULT_MAX_SKILLS);
+  const maxInstructionFiles = resolveLimit(opts.limits?.maxInstructionFiles, opts.maxInstructionFiles, DEFAULT_MAX_INSTRUCTION_FILES);
   const findings: ForeignSkip[] = [];
   const unreadable: string[] = [];
   const input: CopilotInput = {};
@@ -275,11 +286,17 @@ export async function readCopilot(opts: CopilotReadOptions): Promise<CopilotRead
 
   /* skills/（一层；手工嵌套则压平） */
   const skills: CopilotSkillInput[] = [];
+  const skillStats: DirWalkStats & { truncated?: boolean } = {};
   await readSkillsLevel(path.join(home, 'skills'), 0, undefined, skills, {
     maxFiles: maxSkillFiles,
     maxBytes: maxFileBytes,
     maxSkills,
-  });
+  }, skillStats);
+  if (skillStats.truncated === true) {
+    findings.push({ code: 'source-unreadable', origin: 'skills', detail: 'max-skills-reached', count: maxSkills });
+  }
+  // t36：技能文件遍历的条数/字节触顶同样必须可见（与 max-skills-reached 同族）
+  findings.push(...dirWalkSkips(skillStats, 'skills', maxSkillFiles));
   if (skills.length > 0) input.skills = skills;
 
   input.readFindings = findings;

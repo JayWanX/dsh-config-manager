@@ -41,7 +41,7 @@ import type {
 } from '../transport.ts';
 import { signRequest } from './sigv4.ts';
 import type { SigV4DialectId } from './sigv4.ts';
-import { s3Msg } from './messages.ts';
+import { composeMsg, s3Msg } from './messages.ts';
 import { blobIndexKey, blobKey, indexKey, objectUrl, resolveS3Target, snapshotKey } from './s3-providers.ts';
 import type { S3Target } from './s3-providers.ts';
 import type { CloudConfigIssueCode, S3CompatProvider } from '../sync-config.ts';
@@ -197,7 +197,8 @@ export class S3Transport implements SyncTransport {
   };
 
   constructor(options: S3TransportOptions) {
-    const msg = options.msg ?? s3Msg;
+    // t79：宿主传进来的 msg（core 目录）**不包含** sync.s3.* 键，直接用会显示裸键名 —— 合并本地目录。
+    const msg = composeMsg(options.msg, s3Msg);
     if (options.credentials === null || typeof options.credentials !== 'object'
       || typeof options.credentials.getSecretAccessKey !== 'function') {
       throw new S3TransportError(msg('sync.s3.credentialsRequired'));
@@ -248,12 +249,25 @@ export class S3Transport implements SyncTransport {
     }, this.o.retry);
   }
 
-  /** 上传快照（同 id 覆盖，幂等友好）；内容未变时零传输直接返回远端 meta。 */
+  /** 上传快照（同 id 覆盖，幂等友好）；内容未变时零传输直接返回远端 meta。
+   *
+   * **写路径三态（audit-sync sync-N1 / t66）**：索引 404 只是「缺信息」—— 远端已有历史内容时
+   * 一律**中止本次上传（零写入）**，绝不按空集合做读改写（与 delete() 同口径）。 */
   async upload(snapshot: SyncSnapshot): Promise<SyncSnapshotMeta> {
     this.assertSafeId(snapshot.id);
     const secret = await this.secretOnce();
     const meta = computeSnapshotMeta(snapshot);
-    const idxBefore = await this.readIndex(secret);
+    // audit-sync sync-N1 覆盖面补全（t66，来自 t22 的 C7）：upload 也是写路径，**不接受 404 = 空集合**。
+    const { entries: idxBefore, missing: indexMissing } = await this.readIndexDetailed(secret);
+    if (indexMissing && await this.remoteHasPriorContent(secret)) {
+      // 索引 404 只是**缺信息**：远端已有历史内容时按空索引读改写，会把权威索引 PUT 成只有本条目
+      // → 其余快照从列表整体消失，随后 delete + GC 会回收仍被现存快照文件引用的 blob（不可恢复）。
+      // 这里在写任何字节之前显式中止；放行的 404 只限「索引与 blob 仓索引都不存在」（全新远端）。
+      throw new S3TransportError(
+        this.o.msg('sync.s3.indexMissingWithContent', { url: indexKey(this.target.prefix) }),
+        { kind: 'protocol', retryable: false },
+      );
+    }
     const existing = idxBefore.find((m) => m.id === snapshot.id);
     if (existing !== undefined && sectionsEqual(existing, meta)) return existing;
 
@@ -300,16 +314,18 @@ export class S3Transport implements SyncTransport {
   async delete(id: string): Promise<void> {
     this.assertSafeId(id);
     const secret = await this.secretOnce();
-    let idx: SyncSnapshotMeta[] = [];
-    try {
-      idx = await this.readIndex(secret);
-    } catch {
-      idx = []; // 索引缺失/损坏时不阻塞删除
-    }
+    // audit-sync sync-F2（P0）：读不出来 ≠ 远端没有快照（与 WebDAV 同型）。按空索引继续会把
+    // index.json 覆盖成 []（其余快照从列表消失）并让 blob GC 删掉仍被引用的会话 blob —— 一律中止。
+    // audit-sync sync-N1（P0）：与 WebDAV 同型 —— 写路径**不接受 404 = 空集合**。索引真缺失时
+    // 「远端一条快照都没有」是缺信息而非事实，沿用空索引会覆盖 index.json 并用空引用集回收 blob。
+    const { entries: idx, missing: indexMissing } = await this.readIndexDetailed(secret);
     const del = await this.send('DELETE', snapshotKey(this.target.prefix, id), { secret });
     if (!del.res.ok && del.res.status !== 404) {
       throw new S3TransportError(await this.failText('DELETE', del.url, del.res, secret), classifyHttpStatus(del.res.status));
     }
+    // audit-sync sync-N1（P0）：索引真缺失（404）= 缺信息而非「集合为空」→ **不写回索引、不触发 GC**，
+    // 其余快照与其引用的 blob 原样保留（与 WebDAV 同型）。目标快照文件已按用户意图删除。
+    if (indexMissing) return;
     const remaining = idx.filter((m) => m.id !== id);
     if (remaining.length === idx.length && del.res.status === 404) return; // 对象与索引都没有 → 静默成功
     const putIdx = await this.send('PUT', indexKey(this.target.prefix), { body: JSON.stringify(remaining), secret });
@@ -414,14 +430,23 @@ export class S3Transport implements SyncTransport {
     return out;
   }
 
-  /** 读索引（缺失 → []；非法 → 抛错） */
-  private async readIndex(secret: string): Promise<SyncSnapshotMeta[]> {
+  /**
+   * 读索引。**三态语义**（audit-sync sync-N1 / t66，与 WebDAV 同型）：
+   *  - 200 + 合法数组 → 条目；404 → 缺索引（**缺信息**，不是「集合为空」）；
+   *    写路径（**upload / delete**）不得据此做读改写 —— upload 在「远端已有内容」时显式中止，
+   *    delete 直接返回；其它非 2xx / 非法 → 抛错（F2 语义）。
+   */
+  /**
+   * 读索引的**带缺失标志**版本（audit-sync sync-N1，与 WebDAV 同型）：
+   * 404 → `missing = true`（缺信息，不是事实）；其它非 2xx / 非法 → 抛错（F2 语义）。
+   */
+  private async readIndexDetailed(secret: string): Promise<{ entries: SyncSnapshotMeta[]; missing: boolean }> {
     const sent = await this.send('GET', indexKey(this.target.prefix), { secret });
-    if (sent.res.status === 404) return [];
+    if (sent.res.status === 404) return { entries: [], missing: true };
     if (!sent.res.ok) {
       throw new S3TransportError(await this.failText('GET', sent.url, sent.res, secret), classifyHttpStatus(sent.res.status));
     }
-    return this.parseIndex(await sent.res.text(), sent.url, secret);
+    return { entries: this.parseIndex(await sent.res.text(), sent.url, secret), missing: false };
   }
 
   private parseIndex(raw: string, url: string, secret: string): SyncSnapshotMeta[] {
@@ -471,6 +496,34 @@ export class S3Transport implements SyncTransport {
   /* ---------------- P1-4：内容寻址 blob 仓 ---------------- */
 
   /** 读取 blob 索引（哈希 → 写入时间 ms）；缺失/损坏 → 空（GC 只会「少删」，不会误删） */
+  /**
+   * 远端是否已存在历史内容（t66）。判据 = **blob 仓索引对象存在**：它是本通道唯一的、
+   * 无需列举整个桶就能读到的「这里以前写过」证据（本实现未用 ListObjects）。
+   *
+   * 失败安全：读不出来（网络 / 5xx）一律当作**有内容** —— 宁可让这次上传显式失败，也不冒
+   * 「把权威索引写成只有本条目」的风险（与「宁可留垃圾，不可删在用的」同口径）。
+   * 已知残余（如实登记）：远端只有**未外置**的历史快照、索引又缺失时本判据看不出内容（无列举能力）。
+   */
+  private async remoteHasPriorContent(secret: string): Promise<boolean> {
+    let sent: { res: S3Response };
+    try {
+      sent = await this.send('GET', blobIndexKey(this.target.prefix), { secret });
+    } catch {
+      return true; // 网络层读不出来 → 按有内容（失败安全）
+    }
+    const status = sent.res.status;
+    // 明确「对象不存在 / 不允许」= 没有证据；其余非 2xx（5xx 等）判不出来 → 按有内容（失败安全）。
+    if (status === 404 || status === 405 || status === 403 || status === 501) return false;
+    if (status < 200 || status >= 300) return true;
+    try {
+      const parsed = parseJsonSafe(await sent.res.text());
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+      return Object.keys(parsed as Record<string, unknown>).some((k) => BLOB_HASH_RE.test(k));
+    } catch {
+      return true;
+    }
+  }
+
   private async readBlobIndex(secret: string): Promise<Record<string, number>> {
     const sent = await this.send('GET', blobIndexKey(this.target.prefix), { secret });
     if (sent.res.status === 404) return {};
@@ -577,7 +630,9 @@ export class S3Transport implements SyncTransport {
     const referenced = new Set<string>();
     for (const meta of remaining) {
       const sent = await this.send('GET', snapshotKey(this.target.prefix, meta.id), { secret });
-      if (!sent.res.ok) continue;
+      // 条目在但文件 404 ⇒ 不可能引用 blob（安全跳过）；其它失败 ⇒ 读不出来 ≠ 没引用，本轮放弃。
+      if (sent.res.status === 404) continue;
+      if (!sent.res.ok) return;
       let snap: SyncSnapshot;
       try {
         snap = deserializeSnapshot(await sent.res.text());

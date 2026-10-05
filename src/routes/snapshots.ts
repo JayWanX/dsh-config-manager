@@ -14,6 +14,7 @@ import type { RunState } from '../core/run-registry.ts'
 import { snapshotFileDiff, summarizeRestoreChanges } from '../core/snapshot-diff.ts'
 import { buildFileDiffBody, buildRestoreBody, executeRestorePlan, makeRestoreExecutor } from '../index.ts'
 import { EnvironmentLockUnavailableError, runWithMutationLock } from '../utils/env-lock.ts'
+import { isENOENT } from '../utils/guards.ts'
 import { join } from 'node:path'
 
 export function snapshotRoutes(env: RoutesEnv): WebRoute[] {
@@ -189,8 +190,13 @@ export function snapshotRoutes(env: RoutesEnv): WebRoute[] {
         await setSnapshotPinned(snapshotsDir, id, pinned)
         writeJson(res, 200, { ok: true, pinned })
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        writeJson(res, 404, { error: message })
+        // e2e-F4：快照不存在时**不得**把 fs 原始错误（含服务端绝对路径）回给浏览器 ——
+        // 结构化 404 + 机器可读码，文案由界面按码映射；其余失败也不再回显原始 message。
+        if (isENOENT(error)) {
+          writeJson(res, 404, { error: 'snapshot not found', code: 'snapshot-not-found' })
+          return
+        }
+        writeJson(res, 500, { error: 'failed to update snapshot pin' })
       }
     })),
     // --------------------------------------- snapshots/file-diff（git 风格预览）

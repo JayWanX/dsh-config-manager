@@ -80,6 +80,13 @@ export interface RecoveryView {
   safeModeStuck: boolean;
   /** SAFE MODE 是否正在阻断（含仍有 incident 的正常情形；用于文案区分）。 */
   safeModeBlocked: boolean;
+  /** 中断的档案复制残留（cross-F3 / t54）：只给删除，不给启动/改名。 */
+  incompleteCopies: RecoveryIncompleteCopyView[];
+  /**
+   * t89：残留区形态 —— 界面据它把「枚举失败」与「没有残留」渲染成不同形态
+   * （前者必须给可行动提示 + 重试，绝不能显示成「暂无残留」）。
+   */
+  incompleteCopiesNotice: RecoveryIncompleteCopiesNotice;
 }
 
 /** 把 GET /recovery/status 映射为渲染模型。 */
@@ -104,7 +111,11 @@ export function toRecoveryView(status: RecoveryStatus): RecoveryView {
   const safeModeStuck = safeModeBlocked && (status.safeMode?.clearable === true);
   // SAFE MODE 同样阻断一切写操作 → 与残留锁并列算「需要处理」。
   // 少了这一条，「结案但保护仍开」的面板会显示「暂无需要处理的恢复事项」（issue #56 的界面症状）。
-  const recoveryRequired = incidents.length > 0 || lock !== null || safeModeStuck;
+  const incompleteCopies = incompleteCopyRows(status);
+  // t54：中断的档案复制残留同样算「需要处理」—— 它们是删不掉的孤儿目录，
+  // 而此前用户在本页看不到任何线索（t33 的原始 finding：面板既无目标目录也无处置按钮）。
+  const recoveryRequired =
+    incidents.length > 0 || lock !== null || safeModeStuck || incompleteCopies.length > 0;
   let state: RecoveryUiState = 'NORMAL';
   if (recoveryRequired) {
     if (incidents.some((i) => i.state === 'RECOVERING')) state = 'RECOVERING';
@@ -112,7 +123,17 @@ export function toRecoveryView(status: RecoveryStatus): RecoveryView {
     else if (incidents.some((i) => i.decision === 'rollback-recommended')) state = 'ROLLBACK_RECOMMENDED';
     else state = 'NEEDS_ATTENTION';
   }
-  return { state, recoveryRequired, incidents, running: status.running, lock, safeModeStuck, safeModeBlocked };
+  return {
+    state,
+    recoveryRequired,
+    incidents,
+    running: status.running,
+    lock,
+    safeModeStuck,
+    safeModeBlocked,
+    incompleteCopies,
+    incompleteCopiesNotice: incompleteCopiesNotice(status),
+  };
 }
 
 /** 单个 preview 的渲染模型。 */
@@ -240,3 +261,72 @@ export function formatRecoveryTime(value: string | null): string {
   return d.getFullYear() + '/' + (d.getMonth() + 1) + '/' + d.getDate() + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds())
 }
 
+
+/** 中断的档案复制残留的渲染模型（cross-F3 / t54）。 */
+export interface RecoveryIncompleteCopyView {
+  /** 目标档案名（= 目录名；删除时用它） */
+  name: string;
+  /** 目标目录绝对路径（渲染前过 redact()） */
+  dir: string;
+  /** 来源档案名（读不到 = null，界面不臆造） */
+  sourceName: string | null;
+  /** 复制开始时刻（ISO；读不到 = null） */
+  startedAt: string | null;
+  /** 开始时刻的展示文本（null → em dash，与列表其它时间同口径） */
+  startedAtText: string;
+  /** 恒为 true：残留目录**唯一**允许的动作就是删除 */
+  canDelete: true;
+  /** 恒为 false：没有 package.json 就起不来，界面绝不给启动入口 */
+  canLaunch: false;
+}
+
+/**
+ * 中断的档案复制残留 → 渲染模型（cross-F3 / t54）。
+ *
+ * 缺字段（旧宿主不返回）→ `[]`：按「无残留」处理，绝不误报。
+ * 与 t50 的档案面板同一语义：独立形态（「未完成的副本」）+ 只给删除。
+ */
+export function incompleteCopyRows(status: RecoveryStatus): RecoveryIncompleteCopyView[] {
+  const copies = status.incompleteCopies ?? [];
+  return copies.map((c) => ({
+    name: c.name,
+    dir: c.dir,
+    sourceName: c.sourceName ?? null,
+    startedAt: c.startedAt ?? null,
+    startedAtText: formatRecoveryTime(c.startedAt ?? null),
+    canDelete: true,
+    canLaunch: false,
+  }));
+}
+
+/**
+ * t89（S2-3）：残留区的三种形态 —— 「枚举失败」必须与「没有残留」在渲染上可区分。
+ *
+ * - `'unreadable'`：宿主读 profiles 目录失败（`incompleteCopiesUnreadable === true`）；
+ * - `'list'`：确实读到了残留条目；
+ * - `'empty'`：确实没有残留（含旧宿主完全不返回该字段的情形）。
+ *
+ * 失败判定**优先于**行数判定：枚举失败时 `incompleteCopies` 恒为空（服务端口径），
+ * 只看行数就会把它渲染成「没有残留」—— 这正是 S2-3 的症状。
+ * `recoveryRequired` **不**因失败置真：失败只是「不知道」，不是「有事项」，
+ * 不能凭未知声称需要处理（与「旧宿主不返回该字段 → 不声称需要处理」同一口径）。
+ */
+export type RecoveryIncompleteCopiesNotice = 'list' | 'empty' | 'unreadable';
+
+export function incompleteCopiesNotice(status: RecoveryStatus): RecoveryIncompleteCopiesNotice {
+  if (status.incompleteCopiesUnreadable === true) return 'unreadable';
+  return incompleteCopyRows(status).length > 0 ? 'list' : 'empty';
+}
+
+/**
+ * 宿主的机器可读码：优先读结构化 `code`，兼容「只把码写进文本」的错误（t54）。
+ *
+ * 抽到纯函数层是为了让 423 的语义（SAFE MODE 阻断 → 有原因 + 有出口）能被单测直接钉住，
+ * 不依赖真实 http；组件只消费它的结论。
+ */
+export function incompleteDeleteErrorCode(err: unknown): string {
+  const code = (err as { code?: unknown } | null)?.code
+  if (typeof code === 'string' && code !== '') return code
+  const text = err instanceof Error ? err.message : String(err)
+  return text.includes('mutation-locked') ? 'mutation-locked' : ''
+}

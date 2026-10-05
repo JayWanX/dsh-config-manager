@@ -107,11 +107,13 @@ export async function readWorkbuddySessions(
     return { files, readFindings: findings, extraCounts: { 'sessions.candidates': 0 } };
   }
 
+  // 触顶必须**可见**（audit-foreign F4）：静默 break 会让「报成功但条目缺失」。
+  let truncated = false;
   // 目录名是**哈希**：本层只把它当遍历键，绝不参与 cwd 推导（不可逆 → 推导就是猜）
   for (const projectHash of await listDirNames(projectsDir)) {
     const projectDir = joinFor(platform, projectsDir, projectHash);
     for (const name of await listFileNames(projectDir, (n) => WORKBUDDY_SESSION_FILE_RE.test(n))) {
-      if (files.length >= maxFiles) break;
+      if (files.length >= maxFiles) { truncated = true; break; }
       const label = WORKBUDDY_PROJECTS_REL + '/' + projectHash + '/' + name;
       const text = await readTextGuarded(joinFor(platform, projectDir, name), label, maxBytes, findings);
       if (text === null) continue;
@@ -119,5 +121,6 @@ export async function readWorkbuddySessions(
     }
   }
 
+  if (truncated) findings.push({ code: 'source-unreadable', origin: 'workbuddy', detail: 'max-sessions-reached', count: maxFiles });
   return { files, readFindings: findings, extraCounts: { 'sessions.candidates': files.length } };
 }

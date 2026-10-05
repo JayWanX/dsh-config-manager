@@ -44,8 +44,10 @@ import { Modal } from '../common/Modal.tsx'
 import { toast } from '../common/toast-store.ts'
 import { copyTextToClipboard } from '../common/clipboard.ts'
 import {
-  bundleLines, canLaunchProfile, copyWarningKey, dependencyLines, formatBytes, formatProfileTime, issueLabelKey,
-  launchBlockReason, launchState, launchWarningKey, profileInstallCommand, profileRowAction, profileRowFacts, profilesPanelPhase,
+  bundleLines, canLaunchProfile, copyWarningKey, countIncompleteProfileCopies, dependencyLines, formatBytes,
+  formatProfileTime, incompleteCopyFacts, incompleteCopyStartedAtText, isIncompleteProfileCopy, issueLabelKey,
+  launchBlockReason, launchState, launchWarningKey, profileInstallCommand, profileRowAction, profileRowCapabilities,
+  profileRowFacts, profileShapeLabelKey, profilesPanelPhase,
   profileVersionFacts, sessionFormatRisk,
   restartCommand, runningRecordFor, shapeLabelKey, sortProfilesForDisplay, stopResultKey, summarizeProfiles,
   suggestCopyName, validateProfileNameInput,
@@ -370,6 +372,8 @@ export function EnvironmentPanel({ api, t, recoveryApi, recoveryT, incidentApi }
     runningNames: state.running.map((r) => r.name),
   })
   const summary = summarizeProfiles(profileList)
+  // cross-F3：未被完成的副本（中断的复制残留）单独计数 —— 它们不是「档案」，混进形态分布只会误导
+  const incompleteCount = countIncompleteProfileCopies(profileList)
   // 会话格式体检的基准 = 当前实例自己的格式版本（从当前档案行取；读不到就是 null → 不提示，不猜）。
   // 为什么用它：DSH 对「读不出的会话格式」是静默跳过的，档案页必须让用户看见版本错配。
   const currentFormatVersion = profileList.find((p) => p.isCurrent)?.sessionFormatVersion ?? null
@@ -576,12 +580,18 @@ export function EnvironmentPanel({ api, t, recoveryApi, recoveryT, incidentApi }
             <span className={css.cellMeta}>
               {t('profiles.list.count', { count: summary.total })} ·{' '}
               {t('profiles.list.summary', { web: summary.web, headless: summary.headless, generic: summary.generic, installed: summary.withNodeModules })}
+              {incompleteCount > 0 && <> · {t('profiles.list.incompleteCount', { count: incompleteCount })}</>}
             </span>
             <Button size="sm" onClick={load}>{t('profiles.refresh')}</Button>
           </div>
           <div className={css.snapshotList} role="list" aria-label={t('profiles.list.title')}>
             {rows.map((profile) => {
               const facts = profileRowFacts(profile)
+              // cross-F3：残留行（未完成的副本）以独立形态呈现，且只留删除动作 —— 判据全部在纯函数层
+              const incomplete = isIncompleteProfileCopy(profile)
+              const caps = profileRowCapabilities(profile)
+              const copyFacts = incomplete ? incompleteCopyFacts(profile) : null
+              const copyStartedText = copyFacts === null ? null : incompleteCopyStartedAtText(copyFacts.startedAt)
               const runningRecord = runningRecordFor(state.running, profile.name)
               const rowAction = profileRowAction(profile.name, state.running)
               const version = profileVersionFacts(profile)
@@ -590,7 +600,7 @@ export function EnvironmentPanel({ api, t, recoveryApi, recoveryT, incidentApi }
                 <div key={profile.name} className={css.profileRow} role="listitem" data-selected={profile.name === state.selectedName ? '' : undefined}>
                   <div className={css.profileRowHeader}>
                     {/* 整行「信息区」可点：行内只给计数，完整清单（bundle 层 / 逐条依赖 / patch 原文）在详情弹窗里 */}
-                    <button type="button" className={css.profileRowMain} title={t('profiles.list.hint')} onClick={() => { openDetail(profile) }}>
+                    <button type="button" className={css.profileRowMain} title={t(incomplete ? 'profiles.incomplete.hint' : 'profiles.list.hint')} onClick={() => { openDetail(profile) }}>
                       <span className={css.profileRowTitle}>
                         <span className={`${css.mono} ${css.profileRowName}`}>{profile.name}</span>
                         <span className={css.badgeRow}>
@@ -600,7 +610,8 @@ export function EnvironmentPanel({ api, t, recoveryApi, recoveryT, incidentApi }
                               {runningRecord.port !== null ? t('profiles.running.badge', { port: runningRecord.port }) : t('profiles.running.badgePlain')}
                             </Badge>
                           )}
-                          <Badge kind="info">{t(shapeLabelKey(profile.shape))}</Badge>
+                          {/* 残留行必须自报「未完成的副本」——不得伪装成普通「自定义」档案（t50）；非残留行走原形态键 */}
+                          <Badge kind={incomplete ? 'warn' : 'info'}>{t(profileShapeLabelKey(profile))}</Badge>
                           {version.dshVersion !== null && (
                             <Badge kind="info">{t('profiles.version.dsh', { version: version.dshVersion })}</Badge>
                           )}
@@ -618,17 +629,31 @@ export function EnvironmentPanel({ api, t, recoveryApi, recoveryT, incidentApi }
                         </span>
                       </span>
                       <span className={css.profileRowMeta}>
-                        {t('profiles.row.summary', { bundles: facts.bundles, patch: facts.patchEntries, deps: facts.deps })}
-                        {' · '}{facts.hasNodeModules ? t('profiles.nodeModules.yes') : t('profiles.nodeModules.no')}
-                        {' · '}{profile.patchReload === 'startup' ? t('profiles.patchReload.startup') : t('profiles.patchReload.live')}
-                        {profile.updatedAtMs !== null && ` · ${t('profiles.updatedAt', { time: formatProfileTime(profile.updatedAtMs) })}`}
+                        {/* 残留行：讲清「从哪来、何时开始、目录在哪（脱敏后）」；普通档案的行摘要逐字不变 */}
+                        {incomplete && copyFacts !== null
+                          ? (
+                            <>
+                              {copyFacts.copiedFrom !== null && <>{t('profiles.incomplete.from', { name: copyFacts.copiedFrom })}{' · '}</>}
+                              {copyStartedText !== null && <>{t('profiles.incomplete.startedAt', { time: copyStartedText })}{' · '}</>}
+                              {copyFacts.dir !== null && t('profiles.incomplete.dir', { path: redact(copyFacts.dir) })}
+                            </>
+                          )
+                          : (
+                            <>
+                              {t('profiles.row.summary', { bundles: facts.bundles, patch: facts.patchEntries, deps: facts.deps })}
+                              {' · '}{facts.hasNodeModules ? t('profiles.nodeModules.yes') : t('profiles.nodeModules.no')}
+                              {' · '}{profile.patchReload === 'startup' ? t('profiles.patchReload.startup') : t('profiles.patchReload.live')}
+                              {profile.updatedAtMs !== null && ` · ${t('profiles.updatedAt', { time: formatProfileTime(profile.updatedAtMs) })}`}
+                            </>
+                          )}
                       </span>
                     </button>
                     <span className={css.actionRow} data-inline>
-                      {rowAction === 'current' && (
+                      {/* cross-F3：残留行不给启动/停止那一格（generic 必然 notLaunchable）；删除恒在 */}
+                      {caps.launchOrStop && rowAction === 'current' && (
                         <Button size="sm" disabled title={t('profiles.stop.currentHint')}>{t('profiles.current')}</Button>
                       )}
-                      {rowAction === 'stop' && runningRecord !== undefined && (
+                      {caps.launchOrStop && rowAction === 'stop' && runningRecord !== undefined && (
                         <Button
                           size="sm"
                           title={runningRecord.owned ? t('profiles.stop.hint') : t('profiles.stop.hintExternal')}
@@ -638,7 +663,7 @@ export function EnvironmentPanel({ api, t, recoveryApi, recoveryT, incidentApi }
                           {state.stopping === profile.name ? <Spinner label={t('profiles.stopping')} /> : t('profiles.stop')}
                         </Button>
                       )}
-                      {rowAction === 'launch' && (
+                      {caps.launchOrStop && rowAction === 'launch' && (
                         <Button
                           size="sm"
                           variant="primary"
@@ -649,6 +674,7 @@ export function EnvironmentPanel({ api, t, recoveryApi, recoveryT, incidentApi }
                           {state.launching === profile.name ? <Spinner label={t('profiles.launching')} /> : t('profiles.launch')}
                         </Button>
                       )}
+                      {caps.duplicate && (
                       <Button
                         size="sm"
                         title={t('profiles.duplicateHint')}
@@ -664,9 +690,12 @@ export function EnvironmentPanel({ api, t, recoveryApi, recoveryT, incidentApi }
                       >
                         {t('profiles.duplicate')}
                       </Button>
+                      )}
+                      {caps.rename && (
                       <Button size="sm" onClick={() => { patch({ renameTargetName: profile.name, renameValue: profile.name, error: null }) }}>
                         {t('profiles.rename')}
                       </Button>
+                      )}
                       <Button size="sm" variant="danger" onClick={() => { patch({ deleteTargetName: profile.name, deleteCurrentConfirmed: false, error: null }) }}>
                         {t('profiles.delete')}
                       </Button>
@@ -697,7 +726,7 @@ export function EnvironmentPanel({ api, t, recoveryApi, recoveryT, incidentApi }
               <div className={css.badgeRow}>
                 <Badge kind="info">{t(shapeLabelKey(detail.shape))}</Badge>
                 <Badge kind="info">{t('profiles.bundles.count', { count: detail.bundles.length })}</Badge>
-                <Badge kind="info">{t('profiles.patchEntries', { count: detail.patchEntryCount })}（{formatBytes(detail.patchBytes)}）</Badge>
+                <Badge kind="info">{t('profiles.patchEntries', { count: detail.patchEntryCount })}{t('common.parens', { text: formatBytes(detail.patchBytes) })}</Badge>
                 <Badge kind="info">{detail.patchReload === 'startup' ? t('profiles.patchReload.startup') : t('profiles.patchReload.live')}</Badge>
                 <Badge kind={detail.hasNodeModules ? 'ok' : 'warn'}>
                   {detail.hasNodeModules ? t('profiles.nodeModules.yes') : t('profiles.nodeModules.no')}
@@ -835,7 +864,7 @@ export function EnvironmentPanel({ api, t, recoveryApi, recoveryT, incidentApi }
         open={deleteTarget !== null}
         title={t('profiles.deleteTitle')}
         message={deleteTarget !== null
-          ? `${t('profiles.deleteMessage', { name: deleteTarget.name })}${deleteTarget.isCurrent ? `\n\n${t('profiles.deleteCurrentWarning')}` : ''}`
+          ? `${isIncompleteProfileCopy(deleteTarget) ? t('profiles.delete.incompleteMessage', { name: deleteTarget.name }) : t('profiles.deleteMessage', { name: deleteTarget.name })}${deleteTarget.isCurrent ? `\n\n${t('profiles.deleteCurrentWarning')}` : ''}`
           : undefined}
         confirmLabel={t('profiles.delete')}
         cancelLabel={t('common.cancel')}

@@ -146,3 +146,23 @@ test('issue #37：目录不可读不中断整次遍历；base 不在 home 内返
   const ok = await listRecursiveFollowingLinks(path.join(home, 'skills'), home);
   assert.deepEqual(ok.paths, ['skills/ok.md']);
 });
+
+test('cli-F2：超过深度上限的**普通目录**必须留痕，不得静默丢内容', async (t) => {
+  const home = tmpDir('dshcm-deep-');
+  t.after(() => fssync.rmSync(home, { recursive: true, force: true }));
+  let deep = path.join(home, 'skills');
+  await fs.mkdir(deep, { recursive: true });
+  for (let i = 0; i < 70; i += 1) deep = path.join(deep, 'd');
+  await fs.mkdir(deep, { recursive: true });
+  await fs.writeFile(path.join(deep, 'leaf.md'), 'LEAF');
+
+  const listing = await listRecursiveFollowingLinks(path.join(home, 'skills'), home);
+  // 既有上限不变：超深内容本来就不会进清单（防病态目录树/栈爆炸）
+  assert.ok(!listing.paths.some((p) => p.endsWith('leaf.md')), '超深内容不应进清单');
+  // 但**必须留痕**：修复前 skippedLinks 与 unreadableDirs 都是空的 → 「备份成功但缺内容」
+  assert.ok(
+    listing.skippedLinks.some((s) => s.reason === 'too-deep'),
+    '普通目录超深必须记 too-deep，实际: ' + JSON.stringify(listing.skippedLinks),
+  );
+});
+

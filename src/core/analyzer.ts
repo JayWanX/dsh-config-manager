@@ -69,6 +69,24 @@ export const APPLY_ORDER: readonly SectionId[] = [...SECTION_IDS].sort(
 /** ZIP 内可执行文件扩展名黑名单（§19.6：只警告，本插件不执行任何脚本） */
 const EXECUTABLE_EXTENSIONS = new Set(['.exe', '.bat', '.cmd', '.sh', '.ps1', '.dll', '.so', '.dylib', '.bin', '.jar']);
 
+/** 文件分区「ZIP 前缀 → 分区 id」（t14 / core-F3 反向核对用；长前缀优先，避免前缀重叠误判）。 */
+const FILE_SECTION_PREFIX_ENTRIES: readonly (readonly [SectionId, string])[] = (
+  Object.entries(SECTION_FILE_PREFIXES) as [SectionId, string][]
+).slice().sort((a, b) => b[1].length - a[1].length);
+
+/**
+ * JSON 分区「ZIP 内路径 → 分区 id」（t41 / R1 反向核对用；只取确有 JSON 载荷的分区）。
+ *
+ * 与 FILE_SECTION_PREFIX_ENTRIES 是**两个互不相交的命名空间**：文件分区走前缀匹配
+ * （custom/skills/…），JSON 分区走**整条路径精确命中**（config/settings.json、custom/prompts.json…），
+ * 因此扩核不会把文件条目误判成 JSON 载荷（t16 的 check-prefix-overlap.mjs 已静态证实零重叠）。
+ */
+const JSON_SECTION_PATH_ENTRIES: readonly (readonly [SectionId, string])[] = Object.entries(
+  SECTION_JSON_PATHS as Record<string, string | undefined>,
+)
+  .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1] !== '')
+  .map(([id, jsonPath]) => [id as SectionId, jsonPath] as const);
+
 /** 已知外部依赖（MCP command 检测用，§15） */
 const KNOWN_DEPENDENCIES = new Set([
   'npx', 'node', 'npm', 'pnpm', 'yarn', 'bun', 'python', 'python3', 'pip', 'pip3',
@@ -212,8 +230,16 @@ export class Analyzer {
   private readonly parseZipFn: (buf: Uint8Array, limits?: ZipSafetyLimits) => ZipArchive;
   private readonly msg: MsgFunc;
   private readonly sessionFormatProbe?: (files: readonly { relativePath: string; data: Uint8Array }[]) => SessionFormatProbeResult;
-  /** 会话内 bundle 缓存（zipPath → 解析结果），避免重复解压 */
-  private readonly bundleCache = new Map<string, Bundle>();
+  /**
+   * 会话内 bundle 缓存（zipPath → { 身份, 解析结果 }）。
+   *
+   * t14 / core-F1 修：与跨请求 `verifiedBundles` **共用同一套硬边界** ——
+   *  - `refresh`（写盘入口）一律不看它；
+   *  - `reuse` 命中也必须身份（大小 + mtimeMs）一致；stat 读不到就不命中（宁可多读）。
+   * 修前它只按路径命中且位于身份判定之前，于是**同一个 Importer 实例**上 plan → execute
+   * （sync-engine.applyMergePlan 的生产形态）会拿陈旧结果去改用户数据，refresh 语义在门面上不成立。
+   */
+  private readonly bundleCache = new Map<string, { stamp: string; bundle: Bundle }>();
 
   constructor(opts: AnalyzerOptions) {
     this.ctx = opts.ctx;
@@ -239,14 +265,18 @@ export class Analyzer {
    *   不给「校验后文件被换掉」留窗口。
    */
   private async loadBundle(zipPath: string, mode: 'reuse' | 'refresh'): Promise<Bundle> {
-    const cached = this.bundleCache.get(zipPath);
-    if (cached) return cached;
-
+    // 身份判定先行：实例缓存与跨请求缓存**共用同一把钥匙**（路径 + 大小 + mtimeMs）。
     const identity = await archiveStamp(zipPath);
+    // t14 / core-F1：写盘入口（refresh）一律不看任何缓存 —— 同实例 plan → execute
+    // （sync-engine.applyMergePlan）也必须关掉「校验后被换包」的窗口。
+    // 只读入口（reuse）命中也必须身份一致；stat 读不到（被删/不可读）不命中任何缓存，
+    // 让下面的 fs.readFile 给出它自己的精确错误。
     if (mode === 'reuse' && identity !== null) {
+      const cached = this.bundleCache.get(zipPath);
+      if (cached !== undefined && cached.stamp === identity.stamp) return cached.bundle;
       const hit = verifiedBundles.get(zipPath);
       if (hit !== undefined && hit.stamp === identity.stamp && Date.now() - hit.at <= VERIFIED_CACHE_TTL_MS) {
-        this.bundleCache.set(zipPath, hit.bundle);
+        this.bundleCache.set(zipPath, { stamp: identity.stamp, bundle: hit.bundle });
         return hit.bundle;
       }
     }
@@ -345,7 +375,8 @@ export class Analyzer {
     }
 
     const bundle: Bundle = { archive, manifest, checksums, zipWarnings, migrationWarnings };
-    this.bundleCache.set(zipPath, bundle);
+    // 身份读得到才入实例缓存（与跨请求缓存同一判据：不拿未知身份签结果）。
+    if (identity !== null) this.bundleCache.set(zipPath, { stamp: identity.stamp, bundle });
     // 写入跨请求缓存：execute（refresh）也写 —— 它刚做过完整校验，这份结果对后续只读入口同样有效。
     if (identity !== null && identity.size <= VERIFIED_CACHE_MAX_ARCHIVE_BYTES) {
       verifiedBundles.set(zipPath, { stamp: identity.stamp, bundle, at: Date.now() });
@@ -412,6 +443,45 @@ export class Analyzer {
         throw new Error(this.msg('import.sectionInvalid', { section: id, issues: errors.map((e) => e.message).join('; ') }));
       }
       sections.set(id, data);
+    }
+    // t14 / core-F3：反向核对 —— 包内**实际带着**某个文件分区的条目、而 manifest.sections 没把它
+    // 声明为包含时，这些条目会被整段忽略。修前只按清单迭代，「包里有内容却没人说」= 静默忽略，
+    // 用户以为备份内容都导进去了。与 extraEntries（未登记进校验表）同风格：告警可见、不阻断导入。
+    const declaredFileSections = new Set<string>();
+    const declaredJsonSections = new Set<string>();
+    for (const [sectionId, on] of Object.entries(manifest.sections) as [string, boolean][]) {
+      if (!on) continue;
+      if (SECTION_FILE_PREFIXES[sectionId as SectionId] !== undefined) declaredFileSections.add(sectionId);
+      if (SECTION_JSON_PATHS[sectionId as SectionId] !== undefined) declaredJsonSections.add(sectionId);
+    }
+    const undeclaredContent = new Map<SectionId, string[]>();
+    for (const name of archive.names()) {
+      if (name === '' || name.endsWith('/')) continue; // 目录标记条目不算内容
+      const hit = FILE_SECTION_PREFIX_ENTRIES.find(
+        ([id, prefix]) => !declaredFileSections.has(id) && name.startsWith(prefix),
+      );
+      if (hit === undefined) continue;
+      const sample = undeclaredContent.get(hit[0]) ?? [];
+      if (sample.length < 3) sample.push(name); // 每条分区最多列 3 个示例条目，避免超长告警
+      undeclaredContent.set(hit[0], sample);
+    }
+    // t41 / R1：**JSON 载荷**方向同样要反向核对。修前只闭了「文件分区」半边，于是
+    // custom/prompts.json（prompts=false）、config/settings.json（settings=false）这类包
+    // 既不导入也零告警 —— 与文件条目同一条「包里有内容却没人说」的静默忽略路径。
+    // JSON 路径按**整条命中**判定（archive.has），与文件前缀匹配互不干扰。
+    for (const [sectionId, jsonPath] of JSON_SECTION_PATH_ENTRIES) {
+      if (declaredJsonSections.has(sectionId)) continue; // 已声明 → 不冤枉
+      if (!archive.has(jsonPath)) continue; // 包内没有该载荷 → 不误报
+      const sample = undeclaredContent.get(sectionId) ?? [];
+      if (sample.length < 3) sample.push(jsonPath);
+      undeclaredContent.set(sectionId, sample);
+    }
+    if (undeclaredContent.size > 0) {
+      const ids = [...undeclaredContent.keys()];
+      warnings.push(this.msg('import.undeclaredSectionContent', {
+        sections: ids.join(', '),
+        entries: ids.flatMap((id) => undeclaredContent.get(id) ?? []).map((name) => '"' + name + '"').join(', '),
+      }));
     }
     // 未知分区汇总告警（放在版本告警之后：一条消息列出全部被跳过的未知分区）
     if (unsupportedSections.length > 0) {
@@ -535,6 +605,17 @@ export class Analyzer {
     };
   }
 
+  /**
+   * e2e-F1 的第二道门（**不得放宽**）：归档声明携带凭据值（`containsSecrets=true` —— 导出侧只在
+   * 凭据原文非空时才置位，见 exporter.ts:449）却一条 ref 都解不出来时，必须显式告警：
+   * 「读不到 ≠ 没有凭据」。没给密码的情形由安全阀拒绝（`import.encryptedPasswordRequired`），不重复告警。
+   */
+  private secretsPayloadWarnings(manifest: Manifest, decrypted: Map<string, string> | undefined): string[] {
+    if (manifest.security.containsSecrets !== true) return [];
+    if (decrypted === undefined || decrypted.size > 0) return [];
+    return [this.msg('import.secretsPayloadEmpty')];
+  }
+
   /* ---------------- 第 8 步：analyzeImport ---------------- */
 
   /**
@@ -552,6 +633,7 @@ export class Analyzer {
 
     const errors = [...analyzed.adapterIssues];
     const warnings = [...zipWarnings, ...bundle.migrationWarnings, ...analyzed.sectionWarnings];
+    warnings.push(...this.secretsPayloadWarnings(manifest, opts.decryptedCredentials));
     if (!canImport(manifest.schemaVersion)) {
       errors.push(this.msg('import.versionUnsupported', { version: describeVersion(manifest.schemaVersion) }));
     }
@@ -889,6 +971,7 @@ export class Analyzer {
 
     const executed: ExecutedItem[] = [];
     const warnings: string[] = [...bundle.zipWarnings, ...bundle.migrationWarnings, ...analyzed.sectionWarnings];
+    warnings.push(...this.secretsPayloadWarnings(bundle.manifest, opts.decryptedCredentials));
     let needsRestart = plan.needsRestart;
     let anyFailed = false;
     /** 用户终止已在**安全点**生效（项边界；当前项已完整结束）。 */
@@ -1154,12 +1237,14 @@ export class Analyzer {
     }
 
     // 14. 结果
+    // t14 / core-F2：与计划期、执行期共用同一个「值可用」判据（非空字符串）。修前用 Map.has()
+    // 会把「值为空串」算成已满足：没写进去的凭据既不报缺失，还被计入「从归档恢复」条数。
     const missingSecrets = plan.missingSecrets
-      .filter((s) => !importCtx.decryptedCredentials?.has(s.ref) && !importCtx.secretInputs[s.ref])
+      .filter((s) => !usableSecretValue(importCtx.decryptedCredentials, importCtx.secretInputs, s.ref))
       .map((s) => s.ref);
     // issue #39：从**加密归档内**解出并回填的条数（用户手工补录不计入）。只回传条数。
     const credentialsRestored = plan.missingSecrets
-      .filter((s) => importCtx.decryptedCredentials?.has(s.ref) === true)
+      .filter((s) => usableSecretValue(importCtx.decryptedCredentials, undefined, s.ref))
       .length;
 
     // M1：导入成功 → 快照标记 done（元数据写失败只告警，不改变导入结论）。
@@ -1335,10 +1420,7 @@ export class Analyzer {
     // 补录值只经 adapter.applyItem 写入（m5 实现），引擎不直接触碰凭据。
     const secretRef = item.kind === 'MissingSecret' ? item.id.replace(/^secret:/, '') : null;
     const writesTarget = planItemWritesTarget(item, {
-      secretValueAvailable: (ref) => {
-        const value = ctx.decryptedCredentials?.get(ref) ?? ctx.secretInputs[ref];
-        return value !== undefined && value !== '';
-      },
+      secretValueAvailable: (ref) => usableSecretValue(ctx.decryptedCredentials, ctx.secretInputs, ref),
     });
     if (!writesTarget) {
       onLog?.(`– ${item.id}`);
@@ -1590,6 +1672,25 @@ function judgePath(p: string, sourcePlatform: string, targetPlatform: string): P
  * @param decrypted 归档里解出的 ref→值（仅内存；undefined = 未提供密码/无凭据载荷）
  * @param isConfiguredLocally 目标机是否已配置该 ref（读不到 → false，保守按需补录处理）
  */
+/**
+ * 凭据值「可用」的**唯一判据**（t14 / core-F2 修）：必须是非空字符串。
+ *
+ * 此前三处各判各的 —— 计划期用 `Map.has()`（空串也算「有值」）、执行期用 `value !== ''`、
+ * 结果期又用 `Map.has()`。于是「归档里该 ref 的值为空串」时：计划项说「随加密备份恢复」，
+ * 执行静默跳过，结果既不报缺失还把该 ref 算成「已从归档写回」—— 用户看到「导入完成」，
+ * 密钥其实没写进去（静默 no-op）。三处必须同源，否则该缺陷会再次以另一种形态复发。
+ */
+function usableSecretValue(
+  decrypted: ReadonlyMap<string, string> | undefined,
+  inputs: Record<string, string> | undefined,
+  ref: string,
+): boolean {
+  const fromArchive = decrypted?.get(ref);
+  if (typeof fromArchive === 'string' && fromArchive !== '') return true;
+  const fromInput = inputs?.[ref];
+  return typeof fromInput === 'string' && fromInput !== '';
+}
+
 async function buildCredentialPlanItems(
   items: PlanItem[],
   sections: Map<SectionId, unknown>,
@@ -1609,7 +1710,7 @@ async function buildCredentialPlanItems(
     if (existing.has(id)) continue;
     existing.add(id);
     const target = { adapter: 'credentialsStatus' as const, ref };
-    if (decrypted?.has(ref) === true) {
+    if (usableSecretValue(decrypted, undefined, ref)) {
       items.push({
         id,
         kind: 'MissingSecret',

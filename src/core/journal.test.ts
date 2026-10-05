@@ -15,6 +15,7 @@ import {
   isValidTransition, generateOperationId,
   environmentFingerprint, isValidOperationId, isJournalBasename,
   VALID_OPERATION_ID_RE,
+  STALE_JOURNAL_TEMP_MS,
 } from './journal.ts';
 import { readSafeModeMarkerSync, safeModeMarkerPath } from './phase3-host.ts';
 import { sha256Hex } from '../utils/hashing.ts';
@@ -311,4 +312,73 @@ test('SAFE MODE：journal 与宿主同步探测对同一 marker 判定一致（�
   const store2 = mkStore(dir2);
   assert.equal(readSafeModeMarkerSync(dir2), 'unknown', '布局不可信 → fail-closed');
   assert.equal(await journalSafeModeState(store2), 'unknown', 'journal 侧必须同判（修复前误判 clear）');
+});
+
+// ---------- cross-F2：孤儿原子写 tmp 的清理点 ----------
+
+test('cross-F2：transactions 里的孤儿原子写 tmp 必须有清理点（新鲜的可能在写 → 不动）', async (t) => {
+  const dir = tmp(t);
+  const store = mkStore(dir);
+  await store.ensureDirs();
+  const activeDir = path.join(dir, 'transactions', 'active');
+  const stale = path.join(activeDir, '.dshcm.11111111-2222-4333-8444-555555555555.json.1504.1bbe1211075cd69d.tmp');
+  const fresh = path.join(activeDir, '.dshcm.99999999-2222-4333-8444-555555555555.json.1504.2bbe1211075cd69d.tmp');
+  await fs.writeFile(stale, '{"partial":true}');
+  await fs.writeFile(fresh, '{"partial":true}');
+  const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  await fs.utimes(stale, old, old);
+
+  await store.ensureDirs();
+
+  assert.equal(await exists(stale), false, '超过窗口的孤儿 tmp 必须被清掉（否则 transactions 里的垃圾永远既不可回收也不可见）');
+  assert.equal(await exists(fresh), true, '新鲜 tmp 必须保留（可能正在写）');
+  assert.deepEqual(await store.scanActive(), [], '清理后 active 里不再有幽灵项');
+});
+
+// ---------- t65：sweepStaleTemps 的边界语义（t60 的 O1 / O3） ----------
+
+test('t65-O1：年龄恰好 60:00.000 视为陈旧（达到即删、判据 age >= 阈值），差 1ms 则保留', async (t) => {
+  const dir = tmp(t);
+  const store = mkStore(dir);
+  await store.ensureDirs();
+  const activeDir = path.join(dir, 'transactions', 'active');
+  const exact = path.join(activeDir, '.dshcm.a.json.1504.0123456789abcdef.tmp');
+  const justUnder = path.join(activeDir, '.dshcm.b.json.1504.0123456789abcdef.tmp');
+  await fs.writeFile(exact, '{}');
+  await fs.writeFile(justUnder, '{}');
+  const T = Date.now();
+  const atThreshold = new Date(T - STALE_JOURNAL_TEMP_MS);
+  const oneMsUnder = new Date(T - STALE_JOURNAL_TEMP_MS + 1);
+  await fs.utimes(exact, atThreshold, atThreshold);
+  await fs.utimes(justUnder, oneMsUnder, oneMsUnder);
+
+  const removed = await store.sweepStaleTemps(T);
+
+  assert.equal(removed, 1, '恰好 60:00.000 必须被回收（判据是 age >= STALE_JOURNAL_TEMP_MS，注释与此一致）');
+  assert.equal(await exists(exact), false, '达到阈值 → 删');
+  assert.equal(await exists(justUnder), true, '未达到阈值（差 1ms）→ 保留');
+});
+
+test('t65-O3：判据是有意保守宽判 —— 前缀与 .tmp 同时命中的才回收，缺一者一律保留', async (t) => {
+  const dir = tmp(t);
+  const store = mkStore(dir);
+  await store.ensureDirs();
+  const activeDir = path.join(dir, 'transactions', 'active');
+  const realShape = path.join(activeDir, '.dshcm.11111111-2222-4333-8444-555555555555.json.1504.0123456789abcdef.tmp');
+  const broadOnly = path.join(activeDir, '.dshcm.notes.tmp');
+  const noTmpSuffix = path.join(activeDir, '.dshcm.notes.json');
+  const noPrefix = path.join(activeDir, 'notes.tmp');
+  const all = [realShape, broadOnly, noTmpSuffix, noPrefix];
+  for (const p of all) await fs.writeFile(p, '{}');
+  const T = Date.now();
+  const old = new Date(T - 2 * 60 * 60 * 1000);
+  for (const p of all) await fs.utimes(p, old, old);
+
+  const removed = await store.sweepStaleTemps(T);
+
+  assert.equal(removed, 2, '实际 atomic-write 形态与「.dshcm.*.tmp」宽形态各 1 条被收');
+  assert.equal(await exists(realShape), false, '实际形态（.dshcm.<base>.<pid>.<16hex>.tmp）必须被收');
+  assert.equal(await exists(broadOnly), false, 'O3：宽判有意保留 —— .dshcm.*.tmp 一律收（理由见 isJournalTempBasename 注释）');
+  assert.equal(await exists(noTmpSuffix), true, '缺 .tmp 后缀 → 不删');
+  assert.equal(await exists(noPrefix), true, '缺 .dshcm. 前缀 → 不删');
 });

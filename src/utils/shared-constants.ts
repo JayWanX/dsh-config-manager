@@ -37,3 +37,51 @@ export const ENCRYPTED_CONTAINER_CODE = 'encrypted-container';
  * s3 / oss / cos / minio / kodo 五家），`gist` 是一条通道（provider 恒 gist）。
  */
 export const SYNC_CHANNELS = ['git', 'webdav', 's3', 'gist'] as const;
+
+/**
+ * S3 兼容系通道清单（**唯一声明处**，t88；先例 = 上面的 SYNC_CHANNELS）。
+ *
+ * 为什么也放这里：宿主 `sync/sync-config.ts` 与客户端镜像（`ui/sync-settings-view.ts` 的 `S3_PROVIDERS`、
+ * `client/sync/sync-view.ts` 的 provider 文案表）必须同值 —— 两侧各写一份字面量时，「宿主加了兼容商而界面少一个选项」
+ * 这类静默漂移**不会红**（客户端只能靠 `satisfies` 穷尽检查拦「新增」，拦不住「改名 / 删除 / 顺序」）。
+ * 放到零依赖模块后，两侧都 import 它；`sync-config.ts` 只 re-export（宿主沿用既有 import 路径）。
+ *
+ * 与通道清单的关系：`s3` 是**一条通道**（配置里用 `provider` 区分这五家），`gist` 是另一条通道（provider 恒 gist）。
+ */
+export const S3_COMPAT_PROVIDERS = ['s3', 'oss', 'cos', 'minio', 'kodo'] as const;
+/** S3 兼容系通道类型 */
+export type S3CompatProvider = (typeof S3_COMPAT_PROVIDERS)[number];
+/** 非 S3 系的云端点通道（GitHub Gist，走 REST） */
+export const GIST_PROVIDER = 'gist' as const;
+/** Gist 通道类型 */
+export type GistProvider = typeof GIST_PROVIDER;
+/** 云端点通道枚举（S3 兼容系 ×5 + gist） */
+export const CLOUD_SYNC_PROVIDERS = [...S3_COMPAT_PROVIDERS, GIST_PROVIDER] as const;
+/** 云端点通道类型 */
+export type CloudSyncProvider = (typeof CLOUD_SYNC_PROVIDERS)[number];
+
+/**
+ * 云端点密钥槽位引用（**唯一声明处**，t88）：`DSH_CONFIG_MANAGER_SYNC_<PROVIDER>_SECRET_ACCESS_KEY`（gist 为 `..._GIST_TOKEN`）。
+ * 与既有 `syncPasswordRef` 同族。宿主 `cloudSecretRef()` 与客户端文案派生 `cloudSecretRefName()` 都读它，
+ * 因此「宿主改了槽位名而界面提示的还是旧名」不可能再发生（两侧同源 + 结构守卫）。
+ */
+export const CLOUD_SECRET_REFS: Readonly<Record<CloudSyncProvider, string>> = {
+  s3: 'DSH_CONFIG_MANAGER_SYNC_S3_SECRET_ACCESS_KEY',
+  oss: 'DSH_CONFIG_MANAGER_SYNC_OSS_SECRET_ACCESS_KEY',
+  cos: 'DSH_CONFIG_MANAGER_SYNC_COS_SECRET_ACCESS_KEY',
+  minio: 'DSH_CONFIG_MANAGER_SYNC_MINIO_SECRET_ACCESS_KEY',
+  kodo: 'DSH_CONFIG_MANAGER_SYNC_KODO_SECRET_ACCESS_KEY',
+  gist: 'DSH_CONFIG_MANAGER_SYNC_GIST_TOKEN',
+};
+
+/**
+ * 取某云端点通道的密钥槽位引用名（**不涉及任何值**；客户端只需显示这个名字）。
+ *
+ * 已知通道走表；**未知通道仍按同规则派生**（保持历史客户端行为，不因共享化而收紧 —— 手改过的配置里
+ * 出现不在枚举内的 provider 时，界面仍要显示出它对应的槽位名）。
+ */
+export function cloudSecretRefName(provider: string): string {
+  if (provider === GIST_PROVIDER) return CLOUD_SECRET_REFS[GIST_PROVIDER];
+  if ((CLOUD_SYNC_PROVIDERS as readonly string[]).includes(provider)) return CLOUD_SECRET_REFS[provider as CloudSyncProvider];
+  return 'DSH_CONFIG_MANAGER_SYNC_' + provider.toUpperCase() + '_SECRET_ACCESS_KEY';
+}

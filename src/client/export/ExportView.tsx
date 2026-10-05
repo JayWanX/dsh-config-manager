@@ -48,7 +48,14 @@ import { ErrorBanner } from '../common/ErrorBanner.tsx'
 import { ProgressBar } from '../common/ProgressBar.tsx'
 import { ReportView } from '../common/ReportView.tsx'
 import { toast } from '../common/toast-store.ts'
+import { redact } from '../../security/redaction.ts'
 import css from '../config-manager.module.css'
+
+/**
+ * 宿主/错误文本渲染前统一过 redact（AGENTS.md §UI 硬性规则 7；client-F4）。
+ * 单列成一行：plan-text-redaction.test.ts 的「按渲染点」登记表需要一个唯一锚点。
+ */
+const redactErrorText = (err: unknown): string => redact(err instanceof Error ? err.message : String(err))
 
 export interface ExportViewProps {
   api: ConfigManagerApi
@@ -231,7 +238,7 @@ export function ExportView({ api, t }: ExportViewProps) {
    * 纯逻辑层不再产出中文文案。非阻断：只提示「跨设备导入时可能不适用」。
    */
   const deviceSpecific = flow.validateSelection(selection).deviceSpecific
-  const deviceNames = deviceSpecific.map((id) => sectionLabel(id, t)).join('、')
+  const deviceNames = deviceSpecific.map((id) => sectionLabel(id, t)).join(t('common.listSeparator'))
   /** UI-09：设备相关分区的就地警示（非阻断）。**保持单行**（.noticeLine 截断 + title 全文）——
    *  高度确定才能让公告位不抖动（见 .noticeSlot 注释）。 */
   const deviceWarning = deviceSpecific.length > 0
@@ -345,7 +352,7 @@ export function ExportView({ api, t }: ExportViewProps) {
       runStore.patch({ export: { downloaded: true } })
     } catch (err) {
       // 下载失败：同时用 Toast 送达（自动下载是静默的，用户可能已切走）
-      const message = err instanceof Error ? err.message : String(err)
+      const message = redactErrorText(err)
       runStore.patch({ export: { error: message } })
       toast.error(message)
     } finally {

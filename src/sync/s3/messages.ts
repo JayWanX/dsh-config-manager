@@ -29,6 +29,7 @@ export const s3Zh = {
   'sync.s3.timeout': '{method} {url} 请求超时（{timeout}ms）',
   'sync.s3.indexInvalid': '{url} 解析失败或结构非法: {err}',
   'sync.s3.snapshotInvalid': '快照 {id} 解析失败或结构非法: {err}',
+  'sync.s3.indexMissingWithContent': '远端已有内容但索引 {url} 缺失（HTTP 404）：拒绝以空集合覆盖权威索引，本次上传已中止（零写入）',
 } as const;
 
 export const s3En: Record<keyof typeof s3Zh, string> = {
@@ -49,6 +50,7 @@ export const s3En: Record<keyof typeof s3Zh, string> = {
   'sync.s3.timeout': '{method} {url} request timed out ({timeout}ms)',
   'sync.s3.indexInvalid': '{url} failed to parse or is structurally invalid: {err}',
   'sync.s3.snapshotInvalid': 'Snapshot {id} failed to parse or is structurally invalid: {err}',
+  'sync.s3.indexMissingWithContent': 'The remote already has content but index {url} is missing (HTTP 404): refusing to overwrite the authoritative index with an empty set; this upload was aborted (zero writes)',
 };
 
 /** 插值：{param} → 形参值；缺参原样保留（与 core/messages.ts 同口径）。 */
@@ -78,3 +80,23 @@ export function makeCatalogMsg(
 
 /** 缺省（zh）S3 通道翻译器。 */
 export const s3Msg: MsgFunc = makeCatalogMsg(s3Zh, s3En, 'zh');
+
+/**
+ * 把「宿主传入的翻译器」与本地目录**合并**（t79）：
+ *  - **宿主优先**：宿主（`ConfigManagerHostContext.this.msg = makeMsg(language)`，见 src/index.ts:1500）
+ *    掌握 core 全量键与当前语言，它认得就照它；
+ *  - **本地兜底**：`sync.s3.*` 这类键**只存在于本模块**（core 目录里一个都没有），宿主必然查不到
+ *    —— 直接用它会出现「界面显示裸键名」（makeMsg 的未知键回退就是键名本身）。回退本地目录即可拿到文案；
+ *  - 两边都没有 ⇒ 仍回退键名（保持 makeMsg 的既有边界，绝不抛错）。
+ *
+ * 同一个 helper 也供 WebDAV 侧使用（`composeMsg(options.msg, zhMsg)`：宿主缺键时回退 core zh，而不是裸键名）。
+ * 已知取舍：宿主语言为 en 时，本地目录的键仍出 zh 文案（本地目录缺语言上下文）—— 比裸键名好，
+ * 但不等同于完整 en 本地化；要彻底解决得把语言传进传输层（越界，登记为观察）。
+ */
+export function composeMsg(host: MsgFunc | undefined, local: MsgFunc): MsgFunc {
+  if (host === undefined) return local;
+  return (key, params) => {
+    const fromHost = host(key, params);
+    return fromHost === key ? local(key, params) : fromHost;
+  };
+}

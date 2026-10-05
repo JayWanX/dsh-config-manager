@@ -31,6 +31,12 @@ import { toast } from './toast-store.ts'
 import { redact } from '../../security/redaction.ts'
 import css from '../config-manager.module.css'
 
+/**
+ * 宿主/错误文本渲染前统一过 redact（AGENTS.md §UI 硬性规则 7；client-F4）。
+ * 单列成一行：plan-text-redaction.test.ts 的「按渲染点」登记表需要一个唯一锚点。
+ */
+const redactErrorText = (err: unknown): string => redact(err instanceof Error ? err.message : String(err))
+
 /** 轮询间隔：与状态栏的观感一致（比导入向导的 500ms 慢，因为这里不是主工作区）。 */
 const POLL_MS = 1500
 
@@ -108,7 +114,7 @@ export function RunsCenter({ api, recoveryApi, t, defaultRollbackOnError }: Runs
   }, [runs, dialogRun, defaultRollbackOnError])
 
   const fail = (err: unknown): void => {
-    const message = err instanceof Error ? err.message : String(err)
+    const message = redactErrorText(err)
     toast.error(t('runs.actionFailed', { message: message === '' ? t('runs.unsupported') : message }))
   }
 
@@ -153,7 +159,7 @@ export function RunsCenter({ api, recoveryApi, t, defaultRollbackOnError }: Runs
       else toast.warn(t('runs.lock.recoverRefused', { state: res.state }))
       await refresh()
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
+      const message = redactErrorText(err)
       toast.error(t('runs.lock.recoverFailed', { message }))
     } finally { setLockBusy(false) }
   }

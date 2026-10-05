@@ -34,6 +34,16 @@ const MTIME_BATCH = 16;
  */
 const writtenSessionFiles = new WeakMap<ImportContext, number>();
 
+/**
+ * 本次导入**真正写过的会话单元**（`<项目键>/<会话目录>`，与 `unitIdOf` 同一口径）。
+ *
+ * 为什么需要它（ui-F1）：`finalizeApply` 拿到的是**整份分区载荷**，而用户可以在确认页
+ * 逐条取消勾选（`buildSelectedPlan` 只裁 `plan.items`，载荷不受影响）。按载荷做归位判定时，
+ * 「用户取消勾选、盘上根本没有」的会话会以 `relocateDir → unavailable` 收场，被记成**硬失败**
+ * → `anyFailed` → 在 `rollbackOnError=true`（向导默认、同步通道恒 true）下**整笔导入回滚**。
+ * 与 `writtenSessionFiles` 同样以 ImportContext 为键：宿主每个进程只建一次 adapters。 */
+const writtenSessionUnits = new WeakMap<ImportContext, Set<string>>();
+
 export class SessionsAdapter extends FileCollectionAdapter {
   readonly id = 'sessions' as const;
   readonly displayName = 'Sessions';
@@ -441,8 +451,35 @@ export class SessionsAdapter extends FileCollectionAdapter {
   override async applyItem(item: PlanItem, ctx: ImportContext): Promise<ApplyResult> {
     const result = await super.applyItem(item, ctx);
     // 只累计「本次导入（同一 ImportContext）」写成功的数量 —— 见 writtenSessionFiles 的说明。
-    if (result.ok) writtenSessionFiles.set(ctx, (writtenSessionFiles.get(ctx) ?? 0) + 1);
+    if (result.ok) {
+      writtenSessionFiles.set(ctx, (writtenSessionFiles.get(ctx) ?? 0) + 1);
+      const ref = item.target?.ref;
+      if (ref !== undefined && ref !== '') {
+        let units = writtenSessionUnits.get(ctx);
+        if (units === undefined) {
+          units = new Set<string>();
+          writtenSessionUnits.set(ctx, units);
+        }
+        units.add(toPosixRel(this.unitIdOf(ref)));
+      }
+    }
     return result;
+  }
+
+  /**
+   * 目标机上是否存在该会话单元的**任何文件**（ui-F1 的判据）。
+   *
+   * 用途：归位失败且宿主报 `unavailable` 时，区分「目录不存在（本次没写它）」与「真的搬不动」。
+   * 目录列表都读不到（门面抛错）按「不确定」处理 → 返回 true：保守地保留原有的硬失败上报，
+   * 绝不把一次真实的搬迁失败悄悄降级成成功。
+   */
+  private async unitOnTargetDisk(ctx: ImportContext, unit: string): Promise<boolean> {
+    try {
+      const listing = await listFilesDetailed(ctx.target.fs, this.baseDir + '/' + unit);
+      return listing.paths.length > 0;
+    } catch {
+      return true;
+    }
   }
 
   async finalizeApply(ctx: ImportContext): Promise<ApplyResult[]> {
@@ -473,7 +510,12 @@ export class SessionsAdapter extends FileCollectionAdapter {
     const mappings = ctx.pathMappings ?? [];
     const rewrite = store.rewriteLogDir;
     const reindex = store.reindexSessionHeader;
+    // ui-F1：本次没有写过的单元（用户取消勾选 / 未进计划）不做归位与改写判定 ——
+    // 「目录不存在」是它的正常形态，不是失败。appliedUnits 缺省（整批都没走 applyItem，
+    // 例如用户取消全部会话或单测直接调用）时保持既有行为：按载荷逐单元判定。
+    const appliedUnits = writtenSessionUnits.get(ctx);
     for (const [unit, files] of byUnit) {
+      if (appliedUnits !== undefined && !appliedUnits.has(unit)) continue;
       let cwd: string | undefined;
       for (const file of files) {
         const name = toPosixRel(file.relativePath).split('/').pop() ?? '';
@@ -545,6 +587,10 @@ export class SessionsAdapter extends FileCollectionAdapter {
       const moved = await store.relocateDir(dirRel, expected);
       if (moved.moved) {
         results.push({ ok: true, message: ctx.msg('import.sessionRelocated', { unit, from: current, to: expected }) });
+      } else if (moved.reason === 'unavailable' && !(await this.unitOnTargetDisk(ctx, unit))) {
+        // ui-F1：目录在目标机上根本不存在 ⇒ 本次没有它的数据（用户取消勾选 / 未写盘）。
+        // 没有可归位的东西，绝不能记硬失败（会 no-op 地触发 rollbackOnError 整体回滚）。
+        continue;
       } else {
         results.push({ ok: false, message: ctx.msg('import.sessionRelocateFailed', { unit, reason: moved.reason ?? 'unavailable' }) });
       }

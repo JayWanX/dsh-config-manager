@@ -31,9 +31,9 @@ import { resolveProfileDir, validateProfileName } from '../core/plugin-cli.ts'
 import { readTextSafe } from './dsh-profile-io.ts'
 import { readSessionFormatVersionAt } from '../utils/session-format.ts'
 import {
-  DSH_PROFILE_TEMPLATES, checkProfileName, classifyShape, isManagedProfileName,
-  type DshProfileCopyWarning, type DshProfileDetail, type DshProfileErrorCode, type DshProfileIssue,
-  type DshProfileMeta, type DshProfilePatchReload,
+  DSH_PROFILE_TEMPLATES, PROFILE_COPY_MARKER_FILENAME, checkProfileName, classifyShape, isManagedProfileName,
+  type DshProfileCopyMarker, type DshProfileCopyWarning, type DshProfileDetail, type DshProfileErrorCode,
+  type DshProfileIncompleteCopy, type DshProfileIssue, type DshProfileMeta, type DshProfilePatchReload,
 } from './dsh-profile-shared.ts'
 
 /** DSH home 下的 profile 根目录名（与 dsh-app-boot 的 PROFILES_DIR 一致）。 */
@@ -90,6 +90,19 @@ function isInsideDir(root: string, candidate: string): boolean {
   return rel !== '..' && !rel.startsWith(`..${sep}`)
 }
 
+/**
+ * t89：残留枚举结果 —— `unreadable` 让「枚举失败」与「确实没有残留」可区分；
+ * `reason` 仅为诊断码（非用户文案，界面文案走字典键）。
+ */
+export interface DshProfileIncompleteCopiesScan {
+  copies: DshProfileIncompleteCopy[]
+  unreadable: boolean
+  reason: string | null
+}
+
+/** t89：profiles 根目录枚举失败的原因码（诊断/日志用）。 */
+export const PROFILES_ROOT_UNREADABLE = 'profiles-root-unreadable'
+
 /** 「档案」= DSH profile 的读写引擎（同步 fs；profile 数量级为个位数，无需异步）。 */
 export class DshProfileManager {
   private readonly homeDir: string
@@ -120,17 +133,23 @@ export class DshProfileManager {
       if (entry.name === 'node_modules') continue
       const dir = join(root, entry.name)
       if (!this.isProfileDir(dir, entry.isDirectory(), entry.isSymbolicLink())) continue
-      // 没有 package.json 的目录不是 profile（DSH 自己也不会用）
-      if (!existsSync(join(dir, 'package.json'))) continue
-      out.push(this.readMeta(entry.name, dir))
+      // 正常 profile：以 package.json 为准（DSH 自己也是这么认的）
+      if (existsSync(join(dir, 'package.json'))) { out.push(this.readMeta(entry.name, dir)); continue }
+      // cross-F3：没有 package.json 但带「复制进行中标记」= 中断的复制残留。
+      // 它是一个**必须可见**的条目 —— 否则查不到（不在列表里）、也删不掉（requireProfile → notFound）。
+      const marker = this.readCopyMarker(dir)
+      if (marker.present) out.push(this.incompleteMeta(entry.name, dir, marker))
+      // 既无 package.json 又无标记的目录仍按既有口径跳过（DSH 自己也不会用）
     }
     return out.sort((a, b) => a.name.localeCompare(b.name))
   }
 
   /** 单个 profile 的详情（含 package.json / cordis.patch.yml 原文）。 */
   detail(name: string): DshProfileDetail {
-    const dir = this.requireProfile(name)
-    const meta = this.readMeta(name, dir)
+    const dir = this.requireManagedDir(name)
+    const meta = existsSync(join(dir, 'package.json'))
+      ? this.readMeta(name, dir)
+      : this.incompleteMeta(name, dir, this.readCopyMarker(dir))
     const manifest = readTextSafe(join(dir, 'package.json'))
     const patchRaw = readTextSafe(join(dir, PROFILE_PATCH_FILENAME))
     const patch = patchRaw !== null && patchRaw.length <= PATCH_TEXT_LIMIT ? patchRaw : null
@@ -204,6 +223,16 @@ export class DshProfileManager {
     const includeNodeModules = opts.includeNodeModules !== false
     const startedAt = Date.now()
     await mkdir(destDir, { recursive: true })
+    // cross-F3：**先落标记再拷文件**。进程被强杀时标记留在目标目录里，使这个半截副本可被
+    // 档案列表 / 恢复面板辨识并物理删除；不留标记的话它既不在列表里、删除又报 notFound。
+    const marker: DshProfileCopyMarker = {
+      sourceName: name,
+      newName,
+      startedAt: new Date().toISOString(),
+      includeNodeModules,
+      pid: process.pid,
+    }
+    atomicWriteFileSync(this.copyMarkerPath(destDir), `${JSON.stringify(marker, null, 2)}\n`, { mode: 0o644 })
     try {
       const entries = await readdir(srcDir, { withFileTypes: true })
       for (const entry of entries) {
@@ -226,6 +255,12 @@ export class DshProfileManager {
         // 回滚也失败时无能为力：错误照抛，用户可手动删掉这个半套目录
       }
       throw new DshProfileError('copyFailed', `copyFailed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    // 复制成功：移除标记（此后它就是一个正常 profile）。删标记失败无害 —— 列表以 package.json 为准。
+    try {
+      rmSync(this.copyMarkerPath(destDir), { force: true })
+    } catch {
+      // 忽略：有 package.json 时列表不会把它当半截副本
     }
     const meta = this.readMeta(newName, destDir)
     // 没拷 node_modules 却声明了依赖 → 副本启动必然解析不到 bundle：显式告警，绝不静默
@@ -315,17 +350,154 @@ export class DshProfileManager {
    *
    * Desktop 独占档案（desktop）**一律拒绝**（连 allowCurrent 也不行）：它由桌面端应用自己
    * 初始化与维护，删掉之后桌面端要么起不来、要么按 web 模板重建一个空档案（插件全丢）。
+   *
+   * cross-F3：**中断的复制残留**（有进行中标记、无 package.json）也接受删除 —— 它此前既不在
+   * `list()` 里、`requireProfile` 又报 notFound，成了「查不到也删不掉」的孤儿目录。
    */
   remove(name: string, opts: { allowCurrent?: boolean } = {}): void {
     if (isManagedProfileName(name)) throw new DshProfileError('managedProfile')
-    const dir = this.requireProfile(name)
+    const dir = this.requireManagedDir(name)
     if (name === this.currentProfile() && opts.allowCurrent !== true) {
       throw new DshProfileError('currentProfile')
     }
     rmSync(dir, { recursive: true, force: true })
   }
 
-  /** 解析 profile 目录（不存在 → notFound）。 */
+  /**
+   * cross-F3：目标目录 = **正常 profile（有 package.json）** 或 **中断的复制残留（有进行中标记）**；
+   * 两者都没有 → notFound。残余标记的目录必须能被定位与删除，否则就是孤儿。
+   */
+  private requireManagedDir(name: string): string {
+    let dir: string
+    try {
+      dir = resolveProfileDir(this.homeDir, validateProfileName(name))
+    } catch {
+      throw new DshProfileError('invalidName')
+    }
+    if (existsSync(join(dir, 'package.json'))) return dir
+    if (this.readCopyMarker(dir).present) return dir
+    throw new DshProfileError('notFound')
+  }
+
+  /** 复制进行中标记的路径。 */
+  private copyMarkerPath(dir: string): string {
+    return join(dir, PROFILE_COPY_MARKER_FILENAME)
+  }
+
+  /**
+   * 读「复制进行中标记」。**只判存在性**：内容坏掉（手工改过 / 写盘中断）仍算半截副本 ——
+   * 宁可多报一个可疑残留，也绝不把孤儿目录重新变成「查不到也删不掉」。
+   */
+  private readCopyMarker(dir: string): { present: boolean; marker: DshProfileCopyMarker | null } {
+    const markerPath = this.copyMarkerPath(dir)
+    if (!existsSync(markerPath)) return { present: false, marker: null }
+    const raw = readTextSafe(markerPath)
+    if (raw === null) return { present: true, marker: null }
+    try {
+      const parsed = JSON.parse(raw) as Partial<DshProfileCopyMarker>
+      return {
+        present: true,
+        marker: {
+          sourceName: typeof parsed.sourceName === 'string' ? parsed.sourceName : '',
+          newName: typeof parsed.newName === 'string' ? parsed.newName : '',
+          startedAt: typeof parsed.startedAt === 'string' ? parsed.startedAt : '',
+          includeNodeModules: parsed.includeNodeModules === true,
+          pid: typeof parsed.pid === 'number' ? parsed.pid : 0,
+        },
+      }
+    } catch {
+      return { present: true, marker: null }
+    }
+  }
+
+  /**
+   * cross-F3：把「中断的复制残留」渲染成一个可列出、可删除的条目。
+   *
+   * 形态恒为 `generic` ⇒ `isLaunchableShape('generic')` 为假：半截副本**绝不能**给出启动按钮
+   * （没有 package.json，spawn 出去只会得到一个起不来的实例）。
+   */
+  private incompleteMeta(
+    name: string,
+    dir: string,
+    marker: { present: boolean; marker: DshProfileCopyMarker | null },
+  ): DshProfileMeta {
+    let updatedAtMs: number | null = null
+    try {
+      updatedAtMs = statSync(dir).mtimeMs
+    } catch {
+      updatedAtMs = null
+    }
+    const known = marker.marker
+    return {
+      name,
+      dir,
+      bundles: [],
+      dependencies: {},
+      shape: 'generic',
+      patchReload: 'startup',
+      hasNodeModules: existsSync(join(dir, NODE_MODULES_DIR)),
+      patchEntryCount: 0,
+      patchBytes: 0,
+      isCurrent: false,
+      issues: [],
+      updatedAtMs,
+      incomplete: true,
+      ...(known !== null && known.sourceName !== '' ? { copiedFrom: known.sourceName } : {}),
+      ...(known !== null && known.startedAt !== '' ? { copyStartedAt: known.startedAt } : {}),
+    }
+  }
+
+  /**
+   * cross-F3：列出全部**中断的档案复制**残留（有标记、无 package.json），含目标绝对路径。
+   *
+   * 与 `list()` 共用同一份判定（标记存在即残留），避免「列表说没有、这里说有」的分叉；
+   * 档案列表消费 `list()` 里的 `incomplete` 条目，恢复面板消费本方法。
+   */
+  listIncompleteCopies(): DshProfileIncompleteCopy[] {
+    return this.listIncompleteCopiesScan().copies
+  }
+
+  /**
+   * t89（FINAL-SWEEP-2 S2-3）：与 `listIncompleteCopies()` **同源**的枚举结果，额外区分
+   * 「枚举失败」与「确实没有残留」。
+   *
+   * 此前读目录失败直接回落 `[]`（t54 的**有意**选择：残留枚举失败不得让 /recovery/status 整页 500），
+   * 但调用方因此无法把「读不到」与「没有」分开 —— 而更深的 `markerReadable` 已经诚实过一次，
+   * 说明本仓库口径本应区分这两者。本方法保持**不抛**（t54 口径不变），只把失败这一事实交给调用方。
+   *
+   * 判据只有一条：`readdirSync` 失败 = unreadable。根目录**本来不存在**（`!existsSync`）不算失败 ——
+   * 那是「新装机器还没有 profiles 目录」，与「读不动」是两件事。
+   */
+  listIncompleteCopiesScan(): DshProfileIncompleteCopiesScan {
+    const root = this.profilesRoot()
+    if (!existsSync(root)) return { copies: [], unreadable: false, reason: null }
+    let entries: import('node:fs').Dirent[]
+    try {
+      entries = readdirSync(root, { withFileTypes: true })
+    } catch {
+      return { copies: [], unreadable: true, reason: PROFILES_ROOT_UNREADABLE }
+    }
+    const out: DshProfileIncompleteCopy[] = []
+    for (const entry of entries) {
+      if (entry.name === 'node_modules') continue
+      const dir = join(root, entry.name)
+      if (!this.isProfileDir(dir, entry.isDirectory(), entry.isSymbolicLink())) continue
+      if (existsSync(join(dir, 'package.json'))) continue
+      const marker = this.readCopyMarker(dir)
+      if (!marker.present) continue
+      const known = marker.marker
+      out.push({
+        name: entry.name,
+        dir,
+        sourceName: known !== null && known.sourceName !== '' ? known.sourceName : null,
+        startedAt: known !== null && known.startedAt !== '' ? known.startedAt : null,
+        markerReadable: known !== null,
+      })
+    }
+    return { copies: out.sort((a, b) => a.name.localeCompare(b.name)), unreadable: false, reason: null }
+  }
+
+  /** 解析 profile 目录（不存在 → notFound；**只认正常 profile**，半截副本走 requireManagedDir）。 */
   private requireProfile(name: string): string {
     let dir: string
     try {

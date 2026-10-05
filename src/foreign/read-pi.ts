@@ -190,12 +190,14 @@ export async function readPiSessions(opts: PiReadOptions): Promise<SessionReadOu
     return { files, readFindings: findings, extraCounts: { 'sessions.candidates': 0 } };
   }
 
+  // 触顶必须**可见**（audit-foreign F4）。
+  let truncated = false;
   for (const dirName of await listDirNames(sessionsDir)) {
     if (!dirName.startsWith(PI_DIR_PREFIX)) continue;
     const sessionDir = joinFor(platform, sessionsDir, dirName);
     const derivedCwd = await derivedCwdOfDirName(dirName, platform);
     for (const name of await listFileNames(sessionDir, (n) => PI_SESSION_FILE_RE.test(n))) {
-      if (files.length >= maxFiles) break;
+      if (files.length >= maxFiles) { truncated = true; break; }
       const label = PI_SESSIONS_REL + '/' + dirName + '/' + name;
       const text = await readTextGuarded(joinFor(platform, sessionDir, name), label, maxBytes, findings);
       if (text === null) continue;
@@ -222,5 +224,6 @@ export async function readPiSessions(opts: PiReadOptions): Promise<SessionReadOu
     }
   }
 
+  if (truncated) findings.push({ code: 'source-unreadable', origin: 'pi', detail: 'max-sessions-reached', count: maxFiles });
   return { files, readFindings: findings, extraCounts: { 'sessions.candidates': files.length } };
 }

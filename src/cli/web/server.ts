@@ -14,7 +14,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto'
 import http from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
-import { isLoopbackRequest, registerRoutes, RouteError, type WebRoute } from '../../routes/kit.ts'
+import { isLoopbackRequest, registerRoutes, routeSpecOf, RouteError, type HttpMethod, type WebRoute } from '../../routes/kit.ts'
 import type { RescuePaths } from '../actions.ts'
 import { openInBrowser } from './browser.ts'
 import { writeHtml } from './http.ts'
@@ -65,6 +65,20 @@ function readCookie(req: IncomingMessage, name: string): string | undefined {
     if (trimmed.slice(0, at) === name) return trimmed.slice(at + 1)
   }
   return undefined
+}
+
+/**
+ * 把请求目标解析成救急台自己的 URL（**唯一**入口）。
+ *
+ * 为什么不能直接 new URL(req.url, 'http://127.0.0.1')：以 `//` 开头的目标是**协议相对 URL**，
+ * 会被解析成 authority=x / pathname='/' —— 于是 `GET //evil` 悄悄落到首页（cli-F7），
+ * absolute-form（`http://host/x`）同理。这里先折叠成 origin-form 再解析：任何非
+ * `/path?query` 形态都落到「未知路径」（404），而不是被当成首页。
+ */
+function consoleRequestUrl(raw: string | undefined): URL {
+  const target = raw ?? '/'
+  const pathOnly = target.startsWith('/') && !target.startsWith('//') ? target : '/' + target.replace(/^\/+/, '')
+  return new URL(pathOnly, 'http://127.0.0.1')
 }
 
 function constantTimeEquals(a: string, b: string): boolean {
@@ -121,7 +135,7 @@ export async function startConsoleServer(options: ConsoleServerOptions): Promise
   }
 
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    const url = consoleRequestUrl(req.url)
     touchIdle()
     // 第一道：与宿主路由同一套 loopback + 同源围栏（连 bootstrap 也过）
     if (!isLoopbackRequest(req)) {
@@ -161,6 +175,18 @@ export async function startConsoleServer(options: ConsoleServerOptions): Promise
     const route = table.get(url.pathname)
     if (route === undefined) {
       writeHtml(res, 404, renderMessagePage('页面不存在', '没有这个路径：' + url.pathname, '可用页面：/（首页）、/disk、/sessions、/healthz'))
+      return
+    }
+    // 方法白名单（cli-F4）：kit 的 405 出口写的是 **JSON**（给插件 API 客户端用），而救急台是
+    // 人看的页面。这里按**同一条声明**（routeSpecOf 读回的方法白名单）先判一次，让 405 也走 HTML；
+    // kit handler 内那道判定仍在（纵深防御，不依赖本处）。
+    const spec = routeSpecOf(route)
+    if (spec !== undefined && !spec.methods.includes(req.method as HttpMethod)) {
+      writeHtml(res, 405, renderMessagePage(
+        '方法不被允许',
+        '这个地址只接受 ' + spec.methods.join(' / ') + ' 请求（收到 ' + String(req.method ?? '') + '）。',
+        '可用页面：/（首页）、/disk、/sessions、/lock、/profiles、/healthz',
+      ))
       return
     }
     // kit 的 handler 自带方法白名单 + 顶层错误映射。

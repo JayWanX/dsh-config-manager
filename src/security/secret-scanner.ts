@@ -64,14 +64,70 @@ const SENSITIVE_PREFIXES = [
 
 /** 值形状强模式（默认开）：一眼可辨的密钥/凭据形态（包含式：值内任意位置出现即命中） */
 export interface ValuePattern { name: string; re: RegExp }
+/** `bearer` 的**逐位**大小写类：等价于给 scheme 加 `i`，又不污染 token 侧的大小写判定
+ *  （给整条正则加 `i` 会让 `(?=[…]*[A-Z])` 与 `[a-z]` 两个 lookahead 互相等价 → 判定失效）。 */
+const BEARER_SCHEME_ANY_CASE = '[Bb][Ee][Aa][Rr][Ee][Rr]';
+/** Bearer token 的字符集（与下面 `bearer-token` 那条**同一集合**，不扩大） */
+const BEARER_TOKEN_CHARS = '[A-Za-z0-9._~+/=-]';
+/**
+ * Bearer 形态的**大小写不敏感**补充（t72 / t58-F1）。RFC 7235 / 6750 规定 auth-scheme 名
+ * **大小写不敏感**，所以 `bearer` / `BEARER` / `BeArEr` 都是合法且真实的授权头写法，必须剥离。
+ *
+ * 判定边界（**防英文散文过剥**，这是本条的取舍核心）：token 需至少满足其一 ——
+ *   ① 含非字母字符（数字或 `. _ ~ + / = -`）；② **大小写混排**；③ 长度 ≥ 24。
+ * 于是 `bearer credentials are required` / `bearer authentication failed` / `BEARER HEADER NOT SET`
+ * 这类纯小写或纯大写的英文词**不命中**；而 `bearer abc12345`、`BEARER AbCdEfGh`、`bearer <24+ 字符>` 命中。
+ *
+ * 已知残余（登记在 `docs/spec/known-gaps.md` G-36）：scheme 用非规范大小写**且** token 是 8–23 个**纯字母、
+ * 单一大小写**时本条不命中；规范 `Bearer …` 形态不受此限（上面那条 `bearer-token` 只要求 8+ 字符，行为不变）。
+ */
+const BEARER_TOKEN_ANY_CASE = new RegExp(
+  BEARER_SCHEME_ANY_CASE +
+    '\\s+(?:' +
+    '(?=' + BEARER_TOKEN_CHARS + '*[0-9._~+/=-])' + BEARER_TOKEN_CHARS + '{8,}' + // ① 含非字母
+    '|(?=' + BEARER_TOKEN_CHARS + '*[A-Z])(?=' + BEARER_TOKEN_CHARS + '*[a-z])' + BEARER_TOKEN_CHARS + '{8,}' + // ② 大小写混排
+    '|' + BEARER_TOKEN_CHARS + '{24,}' + // ③ 超长（≥24；散文词几乎不可能）
+    ')',
+);
+
+/**
+ * 前缀型模式的**误剥边界**（t83）：修既有过剥 —— `task-management` / `risk-assessment` / `disk-space-report`
+ * 这类**正常内容**里的词会命中 `sk-` 模式（`sk-management` / `sk-assessment` / `sk-space-report`），而
+ * `src/utils/logger.ts` 日志脱敏、core 导出导入的字段值扫描、界面 `redact()` **三条通道共用本表** ⇒
+ * 误剥 = **静默改写用户内容**（实测 `redact('risk-assessment')` → `ri***REDACTED***`），属数据保真问题。
+ * 取证（误剥表 / 过剥侧 / redact 侧三段原始输出）：`outputs/bug-audit/fix-wordboundary/`。
+ *
+ * **为什么 `sk-` 用「载荷形状守卫」而不是左边界 `(?<![A-Za-z0-9])`**：左边界会连带漏剥 t18/t40-b 实测的
+ * **真实**形态 `'p'.repeat(10000) + 'sk-…'`（密钥紧贴长串之后）—— 漏剥 = 明文进包，代价高于词误剥。
+ * 载荷守卫两者兼得：`sk-` 后若是「1–24 个纯小写字母/连字符」= 英文词/标识符形态 → 放行；真实 `sk-` 密钥的
+ * 载荷必然含数字或大写（OpenAI 形态 `sk-` + 40+ 位 base62），且 ≥25 位纯小写载荷也仍然命中（见下）。
+ * 残余（如实登记）：`sk-` + ≤24 个纯小写字母/连字符（无数字、无大写）不再命中 —— 即「载荷形状像词」的边界。
+ *
+ * **逐个模式判断，不一刀切**（其余三条不加工，各有实测理由）：
+ *  - `aws-access-key`（`AKIA…`）/ `github-token`（`gh[pousr]_…`）/ `github-pat`（`github_pat_…`）：**不加边界**。
+ *    ① 自然语言/标识符里**不存在**这些字面前缀（词里不会出现 `AKIA`/`ghp_`/`github_pat_`），无词误剥可修；
+ *    ② 加左边界会与 `sk-` 同样削弱「长串内嵌」检出（t40-b/t40-c 的 `longPad` 形态对它们是同类风险）；
+ *    ③ 实测「前邻字母数字」的命中（`xAKIA0123456789ABCDEF`、`xghp_…`）只能由**人为拼接**造出，不是正常内容。
+ *  - `jwt`（`eyJ…`）：**不加**。它需要三段 base64 且以 `.` 分隔，普通词触发不了 ⇒ 加边界换不来收益，
+ *    反而会让「紧贴字母的真 JWT」漏检（如两段 JWT 相连）。
+ *  - `pem-private-key`：**不加**。形态是 `-----BEGIN … PRIVATE KEY-----`，普通词无法触发。
+ *  - `bearer-token` / `bearer-token-anycase`：**不加**。scheme 是自然语言词，过剥已由 t72 的 token 侧三道
+ *    guards 处理（`bearer credentials are required` 不命中）；且 t72 的验收要求规范形态 `Bearer …` 行为**逐字不变**。
+ *
+ * 保守性核对（不得削弱真检测）：`token=sk-…` / `"key":"sk-…"` / `apikey=sk-…` / `MY_sk-…` / `x-sk-…` /
+ * `'p'.repeat(10000) + 'sk-…'` / `sk-proj-…` / `sk-ant-api03-…` **全部仍命中**（见 `t83-b` / `t83-f`）。
+ */
 export const SECRET_VALUE_PATTERNS: readonly ValuePattern[] = [
-  { name: 'openai-style-key', re: /sk-[A-Za-z0-9_-]{8,}/ },
+  { name: 'openai-style-key', re: /sk-(?![a-z-]{1,24}(?![A-Za-z0-9_-]))[A-Za-z0-9_-]{8,}/ },
   { name: 'jwt', re: /eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/ },
   { name: 'aws-access-key', re: /AKIA[0-9A-Z]{16}/ },
   { name: 'github-token', re: /gh[pousr]_[A-Za-z0-9]{20,}/ },
   { name: 'github-pat', re: /github_pat_[A-Za-z0-9_]{20,}/ },
   { name: 'pem-private-key', re: /-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----/ },
+  // 规范形态 `Bearer …`（大小写敏感；行为与历史逐字一致）。**必须排在下面那条之前**：
+  // 命中顺序决定返回的模式名 ⇒ 规范形态恒回 'bearer-token'（既有断言与既有文案依赖它）。
   { name: 'bearer-token', re: /Bearer [A-Za-z0-9._~+/=-]{8,}/ },
+  { name: 'bearer-token-anycase', re: BEARER_TOKEN_ANY_CASE },
 ];
 
 /**

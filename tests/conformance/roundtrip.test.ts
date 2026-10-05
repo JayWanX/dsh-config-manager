@@ -37,6 +37,7 @@ import { decryptCredentials, createEncryptionProvider, SecurityError } from '../
 import { isTooNew, describeVersion } from '../../src/schema/versions.ts';
 import { runSchemaMigration } from '../../src/core/analyzer.ts';
 import { zhMsg } from '../../src/core/messages.ts';
+import { isFileSection } from '../../src/schema/section-registry.ts';
 import { rebuildBundle, listEntries, readEntryText } from './corpus.ts';
 import type { SectionId } from '../../src/schema/types.ts';
 
@@ -1036,3 +1037,170 @@ test('INT-04 非空校验表语义不变（H2 回归）：表内条目照旧逐�
     );
   });
 });
+
+/* ─────────────────────────── FC-05 ─────────────────────────── */
+
+/** 取 `signature` 起的方法体内部文本（先配平参数表圆括号、再按花括号配平）。
+ *
+ * 必须先跳过参数表：`async analyzeImport(… opts: { decryptedCredentials?: … } = {}, …)` 的参数里
+ * 就有 `{}` 类型字面量，直接找第一个 `{` 会拿到**参数类型**而不是方法体（本用例首次落地时就踩过）。 */
+function methodBody(src: string, signature: string): string | null {
+  const at = src.indexOf(signature);
+  if (at < 0) return null;
+  const parenOpen = src.indexOf('(', at);
+  if (parenOpen < 0) return null;
+  let pdepth = 0;
+  let cursor = parenOpen;
+  for (; cursor < src.length; cursor += 1) {
+    const ch = src[cursor];
+    if (ch === '(') pdepth += 1;
+    else if (ch === ')') {
+      pdepth -= 1;
+      if (pdepth === 0) break;
+    }
+  }
+  const open = src.indexOf('{', cursor);
+  if (open < 0) return null;
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === '{') depth += 1;
+    else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return src.slice(open + 1, i);
+    }
+  }
+  return null;
+}
+
+/** FC-05 的「后果接线」检查（规格 §3.3.1 写侧硬约束第 1 行的「后果」列）。
+ *
+ * 期望形状（`Analyzer.analyzeBundle` 内，顺序不可换）：
+ *   const v = await adapter.validate(data, this.msg);
+ *   if (issue.severity === 'error') adapterIssues.push(this.msg('import.adapterValidationIssue', …));
+ *   if (!v.valid) continue;                              ← 不调 analyzeImport ⇒ 该分区不产出计划项
+ *   const items = await adapter.analyzeImport(data, importCtx);
+ * 外加 `Analyzer.analyzeImport` 里 `const errors = [...analyzed.adapterIssues]`
+ * —— 记进 **errors**（不是 warnings、更不是静默）。
+ *
+ * B2 纪律：钉「接线顺序」而不是「符号存在」。函数返回违规清单，空数组 = 合规；
+ * 用例会把它套在 3 份**突变副本**上自证（突变必须被判违规），否则它只是装饰。 */
+function relativePathConsequenceViolations(src: string): string[] {
+  const out: string[] = [];
+  const body = methodBody(src, 'async analyzeBundle(');
+  if (body === null) {
+    return ['找不到 analyzeBundle 方法体（改名/移动即红灯）'];
+  }
+  const iValidate = body.indexOf('adapter.validate(data, this.msg)');
+  const iIssue = body.indexOf("adapterIssues.push(this.msg('import.adapterValidationIssue'");
+  const iGuard = body.indexOf('if (!v.valid) continue');
+  const iAnalyze = body.indexOf('adapter.analyzeImport(data, importCtx)');
+  if (iValidate < 0) out.push('analyzeBundle 不再调用 adapter.validate(data, this.msg)');
+  if (iIssue < 0) out.push('校验 error 不再记入 adapterIssues ⇒ 变成静默跳过');
+  if (iGuard < 0) out.push('缺少 `if (!v.valid) continue` ⇒ 校验失败的分区仍会进计划（不再被剔除）');
+  if (iAnalyze < 0) out.push('找不到 adapter.analyzeImport 调用点');
+  if (iValidate >= 0 && iIssue >= 0 && iIssue < iValidate) out.push('顺序错误：error 记录早于 validate 调用');
+  if (iIssue >= 0 && iGuard >= 0 && iGuard < iIssue) out.push('顺序错误：continue 早于 error 记录 ⇒ 错误被吞掉');
+  if (iGuard >= 0 && iAnalyze >= 0 && iAnalyze < iGuard) {
+    out.push('顺序错误：analyzeImport 早于 `if (!v.valid) continue` ⇒ 校验失败的分区仍进计划');
+  }
+  const importBody = methodBody(src, 'async analyzeImport(');
+  if (importBody === null) {
+    out.push('找不到 analyzeImport 方法体（改名/移动即红灯）');
+  } else {
+    if (!importBody.includes('const errors = [...analyzed.adapterIssues]')) {
+      out.push('analyzeImport 不再把 adapterIssues 并入 errors');
+    }
+    if (/warnings[\w]*\s*(?:=|\.[\w]*push\()\s*\[\.\.\.analyzed\.adapterIssues\]/.test(importBody)) {
+      out.push('adapterIssues 被混进 warnings（error 被降级成 warning）');
+    }
+  }
+  return out;
+}
+
+/** FC-05 守卫自证用的 3 份突变（都只动结果/顺序，不制造语法噪声）。 */
+function consequenceMutations(src: string): Array<[string, string]> {
+  const dropGuard = src.replace('        if (!v.valid) continue;', '');
+  const guardAfterAnalyze = src
+    .replace('        if (!v.valid) continue;', '')
+    .replace(
+      '        const items = await adapter.analyzeImport(data, importCtx);',
+      '        const items = await adapter.analyzeImport(data, importCtx);' + String.fromCharCode(10) + '        if (!v.valid) continue;',
+    );
+  const asWarning = src.replace(
+    '    const errors = [...analyzed.adapterIssues];',
+    '    const warningsFromAdapters = [...analyzed.adapterIssues];' + String.fromCharCode(10) + '    const errors: string[] = [];',
+  );
+  return [['删掉 if (!v.valid) continue', dropGuard], ['把 continue 移到 analyzeImport 之后', guardAfterAnalyze], ['把 adapterIssues 降级进 warnings', asWarning]];
+}
+
+test('FC-05 分区载荷 relativePath 必须非空（规格 §3.3.1 写侧硬约束）：记 fileRelativePath error 并剔除该分区，不静默跳过', async () => {
+  const EXPECT_MSG = zhMsg('adapter.validate.fileRelativePath');
+  assert.equal(EXPECT_MSG, '文件记录必须含非空 relativePath', '规格 §3.3.1 表格逐字给出的文案');
+
+  // ── ① 载荷层：真实 adapter 逐条判（规格「判据」列）──────────────────────────
+  const adapters = createAdapters({ includeSessions: true });
+  const fileSections = adapters.filter((a) => isFileSection(a.id)).map((a) => a.id).sort();
+  assert.deepEqual(
+    fileSections,
+    ['agentInstructions', 'agentPresets', 'pluginFiles', 'self', 'sessions', 'skills'],
+    '规格 §3.3.1 写侧硬约束表列的是这 6 个文件类分区；集合漂移必须回来同步规格与本断言',
+  );
+
+  const body = Buffer.from(SKILL_BODY, 'utf8');
+  const good = { relativePath: SKILL_REL, data: body, contentHash: sha256Hex(body) };
+  const badFiles: Array<[string, unknown[]]> = [
+    ['空串', [{ relativePath: '', data: body, contentHash: sha256Hex(body) }]],
+    ['非字符串', [{ relativePath: 123, data: body, contentHash: sha256Hex(body) }]],
+    ['缺 relativePath 键', [{ data: body, contentHash: sha256Hex(body) }]],
+  ];
+  for (const adapter of adapters) {
+    if (!isFileSection(adapter.id)) continue;
+    // 载荷是**故意非法**的（空串 / 非字符串 / 缺键 / 非数组），类型层面绕开 FilesSection 的字段约束。
+    // 两个坑都踩过：① 给入参打 `as never` 会触发 TS7022 的隐式 any 循环；
+    // ② 把方法抽成变量会丢 `this`（adapter.validate 里读 this.id）——用 .call 保绑定。
+    const validate = adapter.validate as unknown as (
+      this: unknown,
+      data: unknown,
+      msg: typeof zhMsg,
+    ) => Promise<{ valid: boolean; issues: Array<{ severity: string; message: string }> }>;
+    for (const [label, files] of badFiles) {
+      const v = await validate.call(adapter, { version: 1, files }, zhMsg);
+      assert.equal(v.valid, false, `${adapter.id} / ${label}：载荷层必须判为无效`);
+      const matching: number = v.issues.filter((it) => it.severity === 'error' && it.message === EXPECT_MSG).length;
+      assert.equal(
+        matching,
+        1,
+        `${adapter.id} / ${label}：必须恰好 1 条 fileRelativePath error，实际 issues=${JSON.stringify(v.issues)}`,
+      );
+    }
+    // 规格 §3.3.1 表格同一行的前半句：`files` 本身必须是数组（判据与相对路径那条不同、文案也不同）
+    const notArray = await validate.call(adapter, { version: 1, files: 'not-an-array' }, zhMsg);
+    assert.equal(notArray.valid, false, `${adapter.id}：files 非数组必须判为无效`);
+    assert.ok(
+      notArray.issues.some((it) => it.severity === 'error' && it.message === zhMsg('adapter.validate.array', { subject: 'files' })),
+      `${adapter.id}：files 非数组必须给 array 类 error，实际 ${JSON.stringify(notArray.issues)}`,
+    );
+    const okv = await adapter.validate({ version: 1, files: [good] }, zhMsg); // 正向对照：类型本来就是合法的，无需 cast
+    assert.equal(okv.valid, true, `${adapter.id}：正向对照（非空 relativePath）必须通过——不得一律拒绝`);
+    assert.deepEqual(okv.issues, [], `${adapter.id}：正向对照不得产生任何 issue`);
+  }
+
+  // ── ② 后果接线：源码守卫 + 变异自证（规格「后果」列）──────────────────────
+  const analyzerPath = fileURLToPath(new URL('../../src/core/analyzer.ts', import.meta.url));
+  const analyzerSrc = await fs.readFile(analyzerPath, 'utf8');
+  assert.deepEqual(
+    relativePathConsequenceViolations(analyzerSrc),
+    [],
+    '规格后果列要求：校验失败 ⇒ 该分区被剔除（不产计划项）+ 记一条 error（不是静默跳过）',
+  );
+  for (const [label, mutated] of consequenceMutations(analyzerSrc)) {
+    assert.notEqual(mutated, analyzerSrc, `突变「${label}」没有匹配到源码 —— 自证脚本已失效，请同步锚点`);
+    assert.notDeepEqual(
+      relativePathConsequenceViolations(mutated),
+      [],
+      `守卫自证失败：突变「${label}」没有被判违规 ⇒ 这个守卫是恒真的装饰`,
+    );
+  }
+});
+

@@ -443,6 +443,7 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
           syncApi={syncApi}
           historyApi={historyApi}
           t={t}
+          syncT={syncT}
           openActivity={() => { openTask('history') }}
           // 直达来源选择：开导入面板 + 把面板切到「从其它 agent 导入」那一步
           openForeignImport={() => {

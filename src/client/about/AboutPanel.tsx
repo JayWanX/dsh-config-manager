@@ -230,7 +230,7 @@ export function AboutPanel({ api, t }: AboutPanelProps) {
           {ABOUT_CLI.commands.map((c) => (
             <li key={c.command}>
               <code className={css.cliName}>{c.command}</code>
-              {' — '}{c.description}
+              {' — '}{t(c.descriptionKey)}
             </li>
           ))}
         </ul>

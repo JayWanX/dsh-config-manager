@@ -300,7 +300,7 @@ export function RestorePlanView({ api, t, snapshotId, plan, changeSummary }: Res
                       {safeTarget !== null && (
                         <div className={css.restorePlanNote}>
                           {safeDescription}
-                          {row.detail !== undefined && <span className={css.hint}>（{redact(row.detail)}）</span>}
+                          {row.detail !== undefined && <span className={css.hint}>{t('common.parens', { text: redact(row.detail) })}</span>}
                         </div>
                       )}
                       <Collapse open={open}>{state !== undefined && <DiffPane state={state} t={t} />}</Collapse>

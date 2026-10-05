@@ -303,6 +303,35 @@ export interface RecoveryStatus {
    * 旧宿主不返回 → undefined（面板按「未阻断」处理，不误报保护）。
    */
   safeMode?: RecoverySafeModeStatus;
+  /**
+   * 中断的档案复制残留（cross-F3 / t54）：目标目录带 `.dcm-copy-in-progress.json` 标记、
+   * 却没有 package.json 的半截副本。它们既不在档案列表里、删除又报 notFound ——
+   * 用户此前在「事故恢复」里既看不到、也没有任何处置入口。
+   * 旧宿主不返回 → undefined（按「无残留」处理，不误报）。
+   */
+  incompleteCopies?: RecoveryIncompleteCopy[];
+  /**
+   * t89：残留**枚举失败**（读 profiles 目录失败）时为 true —— 与「确实没有残留」
+   * （字段缺省）区分开：此前两者在响应里完全同形（都是 `incompleteCopies: []`），
+   * 界面便把「读不到」渲染成「暂无残留」。
+   * 旧宿主不返回 → undefined（按「读到了」处理，绝不误报失败）。
+   */
+  incompleteCopiesUnreadable?: boolean;
+}
+
+/**
+ * 中断的档案复制残留（cross-F3 / t54）：**只允许删除**。
+ * 形态恒为 generic ⇒ 不可启动（没有 package.json，spawn 出去只会得到一个起不来的实例）。
+ */
+export interface RecoveryIncompleteCopy {
+  /** 目标档案名（= 目录名） */
+  name: string;
+  /** 目标目录绝对路径（界面渲染前过 `redact()`） */
+  dir: string;
+  /** 来源档案名（标记不可解析时为 null —— 界面不臆造） */
+  sourceName: string | null;
+  /** 复制开始时刻（ISO；标记不可解析时为 null） */
+  startedAt: string | null;
 }
 
 /** SAFE MODE 阻断态摘要（只暴露结论与是否可解除）。 */

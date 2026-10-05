@@ -28,6 +28,35 @@ export async function resolveNamespaces(
   return typeof namespaces === 'function' ? namespaces(ctx) : namespaces;
 }
 
+/**
+ * 一次读回全部 namespace 的 redacted 记录（仅当宿主实现了 `SettingsFacade.describeAll`）。
+ *
+ * 为什么需要：真实 DSH 的 `SettingsProvider.describe()` 是「无参 = 全量」的 —— 每次调用都对
+ * 全部注册项重跑 `schema.toJSON()` + 多次 `structuredClone` + `redactSecrets`，所以「按名单
+ * 逐个 describe」实际是 O(N²)：真机 24 个 namespace 实测 ≈1.7 s，而一次全量只需 ≈70 ms。
+ * 宿主未实现 describeAll（或调用抛错）时返回 `null`，调用方退回逐名 describe —— 与改造前逐字一致。
+ */
+export async function readNamespaceMap(ctx: HostContext): Promise<Map<string, NamespaceInfo> | null> {
+  const describeAll = ctx.settings.describeAll;
+  if (typeof describeAll !== 'function') return null;
+  try {
+    const all = await describeAll.call(ctx.settings, { redactSecrets: true });
+    return new Map(all.map((d) => [d.ns, d.info]));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 从全量 Map 取单个 namespace；缺失时抛出与逐名 `describe()` **逐字相同**的错误
+ * （`namespace not found: <name>`），保证快慢两条路径的告警文案与条目一致。
+ */
+export function namespaceFromMap(all: Map<string, NamespaceInfo>, name: string): NamespaceInfo {
+  const info = all.get(name);
+  if (info === undefined) throw new Error(`namespace not found: ${name}`);
+  return info;
+}
+
 /** 批量读取 namespace 的 redacted 记录（settings/ui 共用；单项失败跳过并告警） */
 export async function collectNamespaceRecords(
   ctx: HostContext,
@@ -35,9 +64,11 @@ export async function collectNamespaceRecords(
   warnings: string[],
 ): Promise<Record<string, NamespaceRecord>> {
   const namespaces: Record<string, NamespaceRecord> = {};
+  // 快路径：宿主能一次读回全部 namespace 时只读一趟；否则逐名读（见 readNamespaceMap）
+  const all = names.length > 0 ? await readNamespaceMap(ctx) : null;
   for (const name of names) {
     try {
-      const info = await ctx.settings.describe(name, { redactSecrets: true });
+      const info = all !== null ? namespaceFromMap(all, name) : await ctx.settings.describe(name, { redactSecrets: true });
       namespaces[name] = {
         value: info.value,
         base: info.base,

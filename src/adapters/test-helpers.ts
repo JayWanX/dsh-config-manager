@@ -21,6 +21,8 @@ export class MemFs implements FileSystemFacade {
   ensureDir?: FileSystemFacade['ensureDir'];
   /** 可选（issue #45）：绝对路径 realpath。测试按需注入；缺省维持「宿主不支持」的旧行为。 */
   realpathDir?: FileSystemFacade['realpathDir'];
+  /** 可选（只读预览）：目录体积上界。测试按需注入；缺省维持「宿主不支持」的旧行为（`link:` 体积按 0）。 */
+  dirSizeBytes?: FileSystemFacade['dirSizeBytes'];
   private readonly homeDir: string;
   constructor(homeDir: string) {
     this.homeDir = homeDir;
@@ -100,6 +102,11 @@ class AutoRegisterMap extends Map<string, { value: unknown; base?: unknown; revi
 export class MemSettings implements SettingsFacade {
   /** 已注册命名空间（对齐真实 dsh-settings：插件激活时注册；未注册的 describe/replace 抛错） */
   registered = new Set<string>();
+  /**
+   * 可选（宿主能力探测）：**默认不提供** ⇒ 既有测试继续覆盖「逐名 describe」回退路径；
+   * 需要验证快路径的测试自行挂上（真实宿主 DshSettingsFacade 始终提供）。
+   */
+  describeAll?: SettingsFacade['describeAll'];
   /** 有值的命名空间自动视为已注册 */
   ns = new AutoRegisterMap(this.registered);
   async describe(namespace: string, _opts?: { redactSecrets?: boolean }): Promise<NamespaceInfo> {

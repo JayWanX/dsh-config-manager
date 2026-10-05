@@ -88,3 +88,30 @@ test('credentials: validate 拒绝 hasValue=true（安全不变量）', async ()
   const bad = await adapter.validate({ version: 1, credentials: [{ ref: 'X', required: true, configured: true, hasValue: true } as never] });
   assert.equal(bad.valid, false);
 });
+test('credentials: 宿主实现 describeAll 时只读一趟，ref 集合与逐名路径一致', async () => {
+  const ctx = makeContext('win32', 'C:\\Users\\alice');
+  ctx.settings.ns.set('llm-deepseek', { value: { apiKeyEnv: 'DEEPSEEK_API_KEY' }, revision: 1, secrets: [] });
+  ctx.settings.ns.set('llm-pi-ai', {
+    value: { providers: { openai: { apiKeyEnv: 'OPENAI_API_KEY' } } },
+    revision: 1,
+    secrets: [],
+  });
+  // 'llm-missing' 不在 registered 里：两条路径都必须跳过它（而不是抛错中断整轮收集）
+  const NS3 = ['llm-deepseek', 'llm-pi-ai', 'llm-missing'];
+  const slowRefs = await defaultCredentialRefs(NS3)(ctx);
+
+  let calls = 0;
+  const base = ctx.settings;
+  ctx.settings.describeAll = async (opts?: { redactSecrets?: boolean }) => {
+    calls += 1;
+    const out: { ns: string; info: Awaited<ReturnType<typeof base.describe>> }[] = [];
+    for (const ns of base.registered) out.push({ ns, info: await base.describe(ns, opts) });
+    return out;
+  };
+  const fastRefs = await defaultCredentialRefs(NS3)(ctx);
+
+  assert.equal(calls, 1, 'N 个 namespace 只允许一次全量读取（真机 24 个逐个 describe ≈1.7 s）');
+  assert.deepEqual(fastRefs, slowRefs);
+  assert.deepEqual(fastRefs.sort(), ['DEEPSEEK_API_KEY', 'OPENAI_API_KEY']);
+});
+

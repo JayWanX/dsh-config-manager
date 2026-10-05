@@ -279,8 +279,11 @@ import { rebuildBundle } from './tests/conformance/corpus.ts';
 - **`prompts` 的 `systemPrompt` 形态**：源 namespace/patch 行里是字符串
   `systemPrompt: "…"`，导入落盘形态为对象 `{ persona: "…" }`。persona **文本**无损，
   但字段**形状**改变。`RT-01` 已注明。
-- **已知分区内的未知字段**：不写回目标（导入不是 round-trip 复制，而是把已知语义
-  落到目标）。因此**不要**声称「未知字段会被保留到目标」。
+- **已知分区内的未知字段**：**分区相关**，不要一句话概括。导入不是 round-trip 复制，而是把
+  已知语义落到目标：`settings` / `ui` / `mcp` / `prompts` / `credentialsStatus` 的未知字段
+  **不写回**；`workspaces[]` 记录、`plugins.patch[].raw`、`providers.raw` 会随「整体搬运」落到
+  目标（规格 §7.3 实测结论）。因此既**不要**声称「未知字段会被保留到目标」，也**不要**声称
+  「一律被丢弃」。
 
 ---
 

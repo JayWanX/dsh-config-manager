@@ -543,6 +543,8 @@ win32 | darwin | linux | freebsd | openbsd | aix | sunos | android | cygwin | ha
 
 `SECTION_FILE_PREFIXES` 全部以 `/` 结尾：`custom/skills/`、`agents/presets/`、`custom/agent-instructions/`、`plugin-files/`、`sessions/`、`self/`（`src/schema/section-registry.ts` 的 `SECTION_REGISTRY`（各文件类条目的 `payload.filePrefix`））。
 
+> **`skills` 的第二种来源（issue #71 起）**：技能不一定落在 `$DSH_HOME/skills` 目录里——外壳的技能来自宿主技能服务（`@deepseek-ai/dsh-skill` 注册表，服务名 `skills`），本机实例即 `$DSH_HOME/skills` 目录**不存在**而技能来自 profile 的 bundle 插件。导出侧因此把服务里的技能**虚拟**成 `<name>/SKILL.md`，同样按 `custom/skills/<name>/SKILL.md` 落归档（`relativePath = <name>/SKILL.md`，即上面这条裁剪规则的结果）；**同名相对路径以磁盘原文优先**（服务只补磁盘没有的）。第三方 importer 不需要知道来源：ZIP 里就是普通文件条目，照 §3.3.1 B 的规则还原即可。
+
 > **注意 `pluginFiles` 与 `self` 的 baseDir 不一致**：`pluginFiles` 的 `relativePath` 是**相对 home 根**（`baseDir = ''`），而 `self` 的 `relativePath` 是**相对 `dsh-config-manager`**（`baseDir = 'dsh-config-manager'`）。同一个「看起来像完整相对路径」的字符串在这两个分区里含义不同——这是第三方最容易搞错的一处（`src/core/backup.ts` 的 `FILE_BASES` 是权威表）。
 
 ##### B. 读侧如何还原 `relativePath` 与目标路径
@@ -656,13 +658,15 @@ THROW 备份 schema v2（高于当前 1，需升级插件），无法导入（�
 | `plugins.plugins[]` | `name`/`version`/`isBundle`/`inBundles`/`enabled` | 必需 | 插件清单 | `src/schema/types.ts` 的 `interface PluginEntry`（`name` / `version` / `isBundle` / `inBundles` / `enabled`） |
 | | `spec` | 可选 | 声明依赖 spec（`^0.3.6`、`github:user/repo`、`file:` 等） | `src/schema/types.ts` 的 `PluginEntry.spec` |
 | | `fiberPhase` | 可选 | 运行时相位标记 | `src/schema/types.ts` 的 `PluginEntry.fiberPhase` |
-| `plugins.patch[]` | `file`/`lineId`/`raw` | 必需 | patch 行；**`raw` 原样写回目标**（未知子字段在此被保留） | `src/schema/types.ts` 的 `interface PatchLine`、`src/adapters/plugins.ts` |
+| `plugins.patch[]` | `file`/`lineId`/`raw` | 必需 | patch 行；**`raw` 原样写回目标**（未知子字段在此被保留）。`file` = 该行所在 patch **层**，取值 = **相对 `$DSH_HOME` 的 POSIX 路径**（`cordis.patch.yml` = 用户层，`profiles/<name>/cordis.patch.yml` = 档案层），与 `mcp`/`prompts` 的 `sourceFile` 同口径；导入侧写回**同语义层**（档案层 → 目标机当前档案），无法识别或缺失的值按用户层处理 | `src/schema/types.ts` 的 `interface PatchLine`、`src/adapters/plugins.ts:185-186`（导出两层）、`src/adapters/plugins.ts:508`（计划项带层）、`src/adapters/plugins.ts:661-664`（写回原层） |
 | `plugins.pnpmWorkspace` | `string \| null` | 可选 | `pnpm-workspace.yaml` 原文 | `src/schema/types.ts` 的 `PluginsSection.pnpmWorkspace` |
 | `plugins.localTarballs` | `LocalPluginTarball[]` | 可选 | 本地源插件 tarball（base64）。**市场通道两端拒绝**；仅本地备份合法 | `src/schema/types.ts:131-157`、`src/market/security.ts` |
 | `plugins.patchFiles` | `{relativePath: string, base64: string}[]` | 可选 | `pnpmWorkspace.patchedDependencies` 引用的 `patches/**` 文件，`relativePath` 相对 **profile 目录**。**市场通道两端拒绝**；仅本地备份合法 | `src/schema/types.ts:158-171`、`src/market/security.ts`、`src/market/prepare.ts` |
 | `mcp.servers[]` | `serverName`/`type` | 必需 | `type ∈ {stdio, streamable-http}` | `src/schema/types.ts` 的 `McpServerEntry.serverName` / `.type` |
-| | `command`/`args`/`env`/`cwd`（stdio）或 `url`/`headers`（http） | 可选 | 写回时按白名单重建 patch 行 → **条目内未知字段会丢失** | `src/adapters/mcp.ts:69-81` |
+| | `command`/`args`/`env`/`cwd`（stdio）或 `url`/`headers`（http） | 可选 | 写回时按白名单重建 patch 行 → **条目内未知字段会丢失** | `src/adapters/mcp.ts:86-98`（`buildMcpPatchLine`）、`src/adapters/mcp.ts:172-190`（`applyItem`） |
+| | `sourceLineId` / `sourceFile` | 可选 | **导出侧附加的来源定位**：`sourceLineId` = 来源 patch 行的 `lineId`（`sourceFile` 缺省时也用于判定目标行是否已被占用）；`sourceFile` = 来源 patch **层**，取值 = **相对 `$DSH_HOME` 的 POSIX 路径**（`cordis.patch.yml` = 用户层，`profiles/<name>/cordis.patch.yml` = 档案层）。导入侧按它把行写回**同语义层**（来源是档案层 → 落到**目标机当前档案**，不照抄 profile 名）。**旧包没有 `sourceFile` = 按用户层处理**（改造前行为，不猜）。两者都不进 patch 行本身，也不影响 `validateSectionData` | `src/adapters/mcp.ts:27-34`（`McpExportEntry.sourceFile`）、`src/adapters/mcp.ts:43-68`（`extractMcpServers` 记录来源层）、`src/adapters/mcp.ts:150` / `:164`（计划项带层） |
 | `prompts.prompts[]` | `id`/`name`/`kind`/`text` | 必需 | `kind ∈ {systemPrompt, planMode}` | `src/schema/types.ts` 的 `interface PromptEntry` |
+| | `sourceLineId` / `sourceLineName` / `sourceFile` | 可选 | 与 `mcp` 同口径的来源定位（`sourceLineName` = 来源 patch 行的 `name`，Create 重建行时用作行名；`sourceFile` 语义与缺省行为**同上**） | `src/adapters/prompts.ts:27-34`、`src/adapters/prompts.ts:215`（Create 写回层）、`src/adapters/prompts.ts:223-228`（Update 定位原行所在层） |
 | `workspaces.workspaces[]` | `id`/`path`/`sessionIds` | 必需 | `path` 是**绝对路径**，跨设备必须路径映射。`sessionIds` 是**会话可见性的唯一凭据**（目标机上 `workspace.path` 必须等于会话首帧 cwd 的 realpath，且 id 在其中）：导出侧必须把**本次包里真的带走的会话**声明进来（`declareBundledSessionsInWorkspaces`；DSH 自己的 `sessionIds` 覆盖率极低，原样搬过去会让目标机看不见这些对话）。id 写法 = 会话日志首帧 header 的 `id`（`session-<uuid>` 与裸 `<uuid>` 两种形态并存）；消费方按某个形态匹配不上时，应换另一种形态再试一次 | `src/schema/types.ts` 的 `interface WorkspaceRecord`（`id` / `path` / `sessionIds`）、`src/core/session-select.ts` |
 | `credentialsStatus.credentials[]` | `ref`/`required`/`configured`/`hasValue` | 必需 | **永不含值**；普通备份 `hasValue` 恒 `false` | `src/schema/types.ts` 的 `interface CredentialStatus` |
 
@@ -1095,11 +1099,11 @@ unsupportedSections= ["keybindings"]                                        ← 
 |---|---|---|---|
 | `settings` / `ui` | ❌ 否（分区级与 namespace 级未知字段均丢失） | `applyNamespaceItem` 只取 `data.namespaces[ref].value` 并整体替换目标 namespace | `src/adapters/settings.ts:107-126` |
 | `providers` | ⚠️ **分区级 / route 条目级 = 否；`raw` 内部 = 是** | 写回值是 `entry.raw ?? stripEntry(entry)`，`raw` 是**整个 namespace 值的深拷贝**，因此 `raw` 内部的未知字段随 namespace 一起落到目标；而 `stripEntry` 只取 8 个已知字段，故**无 `raw` 时**未知字段丢失 | `src/adapters/providers.ts:34-40`（`stripEntry` 白名单）、`src/adapters/providers.ts:131-145`（`const value = entry.raw ?? stripEntry(entry)`） |
-| `mcp` | ❌ 否（且**连条目自身的 `type` 字段都不写回**） | 写回时由白名单字段**重建** patch 行（`buildMcpPatchLine`），只输出 `serverName` + 按 `type` 分支的 `url/headers` 或 `command/args/env/cwd`；`type` 本身不进 patch 行 | `src/adapters/mcp.ts:68-81`、`src/adapters/mcp.ts:159-162` |
-| `prompts` | ❌ 否 | 写回走两条路径，都重建：Create → `buildPromptLine`（只写 `id/name/config.systemPrompt.persona` 或 `config.planMode.sections`）；Update → `mergePromptIntoLine`（只改 `persona` / `sections[].text`，其余取自**目标行**） | `src/adapters/prompts.ts:100-107`、`src/adapters/prompts.ts:79-98`、`src/adapters/prompts.ts:184-208` |
+| `mcp` | ❌ 否（且**连条目自身的 `type` 字段都不写回**） | 写回时由白名单字段**重建** patch 行（`buildMcpPatchLine`），只输出 `serverName` + 按 `type` 分支的 `url/headers` 或 `command/args/env/cwd`；`type` 本身不进 patch 行 | `src/adapters/mcp.ts:86-98`（`buildMcpPatchLine`）、`src/adapters/mcp.ts:172-190`（`applyItem`） |
+| `prompts` | ❌ 否 | 写回走两条路径，都重建：Create → `buildPromptLine`（只写 `id/name/config.systemPrompt.persona` 或 `config.planMode.sections`）；Update → `mergePromptIntoLine`（只改 `persona` / `sections[].text`，其余取自**目标行**） | `src/adapters/prompts.ts:114-120`（`buildPromptLine`）、`src/adapters/prompts.ts:92-111`（`mergePromptIntoLine`）、`src/adapters/prompts.ts:202-232`（`applyItem`） |
 | `workspaces` | ✅ **是**（条目级未知字段原样落到目标记录） | `applyItem` 直接把 `data.workspaces.find(...)` 的**整个记录对象**交给 `ctx.target.workspace.writeRecord(rec)`，无字段过滤 | `src/adapters/workspaces.ts:67-77` |
 | `credentialsStatus` | ❌ 否（**该分区根本不写条目字段**） | `analyzeImport` 恒返回 `[]`；`applyItem` 只做 `credentials.set(ref, value)`，`value` 来自 `secretInputs` / `decryptedCredentials`，**从不读分区载荷里的条目字段** | `src/adapters/credentials.ts:105-118`、`src/core/analyzer.ts` 的 `executeImportPlan`（凭据写入路径；`ensureMissingSecrets` 只读 `ref` 与 `configured`） |
-| `plugins.patch[].raw` | ✅ **是**（原样写回） | `applyPatchChanges(pl.file, [{ lineId: ref, raw: pl.raw, action }])`，不做字段过滤 | `src/adapters/plugins.ts` |
+| `plugins.patch[].raw` | ✅ **是**（原样写回） | `applyPatchChanges(resolveWriteLayer(pl.file, ctx.target.profile), [{ lineId: ref, raw: pl.raw, action }])`，不做字段过滤 | `src/adapters/plugins.ts:661-664` |
 | 文件类 6 个（`skills` / `agentPresets` / `agentInstructions` / `pluginFiles` / `sessions` / `self`） | ⛔ **不适用**（无 JSON 载荷可注入） | ZIP 内没有这些分区的 JSON 文件；导入侧按前缀扫描真实条目**就地重建** `{version:1, files}`，任何「注入到 JSON 里的未知字段」根本没有承载位置 | `src/schema/section-registry.ts` 的 `SECTION_REGISTRY`（各文件类条目的 `payload.filePrefix`）、`src/core/analyzer.ts` 的 `extractSections`（文件类分区就地重建 `{version: 1, files}`）、`src/core/exporter.ts` |
 
 **§7.3 实测命令与输出（S-3，可复现）**

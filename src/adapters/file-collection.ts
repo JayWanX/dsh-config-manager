@@ -294,8 +294,12 @@ export abstract class FileCollectionAdapter implements ConfigAdapter<FilesSectio
    * - `size`：优先 `ctx.fs.statSize`（只 stat，不读内容）；门面未实现或返回 null（文件消失 /
    *   读不到）时**退回 readFile** —— 与改造前把「读不到」暴露成同一个错误，绝不把未知体积
    *   当成 0（0 会让字节闸门少算，把本该剔除的单元放进预览，预览与导出就分叉了）。
+   *
+   * 受保护而非私有（issue #71）：`SkillsAdapter` 的成员有一部分**不在磁盘上**
+   * （来自 `ctx.skills` 技能服务的技能被重建成 `<name>/SKILL.md` 虚拟路径），
+   * 需要在这里按路径分流 —— 覆写后基类的单元分组 / 字节闸门 / 告警 / 预览-导出一致性全部照旧。
    */
-  private async readMember(
+  protected async readMember(
     ctx: HostContext,
     rel: string,
     mode: 'content' | 'size',

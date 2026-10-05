@@ -89,6 +89,49 @@ test('mcp: export 提取 + analyzeImport Create/Skip/Conflict + applyItem 写 pa
   assert.deepEqual((raw['config'] as Record<string, unknown>)['args'], ['-y', 'x'], 'Conflict useImported 应更新目标行');
 });
 
+test('issue #71: profile 层 MCP 行也要导出，且写回**原层**（不再凭空消失 / 不搬家）', async () => {
+  const src = makeContext('win32', 'C:\\Users\\alice', 'tauri');
+  // 真机形态：MCP server 由手写/工具写进 profile 层（home 层只有别的行）
+  src.patchFile.bucket('profiles/tauri/cordis.patch.yml').set('mcp-codegraph', {
+    lineId: 'mcp-codegraph',
+    raw: { id: 'mcp-codegraph', name: 'dsh-mcp-client', config: { serverName: 'codegraph', command: 'codegraph', args: ['serve', '--mcp'] } },
+  });
+  const adapter = new McpAdapter();
+  const exported = await adapter.export(src, { includeSecrets: false });
+  assert.equal(exported.data.servers.length, 1, 'profile 层的 server 必须在备份里（此前只读 home 层 → 恒为空）');
+  const server = exported.data.servers[0];
+  assert.equal(server?.serverName, 'codegraph');
+  assert.equal(server?.sourceFile, 'profiles/tauri/cordis.patch.yml', '必须记住来源层，写回才能落回原层');
+  const sections = new Map([['mcp', exported.data]]);
+
+  // 目标机：同一 profile，patch 两层都空 → Create
+  const dst = makeContext('linux', '/home/bob', 'tauri');
+  const items = await adapter.analyzeImport(exported.data, makeImportContext(dst, sections));
+  assert.equal(items[0]?.kind, 'Create');
+  const r = await adapter.applyItem(items[0]!, makeImportContext(dst, sections));
+  assert.equal(r.ok, true);
+  assert.equal(r.needsRestart, true);
+  assert.equal(dst.patchFile.bucket('profiles/tauri/cordis.patch.yml').has('mcp-codegraph'), true, '新行必须落 profile 层（来源层）');
+  assert.equal(dst.patchFile.lines.size, 0, '不得把 profile 层的 server 搬到 home 层（同一 lineId 两层各一份会让合并语义不可预期）');
+});
+
+test('issue #71: 同名行两层都有 → 只导出优先级更高的一层（home 覆盖 profile）', async () => {
+  const src = makeContext('win32', 'C:\\Users\\alice', 'tauri');
+  const profileRel = 'profiles/tauri/cordis.patch.yml';
+  src.patchFile.lines.set('mcp-fs', {
+    lineId: 'mcp-fs',
+    raw: { id: 'mcp-fs', name: 'dsh-mcp-client', config: { serverName: 'filesystem', command: 'npx', args: ['-y', 'home'] } },
+  });
+  src.patchFile.bucket(profileRel).set('mcp-fs', {
+    lineId: 'mcp-fs',
+    raw: { id: 'mcp-fs', name: 'dsh-mcp-client', config: { serverName: 'filesystem', command: 'npx', args: ['-y', 'profile'] } },
+  });
+  const exported = await new McpAdapter().export(src, { includeSecrets: false });
+  assert.equal(exported.data.servers.length, 1);
+  assert.deepEqual(exported.data.servers[0]?.args, ['-y', 'home'], '生效值是 home 层（DSH 合并序里 home 层在后）');
+  assert.equal(exported.data.servers[0]?.sourceFile, 'cordis.patch.yml');
+});
+
 test('mcp: validate 拒绝无 serverName 的条目', async () => {
   const adapter = new McpAdapter();
   const bad = await adapter.validate({ version: 1, servers: [{ serverName: '' } as never] });

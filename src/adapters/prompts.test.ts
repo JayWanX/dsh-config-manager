@@ -101,6 +101,55 @@ test('prompts: 同行同内容 Skip / 不同 Conflict(update) / 目标无 → Wa
   assert.equal(w.ok, true, 'Warning 项 applyItem 无副作用');
 });
 
+test('issue #71: profile 层 prompt 行也要导出（含 sourceFile），Create 落目标机当前 profile 层', async () => {
+  const PROFILE_REL = 'profiles/tauri/cordis.patch.yml';
+  const src = makeContext('win32', 'C:\\Users\\alice', 'tauri');
+  src.patchFile.bucket(PROFILE_REL).set('persona-line', LINES[0]!);
+  const adapter = new PromptsAdapter();
+  const exported = await adapter.export(src, { includeSecrets: false });
+  assert.equal(exported.data.prompts.length, 1, 'profile 层的 persona 必须在备份里（此前只读 home 层 → 恒为空）');
+  assert.equal(exported.data.prompts[0]?.sourceFile, PROFILE_REL, '必须记住来源层');
+  const sections = new Map([['prompts', exported.data]]);
+
+  // 目标机 profile 名不同（tauri → web）：Create 必须落**目标机自己的** profile 层
+  const dst = makeContext('linux', '/home/bob', 'web');
+  const items = await adapter.analyzeImport(exported.data, makeImportContext(dst, sections));
+  assert.equal(items[0]?.kind, 'Create');
+  const r = await adapter.applyItem(items[0]!, makeImportContext(dst, sections));
+  assert.equal(r.ok, true);
+  assert.equal(dst.patchFile.bucket('profiles/web/cordis.patch.yml').has('persona-line'), true, '落目标机当前 profile 层');
+  assert.equal(dst.patchFile.lines.size, 0, '不得搬到 home 层');
+
+  // Update：目标机该行在 profile 层 → 合并回 profile 层（不搬家、不新建）
+  const dst2 = makeContext('linux', '/home/bob', 'web');
+  dst2.patchFile.bucket('profiles/web/cordis.patch.yml').set('persona-line', {
+    lineId: 'persona-line',
+    raw: { id: 'persona-line', name: '@deepseek-ai/dsh-web', config: { systemPrompt: { persona: 'Old persona.' } } },
+  });
+  const items2 = await adapter.analyzeImport(exported.data, makeImportContext(dst2, sections));
+  assert.equal(items2[0]?.kind, 'Conflict');
+  const r2 = await adapter.applyItem({ ...items2[0]!, kind: 'Update' }, makeImportContext(dst2, sections));
+  assert.equal(r2.ok, true);
+  const merged = dst2.patchFile.bucket('profiles/web/cordis.patch.yml').get('persona-line')?.raw as Record<string, unknown>;
+  const sp = (merged['config'] as Record<string, unknown>)['systemPrompt'] as Record<string, unknown>;
+  assert.equal(sp['persona'], 'You are a helpful coding assistant.');
+  assert.equal(dst2.patchFile.lines.size, 0, 'Update 同样不得在 home 层留下副本');
+});
+
+test('issue #71: 同名行两层都有 → 只导出优先级更高的一层（home 覆盖 profile）', async () => {
+  const src = makeContext('win32', 'C:\\Users\\alice', 'tauri');
+  const profileRel = 'profiles/tauri/cordis.patch.yml';
+  src.patchFile.lines.set('plan-line', LINES[1]!);
+  src.patchFile.bucket(profileRel).set('plan-line', {
+    lineId: 'plan-line',
+    raw: { id: 'plan-line', name: 'plan-mode', config: { planMode: { sections: [{ name: 'plan', order: 1, text: 'Profile version.' }] } } },
+  });
+  const exported = await new PromptsAdapter().export(src, { includeSecrets: false });
+  assert.equal(exported.data.prompts.length, 1);
+  assert.equal(exported.data.prompts[0]?.text, 'Plan first, then code.', '生效值是 home 层');
+  assert.equal(exported.data.prompts[0]?.sourceFile, 'cordis.patch.yml');
+});
+
 test('prompts: validate', async () => {
   const adapter = new PromptsAdapter();
   const ok = await adapter.validate({ version: 1, prompts: [{ id: 'a', name: 'n', kind: 'systemPrompt', text: 't' }] });

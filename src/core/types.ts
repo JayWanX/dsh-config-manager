@@ -327,6 +327,43 @@ export interface PatchFileFacade {
   applyPatchChanges(file: string, changes: PatchChange[]): Promise<void>;
 }
 
+/**
+ * 技能摘要（`ctx.skills.list()` 的返回项；DSH `SkillSummary` 的结构子集）。
+ *
+ * 为什么只声明用得到的字段：core / adapters 不允许 import `@deepseek-ai/*`（架构边界测试），
+ * 宿主的实现在 `src/index.ts` 里做结构适配；这里只钉住备份真正需要的字段。
+ */
+export interface SkillSummaryView {
+  name: string;
+  description: string;
+  whenToUse?: string;
+  invocation?: { modelInvocable?: boolean; userInvocable?: boolean };
+  source?: string;
+  provider?: string;
+}
+
+/** 技能定义（`ctx.skills.get(name)` 的返回项）：摘要 + 正文。 */
+export interface SkillDefinitionView extends SkillSummaryView {
+  content: string;
+}
+
+/**
+ * skills 服务端口（issue #71）。
+ *
+ * 为什么需要它：DSH 的技能**不落在一个可枚举的目录里**。技能 provider 由插件在 apply 时
+ * 注册（`ctx.skills.registerProvider`），可以来自 pnpm 装出来的 profile 插件包
+ * （`profiles/<p>/node_modules` 下任意层级的 `SKILL.md`）、`customSkillDirs` 配置项、或
+ * `DSH_BUNDLED_SKILL_DIR` 的内置目录。此前 dcm 只扫 `$DSH_HOME/skills`，
+ * 于是真机上「一个技能都备份不到」（用户报告的「备份不到外壳 skills」）。
+ *
+ * 可选：宿主未提供（旧宿主 / 无 skills 服务的环境）时 skills 分区退回纯目录扫描，
+ * 行为与改造前完全一致 —— 绝不因为缺这个端口而报错或静默丢分区。
+ */
+export interface SkillStoreFacade {
+  list(): Promise<SkillSummaryView[]>;
+  get(name: string): Promise<SkillDefinitionView | undefined>;
+}
+
 export interface FileSystemFacade {
   readFile(relPath: string): Promise<Uint8Array>;
   writeFile(relPath: string, data: Uint8Array): Promise<void>;
@@ -448,6 +485,12 @@ export interface HostContext {
    * 可选：缺省时归位功能整体不可用（依赖它的调用点必须报「宿主未提供会话存储」而不是静默成功）。
    */
   sessions?: SessionStoreFacade;
+  /**
+   * 技能服务端口（issue #71；宿主注入对应 `ctx.skills`）。
+   *
+   * 可选：缺省时 skills 分区只扫 `$DSH_HOME/skills`（改造前行为），不报错。
+   */
+  skills?: SkillStoreFacade;
   /** 当前管理的 DSH profile 名（如 web）；引擎用它定位 profiles/<profile>/cordis.patch.yml。宿主不暴露时缺省 */
   profile?: string;
   /**
@@ -522,7 +565,17 @@ export interface PathIssue {
   section?: SectionId;
 }
 
-export interface SnapshotTarget { adapter: SectionId; ref: string; }
+export interface SnapshotTarget {
+  adapter: SectionId;
+  ref: string;
+  /**
+   * patch 行类目标的**所在层**（相对 homeDir 的 POSIX 路径，见 core/patch-layers.ts）。
+   *
+   * 为什么必须带上：patch 行有两层（home 层 + profile 层），同一 `ref`（lineId）在两层的
+   * 原值不同、写入位置也不同。缺省 = 用户层（`cordis.patch.yml`），保持旧调用方行为不变。
+   */
+  file?: string;
+}
 
 export interface PlanItem {
   id: string;                 // 稳定项 id（plugin:pkg / prompt:name / workspace:<id> …）
@@ -796,6 +849,8 @@ export interface SnapshotEntry {
   kind: SnapshotEntryKind;
   adapter: SectionId;
   ref: string;
+  /** patchLine 条目：原行所在层（相对 homeDir 的 POSIX 路径）。缺省 = 用户层（旧快照） */
+  file?: string;
   /** 原值（credential 条目不含值，仅 existed 标志） */
   before: unknown;
   revision?: number;

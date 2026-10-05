@@ -11,7 +11,8 @@
  *   ctx.plugins            -> PluginsFacade       (官方 dsh plugin CLI 通道 + profile 文件，
  *                                                  见 src/core/plugin-cli.ts)
  *   ctx.workspaceRegistry  -> WorkspaceFacade     (@deepseek-ai/dsh-workspace)
- *   ~/.dsh/cordis.patch.yml-> PatchFileFacade     (js-yaml)
+ *   ~/.dsh/cordis.patch.yml-> PatchFileFacade     (js-yaml; home 层 + profiles/<p>/ 层)
+ *   ctx.skills             -> SkillStoreFacade    (@deepseek-ai/dsh-skill 注册表，技能备份用)
  *   $DSH_HOME files        -> FileSystemFacade    (node:fs, home-relative)
  *   resolveDshHome()       -> homeDir             (@deepseek-ai/dsh-home-paths)
  *
@@ -77,9 +78,10 @@ import { registerModelTools } from './core/model-tools.ts'
 import { makeMsg, msgOf, zhMsg } from './core/messages.ts'
 import type { MsgFunc } from './core/messages.ts'
 import { cleanupAbortedInstall, hasDshBundlePatch, installAnchorFromProfileContext, installErrorFor, installSpecFor, listInstalledPlugins, profileNameFromProfileContext, resolveProcessProfileName, resolveProfileDir, readProfileManifest, runDshPlugin, validateProfileName } from './core/plugin-cli.ts'
-import type { ConfigAdapter, CredentialsFacade, ExportUnit, FileSystemFacade, HostContext, ImportDecisions, ImportPlan, NamespaceInfo, PatchFileFacade, PlanItemKind, PluginInfo, PluginsFacade, SessionMoveResult, SessionParentRelation, SessionRewriteResult, SessionStoreFacade, SettingsFacade, WorkspaceFacade } from './core/types.ts'
+import type { ConfigAdapter, CredentialsFacade, ExportUnit, FileSystemFacade, HostContext, ImportDecisions, ImportPlan, NamespaceInfo, PatchFileFacade, PlanItemKind, PluginInfo, PluginsFacade, SessionMoveResult, SessionParentRelation, SessionRewriteResult, SessionStoreFacade, SettingsFacade, SkillDefinitionView, SkillStoreFacade, SkillSummaryView, WorkspaceFacade } from './core/types.ts'
 import { ImportUserSkippedError } from './core/types.ts'
-import { createAdapters, USER_PATCH_FILE } from './adapters/index.ts'
+import { createAdapters } from './adapters/index.ts'
+import { isPatchLayerRel, profilePatchRel, readEffectivePatchLines, USER_PATCH_FILE } from './core/patch-layers.ts'
 import { createLocalPluginPackHook } from './core/local-plugin-host.ts'
 import { ENCRYPTED_CONTAINER_CODE, createEncryptionProvider, decryptCredentials, readContainerKind, SecurityError, encryptArchive } from './security/index.ts'
 import { createHardenedZipParser } from './security/zip-security.ts'
@@ -387,6 +389,69 @@ function readService<T>(ctx: Context, serviceName: string): T | undefined {
   return candidate === null || typeof candidate !== 'object' ? undefined : candidate as T
 }
 
+/**
+ * 把 DSH 的 `skills` 服务（@deepseek-ai/dsh-skill 的 SkillRegistry）适配成引擎的
+ * `SkillStoreFacade`（issue #71）。
+ *
+ * 为什么在这里做适配而不是让 adapter 直接调服务：架构边界测试禁止 core / adapters import
+ * `@deepseek-ai/*`（只有 src/index.ts 与 src/client/ 允许），所以适配层只能是宿主入口。
+ *
+ * 服务缺失（旧外壳）或形状不符 → 返回 undefined（skills 分区退回纯目录扫描，不报错）；
+ * 单个方法的异常不在这里吞 —— 由 adapter 决定「这一个技能跳过」还是「整路跳过」。
+ */
+function resolveSkillStore(ctx: Context): SkillStoreFacade | undefined {
+  const service = readService<{
+    list?: (options?: unknown) => Promise<unknown>
+    get?: (name: string, options?: unknown) => Promise<unknown>
+  }>(ctx, 'skills')
+  if (service === undefined || typeof service.list !== 'function' || typeof service.get !== 'function') {
+    return undefined
+  }
+  return {
+    // 不传 scope：外壳自身的技能 provider 都在 global 层（插件 apply 时注册、无 scope），
+    // 传 scope 反而会丢掉它们。范围参数只在调用方明确要「某次会话/某个 preset 的视图」时才需要。
+    async list(): Promise<SkillSummaryView[]> {
+      const raw = await service.list?.({})
+      if (!Array.isArray(raw)) return []
+      const out: SkillSummaryView[] = []
+      for (const item of raw) {
+        if (item === null || typeof item !== 'object') continue
+        const summary = item as Record<string, unknown>
+        if (typeof summary['name'] !== 'string') continue
+        out.push(toSkillSummaryView(summary))
+      }
+      return out
+    },
+    async get(name: string): Promise<SkillDefinitionView | undefined> {
+      const raw = await service.get?.(name, {})
+      if (raw === null || typeof raw !== 'object') return undefined
+      const definition = raw as Record<string, unknown>
+      if (typeof definition['name'] !== 'string' || typeof definition['content'] !== 'string') return undefined
+      return { ...toSkillSummaryView(definition), content: definition['content'] }
+    },
+  }
+}
+
+/** 技能摘要的结构适配（只取引擎声明过的字段；多余字段不落地，避免快照体积被未知字段撑大）。 */
+function toSkillSummaryView(source: Record<string, unknown>): SkillSummaryView {
+  const out: SkillSummaryView = {
+    name: source['name'] as string,
+    description: typeof source['description'] === 'string' ? source['description'] : '',
+  }
+  if (typeof source['whenToUse'] === 'string') out.whenToUse = source['whenToUse']
+  if (typeof source['source'] === 'string') out.source = source['source']
+  if (typeof source['provider'] === 'string') out.provider = source['provider']
+  const invocation = source['invocation']
+  if (invocation !== null && typeof invocation === 'object') {
+    const policy = invocation as Record<string, unknown>
+    const view: { modelInvocable?: boolean; userInvocable?: boolean } = {}
+    if (typeof policy['modelInvocable'] === 'boolean') view.modelInvocable = policy['modelInvocable']
+    if (typeof policy['userInvocable'] === 'boolean') view.userInvocable = policy['userInvocable']
+    out.invocation = view
+  }
+  return out
+}
+
 /** Safe settings namespace converter compatible across DSH 0.1.1 and 0.1.2-alpha.x */
 const SETTINGS_NAMESPACE_REGEX = /^[a-z][a-z0-9-]*$/
 function safeSettingsNamespace(namespace: string): any {
@@ -489,13 +554,24 @@ export function patchRowActivates(raw: unknown, name: string): boolean {
  * 非 bundle 插件安装成功后，幂等补 profile cordis.patch.yml 激活行
  * （{id: pm-<slug>, name: <pkg>}，仿 marketplace ensureRow）。bundle 包不写行
  * （CLI 的 reconcile 已维护 dsh.profile.bundles）。
+ *
+ * 第 4 参 `profile`（issue #71）：patch 的层身份是**相对 homeDir 的路径**，
+ * 目标层 = `profiles/<profile>/cordis.patch.yml`。省略时按缺省档案名（web）—— 兼容旧调用方。
  */
-export async function ensureActivationRow(patchFile: PatchFileFacade, pkgDir: string, pkg: string): Promise<void> {
+export async function ensureActivationRow(
+  patchFile: PatchFileFacade,
+  pkgDir: string,
+  pkg: string,
+  profile?: string,
+): Promise<void> {
   if (hasDshBundlePatch(pkgDir)) return
-  const lines = await patchFile.readPatchLines(PROFILE_PATCH_FILE)
-  if (lines.some((l) => patchRowActivates(l.raw, pkg))) return
+  const file = profilePatchRel(profile)
+  // 幂等判定要看**两层**：home 层里的激活行同样会让 DSH 加载这个包（home 层合并在后、优先级更高），
+  // 只看目标层会在「用户已手工激活过」时多写一行重复激活。
+  const effective = await readEffectivePatchLines(patchFile, profile)
+  if (effective.lines.some((l) => patchRowActivates(l.raw, pkg))) return
   const id = `pm-${slugOf(pkg)}`
-  await patchFile.applyPatchChanges(PROFILE_PATCH_FILE, [
+  await patchFile.applyPatchChanges(file, [
     { lineId: id, raw: { id, name: pkg }, action: 'insert' },
   ])
 }
@@ -549,7 +625,7 @@ export class DshPluginsFacade implements PluginsFacade {
     // 非 bundle 插件：CLI 只维护 bundles，需补 profile patch 激活行才能加载。
     // 补写失败不吞：包已装但未激活，明确报错并允许重试（幂等补行）。
     try {
-      await ensureActivationRow(this.patchFile, join(profileDir, 'node_modules', pkg), pkg)
+      await ensureActivationRow(this.patchFile, join(profileDir, 'node_modules', pkg), pkg, this.profile)
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)
       throw new Error(this.msg('host.activationRowFailed', { pkg, reason }))
@@ -797,11 +873,16 @@ export class DshSessionStoreFacade implements SessionStoreFacade {
   }
 }
 
-/** Profile 目录内的 patch 文件（非 bundle 插件激活行写入处，marketplace 同款路径）。 */
-const PROFILE_PATCH_FILE = 'cordis.patch.yml'
-
-/** Patch-file facade：用户 patch 层（$DSH_HOME/cordis.patch.yml）+ profile patch 层
- * （$DSH_HOME/profiles/<name>/cordis.patch.yml），两者都在 home 根内。 */
+/**
+ * Patch-file facade：patch 的**两层**都在 home 根内 ——
+ *   - 用户（home）层：`$DSH_HOME/cordis.patch.yml`
+ *   - profile 层：`$DSH_HOME/profiles/<name>/cordis.patch.yml`
+ *
+ * `file` 参数是**相对 homeDir 的 POSIX 路径**（issue #71；层身份的定义见 core/patch-layers.ts）。
+ * 改造前这里是「拿文件名字符串当枚举」的两个分支，而两个分支比较的是同一个字面量
+ * `'cordis.patch.yml'` —— profile 分支永远不可达，于是 profile 层的 MCP / prompts 行
+ * 在备份里凭空消失（用户报告的「备份不到外壳 mcp」）。现在按路径解析，两层都能读写。
+ */
 class DshPatchFileFacade implements PatchFileFacade {
   private readonly homeDir: string
   private readonly profile: string
@@ -813,10 +894,32 @@ class DshPatchFileFacade implements PatchFileFacade {
     this.msg = msg
   }
 
+  /**
+   * 层路径 → 绝对路径。
+   *
+   * 只接受**已知的层路径**（用户层 / 本 profile 的 profile 层），且解析结果必须落在 home 根内：
+   * 调用方传进来的是快照里存的字符串，跨机器恢复时不能让它变成任意路径写。
+   * 本 profile 之外的 profile 层同样拒绝 —— 一个档案的备份不该写另一个档案的 patch。
+   */
   private patchPath(file: string): string {
-    if (file === USER_PATCH_FILE) return join(this.homeDir, USER_PATCH_FILE)
-    if (file === PROFILE_PATCH_FILE) return join(this.homeDir, 'profiles', this.profile, PROFILE_PATCH_FILE)
-    throw new Error(this.msg('host.patchUnsupported', { user: USER_PATCH_FILE, profile: PROFILE_PATCH_FILE, file }))
+    const rel = file.replace(/\\/g, '/')
+    const allowed = rel === USER_PATCH_FILE || (isPatchLayerRel(rel) && rel === profilePatchRel(this.profile))
+    if (!allowed) {
+      throw new Error(this.msg('host.patchUnsupported', {
+        user: USER_PATCH_FILE,
+        profile: profilePatchRel(this.profile),
+        file,
+      }))
+    }
+    const abs = resolve(this.homeDir, rel)
+    if (!isSameOrChild(abs, this.homeDir)) {
+      throw new Error(this.msg('host.patchUnsupported', {
+        user: USER_PATCH_FILE,
+        profile: profilePatchRel(this.profile),
+        file,
+      }))
+    }
+    return abs
   }
 
   async readPatchLines(file: string): Promise<{ lineId: string; raw: unknown }[]> {
@@ -1107,6 +1210,15 @@ export class ConfigManagerHostContext implements HostContext {
   /** 会话存储端口（issue #45 会话归位；对 ctx.sessionPersistence 的薄适配） */
   readonly sessions: SessionStoreFacade
   /**
+   * 技能服务端口（issue #71；对 ctx.skills 的薄适配）。
+   *
+   * 为什么需要：真机上 89 个 SKILL.md 全在 `profiles/<p>/node_modules` 里（技能 provider 由
+   * 插件注册），`$DSH_HOME/skills` 根本不存在 —— 只扫目录的分区必然是空的。
+   *
+   * 可选：宿主没有 skills 服务时（旧外壳）缺省 undefined，skills 分区退回纯目录扫描。
+   */
+  readonly skills: SkillStoreFacade | undefined
+  /**
    * 本机 DSH 支持的**会话日志格式版本**（`SESSION_FORMAT_VERSION`；解析不到 = undefined）。
    *
    * 用于导入/同步的「这条对话目标机读不读得了」体检：DSH 对读不出的格式是**静默跳过**的
@@ -1147,6 +1259,7 @@ export class ConfigManagerHostContext implements HostContext {
     this.workspace = new DshWorkspaceFacade(ctx, this.msg)
     this.fs = new DshFileSystemFacade(homeDir, this.msg)
     this.sessions = new DshSessionStoreFacade(ctx, homeDir, this.msg)
+    this.skills = resolveSkillStore(ctx)
   }
 }
 

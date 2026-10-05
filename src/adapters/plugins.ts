@@ -19,6 +19,7 @@ import { msgOf, zhMsg } from '../core/messages.ts';
 import type { MsgFunc } from '../core/messages.ts';
 import { isPathSafe, normalizePath } from '../utils/paths.ts';
 import { PLUGIN_PATCH_REF_PREFIX } from '../core/backup.ts';
+import { readEffectivePatchLines, resolveWriteLayer, USER_PATCH_FILE } from '../core/patch-layers.ts';
 import { parsePnpmPatchedDependencies, sanitizePnpmWorkspacePatches } from './pnpm-workspace.ts';
 import type { LocalPluginTarball, PatchLine, PluginEntry, PluginsSection, PnpmPatchFile } from '../schema/types.ts';
 import type {
@@ -28,7 +29,11 @@ import type {
 import { sectionMeta } from '../schema/section-registry.ts';
 import { validateJsonSection } from './json-section.ts';
 
-export const USER_PATCH_FILE = 'cordis.patch.yml';
+/**
+ * 用户（home）patch 层路径 —— 定义已移到 `core/patch-layers.ts`（issue #71：patch 有 home /
+ * profile 两层，层身份属于引擎知识，不属于某个 adapter）。此处 re-export 保持既有 import 面。
+ */
+export { USER_PATCH_FILE };
 
 /**
  * 本地源插件打包钩子（由宿主注入，见 src/index.ts createAdapters）。
@@ -175,11 +180,12 @@ export class PluginsAdapter implements ConfigAdapter<PluginsSection> {
       warnings.push(msgOf(ctx)('adapter.pluginListReadFailed', { reason: err instanceof Error ? err.message : String(err) }));
     }
     const patch: PatchLine[] = [];
-    try {
-      const lines = await ctx.patchFile.readPatchLines(USER_PATCH_FILE);
-      for (const l of lines) patch.push({ file: USER_PATCH_FILE, lineId: l.lineId, raw: l.raw });
-    } catch (err) {
-      warnings.push(msgOf(ctx)('adapter.patchReadFailed', { reason: err instanceof Error ? err.message : String(err) }));
+    // issue #71：patch 有两层（home 层 + profile 层），只读 home 层会漏掉 DSH 工具与 marketplace
+    // 写入 profile 层的激活行 —— 导出少了它们，导入到新机就少一批插件加载项。
+    const patchRead = await readEffectivePatchLines(ctx.patchFile, ctx.profile);
+    for (const l of patchRead.lines) patch.push({ file: l.file, lineId: l.lineId, raw: l.raw });
+    for (const f of patchRead.failures) {
+      warnings.push(msgOf(ctx)('adapter.patchReadFailed', { reason: `${f.file}: ${f.reason}` }));
     }
     // pnpm-workspace.yaml（allowBuilds / minimumReleaseAgeExclude 等）：随插件分区迁移，
     // 否则目标 profile 的 pnpm 可能因构建白名单/冷静期拒绝安装插件（§34.17 同款语义）。
@@ -491,16 +497,20 @@ export class PluginsAdapter implements ConfigAdapter<PluginsSection> {
 
     // 用户 patch 行：lineId 唯一键；存在且同 → Skip；存在不同 → Conflict；不存在 → Create。
     // mcp-client 行与 systemPrompt/planMode 行由 mcp/prompts adapter 管理，此处跳过（避免重复写入覆盖）。
-    const targetLines = await ctx.target.patchFile.readPatchLines(USER_PATCH_FILE);
+    // issue #71：目标行同样跨两层（否则 profile 层已有的行会被误判成 Create → 导入后出现重复行）
+    const targetLines = (await readEffectivePatchLines(ctx.target.patchFile, ctx.target.profile)).lines;
     for (const pl of data.patch) {
       if (isManagedElsewhere(pl.raw)) continue;
       const id = `patch:${pl.lineId}`;
       const tl = targetLines.find((l) => l.lineId === pl.lineId);
+      // 层身份随计划项走：applyItem 按 pl.file 写回，导入前快照按 target.file 记原行，
+      // 两者必须是同一层，否则回滚会把另一层改坏（issue #71）。
+      const layer = resolveWriteLayer(pl.file, ctx.target.profile);
       if (!tl) {
         items.push({
           id, kind: 'Create', adapter: 'plugins',
           description: msg('adapter.patchLineCreate', { lineId: pl.lineId }), severity: 'info',
-          target: { adapter: 'plugins', ref: pl.lineId },
+          target: { adapter: 'plugins', ref: pl.lineId, file: layer },
         });
       } else if (isDeepStrictEqual(tl.raw, pl.raw)) {
         items.push({ id, kind: 'Skip', adapter: 'plugins', description: msg('adapter.patchLineSame', { lineId: pl.lineId }), severity: 'info' });
@@ -508,7 +518,7 @@ export class PluginsAdapter implements ConfigAdapter<PluginsSection> {
         items.push({
           id, kind: 'Conflict', adapter: 'plugins',
           description: msg('adapter.patchLineDiff', { lineId: pl.lineId }), severity: 'warning',
-          target: { adapter: 'plugins', ref: pl.lineId },
+          target: { adapter: 'plugins', ref: pl.lineId, file: layer },
         });
       }
     }
@@ -646,7 +656,9 @@ export class PluginsAdapter implements ConfigAdapter<PluginsSection> {
     const data = ctx.sections.get('plugins') as PluginsSection | undefined;
     const pl = data?.patch.find((p) => p.lineId === ref);
     if (!pl) return { ok: false, message: msg('adapter.patchMissing', { ref }) };
-    await ctx.target.patchFile.applyPatchChanges(pl.file, [
+    // 层身份按**语义**映射到目标机：来源是别的 profile 层时不能照抄名字（目标机未必有那个
+    // profile，宿主门面会拒绝），一律落到目标机当前 profile 层（与计划项 target.file 同口径）。
+    await ctx.target.patchFile.applyPatchChanges(resolveWriteLayer(pl.file, ctx.target.profile), [
       { lineId: ref, raw: pl.raw, action: item.kind === 'Create' ? 'insert' : 'update' },
     ]);
     return { ok: true, needsRestart: true, message: msg('adapter.patchWritten', { ref }) };

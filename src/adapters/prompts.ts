@@ -8,6 +8,9 @@
  *  - 目标无该行但存在同名 prompt → Conflict（更新其所在行）；
  *  - 均不存在 → Warning（不编造行名自动创建，提示手动配置）。
  * rules/commands 无独立存储（研究报告 §2.2），不实现。
+ *
+ * issue #71：数据源与 mcp 分区同因 —— patch 有 home 层与 profile 层两层，此前只读 home 层，
+ * 于是写进 profile 层的 systemPrompt / planMode 在备份里全部丢失。现在两层都读、写回原层。
  */
 import { msgOf, zhMsg } from '../core/messages.ts';
 import type { MsgFunc } from '../core/messages.ts';
@@ -16,19 +19,28 @@ import type {
   ApplyResult, ConfigAdapter, ExportOptions, ExportSection, HostContext,
   ImportContext, PlanItem, ValidationResult,
 } from '../core/types.ts';
-import { USER_PATCH_FILE } from './plugins.ts';
+import { locatePatchLineLayer, readEffectivePatchLines, resolveWriteLayer } from '../core/patch-layers.ts';
 import { sectionMeta } from '../schema/section-registry.ts';
 import { validateJsonSection } from './json-section.ts';
 
-/** 导出记录：PromptEntry 之外记录来源行名（导入需要重建行时使用） */
+/** 导出记录：PromptEntry 之外记录来源行名与所在层（导入重建 / 写回定位用） */
 export interface PromptExportEntry extends PromptEntry {
   sourceLineName?: string;
+  /**
+   * 来源 patch 层（相对 homeDir 的 POSIX 路径；见 core/patch-layers.ts）。
+   * 缺省 = 用户层（旧备份包没有该字段 → 按旧行为写回 home 层）。
+   */
+  sourceFile?: string;
 }
 
 export interface PromptsExportSection { version: 1; prompts: PromptExportEntry[]; }
 
-/** 从 patch 行 config 中提取 prompt 条目（systemPrompt.persona / planMode.sections[].text） */
-export function extractPrompts(lines: { lineId: string; raw: unknown }[]): PromptExportEntry[] {
+/**
+ * 从 patch 行 config 中提取 prompt 条目（systemPrompt.persona / planMode.sections[].text）。
+ *
+ * 行对象可带 `file`（层身份）：带上时逐条目记录 `sourceFile`，导入写回落回原层。
+ */
+export function extractPrompts(lines: { lineId: string; raw: unknown; file?: string }[]): PromptExportEntry[] {
   const prompts: PromptExportEntry[] = [];
   for (const line of lines) {
     for (const entry of entriesOf(line.raw)) {
@@ -39,11 +51,11 @@ export function extractPrompts(lines: { lineId: string; raw: unknown }[]): Promp
 
       const sp = c['systemPrompt'];
       if (typeof sp === 'string' && sp.trim() !== '') {
-        prompts.push({ id: `prompt:${line.lineId}:persona`, name: `${line.lineId}:persona`, kind: 'systemPrompt', text: sp, sourceLineId: line.lineId, sourceLineName });
+        prompts.push({ id: `prompt:${line.lineId}:persona`, name: `${line.lineId}:persona`, kind: 'systemPrompt', text: sp, sourceLineId: line.lineId, sourceLineName, ...(line.file !== undefined ? { sourceFile: line.file } : {}) });
       } else if (sp !== null && typeof sp === 'object' && typeof (sp as Record<string, unknown>)['persona'] === 'string') {
         const persona = (sp as Record<string, unknown>)['persona'] as string;
         if (persona.trim() !== '') {
-          prompts.push({ id: `prompt:${line.lineId}:persona`, name: `${line.lineId}:persona`, kind: 'systemPrompt', text: persona, sourceLineId: line.lineId, sourceLineName });
+          prompts.push({ id: `prompt:${line.lineId}:persona`, name: `${line.lineId}:persona`, kind: 'systemPrompt', text: persona, sourceLineId: line.lineId, sourceLineName, ...(line.file !== undefined ? { sourceFile: line.file } : {}) });
         }
       }
 
@@ -53,7 +65,7 @@ export function extractPrompts(lines: { lineId: string; raw: unknown }[]): Promp
         for (const [i, s] of sections.entries()) {
           if (s === null || typeof s !== 'object' || typeof s['text'] !== 'string' || (s['text'] as string).trim() === '') continue;
           const name = typeof s['name'] === 'string' && s['name'] !== '' ? s['name'] : `${line.lineId}:section${i}`;
-          prompts.push({ id: `prompt:${line.lineId}:${name}`, name, kind: 'planMode', text: s['text'] as string, sourceLineId: line.lineId, sourceLineName });
+          prompts.push({ id: `prompt:${line.lineId}:${name}`, name, kind: 'planMode', text: s['text'] as string, sourceLineId: line.lineId, sourceLineName, ...(line.file !== undefined ? { sourceFile: line.file } : {}) });
         }
       }
     }
@@ -116,13 +128,12 @@ export class PromptsAdapter implements ConfigAdapter<PromptsExportSection> {
 
   async export(ctx: HostContext, _options: ExportOptions): Promise<ExportSection<PromptsExportSection>> {
     const warnings: string[] = [];
-    let lines: { lineId: string; raw: unknown }[] = [];
-    try {
-      lines = await ctx.patchFile.readPatchLines(USER_PATCH_FILE);
-    } catch (err) {
-      warnings.push(msgOf(ctx)('adapter.patchReadFailedPrompts', { reason: err instanceof Error ? err.message : String(err) }));
+    // issue #71：两层都读（home 层优先），否则 profile 层里的 persona / planMode 全部丢失
+    const read = await readEffectivePatchLines(ctx.patchFile, ctx.profile);
+    for (const f of read.failures) {
+      warnings.push(msgOf(ctx)('adapter.patchReadFailedPrompts', { reason: `${f.file}: ${f.reason}` }));
     }
-    const prompts = extractPrompts(lines);
+    const prompts = extractPrompts(read.lines);
     return {
       sectionId: 'prompts',
       data: { version: 1, prompts },
@@ -134,7 +145,8 @@ export class PromptsAdapter implements ConfigAdapter<PromptsExportSection> {
   async analyzeImport(data: PromptsExportSection, ctx: ImportContext): Promise<PlanItem[]> {
     const msg = ctx.msg;
     const items: PlanItem[] = [];
-    const targetLines = await ctx.target.patchFile.readPatchLines(USER_PATCH_FILE);
+    // issue #71：目标行跨两层；同一 lineId 只保留优先级最高的一层（与 DSH 合并序一致）
+    const targetLines = (await readEffectivePatchLines(ctx.target.patchFile, ctx.target.profile)).lines;
     const targetPrompts = extractPrompts(targetLines);
     for (const p of data.prompts) {
       const id = p.id;
@@ -149,7 +161,8 @@ export class PromptsAdapter implements ConfigAdapter<PromptsExportSection> {
             description: msg('adapter.promptDiff', { name: p.name }),
             detail: `行 ${p.sourceLineId} current=${JSON.stringify(sameName.text).slice(0, 80)} imported=${JSON.stringify(p.text).slice(0, 80)}`,
             severity: 'warning',
-            target: { adapter: 'prompts', ref: p.sourceLineId ?? '' },
+            // 层身份随计划项走：快照按这一层记原行、回滚才能写回原文件（issue #71）
+            target: { adapter: 'prompts', ref: p.sourceLineId ?? '', file: targetLine.file },
           });
         }
       } else if (sameName) {
@@ -161,7 +174,10 @@ export class PromptsAdapter implements ConfigAdapter<PromptsExportSection> {
             id, kind: 'Conflict', adapter: 'prompts',
             description: msg('adapter.promptDiffWithLine', { name: p.name, line: sameName.sourceLineId ?? '' }),
             severity: 'warning',
-            target: { adapter: 'prompts', ref: sameName.sourceLineId ?? '' },
+            target: {
+              adapter: 'prompts', ref: sameName.sourceLineId ?? '',
+              file: targetLines.find((l) => l.lineId === sameName.sourceLineId)?.file,
+            },
           });
         }
       } else if (p.sourceLineName) {
@@ -170,7 +186,7 @@ export class PromptsAdapter implements ConfigAdapter<PromptsExportSection> {
         items.push({
           id, kind: 'Create', adapter: 'prompts',
           description: msg('adapter.promptCreate', { name: p.name, line: lineId }), severity: 'info',
-          target: { adapter: 'prompts', ref: lineId },
+          target: { adapter: 'prompts', ref: lineId, file: resolveWriteLayer(p.sourceFile, ctx.target.profile) },
         });
       } else {
         items.push({
@@ -194,17 +210,22 @@ export class PromptsAdapter implements ConfigAdapter<PromptsExportSection> {
     // Create：目标无来源行 → 用记录的行名重建 patch 行（insert）
     if (item.kind === 'Create') {
       const raw = buildPromptLine(ref, prompt);
-      await ctx.target.patchFile.applyPatchChanges(USER_PATCH_FILE, [
+      // issue #71：备份里记了来源层就落「同语义层」（来源 profile 层 → 目标机当前 profile 层，
+      // 跨机器照抄 profile 名会被宿主门面拒绝）；旧备份包无该字段 → 落 home 层（与改造前一致）
+      await ctx.target.patchFile.applyPatchChanges(resolveWriteLayer(prompt.sourceFile, ctx.target.profile), [
         { lineId: ref, raw, action: 'insert' },
       ]);
       return { ok: true, needsRestart: true, message: msg('adapter.promptCreated', { name: prompt.name, ref }) };
     }
     // Update / Conflict(useImported)：合并进目标行 config
-    const lines = await ctx.target.patchFile.readPatchLines(USER_PATCH_FILE);
+    // issue #71：先定位原行所在层（两层都没有 → home 层），再读该层的原行合并 —— 绝不把
+    // profile 层的行搬到 home 层（同一 lineId 两层各一份会让 DSH 的合并语义变得不可预期）
+    const file = await locatePatchLineLayer(ctx.target.patchFile, ctx.target.profile, ref);
+    const lines = await ctx.target.patchFile.readPatchLines(file);
     const line = lines.find((l) => l.lineId === ref);
     if (!line) return { ok: false, message: msg('adapter.patchLineMissing', { ref }) };
     const newRaw = mergePromptIntoLine(line.raw, prompt);
-    await ctx.target.patchFile.applyPatchChanges(USER_PATCH_FILE, [
+    await ctx.target.patchFile.applyPatchChanges(file, [
       { lineId: ref, raw: newRaw, action: 'update' },
     ]);
     return { ok: true, needsRestart: true, message: msg('adapter.promptWritten', { name: prompt.name, ref }) };

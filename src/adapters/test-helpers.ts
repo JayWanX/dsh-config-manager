@@ -6,6 +6,7 @@ import { normalizePath } from '../utils/paths.ts';
 import { createLogger, type Logger } from '../utils/logger.ts';
 import { sha256Hex } from '../utils/hashing.ts';
 import { zhMsg } from '../core/messages.ts';
+import { USER_PATCH_FILE } from '../core/patch-layers.ts';
 import type {
   CredentialsFacade, FileSystemFacade, HostContext, ImportContext, NamespaceInfo,
   PatchFileFacade, PluginInfo, PluginsFacade, SettingsFacade, Snapshot,
@@ -171,18 +172,46 @@ export class MemWorkspace implements WorkspaceFacade {
   async removeRecord(id: string): Promise<void> { this.records.delete(id); }
 }
 
+/**
+ * 内存 patch 门面，**按层分桶**（issue #71）。
+ *
+ * `lines` 仍是**用户（home）层**的桶 —— 绝大多数既有测试只关心「一行进、一行出」，
+ * 直接操作 `lines` 即可，语义与改造前完全一致。其它层（profile 层）走 `byFile`：
+ * 缺省空桶，因此「读两层」的调用方在旧测试里读到的 profile 层就是空的，不会污染断言。
+ *
+ * 分层用 `byFile(rel)` 显式取桶，避免测试里手写路径字符串。
+ */
 export class MemPatch implements PatchFileFacade {
+  /** 用户（home）层桶：`cordis.patch.yml`。 */
   lines = new Map<string, { lineId: string; raw: unknown }>();
-  async readPatchLines(_file: string): Promise<{ lineId: string; raw: unknown }[]> {
-    return [...this.lines.values()];
+  /** 其它层桶：层路径 → 行表（profile 层等）。 */
+  byFile = new Map<string, Map<string, { lineId: string; raw: unknown }>>();
+
+  /** 取（必要时建）某一层的桶；用户层恒为 `lines`（与旧测试兼容）。 */
+  bucket(file: string): Map<string, { lineId: string; raw: unknown }> {
+    if (file === USER_PATCH_FILE) return this.lines;
+    let bucket = this.byFile.get(file);
+    if (bucket === undefined) {
+      bucket = new Map<string, { lineId: string; raw: unknown }>();
+      this.byFile.set(file, bucket);
+    }
+    return bucket;
   }
+
+  async readPatchLines(file: string): Promise<{ lineId: string; raw: unknown }[]> {
+    if (file === USER_PATCH_FILE) return [...this.lines.values()];
+    const bucket = this.byFile.get(file);
+    return bucket === undefined ? [] : [...bucket.values()];
+  }
+
   async applyPatchChanges(
-    _file: string,
+    file: string,
     changes: { lineId: string; raw: unknown; action: 'insert' | 'update' | 'remove' }[],
   ): Promise<void> {
+    const bucket = this.bucket(file);
     for (const c of changes) {
-      if (c.action === 'remove') this.lines.delete(c.lineId);
-      else this.lines.set(c.lineId, { lineId: c.lineId, raw: c.raw });
+      if (c.action === 'remove') bucket.delete(c.lineId);
+      else bucket.set(c.lineId, { lineId: c.lineId, raw: c.raw });
     }
   }
 }
@@ -227,6 +256,8 @@ export class MockHostContext implements HostContext {
   fs: MemFs;
   /** 可选（issue #45）：会话存储端口；测试按需注入（缺省 = 宿主未提供该能力）。 */
   sessions?: HostContext['sessions'];
+  /** 可选（issue #71）：技能服务端口；测试按需注入（缺省 = 退回纯目录扫描）。 */
+  skills?: HostContext['skills'];
   constructor(platform: string, homeDir: string, profile?: string) {
     this.platform = platform;
     this.homeDir = homeDir;

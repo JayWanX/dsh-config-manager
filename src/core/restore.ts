@@ -24,6 +24,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { resolveFileTarget, verifySnapshot } from './backup.ts';
+import { isPatchLayerRel } from './patch-layers.ts';
 import { expectedSessionRefs, sweepGhostSessions } from './ghost-sweep.ts';
 import { zhMsg } from './messages.ts';
 import type { MsgFunc } from './messages.ts';
@@ -568,7 +569,8 @@ export async function planRestore(opts: RestoreOptions): Promise<RestorePlan> {
 
   // 聚合提示：整文件还原覆盖不了的条目如实说明
   const settingsBacked = hostBackups.some((b) => b.relPath === 'settings.yaml' || b.relPath === 'settings.json');
-  const patchBacked = hostBackups.some((b) => b.relPath === 'cordis.patch.yml');
+  // issue #71：patch 行可能落在任一层 —— 只要**任一层**有整文件备份，patchLine 条目就能整文件还原
+  const patchBacked = hostBackups.some((b) => isPatchLayerRel(b.relPath) && b.existed);
   if (namespaceCount > 0 && !settingsBacked) {
     actions.push({
       kind: 'skip',

@@ -8,6 +8,7 @@
  *  - settings 回滚仍走 expectedRevision 乐观锁，避免覆盖导入后用户的新修改。
  */
 import { resolveFileTarget } from './backup.ts';
+import { isPatchLayerRel, USER_PATCH_FILE } from './patch-layers.ts';
 import { msgOf } from './messages.ts';
 import type {
   ConfigAdapter, HostContext, RollbackReport, Snapshot, SnapshotEntry, SnapshotStore,
@@ -71,9 +72,11 @@ async function compensateOne(
     }
     case 'patchLine': {
       try {
-        // 引擎只管理 profile 的 cordis.patch.yml（backup.ts 的 patchLine 快照只记 lineId 作 ref，
-        // 不含文件编码）——回滚固定写回该文件；切勿把 lineId 当文件名（否则 patchPath 抛「仅支持管理」）。
-        const file = 'cordis.patch.yml';
+        // issue #71：patch 行有两层（home / profile），回滚必须写回**原行所在层**，否则会
+        // 在另一层留下一份「复活的旧值」，而原层仍是导入后的新值。
+        // entry.file 来自快照 JSON（可能被改）→ 只接受合法层路径；缺省 = 用户层（旧快照）。
+        // 切勿把 lineId 当文件名（否则宿主门面抛「仅支持管理 …」）。
+        const file = entry.file !== undefined && isPatchLayerRel(entry.file) ? entry.file : USER_PATCH_FILE;
         const lineId = entry.ref;
         await ctx.patchFile.applyPatchChanges(file, [
           { lineId, raw: entry.before, action: entry.before === null ? 'remove' : 'update' },

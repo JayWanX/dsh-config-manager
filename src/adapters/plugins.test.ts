@@ -187,6 +187,33 @@ test('plugins: 导出清单与 patch 行', async () => {
   assert.equal(v.valid, true);
 });
 
+test('issue #71: plugins 导出同时收集两层 patch 行（此前只读 home 层）', async () => {
+  const PROFILE_REL = 'profiles/tauri/cordis.patch.yml';
+  const src = makeContext('win32', 'C:\\Users\\alice', 'tauri');
+  src.patchFile.lines.set('typert-gateway', { lineId: 'typert-gateway', raw: { id: 'typert-gateway', disabled: false } });
+  // 真机形态：禁用行（mnemon-strategy-*）写在 profile 层，home 层另有插件配置行
+  src.patchFile.bucket(PROFILE_REL).set('mnemon-strategy-a', {
+    lineId: 'mnemon-strategy-a',
+    raw: { id: 'mnemon-strategy-a', name: '@mnemon/strategy-a', disabled: true },
+  });
+  const adapter = new PluginsAdapter();
+  const out = await adapter.export(src, { includeSecrets: false });
+  assert.equal(out.data.patch.length, 2, '真机的行在 profile 层，只读 home 层会漏掉');
+  assert.equal(out.data.patch.find((p) => p.lineId === 'mnemon-strategy-a')?.file, PROFILE_REL, '每行必须记住来源层');
+  assert.equal(out.data.patch.find((p) => p.lineId === 'typert-gateway')?.file, 'cordis.patch.yml');
+
+  // 导入写回原层：目标机没有该行 → Create，落在**目标机当前 profile 层**
+  const dst = makeContext('linux', '/home/bob', 'web');
+  const sections = new Map([['plugins', out.data]]);
+  const items = await adapter.analyzeImport(out.data, makeImportContext(dst, sections));
+  const created = items.find((i) => i.id === 'patch:mnemon-strategy-a');
+  assert.equal(created?.kind, 'Create');
+  const r = await adapter.applyItem(created!, makeImportContext(dst, sections));
+  assert.equal(r.ok, true);
+  assert.equal(dst.patchFile.bucket('profiles/web/cordis.patch.yml').has('mnemon-strategy-a'), true, '写回目标机的 profile 层');
+  assert.equal(dst.patchFile.lines.has('mnemon-strategy-a'), false, '不得搬到 home 层');
+});
+
 test('plugins: 导出携带 pnpm-workspace.yaml；analyze 目标无文件 → Create', async () => {
   const src = makeContext('win32', 'C:\\Users\\alice', 'web');
   await src.fs.writeFile('profiles/web/pnpm-workspace.yaml', new TextEncoder().encode('allowBuilds:\n  ssh2: true\n'));

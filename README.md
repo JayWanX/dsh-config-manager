@@ -489,6 +489,8 @@ dsh-config-manager verify C:/backups/dsh-config.zip   # ...or by path
 
 **Credential files never enter a backup.** `.credentials.*`, `.env`, `*.pem` and friends are excluded by an explicit blacklist, only whitelisted directories are walked (never the whole home directory), and symlinks are skipped rather than followed.
 
+**Offline backup only covers on-disk skills.** Skills that live in the plugin registry (the ones the shell loads from a profile's plugin packages — see issue #71) need the DSH runtime to enumerate, so only the GUI export (or a scheduled backup while DSH is healthy) can include them; the CLI `backup` collects just the files under `$DSH_HOME/skills`. For a complete skills backup, use the GUI export while DSH is healthy.
+
 Structured sections (settings / UI / providers / plugins / MCP / prompts / workspaces) are **not** silently faked: they need the DSH service layer to read and redact, so they are left out and marked `false` in the manifest — the plan printout lists them under “not offline-collectable” so you know exactly what this backup does and does not contain. Use the GUI export when DSH is healthy for a full backup.
 
 ```bash

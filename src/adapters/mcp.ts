@@ -5,6 +5,11 @@
  * dependencyChecker 执行（§15：缺失不阻塞，标记 Requires Attention）。
  *
  * patch 行 raw 支持两种形态：单行 { id, name, config } 与块 { insert: [{ id, name, config }] }。
+ *
+ * issue #71（真机报告「备份不到外壳 mcp」）：数据源是**两层** patch —— home 层
+ * （$DSH_HOME/cordis.patch.yml）与 profile 层（$DSH_HOME/profiles/<p>/cordis.patch.yml）。
+ * 此前只读 home 层，而 DSH 自己的 MCP 配置工具把 server 写进 profile 层，于是备份里
+ * servers 恒为空数组。现在两层都读，每行记住自己来自哪个文件，写回时落回原层。
  */
 import { isDeepStrictEqual } from 'node:util';
 import { msgOf, zhMsg } from '../core/messages.ts';
@@ -16,17 +21,26 @@ import type {
   ApplyResult, ConfigAdapter, ExportOptions, ExportSection, HostContext,
   ImportContext, PlanItem, ValidationResult,
 } from '../core/types.ts';
-import { USER_PATCH_FILE } from './plugins.ts';
+import { locatePatchLineLayer, readEffectivePatchLines, resolveWriteLayer } from '../core/patch-layers.ts';
 
-/** 导出记录：McpServerEntry 之外附加来源 patch 行 id（导入写回定位用） */
+/** 导出记录：McpServerEntry 之外附加来源 patch 行 id 与所在层（导入写回定位用） */
 export interface McpExportEntry extends McpServerEntry {
   sourceLineId: string;
+  /**
+   * 来源 patch 层（相对 homeDir 的 POSIX 路径；见 core/patch-layers.ts）。
+   * 缺省 = 用户层（旧备份包没有该字段 → 按旧行为写回 home 层）。
+   */
+  sourceFile?: string;
 }
 
 export interface McpExportSection { version: 1; servers: McpExportEntry[]; }
 
-/** 从 patch 行数组中提取 MCP server 条目（以 config.serverName 存在为判定） */
-export function extractMcpServers(lines: { lineId: string; raw: unknown }[]): McpExportEntry[] {
+/**
+ * 从 patch 行数组中提取 MCP server 条目（以 config.serverName 存在为判定）。
+ *
+ * 行对象可带 `file`（层身份）：带上时逐条目记录 `sourceFile`，导入写回落回原层。
+ */
+export function extractMcpServers(lines: { lineId: string; raw: unknown; file?: string }[]): McpExportEntry[] {
   const servers: McpExportEntry[] = [];
   for (const line of lines) {
     for (const entry of entriesOf(line.raw)) {
@@ -46,6 +60,7 @@ export function extractMcpServers(lines: { lineId: string; raw: unknown }[]): Mc
         url: typeof c['url'] === 'string' ? c['url'] : undefined,
         headers: c['headers'] !== null && typeof c['headers'] === 'object' ? (c['headers'] as Record<string, string>) : undefined,
         sourceLineId: line.lineId,
+        ...(line.file !== undefined ? { sourceFile: line.file } : {}),
       });
     }
   }
@@ -96,13 +111,12 @@ export class McpAdapter implements ConfigAdapter<McpExportSection> {
 
   async export(ctx: HostContext, _options: ExportOptions): Promise<ExportSection<McpExportSection>> {
     const warnings: string[] = [];
-    let lines: { lineId: string; raw: unknown }[] = [];
-    try {
-      lines = await ctx.patchFile.readPatchLines(USER_PATCH_FILE);
-    } catch (err) {
-      warnings.push(msgOf(ctx)('adapter.patchReadFailedMCP', { reason: err instanceof Error ? err.message : String(err) }));
+    // issue #71：两层都读（home 层优先），否则 profile 层里的 server 全部丢失
+    const read = await readEffectivePatchLines(ctx.patchFile, ctx.profile);
+    for (const f of read.failures) {
+      warnings.push(msgOf(ctx)('adapter.patchReadFailedMCP', { reason: `${f.file}: ${f.reason}` }));
     }
-    const servers = extractMcpServers(lines);
+    const servers = extractMcpServers(read.lines);
     return {
       sectionId: 'mcp',
       data: { version: 1, servers },
@@ -114,13 +128,15 @@ export class McpAdapter implements ConfigAdapter<McpExportSection> {
   async analyzeImport(data: McpExportSection, ctx: ImportContext): Promise<PlanItem[]> {
     const msg = ctx.msg;
     const items: PlanItem[] = [];
-    const targetLines = await ctx.target.patchFile.readPatchLines(USER_PATCH_FILE);
+    // issue #71：目标行跨两层；同一 lineId 只保留优先级最高的一层（与 DSH 合并序一致）
+    const targetLines = (await readEffectivePatchLines(ctx.target.patchFile, ctx.target.profile)).lines;
     const targetServers = extractMcpServers(targetLines);
     for (const server of data.servers) {
       const id = `mcp:${server.serverName}`;
       const existing = targetServers.find((s) => s.serverName === server.serverName);
       const comparable = { ...server } as Record<string, unknown>;
       delete comparable.sourceLineId;
+      delete comparable.sourceFile;
       if (!existing) {
         const lineId = server.sourceLineId && targetLines.some((l) => l.lineId === server.sourceLineId)
           ? `${server.sourceLineId}-imported`
@@ -130,11 +146,13 @@ export class McpAdapter implements ConfigAdapter<McpExportSection> {
           description: msg('adapter.mcpCreate', { serverName: server.serverName }),
           detail: `${server.type === 'stdio' ? `${server.command} ${(server.args ?? []).join(' ')}` : server.url}`,
           severity: 'info',
-          target: { adapter: 'mcp', ref: lineId },
+          // 目标层随计划项一起走：导入前快照要按**这一层**记原行，回滚才能写回原文件
+          target: { adapter: 'mcp', ref: lineId, file: resolveWriteLayer(server.sourceFile, ctx.target.profile) },
         });
       } else {
         const existingComparable = { ...existing } as Record<string, unknown>;
         delete existingComparable.sourceLineId;
+        delete existingComparable.sourceFile;
         if (isDeepStrictEqual(existingComparable, comparable)) {
           items.push({ id, kind: 'Skip', adapter: 'mcp', description: msg('adapter.mcpSame', { serverName: server.serverName }), severity: 'info' });
         } else {
@@ -143,7 +161,7 @@ export class McpAdapter implements ConfigAdapter<McpExportSection> {
             description: msg('adapter.mcpDiff', { serverName: server.serverName }),
             detail: `current=${JSON.stringify(existingComparable)} imported=${JSON.stringify(comparable)}`.slice(0, 200),
             severity: 'warning',
-            target: { adapter: 'mcp', ref: existing.sourceLineId },
+            target: { adapter: 'mcp', ref: existing.sourceLineId, file: existing.sourceFile },
           });
         }
       }
@@ -160,7 +178,12 @@ export class McpAdapter implements ConfigAdapter<McpExportSection> {
     const ref = item.target?.ref;
     if (!ref) return { ok: false, message: msg('adapter.missingTargetRef') };
     const raw = buildMcpPatchLine(ref, server);
-    await ctx.target.patchFile.applyPatchChanges(USER_PATCH_FILE, [
+    // issue #71：Create 落「来源层的同语义层」（来源是 profile 层 → 目标机当前 profile 层），
+    // Update 落「该行当前所在层」—— 两种情况都不把行搬到另一层去（否则同一 lineId 两层各一份）
+    const file = item.kind === 'Create'
+      ? resolveWriteLayer(server.sourceFile, ctx.target.profile)
+      : await locatePatchLineLayer(ctx.target.patchFile, ctx.target.profile, ref);
+    await ctx.target.patchFile.applyPatchChanges(file, [
       { lineId: ref, raw, action: item.kind === 'Create' ? 'insert' : 'update' },
     ]);
     return { ok: true, needsRestart: true, message: msg('adapter.mcpWritten', { serverName }) };

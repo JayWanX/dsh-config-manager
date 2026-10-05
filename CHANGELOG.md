@@ -62,6 +62,52 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 >   APIs first and the section composition separately. The composition card always renders, showing skeleton
 >   rows (`Loading…`) until the data arrives and `Load failed · export everything` on failure.
 
+> **本轮修复**：外壳里配好的 MCP 服务器与技能**备份不到** —— 导出包里 `mcp/servers.json` 恒为空、
+> `custom/skills/` 一个条目都没有，而插件报的是「成功」。根因是两处「只看了一个地方」：MCP / prompts /
+> 插件激活行的 patch **只读了 home 层**，而外壳真正写进去的是**档案层** `profiles/<name>/cordis.patch.yml`；
+> 技能**只扫了 `$DSH_HOME/skills`**，而外壳的技能来自插件注册表。现在 patch 行按层读取、写回原层，
+> 技能经外壳的 `skills` 服务收编，备份与回滚都记住每一行属于哪一层。
+>
+> **Theme**: MCP servers and skills configured in the shell could not be backed up at all (issue #71) —
+> the bundle's `mcp/servers.json` was always empty and `custom/skills/` had no entries, while the plugin
+> reported success. The plugin read only the home layer of the patch file for MCP / prompts / plugin
+> activation rows (the shell writes them into the **profile layer**), and it scanned only
+> `$DSH_HOME/skills` for skills while the shell serves them from its plugin registry. Patch rows are now
+> read per layer and written back to the layer they came from, skills are collected through the shell's
+> `skills` service, and backup/rollback record the layer of every row.
+
+### 🔌 修复：备份不到外壳的 MCP 与 Skills（issue #71）· MCP / skills not backed up (issue #71)
+
+- 🔌 **MCP 服务器现在从两个 patch 层读出**：`$DSH_HOME/cordis.patch.yml`（用户层）与
+  `$DSH_HOME/profiles/<name>/cordis.patch.yml`（档案层）按 **DSH 自己的合并优先级**取有效行（home 层后合并 ⇒
+  优先级更高），同名 `lineId` 只保留优先级最高的那一条；每条导出条目记下自己的来源层。
+  **MCP servers are now read from both patch layers**, merged in DSH's own precedence order (the home
+  layer wins), with the source layer recorded per entry.
+- ✍️ **导入写回原层，不再一律写 home 层**：来自档案层的行写回档案层（并且是**目标机当前档案**），来自用户层的
+  写回用户层；旧备份包没有层字段 ⇒ 按用户层处理（改造前行为，不猜）。同一根因下 prompts 分区与插件激活行
+  一起修好。**Imports write back to the layer a row came from** — profile-layer rows go to the target
+  machine's current profile; bundles from older versions have no layer field and keep the old home-layer
+  behavior. Prompts and plugin activation rows are fixed by the same change.
+- 🧩 **技能经外壳的 `skills` 服务收编**（`ctx.skills.list()` / `get(name)`）：注册表里的技能按
+  `<name>/SKILL.md` 虚拟路径并入 `custom/skills/`，frontmatter 只写 DSH 认的键（`name` / `description` /
+  `whenToUse`，调用策略写 `disable-model-invocation` / `user-invocable`）；**同名时磁盘原文优先**，
+  服务不可用就退回纯目录扫描（只记 warn，不编造告警）。**Skills are collected through the shell's `skills`
+  service** as virtual `<name>/SKILL.md` paths; on-disk files win on the same path, and a missing service
+  degrades to directory scanning.
+- 🛟 **备份与回滚记住 patch 行的层**：快照条目记录 `file`，回滚写回**原层**（旧快照缺该字段 ⇒ 用户层）；
+  计划项去重键把层算进去，档案层的行不再被 home 层的同名行吞掉；整文件还原接受**任一层**的
+  `cordis.patch.yml` 备份。**Snapshots and rollback now record the layer of every patch row.**
+- 🧾 **多行技能字段不再写出非法 YAML**：服务技能的 `description` / `whenToUse` 可能是块标量
+  （真机 `dsh-reverse-skill/skills/binary-diff` 是 4 行 211 字符），重建 frontmatter 按三档编码 ——
+  以恰好一个换行结尾的多行值写块标量 `|`（尾换行交给 clip chomping 还原）、含换行 / 回车 / 控制字符的
+  写双引号 + 转义、其余仍是单引号；解析回来**逐字符相同**。原先只做单引号转义，多行值会跨行 ⇒ 外壳判
+  `invalid YAML frontmatter` 并**丢掉整个技能**（比不备份更糟）。**Multi-line skill fields are now encoded
+  as valid YAML** (block scalar / double-quoted escapes / single-quoted), so the shell can never drop a skill
+  over frontmatter.
+- 🧪 **用例**：新增 `src/core/patch-layers.test.ts`（层优先级 / 写回层解析 / 单层读失败不阻塞），
+  扩充 `src/adapters/files.test.ts`（技能服务合并、磁盘优先、服务缺失、路径安全、**多行字段的 YAML 合法性**）、`mcp.test.ts`、
+  `prompts.test.ts`、`plugins.test.ts`、`tests/core/patch-file-snapshot.test.ts`（快照记层 + 回滚写回原层）。
+
 ## [0.1.69] - 2026-10-04
 
 > **本版已发布**：覆盖此前数轮并行落地的工作（会话跨机迁移与体检、UI v2 信息架构、磁盘占用体检、

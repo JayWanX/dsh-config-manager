@@ -44,7 +44,7 @@ import { promisify } from 'node:util'
 
 import type { Context } from '@deepseek-ai/cordis'
 import * as dshSettings from '@deepseek-ai/dsh-settings'
-import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
+import type { SettingsDescriptor, SettingsProvider } from '@deepseek-ai/dsh-settings'
 import * as dshCredentials from '@deepseek-ai/dsh-credentials'
 import type { CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import { dshHomePath, resolveDshHome } from '@deepseek-ai/dsh-home-paths'
@@ -77,7 +77,7 @@ import { registerModelTools } from './core/model-tools.ts'
 import { makeMsg, msgOf, zhMsg } from './core/messages.ts'
 import type { MsgFunc } from './core/messages.ts'
 import { cleanupAbortedInstall, hasDshBundlePatch, installAnchorFromProfileContext, installErrorFor, installSpecFor, listInstalledPlugins, profileNameFromProfileContext, resolveProcessProfileName, resolveProfileDir, readProfileManifest, runDshPlugin, validateProfileName } from './core/plugin-cli.ts'
-import type { ConfigAdapter, CredentialsFacade, ExportUnit, FileSystemFacade, HostContext, ImportDecisions, ImportPlan, NamespaceInfo, PatchFileFacade, PlanItemKind, PluginInfo, PluginsFacade, SessionMoveResult, SessionParentRelation, SessionRewriteResult, SessionStoreFacade, SettingsFacade, WorkspaceFacade } from './core/types.ts'
+import type { ConfigAdapter, CredentialsFacade, ExportUnit, FileSystemFacade, HostContext, ImportDecisions, ImportPlan, NamedNamespaceInfo, NamespaceInfo, PatchFileFacade, PlanItemKind, PluginInfo, PluginsFacade, SessionMoveResult, SessionParentRelation, SessionRewriteResult, SessionStoreFacade, SettingsFacade, WorkspaceFacade } from './core/types.ts'
 import { ImportUserSkippedError } from './core/types.ts'
 import { createAdapters, USER_PATCH_FILE } from './adapters/index.ts'
 import { createLocalPluginPackHook } from './core/local-plugin-host.ts'
@@ -427,10 +427,8 @@ class DshSettingsFacade implements SettingsFacade {
     return this.ctx.settings
   }
 
-  async describe(namespace: string, opts?: { redactSecrets?: boolean }): Promise<NamespaceInfo> {
-    const all = this.provider().describe({ redactSecrets: opts?.redactSecrets ?? true })
-    const descriptor = all.find((d) => String(d.ns) === namespace)
-    if (!descriptor) throw new Error(`namespace not found: ${namespace}`)
+  /** DSH 描述符 → 核心 NamespaceInfo（describe/describeAll 共用，保证两条路径逐字段同口径） */
+  private toNamespaceInfo(descriptor: SettingsDescriptor): NamespaceInfo {
     return {
       value: descriptor.value,
       base: descriptor.base,
@@ -439,6 +437,25 @@ class DshSettingsFacade implements SettingsFacade {
       applies: descriptor.applies === undefined ? undefined : [descriptor.applies],
       secrets: descriptor.secrets ?? [],
     }
+  }
+
+  async describe(namespace: string, opts?: { redactSecrets?: boolean }): Promise<NamespaceInfo> {
+    const found = (await this.describeAll(opts)).find((d) => d.ns === namespace)
+    if (!found) throw new Error(`namespace not found: ${namespace}`)
+    return found.info
+  }
+
+  /**
+   * 一次读回全部已注册 namespace。
+   *
+   * 真实服务侧 describe() 是「无参 = 全量」的：每次调用都对全部注册项重跑
+   * schema.toJSON + structuredClone + redactSecrets。逐名调用因此是 O(N²)
+   * （真机 24 个 namespace ≈1.7 s），调用方改用本方法后只需一次全量（≈70 ms）。
+   */
+  async describeAll(opts?: { redactSecrets?: boolean }): Promise<NamedNamespaceInfo[]> {
+    return this.provider()
+      .describe({ redactSecrets: opts?.redactSecrets ?? true })
+      .map((descriptor) => ({ ns: String(descriptor.ns), info: this.toNamespaceInfo(descriptor) }))
   }
 
   async replace(namespace: string, value: unknown, expectedRevision?: number): Promise<void> {
@@ -1046,6 +1063,62 @@ export class DshFileSystemFacade implements FileSystemFacade {
       const target = await fs.realpath(resolve(absPath))
       const st = await fs.stat(target)
       return st.isDirectory() ? target : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 目录体积上界（只读预览：本地源插件的 `link:` 目录）。
+   *
+   * 与 realpathDir 同族的「绝对路径」方法：入参只可能是本机插件 spec 推导出的绝对路径
+   * （`link:` 常指向 $DSH_HOME 之外的桌面端 resources 目录），因此**不受 home 边界限制**。
+   *
+   * 约束（宁可低估，不可卡住预览）：
+   *  - 不跟随符号链接 / junction：`readdir(withFileTypes)` 对链接目录的 isDirectory() 恒 false，
+   *    按「既不是文件也不是目录」跳过，既不会绕圈也不会跑出该目录；
+   *  - 跳过 node_modules：`npm pack` 自身也排除它，数进去只会把量级抬高一个数量级；
+   *  - `maxEntries` 兜底（默认 20000）：超出即停并返回已累计值；
+   *  - 不是目录 / 读不到 → null（调用方对这类目录退回「体积按 0」）。
+   */
+  async dirSizeBytes(absPath: string, opts: { maxEntries?: number } = {}): Promise<number | null> {
+    const maxEntries = opts.maxEntries !== undefined && opts.maxEntries > 0 ? opts.maxEntries : 20000
+    const readEntries = async (dir: string): Promise<Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>> => {
+      try {
+        return await fs.readdir(dir, { withFileTypes: true })
+      } catch {
+        return []
+      }
+    }
+    try {
+      const target = resolve(absPath)
+      const st = await fs.stat(target)
+      if (!st.isDirectory()) return null
+      const stack: string[] = [target]
+      let total = 0
+      let counted = 0
+      while (stack.length > 0) {
+        const dir = stack.pop()
+        if (dir === undefined) break
+        for (const ent of await readEntries(dir)) {
+          if (ent.name === 'node_modules') continue
+          const full = join(dir, ent.name)
+          if (ent.isDirectory()) {
+            stack.push(full)
+            continue
+          }
+          if (!ent.isFile()) continue
+          if (counted >= maxEntries) return total
+          counted += 1
+          try {
+            const fileStat = await fs.stat(full)
+            if (fileStat.isFile()) total += fileStat.size
+          } catch {
+            // 单个文件读不到就跳过：预览要的是量级，不值得为它失败
+          }
+        }
+      }
+      return total
     } catch {
       return null
     }

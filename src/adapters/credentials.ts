@@ -14,7 +14,7 @@ import type {
   ApplyResult, ConfigAdapter, ExportOptions, ExportSection, HostContext,
   ImportContext, PlanItem, ValidationResult,
 } from '../core/types.ts';
-import { resolveNamespaces, type NamespaceProvider } from './settings.ts';
+import { namespaceFromMap, readNamespaceMap, resolveNamespaces, type NamespaceProvider } from './settings.ts';
 import { sectionMeta } from '../schema/section-registry.ts';
 import { validateJsonSection } from './json-section.ts';
 
@@ -27,9 +27,12 @@ export type CredentialRefsProvider = (ctx: HostContext) => Promise<string[]>;
 export function defaultCredentialRefs(namespaces: string[] | NamespaceProvider): CredentialRefsProvider {
   return async (ctx: HostContext): Promise<string[]> => {
     const refs = new Set<string>();
-    for (const ns of await resolveNamespaces(namespaces, ctx)) {
+    const names = await resolveNamespaces(namespaces, ctx);
+    // 快路径：宿主能一次读回全部 namespace 时只读一趟（理由见 settings.ts readNamespaceMap）
+    const all = names.length > 0 ? await readNamespaceMap(ctx) : null;
+    for (const ns of names) {
       try {
-        const info = await ctx.settings.describe(ns, { redactSecrets: true });
+        const info = all !== null ? namespaceFromMap(all, ns) : await ctx.settings.describe(ns, { redactSecrets: true });
         const value = (info.value ?? {}) as Record<string, unknown>;
         // 引用类字段名（值 = env/凭据引用名，非秘密本身）
         const REFERENCE_REF_FIELDS = new Set([

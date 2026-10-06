@@ -11,6 +11,105 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 
 ## [Unreleased]
 
+> **外部 agent 迁移来源一次补齐到 30 个（+24）**：此前只认 6 个来源（Claude Code / Hermes / Cursor / Codex /
+> Copilot / Antigravity），现在把生态里其余 24 个会话来源一并接进来：Gemini CLI、Reasonix、OpenCode、Mimocode、
+> ZCode、Grok Build、OpenClaw、Pi、Kimi、Kilo Code、Qoder、ChatGPT、WorkBuddy、千问办公、Continue、Cline、
+> Goose、DSH V4、Zed、Crush、TeleAgent、Trae、Vibe、DSH。新增统一的会话 IR 层（解析 → 中间表示 → 合成 → 编码），
+> 每个来源只需写「读盘 + 转成草稿」两件事，不再各拼一遍 DSH 行格式。
+> - **取证强度是类型上的必填字段**（`measured` / `fixture` / `documented`）——「只有文档落点却当成已验证列出」
+>   在类型层就不可能悄悄发生；来源列表与 CLI 摘要都会说明每个来源凭什么被列出来。本批 24 个多数是 `fixture`
+>   （夹具 + 单测端到端跑同一份布局，**真机未逐家验证**），如实标注、不美化。
+> - **SQLite 类来源零副作用读取**：只读打开 WAL 模式的库仍会在**库所在目录**新建 `-shm` / `-wal` 伴生文件
+>   （实测 32768 B / 0 B，close 后仍在）—— 那会写进**用户其它 agent 的数据目录**。现在按「库头 + 伴生文件大小」
+>   分三态（直接读 / `immutable` / 复制到私有临时目录后读），**绝不退回就地打开**；`immutable` 只在能证明主库
+>   完整时使用 —— 实测它在 `-wal` 非空时会**整条忽略 WAL（静默丢数据）**。
+> - **路径按目标平台显式拼接**（不再读运行平台）；凭据值硬剥离（只留字段名与引用名）；读不到一律如实报码，
+>   **绝不静默跳过**。
+>
+> **Foreign-agent import sources: 6 → 30 (24 added)**: the importer used to know 6 sources (Claude Code /
+> Hermes / Cursor / Codex / Copilot / Antigravity); the remaining 24 session sources in the ecosystem are now
+> wired in: Gemini CLI, Reasonix, OpenCode, Mimocode, ZCode, Grok Build, OpenClaw, Pi, Kimi, Kilo Code, Qoder,
+> ChatGPT, WorkBuddy, Qwen Work, Continue, Cline, Goose, DSH V4, Zed, Crush, TeleAgent, Trae, Vibe, DSH.
+> A shared session IR layer (parse → intermediate form → synthesize → encode) means each source only implements
+> "read from disk + turn into a draft" instead of hand-assembling the DSH row format again.
+> - **Evidence strength is a required, typed field** (`measured` / `fixture` / `documented`), so "listed as
+>   supported although only documented" cannot happen silently — the source list and the CLI summary both say
+>   what each source is listed on. Most of the 24 are `fixture` (fixture + unit test running the same layout,
+>   **not verified per-source on a real machine**), labelled honestly rather than flattered.
+> - **SQLite sources read with zero side effects**: opening a WAL-mode database read-only still creates
+>   `-shm` / `-wal` companion files **in the database's own directory** (measured: 32768 B / 0 B, still there
+>   after close) — which means writing into **another agent's data directory**. The open plan now picks between
+>   three states based on the database header and companion-file sizes (read in place / `immutable` / copy to a
+>   private temp directory first) and **never falls back to opening in place**; `immutable` is used only when the
+>   main database can be proven complete — measured, it **ignores the entire WAL when `-wal` is non-empty
+>   (silent data loss)**.
+> - **Paths are joined explicitly for the target platform** (never the running one); credential values are
+>   stripped to field names and reference names; anything unreadable is reported with a stable code and
+>   **never silently skipped**.
+
+> **同步通道新增 6 类云端点（S3 / OSS / COS / MinIO / Kodo / Gist）**：此前远端只有 git 与 WebDAV 两种。
+> 通道枚举现在扩到四条（`git` / `webdav` / `s3` / `gist`），S3 一系覆盖 AWS S3、阿里云 OSS、腾讯云 COS、
+> MinIO 与七牛 Kodo，外加 GitHub Gist；签名与请求头**手写实现、零新增依赖**（AWS SigV4 与阿里云
+> `OSS4-HMAC-SHA256` 是两个不同方言）。界面上可直接选通道并填端点表单。
+> - **走同一条同步引擎路径，不是旁路**：远端保留（GFS）、会话删除墓碑、内容寻址 blob 仓、「会话绝不悄悄下行」、
+>   「导出密钥必须同时加密」等既有不变量对新通道**一条不放宽**（已用替身 transport 走真引擎逐条验证）。
+> - **密钥只进 DSH 凭据槽位**：配置文件里只有非密字段（provider / endpoint / region / bucket / prefix）；
+>   密钥值绝不进配置文件、不进响应、不进日志；断开通道时逐个槽位清除。
+> - **gist 的能力边界（刻意设计，不是缺陷）**：gist 不外置 blob，且单文件超限会被截断 —— 它的定位是
+>   「配置类分区的低门槛远端」；会话请走 git / WebDAV / S3。
+> - 如实边界：**未对真实云端点做端到端验证**（本批无真实凭据），证据是单测与全量测试。
+>
+> **Six cloud endpoints for the sync channel (S3 / OSS / COS / MinIO / Kodo / Gist)**: remote storage used to
+> be git and WebDAV only. The channel enum now has four entries (`git` / `webdav` / `s3` / `gist`); the S3 family
+> covers AWS S3, Alibaba Cloud OSS, Tencent Cloud COS, MinIO and Qiniu Kodo, plus GitHub Gist. Signing and
+> request headers are **hand-written with zero new dependencies** (AWS SigV4 and Alibaba Cloud's
+> `OSS4-HMAC-SHA256` are two different dialects). The UI lets you pick the channel and fill in the endpoint form.
+> - **Same sync engine path, not a bypass**: remote retention (GFS), session deletion tombstones, the
+>   content-addressed blob store, "sessions never travel down silently" and "exporting secrets requires
+>   encryption" are **not relaxed by a single one** for the new channels (verified by running the real engine
+>   with a stub transport).
+> - **Secrets live only in DSH credential slots**: the config file carries non-secret fields only
+>   (provider / endpoint / region / bucket / prefix); secret values never enter the config file, a response or a
+>   log, and disconnecting a channel clears each slot.
+> - **gist's capability boundary (deliberate, not a defect)**: gist does not externalise blobs and truncates
+>   files past GitHub's size limit — it is positioned as a low-barrier remote for configuration-class sections;
+>   use git / WebDAV / S3 for sessions.
+> - Honest boundary: **no end-to-end verification against a real cloud endpoint** (no real credentials this
+>   round); the evidence is unit tests plus the full suite.
+
+> **事故恢复新增「检查点」三态同点回滚**：会话游标 / 工作区文件块 / 插件自身配置三者各自留痕，并按同一
+> 时点判断「是否同点」；覆盖式恢复**只覆盖记录在案的路径、绝不删除** —— 检查点之后新建的文件原样保留，
+> 并列入 `leftovers` 回报。
+> - 四道门：未确认不回滚（409 且磁盘一字未改）、保护点不可回滚、guard 记录不可删、会话分叉时拒绝覆盖。
+> - **记录不可成为写原语**：台账与校验和不符、或路径越界时，目标与越界路径都**不被写**。
+> - 如实边界：三态采集**非原子**（模块头已声明）；`capturedAt` 仅实例内单调，跨进程时间倒退会让「同点」
+>   判定偏乐观；`workspace` 段的 `restored` 计数不按块递减。
+>
+> **Incident recovery gains three-state same-point checkpoints**: the session cursor, workspace file chunks and
+> the plugin's own configuration each leave a record, and "same point" is judged across all three. An
+> overwriting restore **only overwrites recorded paths and never deletes** — files created after the checkpoint
+> are kept verbatim and reported as `leftovers`.
+> - Four gates: no restore without confirmation (409 with the disk untouched), protected points cannot be rolled
+>   back, guard records cannot be deleted, and a diverged session log refuses to be overwritten.
+> - **A record can never become a write primitive**: when the ledger disagrees with the checksum, or a path
+>   escapes the recorded set, neither the target nor the escaping path is written.
+> - Honest boundaries: the three states are captured **non-atomically** (stated in the module header);
+>   `capturedAt` is monotonic per instance only, so a cross-process clock going backwards makes "same point"
+>   optimistic; the workspace section's `restored` counter does not decrement per chunk.
+
+> **两处「静默」改成可见**：① 快照现在记录导出时的 DSH 版本，版本不匹配时恢复计划里多一条**咨询性提示**
+> （不阻断、也不猜版本）；② 会话导出探测此前只看状态码，而官方 `GET /api/session.export` 在服务缺失时
+> 返回 **500（不是 501）** —— 于是「服务没装」与「服务在但没正文」被混为一谈。现在探测读有限字节正文，
+> 三态（可用 / 不可用 / 未知）各自可辨，且**不消耗完整响应体**（有上限 + 主动断开，并有可失败断言钉住）。
+>
+> **Two silences turned visible**: (1) snapshots now record the DSH version they were exported from, and a
+> version mismatch adds an **advisory** entry to the restore plan (non-blocking, and the version is never
+> guessed); (2) the session-export probe used to look at the status code only, while the official
+> `GET /api/session.export` returns **500 — not 501 — when the service is missing**, conflating "service not
+> installed" with "service present but no body". The probe now reads a bounded amount of body, so the three
+> states (available / unavailable / unknown) are distinguishable, and it **does not consume the full response**
+> (there is a cap plus an active abort, pinned by a failable assertion).
+
 > **全仓对抗审计修复**：本轮对**整仓**做了一次对抗性审计（七个区域审计 + 三轮横向扫查 + 每个修复配独立验证），
 > 收敛出 **44 项缺陷：40 项闭环、5 项部分闭环、2 项等第三方写者落盘后复扫**。修的主要是**静默数据风险**，
 > 而不是看得见的报错。

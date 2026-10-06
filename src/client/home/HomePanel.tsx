@@ -477,11 +477,11 @@ export function HomePanel({ api, syncApi, historyApi, t, syncT, openActivity, op
       <Modal
         open={scheduleOpen}
         onClose={() => { setScheduleOpen(false) }}
-        title={t('snapshots.subTab.schedule')}
+        title={t('home.schedule.title')}
         wide
       >
         <Modal.Header
-          title={t('snapshots.subTab.schedule')}
+          title={t('home.schedule.title')}
           closeLabel={t('common.close')}
           onClose={() => { setScheduleOpen(false) }}
         />

@@ -51,7 +51,7 @@ jobs:
         # npm pack --pack-destination fails if the dir does not exist (fresh checkout).
         run: mkdir -p dist && npm pack --pack-destination ./dist
 
-      - name: CHANGELOG highlights guard (before publish)
+      - name: "Release notes guard: CHANGELOG 亮点段 + 描述模板 (before publish)"
         # 为什么门禁必须放在 npm publish 之前：npm 上同一版本号不可重发，
         # 若把「抽取 + 非空校验」留到后面的 release 步骤（带 tag 条件），
         # CHANGELOG 漏写时只会让流水线变红，包却已经发到 npm；
@@ -70,6 +70,15 @@ jobs:
           python3 .github/scripts/extract-release-notes.py "$VERSION" CHANGELOG.md > /tmp/highlights.md
           if [ ! -s /tmp/highlights.md ]; then
             echo "::error::CHANGELOG.md 缺少当前版本 $VERSION 的亮点段，请先在 CHANGELOG.md 顶部按 ## [vX.Y.Z] 补充（中英双语）后再发版"
+            exit 1
+          fi
+
+          # 描述模板 dry-run：release 描述由 .github/release-notes-template.md 渲染。模板写坏必须在这里
+          # 就红，而不是等 npm publish 之后创建 Release 时才失败 —— 那会留下「包已发到 npm、描述没写」的半成品。
+          # 自动变更记录此刻还不存在（由 gh release create --generate-notes 生成），故用桩文件占位。
+          printf '(auto notes placeholder)\n' > /tmp/auto-notes.stub.md
+          if ! node .github/scripts/render-release-notes.mjs "$VERSION" .github/release-notes-template.md /tmp/highlights.md /tmp/auto-notes.stub.md > /tmp/release-notes.dryrun.md; then
+            echo "::error::release 描述模板渲染失败：检查 .github/release-notes-template.md 与 .github/scripts/render-release-notes.mjs"
             exit 1
           fi
 
@@ -93,22 +102,16 @@ jobs:
           # ② 把自动生成的变更记录存到临时文件
           gh release view "$GITHUB_REF_NAME" --json body -q .body > /tmp/auto-notes.md
 
-          # ③ 双语亮点段已由前面的 "CHANGELOG highlights guard (before publish)" 步骤
-          #    抽取并做过非空校验，写入 /tmp/highlights.md（push tag 与 workflow_dispatch 两条路径都会执行）。
-          #    门禁放在 publish 之前才能保证漏写 CHANGELOG 时不会先把包发上 npm，故此处不再重复抽取。
+          # ③ 双语亮点段已由前面的 "Release notes guard" 步骤抽取并做过非空校验，写入 /tmp/highlights.md
+          #    （push tag 与 workflow_dispatch 两条路径都会执行）；同一门禁还用它 + 桩自动记录做了一次
+          #    模板 dry-run，所以这里的渲染不会再因为模板问题失败。故此处不再重复抽取。
 
-          # ④ 拼装完整描述：双语亮点段 + 安装指引 + 变更记录
-          cp /tmp/highlights.md /tmp/release-notes.md
-          cat >> /tmp/release-notes.md <<'EOF'
-
-          ## 📦 安装 / Install
-          ```bash
-          dsh plugin --profile web add dsh-config-manager@latest
-          ```
-          ## 🔄 变更记录 / Changelog（自动生成）
-          EOF
-          echo "" >> /tmp/release-notes.md
-          cat /tmp/auto-notes.md >> /tmp/release-notes.md
+          # ④ 拼装完整描述：模板渲染（模板与渲染器都在仓库里，改文案不用动 workflow）
+          node .github/scripts/render-release-notes.mjs \
+            "$GITHUB_REF_NAME" \
+            .github/release-notes-template.md \
+            /tmp/highlights.md \
+            /tmp/auto-notes.md > /tmp/release-notes.md
 
           # ⑤ 用拼接后的完整描述更新 release
           gh release edit "$GITHUB_REF_NAME" --notes-file /tmp/release-notes.md

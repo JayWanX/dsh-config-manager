@@ -267,6 +267,46 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
   扩充 `src/adapters/files.test.ts`（技能服务合并、磁盘优先、服务缺失、路径安全、**多行字段的 YAML 合法性**）、`mcp.test.ts`、
   `prompts.test.ts`、`plugins.test.ts`、`tests/core/patch-file-snapshot.test.ts`（快照记层 + 回滚写回原层）。
 
+> **本轮修复**：一键同步**永远收敛不了** —— 4 个空 settings 分区（`permission` / `locale` /
+> `ui-settings-general` / `agent-preset-registry`）与 `self:sync/sync-autosync.json` 每同步一次就会
+> 重新出现在差异列表里，连续 7 次 `completed` 事务全部命中，界面却报「成功」。根因是两处彼此独立的
+> 判定缺陷：settings / providers 把「目标为空 → 新建」排在了「值相等 → 跳过」之前，而两端值都是空的
+> `{}` 时，写回 `{}` 是一次空写入，下一轮读回来还是 `{}` ⇒ 永远判「新建」；`self` 分区按**整文件哈希**
+> 比对，而自动同步配置里的 `lastRunAt` / `consecutiveFailures` 等运行态字段每轮都被调度器改写 ⇒
+> 哈希永远不同、永远判「冲突」（点「应用」还会把远端的陈旧运行态倒灌回本机）。现在两处都按预期判
+> 「跳过」，而「目标非空 + 导入为空」仍判「冲突」—— 不借「跳过空值」静默清空本机配置。
+>
+> **Fix**: one-click sync could never converge. Four empty settings namespaces (`permission` / `locale` /
+> `ui-settings-general` / `agent-preset-registry`) and `self:sync/sync-autosync.json` came back in the diff
+> list on every single sync — seven consecutive `completed` transactions hit them all — while the UI reported
+> success. Two independent judgement bugs: settings / providers tested "target is empty → create" before
+> "values are equal → skip", so when both sides held an empty `{}` the "write" was a no-op that left the next
+> read identical (create forever); and the `self` section compared **whole-file hashes**, while the autosync
+> config's run state (`lastRunAt`, `consecutiveFailures`, …) is rewritten by the scheduler after every run, so
+> the hashes never matched (conflict forever — and applying it pushed the remote's stale run state back onto
+> this machine). Both now skip as expected, and a non-empty target against an empty import is still a conflict,
+> so local configuration is never silently wiped.
+
+### 🔁 修复：一键同步永不收敛（issue #73）· One-click sync that could never converge (issue #73)
+
+- ⚙️ **settings / providers 判定顺序修正**：`planNamespaceItems` 与 `ProvidersAdapter.analyzeImport` 把
+  「值相等 → 跳过」提到「目标为空 → 新建」之前，两端皆 `{}` 时不再反复产生空写入。`ui` 分区与
+  `providers` 共用同一判定，同源生效；「目标为空 + 导入非空」仍是新建、「目标非空 + 导入为空」仍是冲突。
+  **Equal values are now checked before emptiness in settings, ui and providers**, so two empty `{}` values
+  skip instead of creating again on every sync.
+- 🧾 **`self` 调度配置剔除运行态后再比对**：`FileCollectionAdapter` 新增可覆写的比对口径钩子，`self` 对
+  `sync/sync-autosync.json` 与 `sync/backup-schedule.json` 剔除 `lastRunAt` / `lastRunStatus` /
+  `lastRunMessage` / `lastRunHistoryId` / `consecutiveFailures`（含 v2 `channels.git` / `channels.webdav`
+  嵌套）后按**键排序**稳定序列化比对；配置本体不同仍判冲突，文件解析不出 JSON 时回落整文件哈希
+  （「判不出来」≠「判为相同」）。其余 `self` 白名单文件口径不变。**The self section now compares its two
+  scheduler configs without run-state fields**, serialized with sorted keys so a hand-edited key order cannot
+  create a phantom conflict; a real configuration change is still a conflict, and an unparsable file falls back
+  to the whole-file hash.
+- 🧪 **用例**：新增 5 条回归 —— settings / providers「两端皆 `{}` → 跳过」「目标非空 + 导入 `{}` → 冲突」，
+  `self`「仅运行态不同 → 跳过（键序不同亦然）」「配置本体不同 → 冲突」「坏 JSON 回落整文件哈希」
+  「口径不外溢（`sync-config.json` 仍按字节判）」。**Five regression tests** cover the empty-value skip, the
+  non-empty-target conflict, run-state-only skip, a real config change, unparsable JSON, and the scope boundary.
+
 ## [0.1.69] - 2026-10-04
 
 > **本版已发布**：覆盖此前数轮并行落地的工作（会话跨机迁移与体检、UI v2 信息架构、磁盘占用体检、

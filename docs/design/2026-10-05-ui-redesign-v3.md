@@ -376,7 +376,7 @@ node -e "const fs=require('fs');const c=fs.readFileSync('src/client/config-manag
 | `ui/nav-model.ts` | 保留（4+1 项与 4 图标下的容量判定） | 现有 + 新增 5 项用例 |
 | `ui/home-view.ts`（或复用 `overview-view.ts`） | 首页指标/健康/提醒/首用空态投影（删分区构成与活动投影） | 现有测试改造 |
 | `ui/sync-channel-view.ts` | 每通道卡的状态投影（折叠态、安全摘要、内容摘要、按钮可用性）—— 把 SyncPanel 里的可测判定下沉 | 新增 |
-| `ui/commands.ts` | 19 条命令（+market.open/market.publish.open/rescue.open，renamed go.*） | 现有双向守卫扩展 |
+| `ui/commands.ts` | 20 条命令（+market.open/market.publish.open/rescue.open/import.foreign，renamed go.*） | 现有双向守卫扩展 |
 | `ui/state-migration.ts`（可选） | 抽 `parsePersistedState` 的映射表为纯函数便于穷举测试 | 新增 |
 
 ### 5.5 守卫锚点更新清单
@@ -519,7 +519,7 @@ node -e "const fs=require('fs');const c=fs.readFileSync('src/client/config-manag
 | about 关于（状态/更新检查/诊断/CLI 命令/反馈/作者） | Task（保留） |
 | Task 外壳（返回/仅只读 Esc/不重挂） | 保留 |
 
-### 6.7 命令面板（17 → 19）
+### 6.7 命令面板（17 → 20）
 
 | 旧 id | 新 id | 备注 |
 |---|---|---|
@@ -533,6 +533,7 @@ node -e "const fs=require('fs');const c=fs.readFileSync('src/client/config-manag
 | `library.source.all/snapshot/backupFile/remote/market` | 同 | 5 条不变 |
 | `export.open` | 同 | 不变 |
 | `import.open` | 同 | 不变 |
+| — | `import.foreign` | ★ 新增（从其它 agent 导入：开导入面板并停在「来源选择」，与首页工具栏同一入口） |
 | `maintenance.open` | 同 | 不变 |
 | `activity.open` | 同 | → runs |
 | `history.open` | 同 | 不变 |
@@ -691,7 +692,7 @@ Task（覆盖 shellContent，不盖 nav/banner/statusBar）：
 
 ## 11. 实施批次（Phase 1 确认后一口气做完）
 - **M1 设计系统落地**：`--cm-*` token 层 + CSS 重排（§1-§7）+ 全量套用 scale + 删死类/重复块 + 两个新守卫；不动 IA。门禁全绿。
-- **M2 外壳与导航**：4 页签 + 4 图标 + 状态栏进度 + SAFE MODE class 化 + 命令表 19 条 + 容器判据落地（nav-model 5 项用例）。
+- **M2 外壳与导航**：4 页签 + 4 图标 + 状态栏进度 + SAFE MODE class 化 + 命令表（落定 20 条）+ 容器判据落地（nav-model 5 项用例）。
 - **M3 逐页迁移**：首页瘦身 → 产物库底栏 → 同步拆卡（SyncChannelCard + 加密入配置弹窗）→ 环境（档案不动、维护拆文件）。每页迁完立即跑门禁。
 - **M4 流程容器迁移**：market 只作 Task；export/import 外壳去页面 padding；Task/TaskShell 复核。
 - **M5 run-store 迁移**：PanelId 4 值 + 删 MainView/subTab/publish + `pendingZip` + parse 映射重写 + 旧载荷用例 + 守卫锚点更新。

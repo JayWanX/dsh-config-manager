@@ -19,6 +19,7 @@ const TITLES: Record<string, string> = {
   'environment.title': '环境',
   'nav.export': '导出',
   'nav.import': '导入',
+  'foreign.source.title': '从其它 agent 导入',
   'environment.tab.maintenance': '维护与诊断',
   'task.title.runs': '活动记录',
   'task.title.history': '迁移历史',

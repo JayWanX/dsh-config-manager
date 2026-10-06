@@ -36,7 +36,7 @@ export const COMMAND_GROUP_ORDER: readonly CommandGroup[] = ['navigate', 'librar
 export type PaletteTitleKey =
   | 'nav.home' | 'library.title' | 'nav.sync' | 'environment.title'
   | 'nav.market' | 'task.title.publish'
-  | 'nav.export' | 'nav.import' | 'environment.tab.maintenance'
+  | 'nav.export' | 'nav.import' | 'environment.tab.maintenance' | 'foreign.source.title'
   | 'task.title.runs' | 'task.title.history' | 'task.title.about'
   | 'palette.rescue.recovery' | 'palette.rescue.mode'
   | 'library.source.all' | 'library.kind.snapshot' | 'library.kind.backupFile'
@@ -141,6 +141,14 @@ export const COMMANDS: readonly CommandItem[] = [
     group: 'action',
     titleKey: 'nav.import',
     keywords: ['import', 'restore', '导入'],
+  },
+  {
+    // 从其它 agent 导入（Claude Code / Cursor …）：与首页工具栏是**同一个入口** ——
+    // 开导入面板并直接停在「来源选择」那一步，而不是让用户先进向导再找按钮（t17 的语义）。
+    id: 'import.foreign',
+    group: 'action',
+    titleKey: 'foreign.source.title',
+    keywords: ['foreign', 'claude', 'codex', 'cursor', 'agent', 'migrate', '其它', '其他', '外部', '迁移'],
   },
   {
     // 维护与诊断 = 环境页的全屏子视图（磁盘占用 / 会话健康 / 救援模式都在里面）。

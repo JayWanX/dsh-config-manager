@@ -428,6 +428,8 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
       // 发布 = 市场面板的「我的配置」子视图：payload 让面板直开那一页（M4 接线）
       case 'market.publish.open': openTask('market', { subView: 'myconfigs' }); return
       // 维护与诊断是全屏子视图：命令直达它，而不是只把用户送到环境页
+      // 从其它 agent 导入：开导入面板并停在来源选择（与首页工具栏同一路径）
+      case 'import.foreign': openTask('import'); setForeignImportOpen(true); return
       case 'maintenance.open': openMaintenance(); return
       case 'activity.open': openTask('runs'); return
       case 'history.open': openTask('history'); return
@@ -451,7 +453,6 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
           historyApi={historyApi}
           t={t}
           syncT={syncT}
-          openActivity={() => { openTask('history') }}
           // 直达来源选择：开导入面板 + 把面板切到「从其它 agent 导入」那一步
           openForeignImport={() => {
             openTask('import')

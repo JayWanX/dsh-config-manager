@@ -48,7 +48,7 @@ import {
   type OverviewMetricKey,
 } from '../../ui/overview-view.ts'
 import { Badge, Button, Card, Spinner, StatusDot, Stepper } from '../common/ui.tsx'
-import { BackupIcon, ExportIcon, ImportIcon, SyncIcon, ArrowRightIcon } from '../common/Icon.tsx'
+import { BackupIcon, ExportIcon, ImportIcon, SyncIcon } from '../common/Icon.tsx'
 import { CopyButton } from '../common/CopyButton.tsx'
 import { Modal } from '../common/Modal.tsx'
 import { BackupScheduleCard } from './BackupScheduleCard.tsx'
@@ -71,7 +71,6 @@ export interface HomePanelProps {
   /** 同步命名空间翻译器（透传给自动备份卡：跳过原因文案走 sync 字典；client-F1） */
   syncT: TranslateNS<'config-manager-sync'>
   /** 「活动」入口打开 Shell 的只读面板（完整迁移历史） */
-  openActivity?: () => void
   /**
    * 打开导入面板并**直接停在「从其它 agent 导入」**（t17；由壳层注入）。
    * 不传 → 该按钮不渲染（老调用方零改动）。
@@ -164,7 +163,7 @@ function dirOf(path: string): string {
 /**
  * 总览页（控制中心）：状态条 + 动作工具栏 + 备份位置 + 分区构成 + 最近活动。
  */
-export function HomePanel({ api, syncApi, historyApi, t, syncT, openActivity, openForeignImport }: HomePanelProps) {
+export function HomePanel({ api, syncApi, historyApi, t, syncT, openForeignImport }: HomePanelProps) {
   /**
    * 「定时备份」不再是独立页签 —— 设置卡并进本页（§7）。
    * 状态行的「定时备份」段点击**开这个弹窗**，而不是跳页：
@@ -407,10 +406,6 @@ export function HomePanel({ api, syncApi, historyApi, t, syncT, openActivity, op
         <Button title={t('overview.quick.syncTitle')} onClick={() => { navPanel('sync') }}>
           <SyncIcon size={14} /> {t('overview.quick.sync')}
         </Button>
-        <span className={css.statusSpacer} />
-        <Button size="sm" onClick={() => { openActivity?.() }}>
-          {t('task.title.history')} <ArrowRightIcon size={13} />
-        </Button>
       </div>
 
       {emptyState ? (
@@ -438,14 +433,14 @@ export function HomePanel({ api, syncApi, historyApi, t, syncT, openActivity, op
       ) : (
         <>
           {/* 5. 最近活动表（fit-content；类型并入内容列；成功=绿点） */}
-          <Card className={css.activityCard}>
+          <Card className={`${css.activityCard} ${css.fillCard}`}>
             <div className={css.activityHeader}>
               <span className={css.activityTitle}>{t('overview.activity.title')}</span>
             </div>
             {activity.length === 0
               ? <div className={css.activityEmpty}>{t('overview.activity.empty')}</div>
               : (
-                <div className={`${css.activityRows} ${css.activityFit}`}>
+                <div className={css.activityRows}>
                   {activity.map((item, i) => {
                     const atMs = Date.parse(item.at) || 0
                     const kindText = kindLabel(item.kindKey, t)

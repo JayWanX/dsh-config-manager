@@ -2859,7 +2859,7 @@
   opacity: 1;
 }
 
-/* —— 活动卡（填充剩余高度；内部滚动） —— */
+/* —— 活动卡（**首页最后一个数据块**：吃掉剩余高度，列表自身内滚；Canvas 纪律） —— */
 .activityCard {
   display: flex;
   flex-direction: column;
@@ -2910,9 +2910,10 @@
 }
 
 .activityRows {
-  /* 可收缩：卡片被页面挤压缩短时列表随之收缩（自身 overflow 内滚），
-     否则列表保持 272px 而卡片变矮 → 内容溢出卡片边框（曾实测 274px 内容 vs 205px 卡片）。 */
-  flex: 0 1 auto;
+  /* v3：卡片刻意吃掉首页剩余高度（.fillCard），列表随之伸展并自身内滚 —— 否则首页底部
+     会留出大片空白（用户真机反馈「太空旷」）。min-height:0 是可收缩的前提：没有它，
+     列表的自动最小尺寸 = 内容高度，卡片会被 30 行撑破而不是滚动。 */
+  flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   border: 1px solid var(--dsw-alias-border-l1);
@@ -2920,10 +2921,6 @@
   background: var(--dsw-alias-bg-base);
 }
 
-/* 自适应上限变体：fit-content，超过 8 行内部滚动（不再强制撑出空黑块） */
-.activityFit {
-  max-height: 272px;
-}
 
 .activityRow {
   display: grid;

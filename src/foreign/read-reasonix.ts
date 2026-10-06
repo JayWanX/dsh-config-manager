@@ -59,7 +59,7 @@ const REASONIX_SUBAGENT_RE = /^subagent-/;
  * 早期实现按「一切 .jsonl」扫描，于是每个会话都多出 1~3 条幻影会话（stem 变成
  * `desktop-1.events`，且因无 meta 而 session-missing-cwd 或 session-empty）。
  */
-const REASONIX_SIDECAR_RE = /\.(events|conflicts|guardian)\.jsonl$/i;;
+const REASONIX_SIDECAR_RE = /\.(events|conflicts|guardian)\.jsonl$/i;
 
 const LEGACY_CWD_KEYS: readonly string[] = [
   'workspace', 'cwd', 'workdir', 'workingDirectory', 'working_directory', 'projectPath', 'directory', 'path',

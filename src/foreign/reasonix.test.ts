@@ -263,8 +263,11 @@ test('reasonix t7 新版 sidecar：workspace_root/topic_title 供 cwd/标题（�
 
 test('reasonix t8 桌面布局 projects/<slug>/sessions：.titles.json 权威标题 + slug 逆解码', async () => {
   const root = await tmpRoot('reasonix-desktop');
+  // slug 逆解码的候选目录：用**短前缀**的独立 temp 根（贪心解码只合并 ≤3 段，
+  // 带 4 段连字符的 temp 根名会让候选永远拼不出来 —— 那是参考实现同款局限，不是本仓缺陷）
+  const slugRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'dcm'));
   try {
-    const ws = path.join(root, 'ws');
+    const ws = path.join(slugRoot, 'ws');
     await fs.mkdir(ws, { recursive: true });
     const slug = slugOf(ws);
     const rel = path.join('.reasonix', 'sessions', 'projects', slug, 'sessions');
@@ -288,6 +291,7 @@ test('reasonix t8 桌面布局 projects/<slug>/sessions：.titles.json 权威标
     }
     assert.equal(await greedyDecodeSlugPath('dcm--no--such--path--xyz', PLATFORM), undefined, '解不出来绝不臆测');
   } finally {
+    await fs.rm(slugRoot, { recursive: true, force: true });
     await fs.rm(root, { recursive: true, force: true });
   }
 });

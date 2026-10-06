@@ -249,9 +249,9 @@ test('T4 分类：新增三个问题码都有严重级（tool-result-id-mismatch
   const mismatch = classifySessionHealth(input({ deep: { verified: true, issues: [{ code: 'tool-result-id-mismatch' }] } }), ctx());
   assert.equal(mismatch.severity, 'unloadable', 'toolCallId 不配对 = 真 codec 直接拒读');
   const emptyId = classifySessionHealth(input({ deep: { verified: true, issues: [{ code: 'empty-tool-call-id' }] } }), ctx());
-  assert.equal(emptyId.issues[0]?.severity, 'unloadable', '静态回落也是 unloadable（v4 下采集器会自带 nextRequestFails）');
+  assert.equal(emptyId.issues[0]?.severity, 'unloadable', '静态回落也是 unloadable（v4 已实测被 seed/restore 闸门拒读）');
   const dup = classifySessionHealth(input({ deep: { verified: true, issues: [{ code: 'duplicate-tool-call-id' }] } }), ctx());
-  assert.equal(dup.issues[0]?.severity, 'unloadable');
+  assert.equal(dup.issues[0]?.severity, 'nextRequestFails', '未实测「已安装 Session」口径 → 保持较轻结论');
 });
 
 test('T4 分类：同一个 code 重复出现只留一条，且取更重的严重级', () => {

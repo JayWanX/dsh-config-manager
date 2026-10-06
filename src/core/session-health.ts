@@ -257,7 +257,8 @@ const DEEP_SEVERITY: Partial<Record<SessionHealthIssueCode, SessionHealthSeverit
   'empty-tool-call-id': 'unloadable',
   'dangling-tool-call': 'nextRequestFails',
   'tool-result-id-mismatch': 'unloadable',
-  'duplicate-tool-call-id': 'unloadable',
+  /** 未实测「已安装 Session」口径（transformed 下通过），保持较轻结论；采集器显式带上同一值。 */
+  'duplicate-tool-call-id': 'nextRequestFails',
   'invalid-settlement': 'nextRequestFails',
   'closed-turn-continued': 'nextRequestFails',
 };

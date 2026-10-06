@@ -23,17 +23,29 @@
  *  ④ 同一步内重复通告的 tool-call id；
  *  ⑤ tool/result 的 toolCallId 与 message.source.callId 不配对。
  *
- * 严重级**不是注释断言，是真 codec 实测**（2026-10-06；DSH 的
- * `@deepseek-ai/dsh-session-format-catalog` + `createRestore(header, { recovery:'strict' })`）：
- *  - v4（headerVersion >= 4）：tool/result 缺 message.id / toolCallId 不配对 → decodeRow 当场拒读 → unloadable；
+ * 严重级**不是注释断言，是真 codec 实测**（2026-10-06，真机日志 + 官方读取路径；t13 口径订正后）：
+ *  - v4（headerVersion === 4）：tool/result 缺 message.id / toolCallId 不配对 → decodeRow 当场拒读；
  *    user/message 缺 data.id、assistant/message 缺 message.id、tool/call.callId 空、内容块 id 空 →
- *    格式目录口径（transformed）通过 → nextRequestFails（detail 记 codec-unproven）。
+ *    被**已安装 Session 的 seed/restore 闸门**拒读。以上一律 **unloadable**。
+ *    真机原始输出（v4 日志 + `validation:'current'`）：
+ *      `finish: seed user/message at index 9 lacks an identified message`
+ *      `finish: tool call id requires a nonempty string`
  *  - pre-v4（headerVersion < 4）：三类消息缺 id / 空 tool-call id 走 v0→v1、v3→v4 迁移并被迁移器拒绝 → unloadable。
  *  - 版本读不出：按较轻的 nextRequestFails 报，detail 记 codec-uncalibrated（不谎称已验证）。
  *
- * 口径说明（如实记录，避免误读）：同一变体在 `validation:'current'`（已安装 Session 校验）下
- * 更严 —— 真机 v4 日志上，缺 user/assistant message.id 与空 tool-call id 也会被 `finish()` 拒绝。
- * 本轮按裁决采用 transformed（格式目录）口径，故那几类记 nextRequestFails。
+ * **两种校验收口必须分清**（官方源码 `@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js`）：
+ *  · transformed（**容忍**）：`parseHeaderRecord` 只用它解析**首帧 header**；当前代际的真实读盘是
+ *    `readDecodedJsonlSource` → `format.createRestore(header, { recovery:'recoverable',
+ *    validation:'transformed' })`，并在**同一条读取路径**上再调
+ *    `Session.fromRestore(generation.meta.id, generation.events, generation.meta,
+ *    generation.inheritedEventCount, 'detached', currentSessionMessageProjections)` +
+ *    `assertCurrentAssistantStreams(generation.events)`；
+ *    历史代际（version <= 3）走 `historicalSessionFormatCatalog.createRestore(header,
+ *    { recovery:'recoverable', validation:'current' })`。
+ *  · current / Session.fromRestore（**拒绝**）：上面那个 seed/restore 闸门就在 v4 的读盘路径上，
+ *    是用户真实会撞到的拒读 —— v4 日志里缺 user/assistant message.id 或空 tool-call id，transformed
+ *    口径能过、这条闸门过不去。因此本模块按**闸门**定严重级（unloadable）；transformed 的容忍
+ *    只作为口径差异记录在此，不再用于降级。
  */
 import fs from 'node:fs/promises';
 import { join } from 'node:path';
@@ -342,17 +354,28 @@ function finalizeLifecycleScan(scan: LifecycleScan): ToolLifecycleFacts {
   return scan.facts;
 }
 
-/** 缺 message id 的严重级：tool/result 载体任何代际都拒读；其余按代际（见文件头实测口径）。 */
+/**
+ * 缺 message id 的严重级（t13 口径订正）。
+ *
+ * v4：安装版 Session 的 seed/restore 闸门（`Session.fromRestore`）拒读整份日志 → unloadable
+ *     （真机原始输出：`seed user/message at index 9 lacks an identified message`）；
+ * pre-v4：迁移器（v0→v1 / v3→v4）同样拒 → unloadable；
+ * 只有**版本读不出**才取较轻的 nextRequestFails 并在 detail 注明未校准。
+ * tool/result 载体与代际无关（三种口径下都拒读），单独短路。
+ */
 function missingMessageIdSeverity(facts: ToolLifecycleFacts, headerVersion: number | undefined): SessionHealthSeverity {
   if (facts.missingMessageIdToolResult > 0) return 'unloadable';
-  if (headerVersion === undefined) return 'nextRequestFails';
-  return headerVersion >= 4 ? 'nextRequestFails' : 'unloadable';
+  return headerVersion === undefined ? 'nextRequestFails' : 'unloadable';
 }
 
-/** 空 tool-call id 的严重级：v4（格式目录口径）通过；pre-v4 迁移器直接拒。 */
+/**
+ * 空 tool-call id 的严重级（t13 口径订正）。
+ *
+ * v4：`Session.fromRestore` 闸门拒读（原始输出：`tool call id requires a nonempty string`）→ unloadable；
+ * pre-v4：迁移器拒 → unloadable；只有版本读不出才取较轻值。
+ */
 function emptyToolCallIdSeverity(headerVersion: number | undefined): SessionHealthSeverity {
-  if (headerVersion === undefined) return 'nextRequestFails';
-  return headerVersion >= 4 ? 'nextRequestFails' : 'unloadable';
+  return headerVersion === undefined ? 'nextRequestFails' : 'unloadable';
 }
 
 
@@ -527,7 +550,8 @@ async function scanUnit(
     const version = header?.version;
     if (lifecycle.missingMessageId > 0) {
       const severity = missingMessageIdSeverity(lifecycle, version);
-      const note = severity === 'unloadable' ? '' : version === undefined ? '; codec-uncalibrated' : '; codec-unproven';
+      // 只有「版本读不出 → 取较轻值」需要注明未校准；v4/pre-v4 都已实测拒读。
+      const note = version === undefined ? '; codec-uncalibrated' : '';
       deepIssues.push({ code: 'missing-message-id', severity, detail: String(lifecycle.missingMessageId) + ' row(s)' + note });
     }
     if (lifecycle.toolResultIdMismatch > 0) {
@@ -535,7 +559,7 @@ async function scanUnit(
     }
     if (lifecycle.emptyToolCallId > 0) {
       const severity = emptyToolCallIdSeverity(version);
-      const note = severity === 'unloadable' ? '' : version === undefined ? '; codec-uncalibrated' : '; codec-unproven';
+      const note = version === undefined ? '; codec-uncalibrated' : '';
       deepIssues.push({ code: 'empty-tool-call-id', severity, detail: String(lifecycle.emptyToolCallId) + note });
     }
     if (lifecycle.danglingClosedStep > 0) {

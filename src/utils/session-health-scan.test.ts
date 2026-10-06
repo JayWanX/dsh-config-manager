@@ -286,7 +286,7 @@ function t4Codes(row: { issues: readonly { code: string }[] }): string[] {
   return row.issues.map((issue) => issue.code);
 }
 
-test('T4 行档 ①：current 格式缺 message id —— user/assistant → nextRequestFails(codec-unproven)，tool/result → unloadable', { skip: !CAPABLE }, async () => {
+test('T4 行档 ①（t13 口径订正）：v4 缺 message id —— user/assistant/tool/result 三载体一律 unloadable', { skip: !CAPABLE }, async () => {
   const healthy = t4Clone(t4Rows());
   const noUser = t4Clone(t4Rows());
   delete noUser[T4_USER]!.data.id;
@@ -303,9 +303,9 @@ test('T4 行档 ①：current 格式缺 message id —— user/assistant → nex
   assert.deepEqual(t4Codes(t4Row(result, 'healthy')), [], '健康骨架不得报任何新码');
   const user = t4Row(result, 'no-user');
   assert.deepEqual(t4Codes(user), ['missing-message-id']);
-  assert.equal(user.severity, 'nextRequestFails', 'v4 上格式目录口径通过（codec 未证明拒读）');
-  assert.match(String(user.issues[0]?.detail), /codec-unproven/);
-  assert.equal(t4Row(result, 'no-assistant').severity, 'nextRequestFails');
+  assert.equal(user.severity, 'unloadable', 'v4 走安装版 Session 的 seed/restore 闸门：seed user/message at index 9 lacks an identified message');
+  assert.equal(String(user.issues[0]?.detail).includes('codec-uncalibrated'), false, 'v4 已实测拒读，不得再标未校准');
+  assert.equal(t4Row(result, 'no-assistant').severity, 'unloadable', 'assistant/message 同样被 seed/restore 闸门拒读');
   const toolResult = t4Row(result, 'no-result');
   assert.deepEqual(t4Codes(toolResult), ['missing-message-id']);
   assert.equal(toolResult.severity, 'unloadable', 'tool/result 缺 message.id = 真 codec decodeRow 当场拒读');
@@ -330,7 +330,7 @@ test('T4 行档 ①：pre-v4 缺 message id → unloadable（v0→v1 / v3→v4 �
   }
 });
 
-test('T4 行档 ②：空 tool-call id 只进 empty-tool-call-id（v4 → nextRequestFails，pre-v4 → unloadable）', { skip: !CAPABLE }, async () => {
+test('T4 行档 ②（t13 口径订正）：空 tool-call id 只进 empty-tool-call-id（v4 / pre-v4 均 unloadable）', { skip: !CAPABLE }, async () => {
   const emptyCall = t4Clone(t4Rows());
   emptyCall[T4_CALL]!.data.callId = '';
   const emptyBlock = t4Clone(t4Rows());
@@ -345,10 +345,28 @@ test('T4 行档 ②：空 tool-call id 只进 empty-tool-call-id（v4 → nextRe
   for (const id of ['empty-call', 'empty-block']) {
     const row = t4Row(result, id);
     assert.deepEqual(t4Codes(row), ['empty-tool-call-id'], id);
-    assert.equal(row.severity, 'nextRequestFails', id + '：v4 实测通过');
+    assert.equal(row.severity, 'unloadable', id + '：v4 走 Session.fromRestore 闸门 → tool call id requires a nonempty string');
   }
   assert.equal(t4Codes(t4Row(result, 'non-empty')).includes('empty-tool-call-id'), false, '反例：非空 id 不报');
   assert.equal(t4Row(result, 'v3-empty-call').severity, 'unloadable', 'pre-v4 迁移器直接拒');
+});
+
+test('T4 行档（t13）：版本读不出 → 两个码仍取较轻的 nextRequestFails 并注明未校准（口径不变）', { skip: !CAPABLE }, async () => {
+  // header 缺 version 字段：readLogHeaderFromBytes 只认「非负安全整数」，缺字段 = 版本不可读
+  const noVersion = { type: 'session', id: 'session-a', cwd: 'D:\\proj' };
+  const noUser = t4Clone(t4Rows());
+  delete noUser[T4_USER]!.data.id;
+  const emptyCall = t4Clone(t4Rows());
+  emptyCall[T4_CALL]!.data.callId = '';
+  const result = await t4Scan([
+    { id: 'nover-user', header: noVersion, rows: noUser },
+    { id: 'nover-call', header: noVersion, rows: emptyCall },
+  ]);
+  for (const id of ['nover-user', 'nover-call']) {
+    const row = t4Row(result, id);
+    assert.equal(row.severity, 'nextRequestFails', id + '：版本不可读 → 宁可取较轻并注明，不谎称已校准');
+    assert.match(String(row.issues[0]?.detail), /codec-uncalibrated/, id);
+  }
 });
 
 test('T4 行档 ③：已关闭 step 的悬空 tool/call → unloadable；尾部 step 未闭合 → 不报；空 id 的 call 只进 ②', { skip: !CAPABLE }, async () => {

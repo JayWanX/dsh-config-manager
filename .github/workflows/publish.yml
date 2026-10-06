@@ -51,7 +51,7 @@ jobs:
         # npm pack --pack-destination fails if the dir does not exist (fresh checkout).
         run: mkdir -p dist && npm pack --pack-destination ./dist
 
-      - name: "Release notes guard: CHANGELOG 亮点段 + 描述模板 (before publish)"
+      - name: "Release notes guard: CHANGELOG 格式/亮点 + 描述模板 (before publish)"
         # 为什么门禁必须放在 npm publish 之前：npm 上同一版本号不可重发，
         # 若把「抽取 + 非空校验」留到后面的 release 步骤（带 tag 条件），
         # CHANGELOG 漏写时只会让流水线变红，包却已经发到 npm；
@@ -70,6 +70,13 @@ jobs:
           python3 .github/scripts/extract-release-notes.py "$VERSION" CHANGELOG.md > /tmp/highlights.md
           if [ ! -s /tmp/highlights.md ]; then
             echo "::error::CHANGELOG.md 缺少当前版本 $VERSION 的亮点段，请先在 CHANGELOG.md 顶部按 ## [vX.Y.Z] 补充（中英双语）后再发版"
+            exit 1
+          fi
+
+          # CHANGELOG 版本段格式门禁：结构必须与 .github/changelog-template.md 一致 —— 同一个脚本的
+          # release 子命令负责开新骨架，所以「文档里写的格式」就是「实际发出去的格式」。
+          if ! node .github/scripts/changelog-section.mjs check "$VERSION" --changelog CHANGELOG.md; then
+            echo "::error::CHANGELOG.md 的 $VERSION 版本段不符合 .github/changelog-template.md 的结构"
             exit 1
           fi
 

@@ -139,6 +139,14 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
   扩充 `src/adapters/files.test.ts`（技能服务合并、磁盘优先、服务缺失、路径安全、**多行字段的 YAML 合法性**）、`mcp.test.ts`、
   `prompts.test.ts`、`plugins.test.ts`、`tests/core/patch-file-snapshot.test.ts`（快照记层 + 回滚写回原层）。
 
+> **致谢 / Thanks**：本轮的同步通道「选择/新建私有仓库」与链接跟随边界修复（[#67](https://github.com/xiajiajun516/dsh-config-manager/pull/67)）、
+> 总览首屏性能修复（[#68](https://github.com/xiajiajun516/dsh-config-manager/pull/68)）、MCP / Skills 备份修复
+> （[#72](https://github.com/xiajiajun516/dsh-config-manager/pull/72)）均由 **@iuuuuuuuu** 贡献。
+>
+> **Thanks**: the sync repository picker and the link-traversal boundary fix ([#67](https://github.com/xiajiajun516/dsh-config-manager/pull/67)),
+> the Overview first-paint performance fix ([#68](https://github.com/xiajiajun516/dsh-config-manager/pull/68)) and the
+> MCP / skills backup fix ([#72](https://github.com/xiajiajun516/dsh-config-manager/pull/72)) were all contributed by **@iuuuuuuuu**.
+
 ## [0.1.69] - 2026-10-04
 
 > **本版已发布**：覆盖此前数轮并行落地的工作（会话跨机迁移与体检、UI v2 信息架构、磁盘占用体检、

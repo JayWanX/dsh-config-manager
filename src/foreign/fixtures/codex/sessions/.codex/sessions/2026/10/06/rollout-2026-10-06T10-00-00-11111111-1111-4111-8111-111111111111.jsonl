@@ -1,0 +1,15 @@
+{"timestamp":"2026-10-06T10:00:00.000Z","type":"session_meta","payload":{"id":"11111111-1111-4111-8111-111111111111","timestamp":"2026-10-06T10:00:00.000Z","cwd":"D:/proj/alpha"}}
+{"timestamp":"2026-10-06T10:00:00.100Z","type":"turn_context","payload":{"model":"gpt-5-codex"}}
+{"timestamp":"2026-10-06T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>D:/proj/alpha</cwd>\n</environment_context>"},{"type":"input_text","text":"FIXTURE_CODEX_QUESTION_DO_NOT_SHIP 帮我看下这个仓库"}]}}
+{"timestamp":"2026-10-06T10:00:02.000Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"FIXTURE_CODEX_REASONING_DO_NOT_SHIP"}]}}
+{"timestamp":"2026-10-06T10:00:03.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"FIXTURE_CODEX_ASSISTANT_DO_NOT_SHIP 好的，先列一下文件"}]}}
+{"timestamp":"2026-10-06T10:00:04.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"ls\",\"-la\"]}","call_id":"call_fixture_1","id":"fc_fixture_1"}}
+{"timestamp":"2026-10-06T10:00:05.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_fixture_1","output":"file-a.txt\nfile-b.txt"}}
+{"timestamp":"2026-10-06T10:00:06.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_tokens":42}}}
+{"timestamp":"2026-10-06T10:00:07.000Z","type":"event_msg","payload":{"type":"agent_message","message":"FIXTURE_CODEX_DUPLICATE_DO_NOT_SHIP"}}
+{"timestamp":"2026-10-06T10:00:08.000Z","type":"response_item","payload":{"type":"local_shell_call","call_id":"call_fixture_2","action":{"command":"pwd"}}}
+{"timestamp":"2026-10-06T10:00:09.000Z","type":"compacted","payload":{"message":"FIXTURE_CODEX_COMPACTION_DO_NOT_SHIP"}}
+{"timestamp":"2026-10-06T10:00:10.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"tools.apply_patch({\"patch\":\"*** Begin Patch\"})","call_id":"call_fixture_3"}}
+{"timestamp":"2026-10-06T10:00:11.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_fixture_3","output":[{"type":"input_text","text":"FIXTURE_CODEX_TOOL_BLOCK_DO_NOT_SHIP"},{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}}
+{坏行_NOT_JSON
+{"timestamp":"2026-10-06T10:00:13.000Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"FIXTURE_CODEX_DEVELOPER_DO_NOT_SHIP"}]}}

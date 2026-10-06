@@ -703,6 +703,13 @@ export async function readCodexSessions(
       }
       // origin 一律是包内相对标签（root/ 相对路径），绝不含机器路径
       const label = rootName + '/' + hit.rel;
+      // 超限与读不到分开报：长会话 rollout 超过单文件上限时必须是 too-large，
+      // 报成 read-error 会把「文件太大没读」说成「读失败」（排查方向完全不同）
+      const fileStat = await statOrNull(hit.abs);
+      if (fileStat !== null && fileStat.isFile() && fileStat.size > maxBytes) {
+        readFindings.push({ code: 'source-unreadable', origin: label, detail: 'too-large' });
+        continue;
+      }
       const text = await readTextSafe(hit.abs, maxBytes);
       if (text === null) {
         readFindings.push({ code: 'source-unreadable', origin: label, detail: 'read-error' });

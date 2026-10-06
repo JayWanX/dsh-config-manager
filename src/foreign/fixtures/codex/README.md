@@ -14,5 +14,18 @@
 - `malformed/.codex/config.toml` —— 畸形 TOML（未闭合数组）：必须变成
   `source-unreadable`（`detail=toml-error`）且**不抛异常、不产出空 mcp 分区**。
 
+- `sessions/.codex/sessions/2026/10/06/rollout-*.jsonl`（**会话双根**，2026-10-06 起）：
+  - `…11111111-…` 主会话 —— session_meta（cwd/id）→ turn_context（模型）→ user 消息（含
+    `<environment_context>` 注入块，必须被过滤）+ 人类提问 → reasoning（无 IR 承载块，只计数）→
+    assistant 正文 → `function_call`/`function_call_output`（call_id 配对）→ event_msg（与
+    response_item 重复，不记账）→ `local_shell_call`（未知类型计数）→ `compacted`（计数）→
+    `custom_tool_call`（JS 形参原样保留）+ 块数组形态的工具输出（图片块无承载块，计数）→
+    **一行坏 JSON**（只计入 bad）+ developer 消息（角色计数）
+  - `…33333333-…` / `…55555555-…` —— **子代理 rollout**（`thread_source='subagent'` /
+    `source.subagent`）：必须被剔除并报 `unsupported-session-record`
+  - `…44444444-…` —— **fork 会话**（`forked_from_id`/`parent_thread_id`）：必须保留
+  - `sessions/notes.jsonl` —— 非 `rollout-*.jsonl`：**绝不读**（读了就是造垃圾会话）
+- `sessions/.codex/archived_sessions/rollout-*.jsonl` —— 扁平第二根 + Windows 反斜杠 cwd。
+
 假值一律带 `_DO_NOT_SHIP` 后缀（URL 里的 `user:pw@` 也是合成的）：任何一条出现在产物或 ZIP 字节里，
-`codex.test.ts` 的 t3/t8 都会红。
+`codex.test.ts` 的 t3/t8 都会红；子代理 rollout 的两条哨兵值出现在输入结构里则 t11 红。

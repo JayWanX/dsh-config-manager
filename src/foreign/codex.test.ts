@@ -6,6 +6,9 @@
  *  ② 翻译与安全不变量：TOML 引号/数组/表头三形态、MCP 口径与凭据剥离、AGENTS.override.md 优先级、
  *     嵌套技能压平、非法 frontmatter / 同名 / 畸形 TOML / 缺失文件一律进 skipped 且有稳定机器码
  *  ③ 端到端：产物是合法 bundle v1 分区，既有 Importer 能分析，且**整份 ZIP 字节**不含凭据值
+ *  ④ 会话（2026-10-06 起）：rollout JSONL 解析（cwd/id、块归一、工具配对、reasoning 逐类计数）、
+ *     双根读盘（sessions/YYYY/MM/DD + archived_sessions）、子代理跳过而 fork 保留、
+ *     不安全 id / 缺 cwd / 空 rollout / 条数触顶逐条报码，以及 sessions + workspaces 的端到端
  *
  * 取证强度（契约 §8.2 / §8.7）：~/.codex 与 CODEX_HOME 是**文档取证、未经真机验证**
  * （本机无 ~/.codex）；~/.agents/skills 是**实测取证**（目录存在、本机为空）。真机取样用例
@@ -23,8 +26,8 @@ import { MemSnapshotStore, makeContext } from '../adapters/test-helpers.ts';
 import type { McpSection, SectionId } from '../schema/types.ts';
 import { Importer } from '../core/importer.ts';
 import { writeForeignBundle } from './bundle.ts';
-import { convertCodex } from './codex.ts';
-import { parseTomlSubset, readCodex, resolveCodexHome } from './read-codex.ts';
+import { codexSessionId, codexSubagentMarker, convertCodex, parseCodexRollout } from './codex.ts';
+import { parseTomlSubset, readCodex, readCodexSessions, resolveCodexHome } from './read-codex.ts';
 import type { ForeignImportResult } from './types.ts';
 
 const NL = String.fromCharCode(10);
@@ -332,7 +335,251 @@ test(
       assert.ok(s.files.some((f) => f.relativePath === 'SKILL.md'), '每个技能单元必须自带 SKILL.md：' + s.name);
     }
     const result = convertCodex(read.input);
-    assert.ok(!result.sections.some((s) => s.sectionId === 'sessions'), 'Codex 会话不在本期范围（绝不产出 sessions 分区）');
+    // 目标机会话格式版本必须由宿主解析后传入：不给 → 一条都不转（整批报 session-format-version-unknown），
+    // 因此这里绝不产出 sessions/workspaces 分区
+    assert.ok(!result.sections.some((s) => s.sectionId === 'sessions'));
     assert.ok(!result.sections.some((s) => s.sectionId === 'workspaces'));
+    if ((read.input.sessions?.length ?? 0) > 0) {
+      const versioned = convertCodex({ ...read.input, targetSessionFormatVersion: 3 });
+      assert.ok(versioned.sections.some((s) => s.sectionId === 'sessions'), '有版本时读出的会话必须转成 sessions 分区');
+      assert.ok(versioned.sections.some((s) => s.sectionId === 'workspaces'), '会话必须连工作区一起产出');
+    }
   },
 );
+
+/* ---------------- ④ 会话（rollout JSONL）：解析 / 双根读盘 / 转码 ---------------- */
+
+const SESSIONS_HOME = path.join(FIXTURES, 'sessions');
+const MAIN_ID = '11111111-1111-4111-8111-111111111111';
+const ARCHIVED_ID = '22222222-2222-4222-8222-222222222222';
+const FORK_ID = '44444444-4444-4444-8444-444444444444';
+const ROLLOUT_DIR = path.join(SESSIONS_HOME, '.codex', 'sessions', '2026', '10', '06');
+const MAIN_FILE = path.join(ROLLOUT_DIR, 'rollout-2026-10-06T10-00-00-11111111-1111-4111-8111-111111111111.jsonl');
+
+/** JSONL 行构造（夹具写法可读性优先） */
+const lineOf = (o: unknown): string => JSON.stringify(o);
+
+test('t10 rollout 解析：cwd/id 取 session_meta、块归一、工具调用与结果按 call_id 配对、reasoning 逐类计数、坏行只计数', async () => {
+  const rollout = parseCodexRollout(await fs.readFile(MAIN_FILE, 'utf8'), path.basename(MAIN_FILE));
+  assert.equal(rollout.id, MAIN_ID);
+  assert.equal(rollout.subagent, null);
+  assert.equal(rollout.parsed.cwd, 'D:/proj/alpha');
+  assert.equal(rollout.parsed.createdAt, Date.parse('2026-10-06T10:00:00.000Z'));
+  assert.equal(rollout.parsed.raw, 14, '原始行数含被忽略的（元数据 / event_msg / developer）');
+  assert.equal(rollout.parsed.bad, 1, '坏行只计入 bad，绝不抛');
+
+  const records = rollout.parsed.records;
+  assert.equal(records.length, 6, 'user + assistant + 两次工具调用 + 两次结果 = 6 条归一记录');
+  assert.deepEqual(
+    records.map((r) => r.role),
+    ['user', 'assistant', 'assistant', 'user', 'assistant', 'user'],
+    'function_call 挂 assistant 侧、function_call_output 挂 user 侧（合成器据此发 tool/call 与 tool/result）',
+  );
+
+  // user 消息：harness 注入块被过滤，首条人类提问留下 → 会话标题来自它
+  const userBlock = records[0]?.blocks[0];
+  assert.ok(userBlock !== undefined && userBlock.type === 'text');
+  assert.ok(userBlock.text.includes('FIXTURE_CODEX_QUESTION_DO_NOT_SHIP'));
+  assert.ok(!JSON.stringify(records).includes('<environment_context>'), 'harness 注入块绝不能进正文（否则标题会变成环境块）');
+  assert.equal(rollout.parsed.title, 'FIXTURE_CODEX_QUESTION_DO_NOT_SHIP 帮我看下这个仓库');
+
+  // assistant 正文 + turn_context 的模型落到其后开的记录上
+  const assistantBlock = records[1]?.blocks[0];
+  assert.ok(assistantBlock !== undefined && assistantBlock.type === 'text');
+  assert.ok(assistantBlock.text.includes('FIXTURE_CODEX_ASSISTANT_DO_NOT_SHIP'));
+  assert.equal(records[1]?.model, 'gpt-5-codex');
+
+  // function_call → 工具调用块；arguments 是 JSON 字符串时解析成对象
+  const call = records[2]?.blocks[0];
+  assert.ok(call !== undefined && call.type === 'tool_call');
+  assert.equal(call.id, 'call_fixture_1');
+  assert.equal(call.name, 'shell');
+  assert.deepEqual(call.input, { command: ['ls', '-la'] });
+
+  // function_call_output → 工具结果块，按同一个 call_id 配对，正文取 envelope 里的 output
+  const toolResult = records[3]?.blocks[0];
+  assert.ok(toolResult !== undefined && toolResult.type === 'tool_result');
+  assert.equal(toolResult.id, 'call_fixture_1');
+  assert.equal(toolResult.text, 'file-a.txt' + NL + 'file-b.txt');
+  assert.equal(toolResult.isError, false);
+
+  // custom_tool_call（apply_patch）：JS 形参不做 JS→JSON 转换，原样字符串（绝不猜）
+  const patch = records[4]?.blocks[0];
+  assert.ok(patch !== undefined && patch.type === 'tool_call');
+  assert.equal(patch.name, 'apply_patch');
+  assert.equal(patch.input, 'tools.apply_patch({"patch":"*** Begin Patch"})');
+
+  // 块数组形态的输出：文本块拼接；图片块在本共享 IR 里没有承载块 → 计数
+  const blockResult = records[5]?.blocks[0];
+  assert.ok(blockResult !== undefined && blockResult.type === 'tool_result');
+  assert.equal(blockResult.id, 'call_fixture_3');
+  assert.equal(blockResult.text, 'FIXTURE_CODEX_TOOL_BLOCK_DO_NOT_SHIP');
+
+  // 未迁移记录逐类计数（reasoning 绝不伪装成正文；event_msg 是 response_item 的重复 → 不记账）
+  assert.deepEqual(rollout.parsed.ignored, {
+    'injected-block': 1,
+    reasoning: 1,
+    compacted: 1,
+    'response_item:local_shell_call': 1,
+    'message-role:developer': 1,
+    'tool-output:input_image': 1,
+  });
+  assert.ok(!JSON.stringify(records).includes('FIXTURE_CODEX_REASONING_DO_NOT_SHIP'), 'reasoning 摘要绝不进正文');
+  assert.ok(!JSON.stringify(records).includes('FIXTURE_CODEX_DUPLICATE_DO_NOT_SHIP'), 'event_msg 与 response_item 重复 → 绝不重复计数');
+
+  // 子代理标记与 id 口径（fork 不是子代理）
+  assert.equal(codexSubagentMarker({ thread_source: 'subagent' }), 'thread_source=subagent');
+  assert.equal(codexSubagentMarker({ source: { subagent: {} } }), 'source.subagent');
+  assert.equal(codexSubagentMarker({ forked_from_id: 'x', parent_thread_id: 'y' }), null, 'fork 会话必须保留');
+  assert.equal(codexSubagentMarker({}), null);
+  assert.equal(codexSessionId('bad/id', 'rollout-x.jsonl'), 'rollout-x', '不安全 id 回落文件名');
+  assert.equal(codexSessionId('ok-id', 'rollout-x.jsonl'), 'ok-id');
+});
+
+test('t11 双根读盘：sessions/YYYY/MM/DD + archived_sessions 都读；子代理 rollout 剔除并报码；非 rollout jsonl 不读', async () => {
+  const read = await readCodex({ homeDir: SESSIONS_HOME, env: {} });
+  assert.equal(read.found, true);
+  const files = read.input.sessions ?? [];
+  assert.deepEqual(
+    files.map((f) => f.id).sort(),
+    [MAIN_ID, ARCHIVED_ID, FORK_ID].sort(),
+    'fork 会话必须保留；两个子代理 rollout（thread_source / source.subagent）必须被剔除',
+  );
+  const raw = JSON.stringify(read.input);
+  assert.ok(!raw.includes('FIXTURE_CODEX_SUBAGENT_A_DO_NOT_SHIP'));
+  assert.ok(!raw.includes('FIXTURE_CODEX_SUBAGENT_B_DO_NOT_SHIP'));
+  assert.ok(!raw.includes('FIXTURE_CODEX_NOT_A_ROLLOUT_DO_NOT_SHIP'), '非 rollout-*.jsonl 绝不读（读了就是造垃圾会话）');
+
+  const subagentFindings = (read.input.readFindings ?? []).filter((s) => (s.detail ?? '').startsWith('codex-subagent:'));
+  assert.deepEqual(
+    subagentFindings.map((s) => s.detail).sort(),
+    ['codex-subagent:source.subagent', 'codex-subagent:thread_source=subagent'],
+    '两种子代理标记都必须如实报码',
+  );
+  assert.ok(subagentFindings.every((s) => s.code === 'unsupported-session-record'));
+
+  // archived 根的 Windows 反斜杠 cwd 原样保留（归位由转码期的 projectKey 负责）
+  assert.equal(files.find((f) => f.id === ARCHIVED_ID)?.parsed.cwd, 'D:\\proj\\beta');
+});
+
+test('t12 转码：会话 + 工作区同源产出（同 cwd 归并一条工作区）；缺目标机版本时一条都不转', async () => {
+  const read = await readCodex({ homeDir: SESSIONS_HOME, env: {} });
+
+  const none = convertCodex(read.input);
+  assert.ok(!none.sections.some((s) => s.sectionId === 'sessions'), '缺目标机版本时一条都不转');
+  assert.ok(none.skipped.some((s) => s.code === 'session-format-version-unknown' && s.count === 3));
+
+  const result = convertCodex({ ...read.input, targetSessionFormatVersion: 3 });
+  assert.equal(result.counts['sessions.files'], 3);
+  assert.equal(result.counts['sessions.transcoded'], 3);
+  const sessionSection = result.sections.find((s) => s.sectionId === 'sessions');
+  const main = (sessionSection?.files ?? []).find((f) => f.relativePath.includes(MAIN_ID));
+  assert.match(
+    main?.relativePath ?? '',
+    /^--D-proj-alpha--\/11111111-1111-4111-8111-111111111111\/session\.v3\.jsonl\.zstd$/,
+    '会话必须按 projectKey(cwd)/id 归位',
+  );
+  assert.ok((main?.data.length ?? 0) > 0, '必须真的产出会话字节');
+
+  // workspaces：alpha 下两个会话（main + fork）归并成一条，beta 一条
+  const workspaces = result.sections.find((s) => s.sectionId === 'workspaces')?.data as
+    | { workspaces: { id: string; sessionIds: string[] }[] }
+    | undefined;
+  assert.equal(workspaces?.workspaces.length, 2, '同 cwd 的多个会话必须归并成一条工作区记录');
+  assert.equal(workspaces?.workspaces.find((w) => w.sessionIds.includes(FORK_ID))?.sessionIds.length, 2);
+
+  // 未迁移记录逐类报码（reasoning / 注入块 / 坏行都要在报告里可见）
+  assert.ok(result.skipped.some((s) => s.code === 'unsupported-session-record' && s.detail === 'reasoning' && s.count === 1));
+  assert.ok(result.skipped.some((s) => s.code === 'unsupported-session-record' && s.detail === 'injected-block'));
+  assert.ok(result.skipped.some((s) => s.code === 'unsupported-session-record' && s.detail === 'unparsable' && s.count === 1));
+});
+
+test('t13 边界：不安全 id 回落文件名、文件名也不安全则报 session-unsafe-id、缺 cwd / 空 rollout 逐条报码、条数触顶可见', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-codex-sessions-'));
+  const day = '.codex/sessions/2026/10/06/';
+  const userLine = lineOf({
+    timestamp: '2026-10-06T13:00:01.000Z',
+    type: 'response_item',
+    payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'FIXTURE_CODEX_EDGE_DO_NOT_SHIP' }] },
+  });
+  try {
+    // ① payload.id 不安全（含 '/'）→ 回落 rollout 文件名（安全）→ 仍能导入
+    await writeAt(home, day + 'rollout-2026-10-06T13-00-00-66666666-6666-4666-8666-666666666666.jsonl', [
+      lineOf({ timestamp: '2026-10-06T13:00:00.000Z', type: 'session_meta', payload: { id: 'bad/id', cwd: 'D:/proj/alpha' } }),
+      userLine,
+    ].join(NL));
+    // ② 文件名也不安全（带空格）→ 转码期必须报 session-unsafe-id，绝不静默改名
+    await writeAt(home, day + 'rollout-bad id.jsonl', [
+      lineOf({ timestamp: '2026-10-06T13:10:00.000Z', type: 'session_meta', payload: { cwd: 'D:/proj/alpha' } }),
+      userLine,
+    ].join(NL));
+    // ③ 缺 cwd
+    await writeAt(home, day + 'rollout-2026-10-06T14-00-00-77777777-7777-4777-8777-777777777777.jsonl', [
+      lineOf({ timestamp: '2026-10-06T14:00:00.000Z', type: 'session_meta', payload: { id: '77777777-7777-4777-8777-777777777777' } }),
+      userLine,
+    ].join(NL));
+    // ④ 只有坏行 → raw = 0 → session-empty
+    await writeAt(home, day + 'rollout-2026-10-06T15-00-00-88888888-8888-4888-8888-888888888888.jsonl', 'NOT_JSON' + NL);
+
+    const read = await readCodex({ homeDir: home, env: {} });
+    const files = read.input.sessions ?? [];
+    assert.equal(files.length, 4, '读得出 4 条（能不能迁移由转码期判定）');
+    assert.equal(
+      files.find((f) => f.parsed.cwd === 'D:/proj/alpha' && f.id !== 'rollout-bad id')?.id,
+      'rollout-2026-10-06T13-00-00-66666666-6666-4666-8666-666666666666',
+      '不安全 payload.id 回落安全文件名',
+    );
+
+    const result = convertCodex({ ...read.input, targetSessionFormatVersion: 3 });
+    assert.equal(result.counts['sessions.files'], 1, '只有 ① 能转码成功');
+    assert.ok(result.skipped.some((s) => s.code === 'session-unsafe-id' && s.origin === 'rollout-bad id'));
+    assert.ok(result.skipped.some((s) => s.code === 'session-missing-cwd'));
+    assert.ok(result.skipped.some((s) => s.code === 'session-empty'));
+
+    // ⑤ 条数触顶必须可见（多收一个用来判定「还有没读完的」）
+    const capped = await readCodexSessions(path.join(home, '.codex'), 1, 8 * 1024 * 1024);
+    assert.equal(capped.files.length, 1);
+    assert.ok(capped.readFindings.some((s) => s.code === 'source-unreadable' && s.detail === 'max-sessions-reached'));
+
+    // ⑥ 单文件超限：必须是 too-large（报成 read-error 会把「文件太大没读」说成「读失败」）
+    const tooBig = await readCodexSessions(path.join(home, '.codex'), 10, 8);
+    assert.equal(tooBig.files.length, 0);
+    assert.ok(tooBig.readFindings.some((s) => s.code === 'source-unreadable' && s.detail === 'too-large'));
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test('t14 端到端：会话 fixture → 标准 bundle v1（sessions + workspaces 进包，既有 Importer 能分析）', async () => {
+  const read = await readCodex({ homeDir: SESSIONS_HOME, env: {} });
+  const result = convertCodex({ ...read.input, targetSessionFormatVersion: 3 });
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-codex-sessions-e2e-'));
+  try {
+    const zipPath = path.join(tmp, 'codex-sessions.zip');
+    const written = await writeForeignBundle({
+      result,
+      outPath: zipPath,
+      exporterVersion: '0.0.0-test',
+      dshVersion: '0.1.0',
+      platform: 'win32',
+      arch: 'x64',
+      exportedAt: '2026-10-06T00:00:00.000Z',
+    });
+    assert.ok(written.sections.includes('sessions'));
+    assert.ok(written.sections.includes('workspaces'));
+    assert.ok(
+      written.entryNames.some((e) => e.startsWith('sessions/--D-proj-alpha--/')),
+      '会话文件必须按 projectKey/id 进包：' + written.entryNames.join(', '),
+    );
+
+    const ctx = makeContext('win32', path.join(tmp, 'target-home'));
+    const importer = new Importer({ ctx, adapters: createAdapters(), snapshotStore: new MemSnapshotStore() });
+    const analysis = await importer.analyzeImport(zipPath);
+    assert.equal(analysis.valid, true, '产物必须是合法 bundle：' + JSON.stringify(analysis.errors));
+    assert.ok(analysis.sectionsInZip.includes('sessions'));
+    assert.ok(analysis.sectionsInZip.includes('workspaces'));
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+

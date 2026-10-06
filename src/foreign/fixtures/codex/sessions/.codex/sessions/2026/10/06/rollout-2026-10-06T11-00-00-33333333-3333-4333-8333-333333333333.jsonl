@@ -1,0 +1,2 @@
+{"timestamp":"2026-10-06T11:00:00.000Z","type":"session_meta","payload":{"id":"33333333-3333-4333-8333-333333333333","cwd":"D:/proj/alpha","thread_source":"subagent"}}
+{"timestamp":"2026-10-06T11:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"FIXTURE_CODEX_SUBAGENT_A_DO_NOT_SHIP"}]}}

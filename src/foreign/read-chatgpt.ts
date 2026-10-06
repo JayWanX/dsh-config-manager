@@ -22,7 +22,8 @@ import type { ForeignPlatform } from './platform-paths.ts';
 import { readJsonSafe, statOrNull } from './session-read.ts';
 import type { ParsedTranscript, RootProbeOptions, SessionReadOutcome, TranscriptRecord } from './session-source.ts';
 import { firstUserText } from './session-source.ts';
-import { irBump, irTextBlock } from './session-ir.ts';
+import { irBump, irTextBlock, irToolCallBlock, irToolResultBlock } from './session-ir.ts';
+import type { IrBlock } from './session-ir.ts';
 import { isRecord } from '../utils/guards.ts';
 import type { ForeignSkip } from './types.ts';
 
@@ -86,22 +87,97 @@ function conversationListOf(value: unknown): unknown[] | undefined {
 
 interface MessageBox { readonly text: string; readonly isCode: boolean }
 
+const LF = String.fromCharCode(10);
+
+/** `content.parts`（字符串或 `{text}` 对象；非数组一律空） */
+function messageParts(message: Record<string, unknown>): unknown[] {
+  const content = message['content'];
+  if (!isRecord(content)) return [];
+  const parts = content['parts'];
+  return Array.isArray(parts) ? parts : [];
+}
+
+/** 单个 part 的文本投影（只有字符串 / `{text}` 两种形态算正文） */
+function partText(part: unknown): string | undefined {
+  if (typeof part === 'string') return part;
+  if (isRecord(part)) return str(part['text']);
+  return undefined;
+}
+
+/**
+ * 工具调用载体判定（参考 convert/chatgpt.mjs 的 toolCallCarrier）。
+ *
+ * ChatGPT 导出的工具调用是 **assistant content.parts 里的一个 part**：JSON **字符串**，
+ * 或直接的**对象**（个别导出用 `name` 而非 `tool_name`，参数包在 `action` / `metadata` 里）。
+ * 认出来必须**从正文里剥掉**（否则整段 JSON 被拼进对话）并**结构化**成 tool/call
+ * （不认出来就是对象载体被静默丢掉）。
+ */
+function toolCallCarrier(part: unknown): Record<string, unknown> | undefined {
+  let obj: unknown = part;
+  if (typeof part === 'string') {
+    const trimmed = part.trim();
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return undefined;
+    try {
+      obj = JSON.parse(trimmed);
+    } catch {
+      return undefined;
+    }
+  }
+  if (!isRecord(obj)) return undefined;
+  const carrier = isRecord(obj['action']) ? obj['action'] : obj;
+  const callId = str(carrier['tool_call_id']) ?? str(carrier['id']);
+  const name = str(carrier['tool_name']) ?? str(carrier['name']);
+  return callId === undefined || name === undefined ? undefined : carrier;
+}
+
+/** assistant 消息里的工具调用（结构化；FIFO 配对用它的 id） */
+function extractToolCalls(message: Record<string, unknown>): { readonly id: string; readonly name: string; readonly args: unknown }[] {
+  const out: { readonly id: string; readonly name: string; readonly args: unknown }[] = [];
+  for (const part of messageParts(message)) {
+    const carrier = toolCallCarrier(part);
+    if (carrier === undefined) continue;
+    out.push({
+      id: str(carrier['tool_call_id']) ?? str(carrier['id']) ?? '',
+      name: str(carrier['tool_name']) ?? str(carrier['name']) ?? '',
+      args: carrier['args'] ?? {},
+    });
+  }
+  return out;
+}
+
+/** 工具入参：字符串若是 JSON 就解析（合成期要写回 JSON 文本，传裸串会被二次编码） */
+function parseToolArgs(raw: unknown): unknown {
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try {
+        return JSON.parse(trimmed);
+      } catch {
+        return raw;
+      }
+    }
+  }
+  return raw;
+}
+
+/** 消息正文的纯文本投影（**跳过工具调用载体 part**，否则 JSON 字符串会重复进正文） */
+function contentText(message: Record<string, unknown>): string {
+  const texts: string[] = [];
+  for (const part of messageParts(message)) {
+    if (toolCallCarrier(part) !== undefined) continue;
+    const inner = partText(part);
+    if (inner !== undefined) texts.push(inner);
+  }
+  return texts.join(LF);
+}
+
 function contentOf(message: Record<string, unknown>): MessageBox | undefined {
   const content = message['content'];
   if (typeof content === 'string') return { text: content, isCode: false };
   if (!isRecord(content)) return undefined;
   const type = str(content['content_type']) ?? '';
-  const parts = content['parts'];
-  if (Array.isArray(parts)) {
-    const texts: string[] = [];
-    for (const part of parts) {
-      if (typeof part === 'string') texts.push(part);
-      else if (isRecord(part)) {
-        const inner = str(part['text']);
-        if (inner !== undefined) texts.push(inner);
-      }
-    }
-    const text = texts.join(String.fromCharCode(10));
+  if (Array.isArray(content['parts'])) {
+    const text = contentText(message);
     if (text !== '') return { text, isCode: type === 'code' };
   }
   const direct = str(content['text']);
@@ -115,42 +191,121 @@ function messageOf(node: unknown): Record<string, unknown> | undefined {
   return isRecord(message) ? message : undefined;
 }
 
-/** 缺 current_node 时的兜底：从每条无父链出发取**最长**链（导出文件里通常只有一条根链） */
-function longestChain(nodes: Map<string, Record<string, unknown>>): string[] {
-  // 「有父」集合存**子节点自己的 id**（先前写成把 parent 塞进去，等于把根当成有父 → 只返回末节点）
-  const hasParent = new Set<string>();
+/** 节点时间（活跃分支排序用）：消息 create_time 的数值形态；缺时 0（稳定排序保持插入序） */
+function messageTimeOf(node: Record<string, unknown> | undefined): number {
+  const message = messageOf(node);
+  if (message === undefined) return 0;
+  const t = message['create_time'];
+  if (typeof t === 'number' && Number.isFinite(t)) return t;
+  if (typeof t === 'string') {
+    const parsed = Date.parse(t);
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
+  return 0;
+}
+
+/**
+ * 子节点解析：优先节点自带的 `children`；**缺失时按 `parent` 指针还原**
+ * （参考 convert/chatgpt.mjs 的 childrenResolver）。
+ *
+ * 为什么必须有还原支：官方「slim」导出**完全不写 children**，只沿 children 走的话
+ * root 之后一个节点都遍历不到 —— 整份导出只导入 1 条消息（旧行为）。
+ * 还原出的兄弟顺序按消息 create_time 升序，这样「最后一个 child = 活跃分支」的既有语义
+ * 在还原后依然成立（与自带 children 的导出侧排序对齐）。
+ */
+function childrenResolver(nodes: Map<string, Record<string, unknown>>): (id: string) => string[] {
+  const derived = new Map<string, string[]>();
   for (const [id, node] of nodes) {
     const parent = node['parent'];
-    if (typeof parent === 'string' && nodes.has(parent)) hasParent.add(id);
+    if (typeof parent !== 'string' || parent === id || !nodes.has(parent)) continue;
+    const list = derived.get(parent);
+    if (list === undefined) derived.set(parent, [id]);
+    else list.push(id);
   }
-  const memo = new Map<string, string[]>();
-  const walk = (id: string, guard: Set<string>): string[] => {
-    const cached = memo.get(id);
-    if (cached !== undefined) return cached;
-    if (guard.has(id)) return [id];
-    guard.add(id);
+  for (const list of derived.values()) {
+    list.sort((a, b) => messageTimeOf(nodes.get(a)) - messageTimeOf(nodes.get(b)));
+  }
+  return (id: string): string[] => {
     const node = nodes.get(id);
-    const children = node === undefined ? undefined : node['children'];
-    let best: string[] = [];
-    if (Array.isArray(children)) {
-      for (const child of children) {
-        if (typeof child !== 'string' || !nodes.has(child)) continue;
-        const branch = walk(child, new Set(guard));
-        if (branch.length > best.length) best = branch;
+    if (node === undefined) return [];
+    const declared = node['children'];
+    if (Array.isArray(declared)) {
+      const kids: string[] = [];
+      for (const child of declared) {
+        if (typeof child === 'string' && nodes.has(child)) kids.push(child);
       }
+      if (kids.length > 0) return kids;
     }
-    guard.delete(id);
-    const chain = [id, ...best];
-    memo.set(id, chain);
-    return chain;
+    return derived.get(id) ?? [];
   };
-  let best: string[] = [];
-  for (const id of nodes.keys()) {
-    if (hasParent.has(id)) continue;
-    const chain = walk(id, new Set());
-    if (chain.length > best.length) best = chain;
+}
+
+/**
+ * 缺 current_node 时的兜底：从每条无父链出发取**最长**链（导出文件里通常只有一条根链）。
+ *
+ * **迭代**（显式栈）实现：递归版在深层导出（上限 20000 节点）会爆栈 —— 超过调用栈上限时
+ * 整个来源炸掉，而不是「导入得少一点」。环保护靠 visiting 集合。
+ */
+function longestChain(nodes: Map<string, Record<string, unknown>>, childrenOf: (id: string) => string[]): string[] {
+  const roots: string[] = [];
+  for (const [id, node] of nodes) {
+    const parent = node['parent'];
+    if (typeof parent === 'string' && parent !== id && nodes.has(parent)) continue;
+    roots.push(id);
   }
-  return best;
+  // memo 只存「以该节点为头的最长链长度 + 下一跳」：直接存链数组会退化成 O(N²)
+  //（25000 节点的深链上实测 7 秒 + 数百 MB 拷贝）
+  const memoLen = new Map<string, number>();
+  const memoNext = new Map<string, string | undefined>();
+  const state = new Map<string, 'visiting' | 'done'>();
+  for (const root of roots) {
+    if (state.has(root)) continue;
+    const stack: { id: string; kids: string[]; next: number }[] = [{ id: root, kids: childrenOf(root), next: 0 }];
+    state.set(root, 'visiting');
+    while (stack.length > 0) {
+      const top = stack[stack.length - 1];
+      if (top === undefined) break;
+      if (top.next < top.kids.length) {
+        const kid = top.kids[top.next];
+        top.next += 1;
+        if (kid === undefined || state.has(kid)) continue;
+        state.set(kid, 'visiting');
+        stack.push({ id: kid, kids: childrenOf(kid), next: 0 });
+        continue;
+      }
+      stack.pop();
+      state.set(top.id, 'done');
+      let childLen = 0;
+      let next: string | undefined;
+      for (const kid of top.kids) {
+        const len = memoLen.get(kid) ?? 0;
+        if (len > childLen) {
+          childLen = len;
+          next = kid;
+        }
+      }
+      memoLen.set(top.id, childLen + 1);
+      memoNext.set(top.id, next);
+    }
+  }
+  let bestRoot: string | undefined;
+  let bestLen = 0;
+  for (const root of roots) {
+    const len = memoLen.get(root) ?? 0;
+    if (len > bestLen) {
+      bestLen = len;
+      bestRoot = root;
+    }
+  }
+  const chain: string[] = [];
+  const seen = new Set<string>();
+  let cursor = bestRoot;
+  while (cursor !== undefined && !seen.has(cursor)) {
+    seen.add(cursor);
+    chain.push(cursor);
+    cursor = memoNext.get(cursor);
+  }
+  return chain;
 }
 
 /** mapping DAG → 线性链（current_node 向上回溯；缺则最长根链） */
@@ -176,7 +331,7 @@ export function chatgptChainOf(mapping: unknown, currentNode: unknown): string[]
     chain.reverse();
     return chain;
   }
-  return longestChain(nodes);
+  return longestChain(nodes, childrenResolver(nodes));
 }
 
 function recordsFromConversation(
@@ -192,6 +347,10 @@ function recordsFromConversation(
   const chain = chatgptChainOf(mapping, item['current_node']);
   const records: TranscriptRecord[] = [];
   let idIndex = 0;
+  // 未配对调用（ChatGPT 导出的 tool 消息**没有** tool_call_id → 按 FIFO 位置配对）
+  const pendingCalls: string[] = [];
+  // 当前「打开的」assistant 步：工具结果与孤儿文本都挂回它的 blocks
+  let openAssistant: IrBlock[] | undefined;
   for (const nodeId of chain) {
     // 节点触顶绝不静默（audit-foreign F4）：逐类计数 → 下游 unsupported-session-record 可见。
     if (idIndex >= maxNodes) { irBump(ignored, 'chatgpt:max-nodes'); break; }
@@ -205,20 +364,62 @@ function recordsFromConversation(
     const author = message['author'];
     const rawRole = isRecord(author) ? str(author['role']) : undefined;
     const role = rawRole === undefined ? undefined : rawRole.toLowerCase();
+    const time = epochMsOf(message['create_time']);
+    if (role === 'tool') {
+      // 结构化还原：结果挂到配对的调用所在步（参考 buildTurns 的 FIFO）
+      const text = contentText(message);
+      const callId = pendingCalls.shift();
+      if (callId !== undefined && openAssistant !== undefined) {
+        records.push({
+          role: 'user',
+          blocks: [irToolResultBlock(callId, text, false)],
+          ...(time !== undefined ? { time } : {}),
+          id: nodeId,
+        });
+      } else {
+        // 孤儿结果（转录从中途开始）：绝不挂错步；正文不丢（参考把它们并回最近一步的正文）
+        irBump(ignored, 'chatgpt:orphan-tool-result');
+        if (text !== '' && openAssistant !== undefined) openAssistant.push(irTextBlock(text));
+      }
+      continue;
+    }
     if (role !== 'user' && role !== 'assistant') {
       irBump(ignored, 'chatgpt:role-' + (role ?? 'unknown'));
       continue;
     }
+    if (role === 'user') {
+      openAssistant = undefined;
+      const box = contentOf(message);
+      if (box === undefined || box.text.trim() === '') {
+        irBump(ignored, 'chatgpt:no-content');
+        continue;
+      }
+      if (box.isCode) irBump(ignored, 'chatgpt:code-block');
+      records.push({
+        role: 'user',
+        blocks: [irTextBlock(box.text)],
+        ...(time !== undefined ? { time } : {}),
+        id: nodeId,
+      });
+      continue;
+    }
+    // assistant：正文（已剥掉工具调用载体 part）+ 结构化的工具调用块
     const box = contentOf(message);
-    if (box === undefined || box.text.trim() === '') {
+    if (box !== undefined && box.isCode) irBump(ignored, 'chatgpt:code-block');
+    const blocks: IrBlock[] = [];
+    if (box !== undefined && box.text.trim() !== '') blocks.push(irTextBlock(box.text));
+    for (const call of extractToolCalls(message)) {
+      blocks.push(irToolCallBlock(call.id, call.name, parseToolArgs(call.args)));
+      pendingCalls.push(call.id);
+    }
+    if (blocks.length === 0) {
       irBump(ignored, 'chatgpt:no-content');
       continue;
     }
-    if (box.isCode) irBump(ignored, 'chatgpt:code-block');
-    const time = epochMsOf(message['create_time']);
+    openAssistant = blocks;
     records.push({
-      role,
-      blocks: [irTextBlock(box.text)],
+      role: 'assistant',
+      blocks,
       ...(time !== undefined ? { time } : {}),
       id: nodeId,
     });

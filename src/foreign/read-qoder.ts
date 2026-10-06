@@ -293,6 +293,7 @@ export async function readQoderSessions(opts: QoderReadOptions): Promise<Session
   const findings: ForeignSkip[] = [];
   const files: QoderSessionFile[] = [];
   let subagents = 0;
+  let auxiliary = 0;
 
   if (!(await isDirectory(projectsDir))) {
     return { files, readFindings: findings, extraCounts: { 'sessions.candidates': 0 } };
@@ -309,7 +310,14 @@ export async function readQoderSessions(opts: QoderReadOptions): Promise<Session
       const text = await readTextGuarded(joinFor(platform, projectDir, name), label, maxBytes, findings);
       if (text === null) continue;
       const id = stemOf(name);
-      const base = parseGenericJsonl(text, QODER_SHAPE);
+      const outcome = parseQoderJsonl(text, id);
+      if (outcome.stemMismatch) {
+        // 主体判定（参考 convert/qoder.mjs）：文件名 stem ≠ 记录 sessionId = 辅助 / 子代理
+        // transcript。按它建会话会与主 transcript 撞 id（先到者占会话，主内容被幂等跳过）
+        auxiliary += 1;
+        continue;
+      }
+      const base = outcome.parsed;
       if (base.cwd === undefined && derivedCwd !== undefined) {
         files.push({ id, parsed: { ...base, cwd: derivedCwd } });
         findings.push({ code: 'session-cwd-derived', origin: id, detail: 'project-dir-encoding' });
@@ -323,13 +331,21 @@ export async function readQoderSessions(opts: QoderReadOptions): Promise<Session
   }
 
   if (truncated) findings.push({ code: 'source-unreadable', origin: 'qoder', detail: 'max-sessions-reached', count: maxFiles });
-  const extraSkips: ForeignSkip[] = subagents > 0
-    ? [{ code: 'unsupported-session-record', origin: 'subagents', detail: 'subagent-transcript', count: subagents }]
-    : [];
+  const extraSkips: ForeignSkip[] = [];
+  if (subagents > 0) {
+    extraSkips.push({ code: 'unsupported-session-record', origin: 'subagents', detail: 'subagent-transcript', count: subagents });
+  }
+  if (auxiliary > 0) {
+    extraSkips.push({ code: 'unsupported-session-record', origin: 'qoder', detail: 'auxiliary-transcript', count: auxiliary });
+  }
   return {
     files,
     readFindings: findings,
     extraSkips,
-    extraCounts: { 'sessions.candidates': files.length, 'qoder.subagentTranscripts': subagents },
+    extraCounts: {
+      'sessions.candidates': files.length,
+      'qoder.subagentTranscripts': subagents,
+      'qoder.auxiliaryTranscripts': auxiliary,
+    },
   };
 }

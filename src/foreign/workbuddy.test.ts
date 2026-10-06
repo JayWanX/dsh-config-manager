@@ -19,7 +19,7 @@ import { dshSessionLogName } from './claude-sessions.ts';
 import { joinFor, normalizePlatform } from './platform-paths.ts';
 import { FOREIGN_TRUTH_TABLES } from './truth-table.ts';
 import { createWorkbuddySource, workbuddySource, WORKBUDDY_PROVIDER } from './workbuddy.ts';
-import { readWorkbuddySessions, workbuddyProjectsDir } from './read-workbuddy.ts';
+import { extractWorkbuddyUserQuery, parseWorkbuddyJsonl, readWorkbuddySessions, workbuddyProjectsDir } from './read-workbuddy.ts';
 import type { ForeignImportResult } from './types.ts';
 
 const PLATFORM = normalizePlatform(process.platform);
@@ -122,6 +122,85 @@ test('t5 未安装 / 0 字节：正常状态、不抛、如实报码', async () 
     const read = await readWorkbuddySessions({ homeDir: tmp, env: {}, platform: PLATFORM });
     assert.deepEqual(read.files, []);
     assert.ok(read.readFindings?.some((s) => s.code === 'source-empty-file' && (s.origin ?? '').endsWith('empty.jsonl')));
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+/* ---------------- ⑥ 参考实现对齐（convert/workbuddy.mjs） ---------------- */
+
+test('t6 提问提取：<user_query> 优先；缺失时剥 system-reminder 与其余标签', () => {
+  assert.equal(
+    extractWorkbuddyUserQuery([{ type: 'input_text', text: '<system-reminder>提示</system-reminder><user_query>真正的问题</user_query>' }]),
+    '真正的问题',
+    '人类提问在 <user_query> 信封里，注入上下文不是提问',
+  );
+  assert.equal(
+    extractWorkbuddyUserQuery([{ type: 'input_text', text: '  <user_query>' + NL + '  多行提问  ' + NL + '</user_query>' }]),
+    '多行提问',
+  );
+  assert.equal(
+    extractWorkbuddyUserQuery([{ type: 'input_text', text: '<system-reminder>一大段注入</system-reminder>剩余纯文本' }]),
+    '剩余纯文本',
+    '没有 user_query 时剥掉 system-reminder 整块',
+  );
+  assert.equal(extractWorkbuddyUserQuery([{ type: 'image_blob_ref', path: '/x.png' }]), '', '没有可提取文本就是空提问');
+  assert.equal(extractWorkbuddyUserQuery('裸字符串提问'), '裸字符串提问');
+});
+
+test('t7 事件流：function_call/result 按 callId 配对；reasoning 只显式计数；孤儿/未完成/中断各归各档', () => {
+  const lines = [
+    JSON.stringify({ type: 'message', sessionId: 'wb-1', cwd: '/work/wb', role: 'user', timestamp: '2026-10-05T00:00:00Z', content: [
+      { type: 'input_text', text: '<user_query>帮我读文件</user_query>' + NL + '<project_context>项目上下文</project_context>' },
+    ] }),
+    JSON.stringify({ type: 'reasoning', sessionId: 'wb-1', rawContent: [{ type: 'reasoning_text', text: '先看看' }] }),
+    JSON.stringify({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '好的' }] }),
+    JSON.stringify({ type: 'function_call', sessionId: 'wb-1', callId: 'c1', name: 'read_file', arguments: '{"path":"a.ts"}' }),
+    JSON.stringify({ type: 'function_call_result', callId: 'c1', status: 'completed', output: { type: 'text', text: '文件内容' } }),
+    JSON.stringify({ type: 'function_call_result', callId: 'c1', status: 'incomplete', output: '不该出现' }),
+    JSON.stringify({ type: 'function_call_result', callId: 'ghost', status: 'completed', output: '没有对应调用' }),
+    JSON.stringify({ type: 'function_call', callId: 'c2', name: 'x', arguments: '{}', providerData: { isPartialAborted: true } }),
+    JSON.stringify({ type: 'file-history-snapshot', sessionId: 'wb-1', files: {} }),
+    JSON.stringify({ type: 'message', role: 'user', content: [
+      { type: 'input_text', text: '<system-reminder>系统提醒</system-reminder>接下来做什么' },
+    ] }),
+  ];
+  const parsed = parseWorkbuddyJsonl(lines.join(NL));
+  assert.equal(parsed.cwd, '/work/wb');
+  assert.equal(parsed.title, '帮我读文件', '注入的 project_context 不得成为标题');
+  assert.deepEqual(parsed.records.map((r) => r.role), ['user', 'assistant', 'user', 'user']);
+  assert.deepEqual(parsed.records[0]?.blocks, [{ type: 'text', text: '帮我读文件' }], '提问必须从 <user_query> 提取');
+  assert.deepEqual(parsed.records[1]?.blocks, [
+    { type: 'text', text: '好的' },
+    { type: 'tool_call', id: 'c1', name: 'read_file', input: { path: 'a.ts' } },
+  ], 'function_call 必须结构化为 tool/call（旧行为整类丢弃）');
+  assert.deepEqual(parsed.records[2]?.blocks, [{ type: 'tool_result', id: 'c1', text: '文件内容', isError: false }]);
+  assert.deepEqual(parsed.records[3]?.blocks, [{ type: 'text', text: '接下来做什么' }]);
+  // 推理在本地 IR 没有承载位 → 只显式计数，绝不伪装成正文
+  assert.equal(parsed.ignored['workbuddy:reasoning'], 1);
+  assert.equal(parsed.ignored['workbuddy:incomplete-result'], 1);
+  assert.equal(parsed.ignored['workbuddy:orphan-tool-result'], 1);
+  assert.equal(parsed.ignored['workbuddy:aborted-call'], 1);
+  assert.equal(parsed.ignored['workbuddy:file-history-snapshot'], 1);
+  const allBlocks = parsed.records.flatMap((r) => r.blocks);
+  assert.equal(allBlocks.some((b) => b.type === 'text' && b.text.includes('先看看')), false, '推理绝不进正文');
+});
+
+test('t8 端到端：参考事件流形态的 transcript 产出会话与工作区', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-workbuddy-events-'));
+  try {
+    const body = [
+      JSON.stringify({ type: 'message', sessionId: 'wb-1', cwd: '/work/wb', role: 'user', content: [{ type: 'input_text', text: '<user_query>你好</user_query>' }] }),
+      JSON.stringify({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '回复' }] }),
+    ].join(NL);
+    await writeAt(tmp, '.workbuddy/projects/hash-3/wb-1.jsonl', body);
+    const read = await readWorkbuddySessions({ homeDir: tmp, env: {}, platform: PLATFORM });
+    assert.equal(read.files[0]?.parsed.cwd, '/work/wb');
+    const result = await workbuddySource.build(ctxOf(tmp));
+    const files = sessionsOf(result);
+    assert.equal(files.length, 1);
+    assert.equal(files[0]?.relativePath, projectKeyOf('/work/wb') + '/wb-1/' + dshSessionLogName(TARGET_VERSION));
+    assert.ok((files[0]?.data.length ?? 0) > 0);
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }

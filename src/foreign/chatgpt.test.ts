@@ -181,3 +181,99 @@ test('chatgpt t6 未给显式路径：build 只报 source-needs-explicit-path，
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+test('chatgpt t7 工具 part：JSON 字符串/对象载体都剥离并结构化；role=tool 按 FIFO 配对', async () => {
+  const root = await tmpRoot('chatgpt-tools');
+  try {
+    const list = [
+      {
+        id: 'conv-json',
+        title: '字符串载体',
+        current_node: 'n3',
+        mapping: {
+          n1: { id: 'n1', parent: null, children: ['n2'], message: { author: { role: 'user' }, content: { content_type: 'text', parts: ['搜索一下'] }, create_time: 1 } },
+          n2: { id: 'n2', parent: 'n1', children: ['n3'], message: { author: { role: 'assistant' }, content: { content_type: 'text', parts: [
+            JSON.stringify({ tool_name: 'web', tool_call_id: 'call_1', args: { q: 'x' } }),
+            '正在搜索',
+          ] }, create_time: 2 } },
+          n3: { id: 'n3', parent: 'n2', children: [], message: { author: { role: 'tool' }, content: { content_type: 'text', parts: ['结果文本'] }, create_time: 3 } },
+        },
+      },
+      {
+        id: 'conv-object',
+        title: '对象载体 + 孤儿结果',
+        current_node: 'm4',
+        mapping: {
+          m1: { id: 'm1', parent: null, children: ['m2'], message: { author: { role: 'user' }, content: { content_type: 'text', parts: ['再来'] }, create_time: 1 } },
+          m2: { id: 'm2', parent: 'm1', children: ['m3'], message: { author: { role: 'assistant' }, content: { content_type: 'text', parts: [
+            { tool_name: 'read', tool_call_id: 'call_2', args: { path: 'a' } },
+          ] }, create_time: 2 } },
+          m3: { id: 'm3', parent: 'm2', children: ['m4'], message: { author: { role: 'tool' }, content: { content_type: 'text', parts: ['读到内容'] }, create_time: 3 } },
+          m4: { id: 'm4', parent: 'm3', children: [], message: { author: { role: 'tool' }, content: { content_type: 'text', parts: ['没有对应调用的结果'] }, create_time: 4 } },
+        },
+      },
+    ];
+    const file = path.join(root, 'conversations.json');
+    await writeAt(root, 'conversations.json', JSON.stringify(list));
+    const read = await readChatgpt({ homeDir: root, env: {}, platform: HOST, projectDir: file });
+    const byId = new Map(read.files.map((f) => [f.id, f]));
+
+    const json = byId.get('conv-json');
+    assert.ok(json !== undefined);
+    assert.deepEqual(json.records.map((r) => r.role), ['user', 'assistant', 'user'], 'tool 消息产出配对的 tool_result');
+    assert.deepEqual(json.records[1]?.blocks, [
+      { type: 'text', text: '正在搜索' },
+      { type: 'tool_call', id: 'call_1', name: 'web', input: { q: 'x' } },
+    ], 'JSON 字符串载体必须被剥离出正文并结构化为 tool/call（绝不重复进正文）');
+    assert.deepEqual(json.records[2]?.blocks, [{ type: 'tool_result', id: 'call_1', text: '结果文本', isError: false }]);
+    assert.equal(json.ignored['chatgpt:role-tool'], undefined, 'role=tool 不再被当未迁移角色丢弃');
+
+    const obj = byId.get('conv-object');
+    assert.ok(obj !== undefined);
+    const objBlocks = obj.records[1]?.blocks ?? [];
+    assert.deepEqual(objBlocks[0], { type: 'tool_call', id: 'call_2', name: 'read', input: { path: 'a' } },
+      '对象载体同样必须被结构化（旧行为是静默丢掉）');
+    assert.equal(obj.ignored['chatgpt:orphan-tool-result'], 1, '孤儿结果必须显式计数');
+    assert.deepEqual(obj.records.map((r) => r.role), ['user', 'assistant', 'user'], '孤儿结果绝不新开一轮');
+    assert.ok(
+      obj.records[1]?.blocks.some((b) => b.type === 'text' && b.text.includes('没有对应调用的结果')),
+      '孤儿结果正文不丢（并回最近一步，参考 buildTurns）',
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('chatgpt t8 slim 导出：缺 children 时按 parent 指针还原全链；深链走迭代不爆栈', () => {
+  const slim = {
+    n0: { id: 'n0', parent: null, message: { author: { role: 'user' }, content: { content_type: 'text', parts: ['a'] }, create_time: 1 } },
+    n1: { id: 'n1', parent: 'n0', message: { author: { role: 'assistant' }, content: { content_type: 'text', parts: ['b'] }, create_time: 2 } },
+    n2: { id: 'n2', parent: 'n1', message: { author: { role: 'user' }, content: { content_type: 'text', parts: ['c'] }, create_time: 3 } },
+  };
+  assert.deepEqual(chatgptChainOf(slim, undefined), ['n0', 'n1', 'n2'], '官方 slim 导出不写 children → 必须按 parent 还原');
+
+  // 分支：还原出的子节点同样参与「最长根链」兜底（cwd/链走法逐条经 parent 指针）
+  const branch = {
+    r: { id: 'r', parent: null, message: { author: { role: 'user' }, content: { content_type: 'text', parts: ['r'] }, create_time: 1 } },
+    short: { id: 'short', parent: 'r', message: { author: { role: 'assistant' }, content: { content_type: 'text', parts: ['short'] }, create_time: 5 } },
+    long: { id: 'long', parent: 'r', message: { author: { role: 'assistant' }, content: { content_type: 'text', parts: ['long'] }, create_time: 9 } },
+    deep: { id: 'deep', parent: 'long', message: { author: { role: 'user' }, content: { content_type: 'text', parts: ['deep'] }, create_time: 10 } },
+  };
+  assert.deepEqual(chatgptChainOf(branch, 'short'), ['r', 'short'], 'current_node 仍在时走回溯；不碰 children');
+  assert.deepEqual(chatgptChainOf(branch, undefined), ['r', 'long', 'deep'], '缺 children 时按 parent 还原出全部子节点');
+
+  // 深链：递归实现在这里会 RangeError（栈溢出）
+  const deep: Record<string, unknown> = {};
+  const depth = 25000;
+  for (let i = 0; i < depth; i += 1) {
+    deep['n' + String(i)] = {
+      id: 'n' + String(i),
+      parent: i === 0 ? null : 'n' + String(i - 1),
+      message: { author: { role: i % 2 === 0 ? 'user' : 'assistant' }, content: { content_type: 'text', parts: ['m' + String(i)] }, create_time: i },
+    };
+  }
+  const chain = chatgptChainOf(deep, undefined);
+  assert.equal(chain.length, depth, '深链必须整条返回（迭代实现，绝不爆栈）');
+  assert.equal(chain[0], 'n0');
+  assert.equal(chain[depth - 1], 'n' + String(depth - 1));
+});

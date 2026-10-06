@@ -20,7 +20,7 @@ import { dshSessionLogName } from './claude-sessions.ts';
 import { joinFor, normalizePlatform } from './platform-paths.ts';
 import { FOREIGN_TRUTH_TABLES } from './truth-table.ts';
 import { createQoderSource, qoderSource, QODER_PROVIDER } from './qoder.ts';
-import { derivedCwdOf, qoderProjectsDir, readQoderSessions } from './read-qoder.ts';
+import { derivedCwdOf, parseQoderJsonl, qoderProjectsDir, readQoderSessions } from './read-qoder.ts';
 import type { ForeignImportResult } from './types.ts';
 
 const PLATFORM = normalizePlatform(process.platform);
@@ -158,6 +158,108 @@ test('t5 记录里带 cwd 时优先采信记录（不报 session-cwd-derived）'
     assert.ok(!read.readFindings?.some((s) => s.code === 'session-cwd-derived'));
     assert.equal(QODER_PROVIDER, 'qoder');
     assert.equal(joinFor('linux', '/a', 'b'), '/a/b');
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+/* ---------------- ④ 参考实现对齐（convert/qoder.mjs） ---------------- */
+
+test('t6 标题：ai-title > last-prompt > 首问兜底；thinking 块只显式计数', () => {
+  const lines = [
+    JSON.stringify({ type: 'user', sessionId: 's1', cwd: '/w', message: { role: 'user', content: '第一个问题' } }),
+    JSON.stringify({ type: 'last-prompt', sessionId: 's1', lastPrompt: '最近提问' }),
+    JSON.stringify({ type: 'assistant', sessionId: 's1', message: { role: 'assistant', content: [
+      { type: 'thinking', thinking: '推理正文' },
+      { type: 'text', text: '回答' },
+    ] } }),
+  ].join(NL);
+  const withLast = parseQoderJsonl(lines, 's1');
+  assert.equal(withLast.parsed.title, '最近提问', 'ai-title 缺省时用 last-prompt');
+  assert.equal(withLast.parsed.ignored['block:thinking'], 1, 'thinking 无 IR 承载位 → 必须显式计数');
+  assert.deepEqual(withLast.parsed.records[1]?.blocks, [{ type: 'text', text: '回答' }], '推理绝不伪装成正文');
+
+  const withAi = parseQoderJsonl([
+    JSON.stringify({ type: 'user', sessionId: 's1', message: { role: 'user', content: '第一个问题' } }),
+    JSON.stringify({ type: 'last-prompt', sessionId: 's1', lastPrompt: '最近提问' }),
+    JSON.stringify({ type: 'ai-title', sessionId: 's1', aiTitle: 'AI 标题' }),
+  ].join(NL), 's1');
+  assert.equal(withAi.parsed.title, 'AI 标题', 'ai-title 优先于 last-prompt');
+
+  const fallback = parseQoderJsonl(
+    JSON.stringify({ type: 'user', sessionId: 's1', message: { role: 'user', content: '只有提问' } }),
+    's1',
+  );
+  assert.equal(fallback.parsed.title, '只有提问');
+  assert.equal(fallback.sessionId, 's1');
+});
+
+test('t7 tool_result 缺 tool_use_id：按未决调用顺序回退配对（显式 id 会把该调用移出队列）', () => {
+  const result = (text: string, toolUseId?: string) => JSON.stringify({
+    type: 'user',
+    sessionId: 's1',
+    message: {
+      role: 'user',
+      content: [{ type: 'tool_result', ...(toolUseId !== undefined ? { tool_use_id: toolUseId } : {}), content: [{ type: 'text', text }] }],
+    },
+  });
+  const out = parseQoderJsonl([
+    JSON.stringify({ type: 'user', sessionId: 's1', cwd: '/w', message: { role: 'user', content: '读两个文件' } }),
+    JSON.stringify({ type: 'assistant', sessionId: 's1', message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 'tu_1', name: 'read', input: {} },
+      { type: 'tool_use', id: 'tu_2', name: 'read', input: {} },
+    ] } }),
+    // 第一条缺 id → 回退配对最早未决调用 tu_1
+    result('r1'),
+    // 显式 id 的结果把 tu_2 移出未决队列
+    result('r2', 'tu_2'),
+    // 再回来一条缺 id → 队列已空，保持空串（绝不伪造配对）
+    result('r3'),
+  ].join(NL), 's1');
+  const results = out.parsed.records.flatMap((r) => r.blocks).filter((b) => b.type === 'tool_result');
+  assert.deepEqual(results.map((b) => (b.type === 'tool_result' ? [b.id, b.text] : [])), [
+    ['tu_1', 'r1'],
+    ['tu_2', 'r2'],
+    ['', 'r3'],
+  ]);
+
+  // 并行调用 + 乱序结果：显式 id 优先，不受顺序影响
+  const out2 = parseQoderJsonl([
+    JSON.stringify({ type: 'user', sessionId: 's1', message: { role: 'user', content: 'hi' } }),
+    JSON.stringify({ type: 'assistant', sessionId: 's1', message: { role: 'assistant', content: [
+      { type: 'tool_use', id: 'tu_1', name: 'a', input: {} },
+      { type: 'tool_use', id: 'tu_2', name: 'b', input: {} },
+    ] } }),
+    result('second', 'tu_2'),
+    result('first', 'tu_1'),
+  ].join(NL), 's1');
+  const results2 = out2.parsed.records.flatMap((r) => r.blocks).filter((b) => b.type === 'tool_result');
+  assert.deepEqual(results2.map((b) => (b.type === 'tool_result' ? [b.id, b.text] : [])), [['tu_2', 'second'], ['tu_1', 'first']]);
+});
+
+test('t8 主体判定：文件名 stem ≠ 记录 sessionId 的辅助 transcript 跳过并报码', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-qoder-stem-'));
+  try {
+    await writeAt(tmp, '.qoder/projects/-proj-abc/main.jsonl', JSON.stringify({
+      type: 'user',
+      sessionId: 'main',
+      cwd: '/w/proj',
+      message: { role: 'user', content: '主 transcript' },
+    }));
+    // 辅助文件：文件名 aux 但记录自报 sessionId=main（按它建会话会与主 transcript 撞 id）
+    await writeAt(tmp, '.qoder/projects/-proj-abc/aux.jsonl', JSON.stringify({
+      type: 'assistant',
+      sessionId: 'main',
+      cwd: '/w/proj',
+      message: { role: 'assistant', content: '辅助内容' },
+    }));
+    const read = await readQoderSessions({ homeDir: tmp, env: {}, platform: PLATFORM });
+    assert.deepEqual(read.files.map((f) => f.id), ['main'], '只有主 transcript 成为会话');
+    assert.equal(read.extraCounts?.['qoder.auxiliaryTranscripts'], 1);
+    assert.ok(read.extraSkips?.some((s) => s.code === 'unsupported-session-record' && s.detail === 'auxiliary-transcript'));
+    // 记录里没有 sessionId 时不做主体判定（沿用文件名 stem）
+    const noId = parseQoderJsonl(JSON.stringify({ type: 'user', message: { role: 'user', content: 'x' } }), 'aux');
+    assert.equal(noId.stemMismatch, false, '记录没自报 sessionId → 不判主体');
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }

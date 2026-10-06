@@ -485,6 +485,18 @@
   padding: 8px 12px 0;
 }
 
+/* v3：通道卡折叠体（SyncPanel）—— Collapse 的内层不是 flex 容器，多张卡片直接堆叠会贴在一起，
+   这里补回与 .viewBody 一致的 10px 节奏（入口卡与折叠体之间也留 10px）。 */
+.syncChannelBody {
+  margin-top: 10px;
+}
+
+.syncChannelBody .collapseInner {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 /* 状态栏里的「进行中任务名」：弱化一档，与状态文本并排但不抢焦点。 */
 .statusTask {
   color: var(--dsw-alias-label-secondary);

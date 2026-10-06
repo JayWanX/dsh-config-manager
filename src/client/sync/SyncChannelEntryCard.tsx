@@ -6,6 +6,7 @@
  */
 import type { TranslateNS } from '../client-types.ts'
 import { Badge, Button, Card } from '../common/ui.tsx'
+import { ExpandChevron } from '../common/Icon.tsx'
 import { InfoHint } from '../common/InfoHint.tsx'
 import type { SyncStatusResponse } from './sync-api.ts'
 import type { SyncChannel } from './sync-view.ts'
@@ -14,7 +15,7 @@ import { needsGitToken, SYNC_CHANNEL_LABEL_KEY } from './sync-view.ts'
 import css from '../config-manager.module.css'
 
 /** 同步通道入口卡：通道徽章 + 配置状态 + 状态事实行 + 打开配置弹窗 + 断开该通道配置。 */
-export function SyncChannelEntryCard({ t, channel, statusInfo, remoteReady, repoUrl, webdavUrl, s3Endpoint, gistId, onOpen, onClear }: {
+export function SyncChannelEntryCard({ t, channel, statusInfo, remoteReady, repoUrl, webdavUrl, s3Endpoint, gistId, onOpen, onClear, expanded, contentId, onToggleExpanded }: {
   t: TranslateNS<'config-manager-sync'>
   channel: SyncChannel
   statusInfo: SyncStatusResponse | null
@@ -28,6 +29,14 @@ export function SyncChannelEntryCard({ t, channel, statusInfo, remoteReady, repo
   onOpen: () => void
   /** 请求断开该通道（未配置时按钮不渲染）；确认与执行由壳层负责（本卡不发请求） */
   onClear: () => void
+  /**
+   * v3 §2.2-3：通道卡可折叠（4 个通道全展开远超 564×720 画布）。
+   * 未配置的通道走矮态、没有可折叠内容 —— 调用方只在 remoteReady 时传这三个 prop。
+   */
+  expanded?: boolean
+  /** 折叠体的 id（与 aria-controls 配对；由调用方给 Collapse 同一个 id） */
+  contentId?: string
+  onToggleExpanded?: () => void
 }) {
   /** 事实行里的「当前远端」预览：按通道取那个真正标识远端的字段（gist 用 id，没有 URL） */
   const previewRemote = channel === 'webdav'
@@ -106,6 +115,26 @@ export function SyncChannelEntryCard({ t, channel, statusInfo, remoteReady, repo
           <Button variant="danger" onClick={onClear}>
             {t('channel.clear')}
           </Button>
+        )}
+        {onToggleExpanded !== undefined && (
+          <>
+            <span className={css.statusSpacer} />
+            {/* 展开/收起该通道的详情（内容区 / 加密 / 解密 / 自动同步）。
+                形态与 ContentPicker 的展开控件一致：原生 button + aria-expanded + aria-controls，
+                图标走 ExpandChevron 形变（折叠展开是它的合法用途）。 */}
+            <button
+              type="button"
+              className={css.iconBtn}
+              data-size="sm"
+              aria-expanded={expanded === true}
+              aria-controls={contentId}
+              aria-label={expanded === true ? t('channel.collapse') : t('channel.expand')}
+              title={expanded === true ? t('channel.collapse') : t('channel.expand')}
+              onClick={onToggleExpanded}
+            >
+              <ExpandChevron open={expanded === true} size={14} />
+            </button>
+          </>
         )}
       </div>
     </Card>

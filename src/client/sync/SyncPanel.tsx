@@ -87,6 +87,7 @@ import type { ExportPreviewResponse } from '../api.ts'
 import { SecurityOptionsCard } from './SecurityOptionsCard.tsx'
 import { DecryptPasswordCard } from './DecryptPasswordCard.tsx'
 import { AutosyncCard } from './AutosyncCard.tsx'
+import { Collapse } from '../common/Motion.tsx'
 import { SyncLogList } from './SyncLogList.tsx'
 import { UnreadableSnapshotsBanner } from './UnreadableSnapshotsBanner.tsx'
 import { SyncConfirmView } from './SyncConfirmView.tsx'
@@ -1128,6 +1129,19 @@ export function SyncPanel({ api, t, cmT }: SyncPanelProps) {
    * 不同**整棵子树重挂** —— Select 的展开态当场清零（真机：打开「选择历史快照」下拉（onOpen 会触发
    * 一次 loadSnapshots → 父组件重渲染）立刻被关掉，根本选不中）。返回 JSX 直接调用即可保持标识稳定。
    */
+  /**
+   * v3 §2.2-3：通道详情折叠态。缺省（键不存在）=「当前活跃通道展开」——
+   * 用户点过哪张卡的按钮，哪张卡就是活跃的。四个通道全部展开会远超 564×720 画布（P-IA-8）。
+   * 折叠态**不持久化**：它是瞬态的查看状态，刷新后回到「活跃通道展开」即可。
+   */
+  const [channelExpanded, setChannelExpanded] = useState<Partial<Record<SyncChannel, boolean>>>({})
+  const isChannelExpanded = (c: SyncChannel): boolean => channelExpanded[c] ?? (c === state.channel)
+  const toggleChannelExpanded = (c: SyncChannel): void => {
+    setChannelExpanded((prev) => ({ ...prev, [c]: !(prev[c] ?? (c === state.channel)) }))
+  }
+  /** 折叠体 id（与入口卡的 aria-controls 配对；Collapse 的 id 恒有值） */
+  const channelContentId = (c: SyncChannel): string => 'sync-channel-' + c
+
   const renderChannelCard = (channel: SyncChannel): ReactNode => {
     const cs = channelStateOf(channel)
     const ready = remoteReadyOf(channel)
@@ -1145,7 +1159,11 @@ export function SyncPanel({ api, t, cmT }: SyncPanelProps) {
           gistId={state.gistId}
           onOpen={() => { openChannelDialogFor(channel) }}
           onClear={() => { setClearTarget(channel) }}
+          expanded={ready ? isChannelExpanded(channel) : undefined}
+          contentId={ready ? channelContentId(channel) : undefined}
+          onToggleExpanded={ready ? () => { toggleChannelExpanded(channel) } : undefined}
         />
+        <Collapse open={ready && isChannelExpanded(channel)} id={channelContentId(channel)} className={css.syncChannelBody}>
         {ready && (
           <Card>
             {/* 同步内容：**跟着通道卡走** —— autosync 与 sync-selection 都按通道独立，
@@ -1238,6 +1256,33 @@ export function SyncPanel({ api, t, cmT }: SyncPanelProps) {
             />
           </Card>
         )}
+        {/* v3（P-IA-7 / §2.2-6）：加密与解密**属于这一条通道**，因此渲染在它自己的卡里。
+            此前这两张卡挂在页面级、绑定一个被「点某张卡的按钮」悄悄切换的隐式当前通道 ——
+            用户会以为四个通道共用一份加密设置。现在每张已配置的通道卡各自持有自己的凭据区，
+            所有 handler 都显式传 channel（不再读 state.channel）。 */}
+        {ready && (
+          <SecurityOptionsCard
+            t={t}
+            settings={cs}
+            onToggleEncrypt={(next) => { setEncrypt(channel, next) }}
+            onToggleIncludeSecrets={(next) => { setIncludeSecrets(channel, next) }}
+            onPatchSettings={(p) => { patchChannelOf(channel, p) }}
+            onPersistEncryptPassword={() => { void persistEncryptPassword(channel) }}
+          />
+        )}
+        {ready && (
+          <DecryptPasswordCard
+            t={t}
+            settings={cs}
+            onPatchSettings={(p) => { patchChannelOf(channel, p) }}
+            onPersistDecryptPassword={() => { void persistDecryptPassword(channel) }}
+            onClearSavedPassword={() => { clearSavedDecryptPassword(channel) }}
+          />
+        )}
+        {/* issue #59：远端快照列表不完整时的常驻告知（push 报成功但列表为空时，这里是唯一线索）。
+            v3：跟着**它所属的通道**走（此前挂页面级 = 显示的是隐式当前通道的列表）。 */}
+        {ready && <UnreadableSnapshotsBanner items={cs.unreadableSnapshots} t={t} />}
+        </Collapse>
       </>
     )
   }
@@ -1318,26 +1363,7 @@ export function SyncPanel({ api, t, cmT }: SyncPanelProps) {
             onSessionsInclude={(ids) => { setSessionsInclude(state.channel, ids) }}
             onClose={() => { setSectionPickerOpen(false) }}
           />
-          {/* 加密与密钥导出（渲染段拆到 SecurityOptionsCard，t42） */}
-          <SecurityOptionsCard
-            t={t}
-            settings={chState}
-            onToggleEncrypt={(next) => { setEncrypt(state.channel, next) }}
-            onToggleIncludeSecrets={(next) => { setIncludeSecrets(state.channel, next) }}
-            onPatchSettings={patchChannel}
-            onPersistEncryptPassword={() => { void persistEncryptPassword(state.channel) }}
-          />
-
-          {/* 解密密码（渲染段拆到 DecryptPasswordCard，t42） */}
-          <DecryptPasswordCard
-            t={t}
-            settings={chState}
-            onPatchSettings={patchChannel}
-            onPersistDecryptPassword={() => { void persistDecryptPassword() }}
-            onClearSavedPassword={clearSavedDecryptPassword}
-          />
-          {/* issue #59：远端快照列表不完整时的常驻告知（push 报成功但列表为空时，这里是唯一线索） */}
-          <UnreadableSnapshotsBanner items={chState.unreadableSnapshots} t={t} />
+          {/* v3：页面级的加密/解密/快照列表卡已移入各自的通道卡（见 renderChannelCard）。 */}
           {/* 同步记录（只留操作日志）：远端快照行已搬进产物库（§8）。
               这条指路行是**必须的** —— 否则用户会以为「远端快照不见了」。 */}
           <div className={css.actionRow}>

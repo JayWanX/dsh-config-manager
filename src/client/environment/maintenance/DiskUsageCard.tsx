@@ -18,18 +18,18 @@
  * 与原实现一致，**排版与注释措辞是重建的**。教训见 AGENTS.md「常见坑」的通配套。
  */
 import { useEffect, useRef, useState } from 'react'
-import { cleanupOutcome, diskUsageViewModel } from '../../ui/disk-usage-view.ts'
-import { formatBytes } from '../../ui/report.ts'
-import { redact } from '../../security/redaction.ts'
-import type { ConfigManagerApi } from '../api.ts'
-import type { DiskUsageReport } from '../../core/disk-usage.ts'
-import { Badge, Banner, Button, Card, Checkbox, IconButton } from '../common/ui.tsx'
-import { SkeletonList } from '../common/Skeleton.tsx'
-import { InfoHint } from '../common/InfoHint.tsx'
-import { ConfirmDialog } from '../common/ConfirmDialog.tsx'
-import { RefreshIcon } from '../common/Icon.tsx'
-import { toast } from '../common/toast-store.ts'
-import css from '../config-manager.module.css'
+import { cleanupOutcome, diskUsageViewModel } from '../../../ui/disk-usage-view.ts'
+import { formatBytes } from '../../../ui/report.ts'
+import { redact } from '../../../security/redaction.ts'
+import type { ConfigManagerApi } from '../../api.ts'
+import type { DiskUsageReport } from '../../../core/disk-usage.ts'
+import { Badge, Banner, Button, Card, Checkbox, IconButton } from '../../common/ui.tsx'
+import { SkeletonList } from '../../common/Skeleton.tsx'
+import { InfoHint } from '../../common/InfoHint.tsx'
+import { ConfirmDialog } from '../../common/ConfirmDialog.tsx'
+import { RefreshIcon } from '../../common/Icon.tsx'
+import { toast } from '../../common/toast-store.ts'
+import css from '../../config-manager.module.css'
 
 export interface DiskUsageCardProps {
   api: ConfigManagerApi

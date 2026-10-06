@@ -16,10 +16,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-// 本文件位于 src/client/snapshots/ → 仓库根是上三级
+// 本文件位于 src/client/library/ → 仓库根是上三级（v3：随 DiskUsageCard 搬移一并从 snapshots/ 迁出）
 const ROOT = path.resolve(import.meta.dirname, '../../..');
 const CSS = fs.readFileSync(path.join(ROOT, 'src/client/config-manager.module.css'), 'utf8');
-const DISK = fs.readFileSync(path.join(ROOT, 'src/client/snapshots/DiskUsageCard.tsx'), 'utf8');
+const DISK = fs.readFileSync(path.join(ROOT, 'src/client/environment/maintenance/DiskUsageCard.tsx'), 'utf8');
 const LIBRARY = fs.readFileSync(path.join(ROOT, 'src/client/library/LibraryPanel.tsx'), 'utf8');
 
 /** 取一条 CSS 规则的声明块（找不到 → null）。 */

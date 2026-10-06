@@ -51,7 +51,7 @@ import { Badge, Button, Card, Spinner, StatusDot, Stepper } from '../common/ui.t
 import { BackupIcon, ExportIcon, ImportIcon, SyncIcon, ArrowRightIcon } from '../common/Icon.tsx'
 import { CopyButton } from '../common/CopyButton.tsx'
 import { Modal } from '../common/Modal.tsx'
-import { BackupScheduleCard } from '../snapshots/BackupScheduleCard.tsx'
+import { BackupScheduleCard } from './BackupScheduleCard.tsx'
 import css from '../config-manager.module.css'
 
 /** issue #43：立即备份跳过原因 → 文案键（文案统一走 locale 字典；未知 token 走 other）。 */

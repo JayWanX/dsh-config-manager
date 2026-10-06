@@ -131,21 +131,21 @@ const RENDER_POINTS: RenderPoint[] = [
   /* git 风格恢复预览（RestorePlanView）：描述/路径/明细/文件正文/错误文本逐个登记 */
   {
     id: 'restore-plan-description',
-    file: 'src/client/snapshots/RestorePlanView.tsx',
+    file: 'src/client/library/RestorePlanView.tsx',
     redacted: R('const safeDescription = redact(row.description)'),
     bare: R('const safeDescription = row.description'),
     why: '恢复计划行描述（宿主拼装，可能含本地明文配置值）',
   },
   {
     id: 'restore-plan-target',
-    file: 'src/client/snapshots/RestorePlanView.tsx',
+    file: 'src/client/library/RestorePlanView.tsx',
     redacted: R('const safeTarget = row.target === undefined ? null : redact(row.target)'),
     bare: R('const safeTarget = row.target === undefined ? null : row.target'),
     why: '恢复计划行目标路径（宿主拼装的 home 相对路径，同时进可见文本与 title）',
   },
   {
     id: 'restore-plan-detail',
-    file: 'src/client/snapshots/RestorePlanView.tsx',
+    file: 'src/client/library/RestorePlanView.tsx',
     // client-F6：括号本身进字典（common.parens），宿主文本仍然先过 redact
     redacted: R("{t('common.parens', { text: redact(row.detail) })}"),
     bare: R("{t('common.parens', { text: row.detail })}"),
@@ -153,14 +153,14 @@ const RENDER_POINTS: RenderPoint[] = [
   },
   {
     id: 'restore-plan-diff-cell',
-    file: 'src/client/snapshots/RestorePlanView.tsx',
+    file: 'src/client/library/RestorePlanView.tsx',
     redacted: R("return text === undefined ? '' : redact(text)"),
     bare: R("return text === undefined ? '' : text"),
     why: '逐行对照单元格正文（磁盘/快照文件原文，可能含明文凭据）',
   },
   {
     id: 'restore-plan-diff-error',
-    file: 'src/client/snapshots/RestorePlanView.tsx',
+    file: 'src/client/library/RestorePlanView.tsx',
     redacted: R('<Banner kind="error">{redact(state.message)}</Banner>'),
     bare: R('<Banner kind="error">{state.message}</Banner>'),
     why: '读取单文件差异失败的错误文本（宿主返回，可能含路径）',
@@ -296,7 +296,7 @@ const RENDER_POINTS: RenderPoint[] = [
   },
   {
     id: 'toast-error-text-backup-schedule',
-    file: 'src/client/snapshots/BackupScheduleCard.tsx',
+    file: 'src/client/home/BackupScheduleCard.tsx',
     redacted: /const redactErrorText = \(err: unknown\): string => redact\(err instanceof Error \? err\.message : String\(err\)\)/,
     bare: /const redactErrorText = \(err: unknown\): string => err instanceof Error \? err\.message : String\(err\)/,
     why: '定时备份卡错误文本（2 处）此前裸渲染',

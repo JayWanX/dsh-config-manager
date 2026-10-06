@@ -105,7 +105,7 @@ export function apply(ctx: ClientContext): void {
   // 事故恢复（崩溃归因 / 救援模式）：沿用主字典的错误文案，不新增 locale namespace。
   const incidentApi = new IncidentApi(uiT)
 
-  // 单一 settings.section：备份与迁移页（内部 Export/Import/Snapshots/Sync/Market/About 六 tab）。
+  // 单一 settings.section：备份与迁移页（UI v3：4 个一级页面 home/library/sync/environment + Task 流程面板）。
   // 远程同步、配置市场与关于页不注册独立设置页 —— 并入主 section 的 inject 面
   // （syncApi/syncT、marketApi/marketT、myConfigsApi），由 ConfigManagerSection 渲染第 4/5/6 个 tab。
   // 避免第二个 settings.section 注册在目标 DSH 渲染 section 列表时抛错导致整页空白。

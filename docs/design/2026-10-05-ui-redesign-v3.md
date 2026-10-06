@@ -790,14 +790,19 @@ Task（覆盖 shellContent，不盖 nav/banner/statusBar）：
 |---|---|---|
 | M1 | `--cm-*` 语义 token 层（54 个定义）；四态/主色引用 141 处收敛到中间层；scale 迁移 113 处（字号 48 / 圆角 12 / 行高 12 / 层级 8 / 间距 40）；删 11 个死类；**新增两个源级守卫** | `css-scale-guard.test.ts`（6 项）+ `css-token-guard.test.ts`（5 项）全绿；`npm run build` 0 |
 | M2+M5 | PanelId 收敛为 `home/library/sync/environment`；删 `MainView`、`TaskKind 'publish'`、`snapshots.subTab`；`importBackup` → `library.pendingZip`；`parsePersistedState` 映射表重写（旧值全部收敛、认不出的落首页）；导航 4 项 + 4 图标（新增 `history`）；命令 17→19；状态栏任务名 + 不定态进度条；SAFE MODE 横幅去内联 style | `run-store.test.ts` 迁移用例（含 market→library+筛选、snapshots 子视图分流、未知值→首页、pendingZip 瞬态）；`commands.test.ts` 双向守卫 18/18 |
-| M3（部分） | 首页删「备份位置卡 + 分区构成卡」（位置/配额信息移入定时备份设置弹窗）、**首页不再触发 export-preview**（最慢请求，12~30s）；产物库底栏补第 4 入口「发布到市场」；市场 `initialSubView` 直达「我的配置」；删同步页**重复渲染**的页面级分区卡 | typecheck 双绿；全量 `npm test` 3707 / 3705 pass / 0 fail |
+| M3 | 首页删「备份位置卡 + 分区构成卡」（位置/配额信息移入定时备份设置弹窗）、**首页不再触发 export-preview**（最慢请求，12~30s）；产物库底栏补第 4 入口「发布到市场」；市场 `initialSubView` 直达「我的配置」；删同步页**重复渲染**的页面级分区卡 | 全量门禁五绿 |
 | M6 | `DESIGN.md` §1/§1.1/§3/§4/§5/§6/§9 改写 + 顶部 v3 权威与 v2 作废声明；`AGENTS.md` UI 铁律 1/2/9 + 环境注意；v2 文档标注作废；本文补实施结果 | 本文 + 上述两文件 |
 
-### 14.2 未落地（偏差，明确登记）
+### 14.2 后补完成（第 4 轮）
+
+| 项 | 内容 |
+|---|---|
+| **M3c 同步页归位** | 加密/解密两张卡 + unreadable 横幅**移入各自的通道卡**（所有 handler 显式传 channel，不再读隐式的 `state.channel`）—— P-IA-7 消除；已配置通道卡支持**折叠**（缺省展开活跃通道；行尾 chevron 切换，带 `aria-expanded` + `aria-controls`）—— P-IA-8 消除（4 通道不再撑爆 564×720） |
+| **M3d 组件归位** | `DiskUsageCard` → `environment/maintenance/`、`BackupScheduleCard` → `home/`、`RestorePlanView` → `library/`；两个测试一并迁出（落在同深度的 `library/`，ROOT 不变）；`snapshots/` 目录删除；4 个守卫锚点同步更新（info-hint 13 / plan-text-redaction 6 / locale-hardcode 1 / files-layout 1） |
+
+### 14.3 未落地（偏差，明确登记）
 | 项 | 计划 | 实际 | 原因 / 后续 |
 |---|---|---|---|
-| 同步页拆卡（M3c） | 拆出 `SyncChannelCard`、已配置通道卡可折叠、加密/解密迁入 `ChannelConfigDialog` | **只完成「删页面级重复分区卡」** | SyncPanel 是 1230 行单组件 + 30 个 handler；折叠与凭据搬家需要同时改动 14 个 handler 的签名与 `SyncConfirmView` 的共享状态机。在「每批必须独立可构建、可测」的约束下，半成品比不动更危险 —— 留作独立的下一批（方案与判据已在 §2.2-6 / §3.1 写清）。**当前危害已被削弱**：重复渲染的两张卡已删掉一张。 |
-| 组件文件搬移（M3d） | `DiskUsageCard` → `environment/maintenance/`、`BackupScheduleCard` → `home/`、`RestorePlanView` → `library/` | **未做** | 纯目录卫生，无用户可见差异；但会打断 3 个源码级守卫的路径断言（`files-layout` / `session-dialog-mount` / `info-hint`）。与 M3c 合并成一批做更划算。 |
 | CSS 物理重排（§4 的 §1–§7 分节） | 把 4957 行按层重排 | **只加了 token 层与三个新类**，未整体重排 | §12.6 的纪律是「只替换值、不重排规则」（三个守卫用行首锚定取规则体）。整体重排风险高、收益低，**取消该项**（分层由「§1 TOKENS 在文件顶部 + 守卫强制」表达，不再依赖物理顺序）。 |
 | `snapshots.subTab` 的 locale 键清理 | 删 `snapshots.subTab.*` | **保留** | 其中 `snapshots.subTab.schedule` 仍被首页弹窗标题借用（`HomePanel`）。改为专用键会牵动 `info-hint-guard` 的 KEEP 台账 —— 与 M3c/M3d 合并处理。 |
 

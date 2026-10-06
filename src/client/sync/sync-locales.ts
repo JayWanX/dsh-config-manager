@@ -34,6 +34,8 @@ export const zh = {
   'channel.open': '配置同步通道',
   'channel.openHint': '远程同步通过「同步通道」进行：Git 私有仓库或 WebDAV 服务器。点击按钮在弹窗中配置或修改。',
   // 断开通道配置（用户实测要求：配置过就必须能删掉，否则打不通的通道会永久占位）
+  'channel.expand': '展开通道详情',
+  'channel.collapse': '收起通道详情',
   'channel.clear': '断开配置',
   'channel.clearConfirmTitle': '断开同步通道配置？',
   'channel.clearConfirmMessage': '将删除「{channel}」的本机配置、已保存的凭据与自动同步开关。远端快照与本机备份不受影响；断开后可重新配置。',
@@ -375,6 +377,8 @@ export const en: Record<keyof typeof zh, string> = {
   'channel.open': 'Configure sync channel',
   'channel.openHint': 'Remote sync runs through a sync channel: a private Git repository or a WebDAV server. Click the button to configure or change it in the dialog.',
   // Disconnect channel config (user report: once configured there was no way out)
+  'channel.expand': 'Expand channel details',
+  'channel.collapse': 'Collapse channel details',
   'channel.clear': 'Disconnect',
   'channel.clearConfirmTitle': 'Disconnect sync channel?',
   'channel.clearConfirmMessage': 'This removes the local configuration of "{channel}", its saved credentials and its auto-sync switch. Remote snapshots and local backups are untouched; you can configure it again later.',

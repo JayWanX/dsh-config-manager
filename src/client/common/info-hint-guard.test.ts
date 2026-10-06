@@ -111,20 +111,20 @@ const MOVE_PINS: readonly MovePin[] = [
   { key: 'channel.openHint', file: 'src/client/sync/SyncChannelEntryCard.tsx', kind: '机制' },
   { key: 'autosync.description', file: 'src/client/sync/AutosyncCard.tsx', kind: '机制' },
   { key: 'autosync.intervalHint', file: 'src/client/sync/AutosyncCard.tsx', kind: '机制' },
-  // t3：snapshots/ + export/
+  // t3：environment/maintenance + home + library + export/（v3 搬移后的落点）
   // UI v2：产物列表搬进产物库 → MOVE 键的渲染点随之改址
   // 2026-10-04 用户要求：产物库页首标题行（含保留期 ⓘ）整体移除 → `snapshots.retentionHint` 退出 MOVE 台账（43 → 42）
   // （备份文件提示随 BackupFilesCard 一起消失，其信息由行内元数据承担）
   { key: 'backupFiles.hint', file: 'src/client/library/LibraryPanel.tsx', kind: '机制' },
-  { key: 'diskUsage.backupRetention', file: 'src/client/snapshots/DiskUsageCard.tsx', kind: '机制' },
-  { key: 'backupSchedule.hint', file: 'src/client/snapshots/BackupScheduleCard.tsx', kind: '机制' },
-  { key: 'backupSchedule.enabledHint', file: 'src/client/snapshots/BackupScheduleCard.tsx', kind: '机制' },
-  { key: 'backupSchedule.customHint', file: 'src/client/snapshots/BackupScheduleCard.tsx', kind: '边界' },
-  { key: 'retention.hint', file: 'src/client/snapshots/BackupScheduleCard.tsx', kind: '边界' },
-  { key: 'retention.keepLastHint', file: 'src/client/snapshots/BackupScheduleCard.tsx', kind: '输入规则' },
-  { key: 'retention.keepMonthlyHint', file: 'src/client/snapshots/BackupScheduleCard.tsx', kind: '输入规则' },
-  { key: 'retention.keepYearlyHint', file: 'src/client/snapshots/BackupScheduleCard.tsx', kind: '输入规则' },
-  { key: 'retention.appliesTo', file: 'src/client/snapshots/BackupScheduleCard.tsx', kind: '边界' },
+  { key: 'diskUsage.backupRetention', file: 'src/client/environment/maintenance/DiskUsageCard.tsx', kind: '机制' },
+  { key: 'backupSchedule.hint', file: 'src/client/home/BackupScheduleCard.tsx', kind: '机制' },
+  { key: 'backupSchedule.enabledHint', file: 'src/client/home/BackupScheduleCard.tsx', kind: '机制' },
+  { key: 'backupSchedule.customHint', file: 'src/client/home/BackupScheduleCard.tsx', kind: '边界' },
+  { key: 'retention.hint', file: 'src/client/home/BackupScheduleCard.tsx', kind: '边界' },
+  { key: 'retention.keepLastHint', file: 'src/client/home/BackupScheduleCard.tsx', kind: '输入规则' },
+  { key: 'retention.keepMonthlyHint', file: 'src/client/home/BackupScheduleCard.tsx', kind: '输入规则' },
+  { key: 'retention.keepYearlyHint', file: 'src/client/home/BackupScheduleCard.tsx', kind: '输入规则' },
+  { key: 'retention.appliesTo', file: 'src/client/home/BackupScheduleCard.tsx', kind: '边界' },
   { key: 'export.hint', file: 'src/client/export/ExportView.tsx', kind: '机制' },
   { key: 'export.fileNameHint', file: 'src/client/export/ExportView.tsx', kind: '输入规则' },
   { key: 'export.noteHint', file: 'src/client/export/ExportView.tsx', kind: '背景' },
@@ -147,13 +147,13 @@ const MOVE_PINS: readonly MovePin[] = [
 const KEEP_PINS: readonly KeepPin[] = [
   // ①错误 / 失败原因
   { key: 'history.autosyncError', file: 'src/client/sync/SyncLogList.tsx', kind: '错误' },
-  { key: 'snapshots.plan.diffUnreadable', file: 'src/client/snapshots/RestorePlanView.tsx', kind: '错误' },
+  { key: 'snapshots.plan.diffUnreadable', file: 'src/client/library/RestorePlanView.tsx', kind: '错误' },
   { key: 'export.fileNameInvalid', file: 'src/client/export/ExportView.tsx', kind: '错误' },
   { key: 'detail.failed', file: 'src/client/market/MarketPanel.tsx', kind: '错误' },
   { key: 'myconfigs.install.failed', file: 'src/client/market/MyConfigsInstall.tsx', kind: '错误' },
   { key: 'about.update.noCommand', file: 'src/client/about/AboutPanel.tsx', kind: '错误' },
   { key: 'nextSteps.unresolved.hint', file: 'src/client/import/ImportWizardView.tsx', kind: '错误' },
-  { key: 'diskUsage.partial', file: 'src/client/snapshots/DiskUsageCard.tsx', kind: '错误' },
+  { key: 'diskUsage.partial', file: 'src/client/environment/maintenance/DiskUsageCard.tsx', kind: '错误' },
   { key: 'picker.unitsUnavailable', file: 'src/client/common/ContentPicker.tsx', kind: '错误' },
   { key: 'runs.loadFailed', file: 'src/client/common/RunsCenter.tsx', kind: '错误' },
   // ②安全与不可逆
@@ -164,7 +164,7 @@ const KEEP_PINS: readonly KeepPin[] = [
   { key: 'backupFiles.encryptedHint', file: 'src/client/library/ArtifactRow.tsx', kind: '安全' },
   { key: 'export.encryptHint', file: 'src/client/export/ExportView.tsx', kind: '安全' },
   { key: 'export.includeSecretsHint', file: 'src/client/export/ExportView.tsx', kind: '安全' },
-  { key: 'diskUsage.clean.hint', file: 'src/client/snapshots/DiskUsageCard.tsx', kind: '安全' },
+  { key: 'diskUsage.clean.hint', file: 'src/client/environment/maintenance/DiskUsageCard.tsx', kind: '安全' },
   { key: 'review.rollbackHint', file: 'src/client/market/MarketImportReview.tsx', kind: '安全' },
   { key: 'nextSteps.secrets.hint', file: 'src/client/import/ImportWizardView.tsx', kind: '安全' },
   { key: 'import.secrets.hint', file: 'src/client/import/import-wizard-steps.tsx', kind: '安全' },
@@ -179,7 +179,7 @@ const KEEP_PINS: readonly KeepPin[] = [
   { key: 'overview.activity.empty', file: 'src/client/home/HomePanel.tsx', kind: '空态' },
   { key: 'review.changeEmpty', file: 'src/client/market/MarketImportReview.tsx', kind: '空态' },
   { key: 'export.compositionEmpty', file: 'src/client/export/ExportView.tsx', kind: '空态' },
-  { key: 'snapshots.plan.diffIdentical', file: 'src/client/snapshots/RestorePlanView.tsx', kind: '空态' },
+  { key: 'snapshots.plan.diffIdentical', file: 'src/client/library/RestorePlanView.tsx', kind: '空态' },
   { key: 'profiles.running.none', file: 'src/client/environment/EnvironmentPanel.tsx', kind: '空态' },
   { key: 'backupFiles.empty', file: 'src/client/library/LibraryPanel.tsx', kind: '空态' },
   { key: 'runs.empty', file: 'src/client/common/RunsCenter.tsx', kind: '空态' },
@@ -203,7 +203,7 @@ const KEEP_PINS: readonly KeepPin[] = [
 
 /** label= 白名单：值来自调用方显式传入的字符串 prop（UiT 消费方取不到主字典）。 */
 const LABEL_PROP_PINS: Readonly<Record<string, string>> = {
-  'src/client/snapshots/DiskUsageCard.tsx': 'infoHintLabel',
+  'src/client/environment/maintenance/DiskUsageCard.tsx': 'infoHintLabel',
 };
 
 /** 上表 prop 的提供方：必须由有主字典 t 的文件显式传 `t('common.infoHint')`。 */

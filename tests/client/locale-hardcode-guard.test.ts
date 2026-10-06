@@ -35,7 +35,7 @@ interface Site {
 const SITES: Site[] = [
   {
     id: 'restore-plan-detail',
-    file: 'src/client/snapshots/RestorePlanView.tsx',
+    file: 'src/client/library/RestorePlanView.tsx',
     forbidden: /（\{redact\(row\.detail\)\}）/,
     required: /t\('common\.parens', \{ text: redact\(row\.detail\) \}\)/,
     why: '恢复计划行明细括号',

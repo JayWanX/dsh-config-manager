@@ -22,12 +22,15 @@ import { joinFor, normalizePlatform } from './platform-paths.ts';
 import { FOREIGN_TRUTH_TABLES } from './truth-table.ts';
 import { createKimiSource, kimiSource, KIMI_PROVIDER } from './kimi.ts';
 import {
+  cwdOfState,
+  kimiUserInputText,
   md5Hex,
   normalizeEventType,
   parseKimiWire,
   readKimiSessions,
   kimiCodeSessionsDir,
   kimiLegacySessionsDir,
+  titleOfState,
   workspaceMapOf,
   workDirMapOf,
 } from './read-kimi.ts';
@@ -182,6 +185,74 @@ test('t7 未安装 / 0 字节：正常状态、不抛、如实报码', async () 
     const read = await readKimiSessions({ homeDir: tmp, env: {}, platform: PLATFORM });
     assert.deepEqual(read.files, []);
     assert.ok(read.readFindings?.some((s) => s.code === 'source-empty-file' && (s.origin ?? '').endsWith('wire.jsonl')));
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('t8 旧 wire 真形态 {timestamp, message:{type,payload}}：事件类型/载荷/时间全部读出', () => {
+  const parsed = parseKimiWire([
+    JSON.stringify({ timestamp: 1700000000, message: { type: 'TurnBegin', payload: { user_input: '旧格式你好' } } }),
+    JSON.stringify({ timestamp: 1700000001, message: { type: 'TextPart', payload: { text: '回复' } } }),
+    JSON.stringify({ timestamp: 1700000002, message: { type: 'ToolCall', payload: { id: 'c1', function: { name: 'read', arguments: '{"p":1}' } } } }),
+    JSON.stringify({ timestamp: 1700000003, message: { type: 'ToolResult', payload: { tool_call_id: 'c1', return_value: { is_error: false, output: 'body' } } } }),
+    JSON.stringify({ timestamp: 1700000004, message: { type: 'CompactionBegin', payload: {} } }),
+  ].join(NL));
+  assert.deepEqual(parsed.records.map((r) => r.role), ['user', 'assistant', 'assistant', 'user']);
+  assert.deepEqual(parsed.records[0]?.blocks, [{ type: 'text', text: '旧格式你好' }]);
+  assert.deepEqual(parsed.records[2]?.blocks, [{ type: 'tool_call', id: 'c1', name: 'read', input: { p: 1 } }]);
+  assert.deepEqual(parsed.records[3]?.blocks[0], { type: 'tool_result', id: 'c1', text: 'body', isError: false });
+  assert.equal(parsed.createdAt, 1700000000000, '顶层 timestamp 是秒 → 换算毫秒');
+  assert.equal(parsed.ignored['compaction'], 1);
+});
+
+test('t9 新代次：turn.prompt.input 提问；append_loop_event.part 正文/思考；tool.result.result.is_error', () => {
+  assert.equal(kimiUserInputText([{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }]), 'ab');
+  const parsed = parseKimiWire([
+    JSON.stringify({ type: 'turn.prompt', input: [{ type: 'text', text: '新格式' }] }),
+    JSON.stringify({ type: 'context.append_loop_event', event: { type: 'step.begin' } }),
+    JSON.stringify({ type: 'context.append_loop_event', event: { type: 'content.part', part: { type: 'text', text: '正文' } } }),
+    JSON.stringify({ type: 'context.append_loop_event', event: { type: 'content.part', part: { type: 'think', think: '思考' } } }),
+    JSON.stringify({ type: 'context.append_loop_event', event: { type: 'tool.call', toolCallId: 'c1', name: 'read', args: { p: 2 } } }),
+    JSON.stringify({ type: 'context.append_loop_event', event: { type: 'tool.result', toolCallId: 'c1', result: { is_error: true, output: 'boom' } } }),
+    JSON.stringify({ type: 'context.apply_compaction', summary: '摘要' }),
+  ].join(NL));
+  assert.deepEqual(parsed.records.map((r) => r.role), ['user', 'assistant', 'assistant', 'user']);
+  assert.deepEqual(parsed.records[0]?.blocks, [{ type: 'text', text: '新格式' }]);
+  assert.deepEqual(parsed.records[1]?.blocks, [{ type: 'text', text: '正文' }]);
+  assert.deepEqual(parsed.records[2]?.blocks, [{ type: 'tool_call', id: 'c1', name: 'read', input: { p: 2 } }]);
+  assert.deepEqual(parsed.records[3]?.blocks[0], { type: 'tool_result', id: 'c1', text: 'boom', isError: true });
+  assert.equal(parsed.ignored['reasoning-block'], 1);
+  assert.equal(parsed.ignored['compaction'], 1);
+});
+
+test('t10 孤儿工具结果逐条计数（未声明 / 重复）', () => {
+  const parsed = parseKimiWire([
+    JSON.stringify({ type: 'turn.prompt', input: 'hi' }),
+    JSON.stringify({ type: 'context.append_loop_event', event: { type: 'tool.result', toolCallId: 'ghost', result: { output: 'x' } } }),
+  ].join(NL));
+  assert.equal(parsed.ignored['dropped-tool-result'], 1);
+});
+
+test('t11 cwd 反查补 workDir / root；state.custom_title 作权威标题', async () => {
+  assert.equal(cwdOfState({ workDir: '/work/wd' }), '/work/wd');
+  assert.deepEqual([...workspaceMapOf({ ws1: { root: '/work/root' } }).entries()], [['ws1', '/work/root']]);
+  assert.equal(titleOfState({ custom_title: ' 自定义 ' }), '自定义');
+  assert.equal(titleOfState({ isCustomTitle: true, title: '新态标题' }), '新态标题');
+  assert.equal(titleOfState({ title: '非自定义不采信' }), undefined);
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-kimi-meta-'));
+  try {
+    await writeAt(tmp, '.kimi-code/workspaces.json', JSON.stringify({ 'ws-x': { root: '/work/root-fallback' } }));
+    await writeAt(tmp, '.kimi-code/sessions/ws-x/sid-a/agents/main/wire.jsonl', JSON.stringify({ type: 'turn.prompt', input: 'hi' }) + NL);
+    await writeAt(tmp, '.kimi-code/sessions/ws-x/sid-a/state.json', JSON.stringify({ workDir: '/work/code-workdir', custom_title: '自定义标题' }));
+    await writeAt(tmp, '.kimi-code/sessions/ws-x/sid-b/agents/main/wire.jsonl', JSON.stringify({ type: 'turn.prompt', input: 'yo' }) + NL);
+
+    const read = await readKimiSessions({ homeDir: tmp, env: {}, platform: PLATFORM });
+    const byId = new Map(read.files.map((f) => [f.id, f.parsed]));
+    assert.equal(byId.get('sid-a')?.cwd, '/work/code-workdir', 'state.workDir 是权威 cwd');
+    assert.equal(byId.get('sid-a')?.title, '自定义标题');
+    assert.equal(byId.get('sid-b')?.cwd, '/work/root-fallback', 'workspaces.json 条目 root 反查');
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }

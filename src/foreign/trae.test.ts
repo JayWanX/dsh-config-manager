@@ -64,7 +64,16 @@ function ctxOf(homeDir: string, platform: ForeignPlatform, env: Record<string, s
 }
 
 import { traeSource } from './trae.ts';
-import { isTraeChatStorageKey, readTrae, traeSessionsOfValue, traeUserDataDirs, traeVscdbPaths } from './read-trae.ts';
+import {
+  isTraeChatStorageKey,
+  readTrae,
+  TRAE_FALLBACK_KEYS,
+  TRAE_STORAGE_KEY,
+  traeSessionsOfValue,
+  traeTimeValue,
+  traeUserDataDirs,
+  traeVscdbPaths,
+} from './read-trae.ts';
 import { sqliteCapability } from './sqlite.ts';
 
 interface SqliteModule {
@@ -108,9 +117,16 @@ test('trae t1 路径真值：4 个发行版 × 三分支与真值表逐项一致
   assert.equal(traeUserDataDirs({ homeDir: '/Users/u', env: {}, platform: 'darwin' })[0], ['/Users/u', 'Library', 'Application Support', 'Trae', 'User'].join('/'));
 });
 
-test('trae t2 存储键判定：确证的 icube 键命中；无关 UI 键不命中（绝不把 ItemTable 当会话）', () => {
-  assert.equal(isTraeChatStorageKey('memento/icube-ai-agent-storage'), true);
+test('trae t2 存储键判定：主键 + 参考的回退键命中；无关 UI 键不命中（绝不把 ItemTable 当会话）', () => {
+  assert.equal(isTraeChatStorageKey(TRAE_STORAGE_KEY), true);
   assert.equal(isTraeChatStorageKey('memento/trae-agent-storage'), true);
+  // 参考 lib/sources/trae.mjs 的 TRAE_FALLBACK_KEYS：旧版 Trae 把会话放在这两个键下，
+  // 只认 icube 模式会**整库漏读**
+  for (const key of TRAE_FALLBACK_KEYS) {
+    assert.equal(isTraeChatStorageKey(key), true, '回退键必须命中：' + key);
+  }
+  assert.equal(isTraeChatStorageKey('chat.ChatSessionStore.index'), true);
+  assert.equal(isTraeChatStorageKey('ChatStore'), true);
   assert.equal(isTraeChatStorageKey('memento/workbench.panel.output'), false);
   assert.equal(isTraeChatStorageKey('colorThemeData'), false);
 });
@@ -188,6 +204,112 @@ test('trae t5 无候选键：如实报 sessions-not-migrated（绝不假装成�
     const read = await readTrae({ homeDir: root, env: {}, platform: HOST });
     assert.deepEqual(read.files, []);
     assert.equal(read.extraSkips?.some((s) => s.code === 'sessions-not-migrated' && s.detail === 'chat-storage-key-not-found'), true);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('trae t6 时间：秒 / 毫秒 / 数字字符串三种形态都归一到毫秒（参考 timeValue）', () => {
+  assert.equal(traeTimeValue(1700000000), 1700000000000, '秒 → 毫秒（否则落到 1970）');
+  assert.equal(traeTimeValue('1700000000'), 1700000000000, '数字字符串不能被 Date.parse 变成 NaN');
+  assert.equal(traeTimeValue(1700000000000), 1700000000000, '毫秒原样');
+  assert.equal(traeTimeValue('2026-10-05T00:00:00Z'), Date.parse('2026-10-05T00:00:00Z'));
+  assert.equal(traeTimeValue('nope'), undefined);
+  // 口径取自 read-opencode.ts 的 msTime（先取整再换算，秒的小数部分丢弃）——与参考
+  // 「先乘再取整」差 1 秒以内的毫秒位；宿主不消费这个精度，且复用单一时间口径优先。
+  assert.equal(traeTimeValue(1700000000.5), 1700000000000);
+});
+
+test('trae t7 容器与正文：对象映射消息 + body/prompt/response/output + planItems + role=agent', () => {
+  const value = {
+    entries: {
+      e1: {
+        id: 'e-1',
+        workspace: '/p/e',
+        chatMessages: {
+          m1: { role: 'agent', body: '来自 body 的正文' },
+          m2: { role: 'assistant', prompt: '来自 prompt 的正文' },
+          m3: { role: 'user', response: '来自 response 的正文', sender: 'user' },
+          m4: { role: 'assistant', output: '来自 output 的正文' },
+        },
+      },
+    },
+  };
+  const found = traeSessionsOfValue(value, 'chat.ChatSessionStore.index', 'linux');
+  assert.equal(found.length, 1, '对象映射容器也必须被认出（参考 valuesOf 同时认数组与对象）');
+  const session = found[0];
+  assert.ok(session !== undefined);
+  assert.equal(session.id, 'e-1');
+  assert.equal(session.cwd, '/p/e');
+  assert.deepEqual(session.records.map((r) => r.role), ['assistant', 'assistant', 'user', 'assistant'], 'role=agent → assistant');
+  const texts = session.records.map((r) => r.blocks.map((b) => (b.type === 'text' ? b.text : '')).join(''));
+  assert.deepEqual(texts, ['来自 body 的正文', '来自 prompt 的正文', '来自 response 的正文', '来自 output 的正文']);
+
+  // Agent 模式：正文在 agentTaskContent.guideline.planItems 里（content/text 为空）
+  const plan = traeSessionsOfValue({
+    sessions: [{
+      id: 'p-1',
+      messages: [{
+        role: 'agent',
+        agentTaskContent: {
+          guideline: {
+            planItems: [
+              { thought: '先想想', toolName: 'read_file', params: { path: 'a.ts' }, result: 'ok' },
+              '一条纯字符串计划项',
+            ],
+          },
+        },
+      }],
+    }],
+  }, TRAE_STORAGE_KEY, 'linux');
+  assert.equal(plan.length, 1);
+  const planText = plan[0]?.records[0]?.blocks[0];
+  assert.equal(planText?.type, 'text');
+  if (planText?.type === 'text') {
+    assert.ok(planText.text.includes('[thought] 先想想'));
+    assert.ok(planText.text.includes('[tool] read_file'));
+    assert.ok(planText.text.includes('[arguments] {"path":"a.ts"}'));
+    assert.ok(planText.text.includes('[result] ok'));
+    assert.ok(planText.text.includes('一条纯字符串计划项'));
+  }
+});
+
+test('trae t8 cwd 只认语义唯一的键：path/rootPath 这类过宽键不得被当会话 cwd', () => {
+  const found = traeSessionsOfValue({
+    sessions: [{
+      id: 'c-1',
+      path: '/definitely/not/cwd',
+      rootPath: '/also/not/cwd',
+      messages: [{ role: 'user', content: 'hi' }],
+    }],
+  }, TRAE_STORAGE_KEY, 'linux');
+  assert.equal(found.length, 1);
+  assert.equal(found[0]?.cwd, undefined, 'path/rootPath 在存储值里到处都是 → 绝不能当 cwd');
+});
+
+test('trae t9 旧版回退键的库：整库可读（不再漏读）', async (t) => {
+  const capability = await sqliteCapability();
+  if (!capability.available) {
+    t.skip('本宿主无 node:sqlite');
+    return;
+  }
+  const root = await tmpRoot('trae-fallback');
+  try {
+    const userDir = vscodeUserDataDir(HOST, root, {}, 'Trae');
+    const cwd = path.join(root, 'proj');
+    const payload = JSON.stringify({
+      sessions: [{ id: 'old-1', workspace: cwd, title: '旧版会话', entries: [
+        { role: 'user', content: 'hi' },
+      ] }],
+    });
+    assert.equal(await makeVscdb(path.join(userDir, 'globalStorage', 'state.vscdb'), [
+      { key: 'chat.ChatSessionStore.index', value: payload },
+    ]), true);
+    const read = await readTrae({ homeDir: root, env: {}, platform: HOST });
+    assert.equal(read.files.length, 1, '回退键下的会话必须被读到');
+    assert.equal(read.files[0]?.id, 'old-1');
+    assert.equal(read.files[0]?.cwd, cwd);
+    assert.equal(read.extraCounts?.['trae.chatStorageKeys'], 1);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

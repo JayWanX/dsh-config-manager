@@ -10,7 +10,7 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { crushProjectDbPath, crushProjectPathsOf, crushRegistryPath, readCrush, readCrushDatabase } from './read-crush.ts';
+import { crushProjectDbPath, crushProjectEntriesOf, crushProjectPathsOf, crushRegistryPath, readCrush, readCrushDatabase } from './read-crush.ts';
 import { createCrushSource } from './crush.ts';
 import type { ForeignSourceContext } from './registry.ts';
 import { expandTruthList, FOREIGN_TRUTH_TABLES, TRUTH_PROBES } from './truth-table.ts';
@@ -75,12 +75,28 @@ function truth(): ForeignTruthTableEntry {
 }
 
 const CRUSH_SCHEMA: readonly (readonly [string, readonly unknown[]])[] = [
-  ['CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, created_at INTEGER, updated_at INTEGER)', []],
-  ['CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT, role TEXT, parts TEXT, created_at INTEGER, model TEXT)', []],
+  ['CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, created_at INTEGER, updated_at INTEGER, parent_session_id TEXT)', []],
+  ['CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT, role TEXT, parts TEXT, created_at INTEGER, finished_at INTEGER, model TEXT, is_summary_message INTEGER)', []],
   ['CREATE TABLE read_files (id TEXT PRIMARY KEY, session_id TEXT, path TEXT)', []],
-  ['INSERT INTO sessions VALUES (?, ?, ?, ?)', ['c-1', 'Crush run', 1791202000, 1791202010]],
-  ['INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)', ['c-m1', 'c-1', 'user', JSON.stringify([{ type: 'text', text: 'crush user' }]), 1791202001, null]],
-  ['INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)', ['c-m2', 'c-1', 'assistant', JSON.stringify([{ type: 'text', text: 'crush reply' }]), 1791202002, 'model-x']],
+  // c-1 是顶层会话；c-sub 有 parent、title-7 是标题生成会话 → 都不单独成会话
+  ['INSERT INTO sessions VALUES (?, ?, ?, ?, ?)', ['c-1', 'Crush run', 1791202000, 1791202010, null]],
+  ['INSERT INTO sessions VALUES (?, ?, ?, ?, ?)', ['c-sub', 'child', 1791202020, 1791202021, 'c-1']],
+  ['INSERT INTO sessions VALUES (?, ?, ?, ?, ?)', ['title-7', 'Generate a title', 1791202030, 1791202031, null]],
+  // 乱序插入：读盘层必须按 (created_at, id) 还原消息序
+  ['INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)', ['c-m2', 'c-1', 'assistant', JSON.stringify([
+    { type: 'text', data: { text: 'crush reply' } },
+    { type: 'tool_call', data: { id: 'call-1', name: 'bash', input: '{"cmd":"ls"}' } },
+    { type: 'reasoning', data: { thinking: 'internal' } },
+  ]), 1791202002, 1791202005, 'model-x', 0]],
+  ['INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)', ['c-m3', 'c-1', 'tool', JSON.stringify([
+    { type: 'tool_result', data: { tool_call_id: 'call-1', content: 'out', is_error: false } },
+  ]), 1791202003, null, null, 0]],
+  ['INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)', ['c-m4', 'c-1', 'assistant', JSON.stringify([
+    { type: 'text', data: { text: 'compaction summary body' } },
+  ]), 1791202004, null, null, 1]],
+  ['INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)', ['c-m1', 'c-1', 'user', JSON.stringify([
+    { type: 'text', data: { text: 'crush user' } },
+  ]), 1791202001, null, null, 0]],
 ];
 
 test('crush：probePaths 与真值表相等（用户级只到 projects.json）；显式 projectDir 追加项目库', () => {
@@ -105,6 +121,11 @@ test('crush：projects.json 四种形态都能取出项目路径（认不出来�
   assert.deepEqual(crushProjectPathsOf({ projects: { '/p/a': {}, '/p/b': { path: '/p/b' } } }), ['/p/a', '/p/b']);
   assert.deepEqual(crushProjectPathsOf({ version: 1, projects: 'nonsense' }), []);
   assert.deepEqual(crushProjectPathsOf(42), []);
+  // data_dir（自定义数据目录）必须带回：库在 <data_dir>/crush.db，而不是 <项目>/.crush/crush.db
+  assert.deepEqual(
+    crushProjectEntriesOf({ projects: [{ path: '/p/a', data_dir: '/custom/data' }, { path: '/p/b' }] }),
+    [{ path: '/p/a', dataDir: '/custom/data' }, { path: '/p/b' }],
+  );
 });
 
 test('crush：每项目一库 —— 有库的项目产出会话，没库的项目**响亮报码**', async (t) => {
@@ -127,10 +148,26 @@ test('crush：每项目一库 —— 有库的项目产出会话，没库的项�
   assert.deepEqual(det.paths, ['.local/share/crush/projects.json']);
 
   const read = await readCrush({ homeDir: home, platform: 'linux', env: {} });
-  assert.equal(read.files.length, 1, '只有 projA 有库');
+  assert.equal(read.files.length, 1, '只有 projA 有库；子会话与标题生成会话被过滤');
   assert.equal(read.files[0]?.parsed.cwd, projA, '会话没有 cwd 列时取项目目录本身（库就在它下面）');
   assert.equal(read.extraCounts?.['crush.projects'], 2);
   assert.equal(read.extraCounts?.['crush.databases'], 1);
+  assert.equal(read.extraCounts?.['crush.sessions.filtered-parent'], 1);
+  assert.equal(read.extraCounts?.['crush.sessions.filtered-synthetic'], 1);
+  const parsed = read.files[0]?.parsed;
+  assert.ok(parsed !== undefined);
+  assert.equal(parsed.createdAt, 1791202000000, '会话 createdAt 取 created_at（不是 updated_at）');
+  assert.deepEqual(parsed.records.map((r) => r.role), ['user', 'assistant', 'user'], '按 created_at 还原消息序');
+  assert.deepEqual(parsed.records[1]?.blocks, [
+    { type: 'text', text: 'crush reply' },
+    { type: 'tool_call', id: 'call-1', name: 'bash', input: { cmd: 'ls' } },
+  ], 'parts 是 TEXT JSON：按 {type,data} 判别式解析，tool_call.input 反序列化成对象');
+  assert.equal(parsed.records[1]?.time, 1791202005000, 'assistant 的 step 时间取 finished_at');
+  assert.deepEqual(parsed.records[2]?.blocks, [
+    { type: 'tool_result', id: 'call-1', text: 'out', isError: false },
+  ], "role='tool' 消息的工具结果要挂回调用所在步");
+  assert.equal(parsed.ignored['block:reasoning'], 1);
+  assert.equal(parsed.ignored['message:summary'], 1, 'is_summary_message 的压缩产物不进普通对话');
   assert.equal(read.readFindings?.[0]?.code, 'source-unreadable');
   assert.equal(read.readFindings?.[0]?.detail, 'crush-db-missing', '点名了却没有库 = 必须响亮，绝不静默跳过');
   assert.ok((read.readFindings?.[0]?.origin ?? '').includes('crush.db'));
@@ -157,6 +194,25 @@ test('crush：注册表坏掉 / 显式 projectDir 没有库 → 各自响亮报�
   const explicit = await readCrush({ homeDir: home, platform: 'linux', env: {}, projectDir: path.join(home, 'nowhere') });
   const missing = explicit.readFindings?.find((s) => s.detail === 'crush-db-missing');
   assert.ok(missing !== undefined, '显式点名的项目也必须响亮报码');
+});
+
+test('crush：注册表 data_dir 指向自定义数据目录时，库在 <data_dir>/crush.db', async (t) => {
+  const home = await tempHome('dcm-crush-datadir-');
+  const project = path.join(home, 'proj');
+  const custom = path.join(home, 'custom-data');
+  const dbFile = path.join(custom, 'crush.db');
+  if (!(await createDb(dbFile, CRUSH_SCHEMA))) {
+    t.skip('宿主无 node:sqlite');
+    return;
+  }
+  // data_dir 用真实临时目录：绝对路径判定要与声明的平台一致，故这里用运行平台
+  const registry = crushRegistryPath({ homeDir: home, platform: process.platform, env: {} });
+  await fsp.mkdir(path.dirname(registry), { recursive: true });
+  await fsp.writeFile(registry, JSON.stringify({ projects: [{ path: project, data_dir: custom }] }));
+
+  const read = await readCrush({ homeDir: home, platform: process.platform, env: {} });
+  assert.equal(read.files.length, 1, 'data_dir 覆盖后仍要读到库（旧代码会去 <项目>/.crush 找不到 → 漏读）');
+  assert.equal(read.files[0]?.id, 'c-1');
 });
 
 test('crush：sessions/messages 表在但 messages 没有 parts 列 → shape-mismatch', async (t) => {

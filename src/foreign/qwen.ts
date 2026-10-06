@@ -5,9 +5,10 @@
  * 「草稿 → 字节」的唯一出口是共享骨架 `session-source.ts`（工具配对 / seq / surfaceOp /
  * workspaces 同源产出都在那里，本层不重造）。
  *
- * **本来源的一条刻意留白**（见 read-qwen.ts 文件头）：`<slug>` 的编码语义未经取证，
- * 因此 cwd 只来自记录字段；没有就按 `session-missing-cwd` 跳过并报码。宁可少搬，
- * 也绝不产出一条指向不存在目录的会话（DSH 启动时校验「日志位置 == projectKey(cwd)/id」）。
+ * cwd 的**唯一权威**是 `workspace-directories` 里第一个非 `.qwenworkcn` 目录（用户选的
+ * 项目文件夹）；记录内 `cwd` 是千问临时工作区、`<slug>` 编码语义未经取证 —— 两者都
+ * **丢弃**（见 read-qwen.ts 文件头）。没有真实项目目录就按 `session-missing-cwd` 跳过并报码。
+ * 宁可少搬，也绝不产出一条指向不存在目录的会话（DSH 启动时校验「日志位置 == projectKey(cwd)/id」）。
  *
  * 真值表与取证强度（`evidence`）一律从 truth-table.ts 派生：本来源是 `fixture`
  * （夹具 + 单测可复现，**真机未验证**）。probePaths 按真值表模板展开（与 registry.ts 的

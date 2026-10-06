@@ -18,11 +18,18 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { projectKeyOf } from '../core/session-select.ts';
+import { readSessionLogShapeFromBytes } from '../utils/session-log.ts';
 import { dshSessionLogName } from './claude-sessions.ts';
 import { normalizePlatform, joinFor } from './platform-paths.ts';
 import { FOREIGN_TRUTH_TABLES } from './truth-table.ts';
 import { createGeminiSource, geminiSource, GEMINI_PROVIDER } from './gemini.ts';
-import { geminiHistoryDir, parseGeminiSession, readGeminiSessions } from './read-gemini.ts';
+import {
+  GEMINI_SESSION_FILE_RE,
+  geminiHistoryDir,
+  geminiToolResultText,
+  parseGeminiSession,
+  readGeminiSessions,
+} from './read-gemini.ts';
 import type { ForeignImportResult } from './types.ts';
 
 const PLATFORM = normalizePlatform(process.platform);
@@ -189,4 +196,96 @@ test('t6 provider 名与平台拼接：provider 进 request/header，路径用 j
   assert.equal(GEMINI_PROVIDER, 'gemini');
   assert.equal(joinFor('win32', 'C:' + BS + 'u', '.gemini'), 'C:' + BS + 'u' + BS + '.gemini');
   assert.equal(NL.length, 1);
+});
+
+/* ---------------- ④ 真实 toolCalls 形态（chat-import convert/gemini.mjs:72,105-116） ---------------- */
+
+test('t7 内联结果取 result[].functionResponse.response.output；resultDisplay 兜底；status=error → isError', () => {
+  const doc = {
+    sessionId: 'g-tools',
+    startTime: '2026-01-01T00:00:00Z',
+    directories: ['/work/proj'],
+    messages: [
+      { type: 'user', content: '读文件并搜索' },
+      {
+        type: 'gemini',
+        content: '',
+        toolCalls: [
+          { id: 'c1', name: 'read_file', args: { path: 'a.ts' }, result: [{ functionResponse: { response: { output: '文件正文' } } }] },
+          { name: 'grep', args: { q: 'x' }, resultDisplay: 'display 文本', status: 'error' },
+        ],
+      },
+    ],
+  };
+  const outcome = parseGeminiSession(JSON.stringify(doc));
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  const callBlocks = outcome.parsed.records[1]?.blocks.filter((b) => b.type === 'tool_call') ?? [];
+  assert.deepEqual(callBlocks, [
+    { type: 'tool_call', id: 'c1', name: 'read_file', input: { path: 'a.ts' } },
+    // id 缺失 → 铸 gemini-<turn>-<n>（turn=1 是已开启的用户回合数，n 是该条消息内的调用序号）
+    { type: 'tool_call', id: 'gemini-1-2', name: 'grep', input: { q: 'x' } },
+  ]);
+  const resultBlocks = outcome.parsed.records[2]?.blocks.filter((b) => b.type === 'tool_result') ?? [];
+  assert.deepEqual(resultBlocks, [
+    { type: 'tool_result', id: 'c1', text: '文件正文', isError: false },
+    { type: 'tool_result', id: 'gemini-1-2', text: 'display 文本', isError: true },
+  ]);
+
+  // 直接测取值口径：不是 text/content/message 的形态也必须取到（此前通用 flattenText 返回空串）
+  const ignored: Record<string, number> = {};
+  assert.equal(geminiToolResultText({ result: [{ functionResponse: { response: { output: 'x' } } }] }, ignored), 'x');
+  assert.equal(geminiToolResultText({ result: [{ functionResponse: {} }], resultDisplay: 'd' }, ignored), 'd');
+  assert.equal(geminiToolResultText({ result: [{ functionResponse: {} }] }, ignored), undefined);
+  assert.equal(geminiToolResultText({}, ignored), undefined);
+});
+
+test('t8 tool/call 与 tool/result 的 callId 必须逐字相同（端到端解字节，配对断裂会让 DSH 判损坏）', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-gemini-tools-'));
+  try {
+    await writeAt(tmp, '.gemini/history/-work-proj/chats/session-tools.json', JSON.stringify({
+      sessionId: 'g-tools',
+      startTime: '2026-01-01T00:00:00Z',
+      directories: ['/work/proj'],
+      messages: [
+        { type: 'user', content: '读文件' },
+        { type: 'gemini', content: '', model: 'gemini-2.5', toolCalls: [{ name: 'read_file', args: { path: 'a.ts' }, result: 'b' }] },
+      ],
+    }));
+    const result = await geminiSource.build(ctxOf(tmp));
+    const file = sessionsOf(result)[0];
+    assert.ok(file !== undefined);
+    const shape = readSessionLogShapeFromBytes(file.data);
+    assert.equal(shape.ok, true);
+    if (!shape.ok) return;
+    const rows = shape.rows.filter((r): r is Record<string, unknown> => r !== null);
+    const call = rows.find((r) => r['type'] === 'tool/call');
+    const toolResult = rows.find((r) => r['type'] === 'tool/result');
+    assert.ok(call !== undefined && toolResult !== undefined, '调用与结果都必须落行');
+    const callId = (call['data'] as Record<string, unknown>)['callId'];
+    const message = (toolResult['data'] as Record<string, unknown>)['message'] as Record<string, unknown>;
+    const source = message['source'] as Record<string, unknown>;
+    assert.equal(callId, 'gemini-1-1');
+    assert.equal(source['callId'], callId, 'tool/result 必须挂回同一次 tool/call（否则 DSH 判损坏）');
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('t9 会话文件名：大小写不敏感、拒绝空 stem（session-.json）', async () => {
+  assert.equal(GEMINI_SESSION_FILE_RE.test('session-1.json'), true);
+  assert.equal(GEMINI_SESSION_FILE_RE.test('Session-1.JSON'), true);
+  assert.equal(GEMINI_SESSION_FILE_RE.test('session-.json'), false, '空 stem 不是合法会话名');
+  assert.equal(GEMINI_SESSION_FILE_RE.test('session.json'), false);
+
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-gemini-name-'));
+  try {
+    const body = (id: string) => JSON.stringify({ sessionId: id, directories: ['/work/proj'], messages: [{ type: 'user', content: 'hi' }] });
+    await writeAt(tmp, '.gemini/history/slot/chats/Session-Upper.json', body('g-upper'));
+    await writeAt(tmp, '.gemini/history/slot/chats/session-.json', body('g-empty-stem'));
+    const read = await readGeminiSessions({ homeDir: tmp, env: {}, platform: PLATFORM });
+    assert.deepEqual(read.files.map((f) => f.id), ['g-upper'], '大写文件名要读，空 stem 要拒');
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
 });

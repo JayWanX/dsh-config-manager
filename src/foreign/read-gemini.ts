@@ -44,8 +44,14 @@ import type { ForeignSkip } from './types.ts';
 /** 相对用户 home 的位置标签前缀（回给 GUI/CLI 的**只允许路径**） */
 export const GEMINI_HISTORY_REL = '.gemini/history';
 
-/** 会话文件名（chat-import §3.1：`<slot>/chats/session-*.json`） */
-export const GEMINI_SESSION_FILE_RE = /^session-.*\.json$/;
+/**
+ * 会话文件名（chat-import §3.1：`<slot>/chats/session-*.json`）。
+ *
+ * 两处与参考逐字对齐（convert 侧 discovery/gemini.mjs:20 是 `/^session-.+\.json$/i`）：
+ *  · `.+` 而非 `.*` —— 拒绝 `session-.json`（空 stem 不是合法会话名，会产出空 id 会话）；
+ *  · `i` 大小写不敏感 —— 真机上出现过 `Session-*.json` 的坑位（漏读 = 用户以为会话消失）。
+ */
+export const GEMINI_SESSION_FILE_RE = /^session-.+\.json$/i;
 
 const MAX_SESSION_FILES = 500;
 
@@ -109,15 +115,47 @@ function timeOf(rec: Record<string, unknown>): IrTimeMs | undefined {
 }
 
 /**
+ * 内联工具结果文本（chat-import convert/gemini.mjs:105-116）。
+ *
+ * **必须走专用口径**：真实形态是 `result[].functionResponse.response.output`，而通用
+ * `flattenText` 只认 text/content/message —— 交给它必然返回空串（导入后工具结果全空）。
+ * 取值顺序：逐条 functionResponse.response.output → `resultDisplay`（参考的兜底，本仓此前完全没有）
+ * → 通用文本投影（容忍非官方变体：本仓既有夹具用 `result: '文本'`）。
+ */
+export function geminiToolResultText(item: Record<string, unknown>, ignored: Record<string, number>): string | undefined {
+  const result = item['result'];
+  if (Array.isArray(result)) {
+    for (const entry of result) {
+      if (!isRecord(entry)) continue;
+      const functionResponse = entry['functionResponse'];
+      const response = isRecord(functionResponse) ? functionResponse['response'] : undefined;
+      const output = isRecord(response) ? response['output'] : undefined;
+      if (typeof output === 'string') return output;
+    }
+  }
+  if (result !== undefined) {
+    const fallback = flattenText(result, ignored, 'toolResult');
+    if (fallback !== '') return fallback;
+  }
+  if (typeof item['resultDisplay'] === 'string') return item['resultDisplay'];
+  return undefined;
+}
+
+/**
  * `toolCalls[]` → 工具块。
  *
  * 返回值 = **调用块**（写进 assistant 那条记录）；`results` 是出参，收集**内联结果**
- * （写进紧随其后的 user 记录）。id 缺省恒为空串（**不伪造** —— 伪造会让 tool_result 配对错位）。
+ * （写进紧随其后的 user 记录）。
+ *
+ * id 缺省时铸 `gemini-<turn>-<n>`（chat-import convert/gemini.mjs:72 同款）：合成器对空
+ * callId 会**只改写调用侧**为 `call-<消息序>`（session-ir.ts:389），结果侧仍是空串 →
+ * tool/result 与 tool/call 配对断裂（会话被判损坏）。铸 id 后两侧同源，配对恒闭合。
  */
 export function geminiToolBlocks(
   raw: unknown,
   ignored: Record<string, number>,
   results: IrBlock[],
+  turn = 0,
 ): IrBlock[] {
   if (raw === undefined) return [];
   if (!Array.isArray(raw)) {
@@ -125,19 +163,25 @@ export function geminiToolBlocks(
     return [];
   }
   const out: IrBlock[] = [];
+  let index = 0;
   for (const item of raw) {
     if (!isRecord(item)) {
       irBump(ignored, 'toolCall:not-an-object');
       continue;
     }
+    index += 1;
     const name = irStr(item['name']) ?? irStr(item['toolName']) ?? '';
-    const id = irStr(item['id']) ?? irStr(item['callId']) ?? '';
+    const id = irStr(item['id']) ?? irStr(item['callId']) ?? 'gemini-' + String(turn) + '-' + String(index);
     const input = item['args'] ?? item['arguments'] ?? item['input'] ?? item['parameters'];
     out.push(irToolCallBlock(id, name, input));
     // 「工具结果内联在 toolCalls[].result」是 gemini 与 Claude 的关键差异（chat-import §8.4）
-    if (item['result'] !== undefined) {
-      const text = flattenText(item['result'], ignored, 'toolResult');
-      const isError = item['isError'] === true || item['is_error'] === true || item['error'] === true;
+    const hasResult = item['result'] !== undefined || typeof item['resultDisplay'] === 'string';
+    if (hasResult) {
+      const text = geminiToolResultText(item, ignored) ?? '';
+      // 与参考的差异：参考在取不到文本时整条丢弃结果，本仓 IR 没有「自动补空结果」的合成步骤
+      // （session-ir.ts 的待办），丢弃会让调用侧悬空 → 补一条空文本结果，保持生命周期闭合。
+      const isError = item['isError'] === true || item['is_error'] === true || item['error'] === true
+        || item['status'] === 'error';
       results.push(irToolResultBlock(id, text, isError));
     }
   }
@@ -160,6 +204,8 @@ export function parseGeminiSession(text: string): GeminiParseOutcome {
   const records: TranscriptRecord[] = [];
   let raw = 0;
   let bad = 0;
+  // 已开启的用户回合数（1 基；仅用于缺 id 工具的兜底 id `gemini-<turn>-<n>`，与参考同口径）
+  let turn = 0;
   let createdAt: IrTimeMs | undefined = irSafeTime(doc['startTime']);
 
   for (const item of messages) {
@@ -187,7 +233,7 @@ export function parseGeminiSession(text: string): GeminiParseOutcome {
     const blocks = genericBlocksOf(item['content'], ignored, 'block');
     if (role === 'assistant') {
       const results: IrBlock[] = [];
-      const calls = geminiToolBlocks(item['toolCalls'], ignored, results);
+      const calls = geminiToolBlocks(item['toolCalls'], ignored, results, turn);
       if (item['thoughts'] !== undefined) irBump(ignored, 'thoughts');
       if (blocks.length === 0 && calls.length === 0) {
         irBump(ignored, 'gemini-empty');
@@ -204,6 +250,7 @@ export function parseGeminiSession(text: string): GeminiParseOutcome {
     }
     const userRecord: TranscriptRecord = { role, blocks, time, id };
     records.push(model === undefined ? userRecord : { ...userRecord, model });
+    turn += 1;
   }
 
   let title = titleFromRecord(doc, ['title', 'summary']);

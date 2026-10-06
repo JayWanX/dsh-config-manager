@@ -10,23 +10,29 @@
  *    （真值表同款说明；本层不假装能找到它，也不为此报码 —— 那是「不知道」，不是「读不到」）
  *
  * 表面（竞品 sources/zed.mjs:50-58 的签名判定）：**只有一张 `threads` 表**，
- * 含 `{id, summary, updated_at, data_type, data, folder_paths, created_at}`；
- * `data` 是 BLOB，`data_type` 写入端**恒 `zstd`**（标准帧），`json` 只读兼容。
+ * 含 `{id, summary, updated_at, data_type, data, parent_id, folder_paths, folder_paths_order, created_at}`；
+ * `data` 是 BLOB，`data_type` 写入端**恒 zstd**（标准帧），`json` 只读兼容。
+ *
+ * 三种方言都要认（参考 lib/convert/zed.mjs）：
+ *  - **v0.3.0（当前）**：消息是 serde 外部标签 `{User:{content:[{Text}|{Mention}|{Image}]}}` /
+ *    `{Agent:{content:[{Text}|{Thinking}|{ToolUse}], tool_results:{<tool_use_id>:…}}}` /
+ *    `{Compaction:{Summary}}`（裸字符串 "Resume" 是 UI 续聊标记）—— 旧代码只匹配小写别名、
+ *    只取 content/message/segments/text/parts，整个线程都记 `message:unmapped`；
+ *  - **legacy**：`{role, segments, tool_uses, tool_results, is_visible}`；
+ *  - 工具结果按 `tool_use_id` 配对，v0.3.0 挂同一条 Agent 消息的对象里、legacy 是消息上的数组。
  *
  * zstd 走 `node:zlib` 的 `zstdDecompressSync`（Node ≥22.15 / ≥23.8；本仓库 engines ^22.19）。
  * 该函数在运行时**能力探测**：缺它时该库整体降级为「一条 zstd-unavailable 的 source-unreadable」
  * （逐条计数），绝不因为解不开就把线索引成空会话。
  *
- * 取证强度 = `fixture`（真机未验证；真实临时库夹具 + 单测端到端）。**真机形态未知的具体一点**：
- * `data` 反序列化后的 JSON 结构只按「顶层 messages 数组 + 每项能给出 role 与 content」两个
- * 最小假设实现，其余走 `genericBlocksOf` 兜底并逐类计数 —— 见 `zedMessagesOf`。
+ * 取证强度 = `fixture`（真机未验证；真实临时库夹具 + 单测端到端）。`parent_id` 非空 = 子代理线程
+ * （上游 UI/ThreadStore 都过滤）→ 本层同样跳过。
  */
 import zlib from 'node:zlib';
 
 import { joinFor, normalizePlatform, xdgDataHome } from './platform-paths.ts';
 import { isFile, labelForPath } from './session-read.ts';
 import {
-  jsonCell,
   openDetail,
   pickString,
   pickTime,
@@ -38,9 +44,9 @@ import {
 } from './read-opencode.ts';
 import type { SqliteDeps, SqliteReadPart, SqliteSessionFile } from './read-opencode.ts';
 import type { SqliteHandle, SqliteRow } from './sqlite.ts';
-import { irBump } from './session-ir.ts';
+import { irBump, irTextBlock, irToolCallBlock, irToolResultBlock } from './session-ir.ts';
 import type { IrBlock, IrTimeMs } from './session-ir.ts';
-import { firstUserText, genericBlocksOf } from './session-source.ts';
+import { firstUserText } from './session-source.ts';
 import type { SessionReadOutcome, TranscriptRecord } from './session-source.ts';
 import { isRecord } from '../utils/guards.ts';
 import type { ForeignSkip } from './types.ts';
@@ -83,7 +89,8 @@ const ZED_TITLE_KEYS = ['summary', 'title', 'name'];
 const ZED_TIME_KEYS = ['updated_at', 'updatedAt', 'created_at', 'createdAt'];
 const ZED_DATA_TYPE_KEYS = ['data_type', 'dataType', 'type'];
 const ZED_FOLDER_KEYS = ['folder_paths', 'folderPaths'];
-const ZED_THREAD_MESSAGE_KEYS = ['messages', 'conversation', 'events', 'items', 'turns', 'entries'];
+const ZED_FOLDER_ORDER_KEYS = ['folder_paths_order', 'folderPathsOrder'];
+const ZED_PARENT_KEYS = ['parent_id', 'parentId'];
 
 interface ZedAcc {
   ignored: Record<string, number>;
@@ -125,82 +132,249 @@ function decodeThread(row: SqliteRow): ThreadDecode {
   }
 }
 
-/** serde 枚举形态的两个键（`{User:{...}}` / `{Assistant:{...}}`）也认；认不出来就逐类计数 */
-const ZED_ROLE_ALIASES: readonly (readonly [string, 'user' | 'assistant'])[] = [
-  ['user', 'user'], ['human', 'user'], ['prompt', 'user'], ['user_message', 'user'],
-  ['assistant', 'assistant'], ['ai', 'assistant'], ['model', 'assistant'], ['assistant_message', 'assistant'],
-];
+/* ---------------- folder_paths 编码（`\n` 连接 + `,` 连接的 order 索引） ---------------- */
 
-function zedRecordOf(item: unknown, acc: ZedAcc): TranscriptRecord[] | null {
-  if (!isRecord(item)) {
-    acc.bad++;
-    return null;
+/**
+ * `folder_paths` 用 `\n` 连接路径、`folder_paths_order` 用 `,` 连接索引 —— 旧代码把它当
+ * JSON 数组解析（jsonCell），真实库上 cwd 永远拿不到。索引缺失/长度不符时退化为字典序。
+ */
+export function zedFolderPaths(folderPaths: unknown, order: unknown): string[] {
+  const paths = typeof folderPaths === 'string' && folderPaths !== ''
+    ? folderPaths.split(String.fromCharCode(10)).filter((p) => p !== '')
+    : [];
+  if (paths.length <= 1) return paths;
+  const orderText = typeof order === 'string' && order !== '' ? order : '';
+  if (orderText === '') return paths;
+  const indexes = orderText.split(',').map((n) => Number.parseInt(n, 10));
+  if (indexes.length !== paths.length || indexes.some((i) => !Number.isInteger(i) || i < 0 || i >= paths.length)) {
+    return paths;
   }
-  let payload: Record<string, unknown> = item;
-  let role: 'user' | 'assistant' | undefined;
-  for (const [alias, mapped] of ZED_ROLE_ALIASES) {
-    if (item[alias] !== undefined) {
-      role = mapped;
-      const inner = item[alias];
-      if (isRecord(inner)) payload = inner;
-      break;
-    }
-  }
-  if (role === undefined) {
-    const raw = (pickString(item, ['role', 'sender', 'kind', 'type']) ?? '').toLowerCase();
-    for (const [alias, mapped] of ZED_ROLE_ALIASES) {
-      if (raw === alias) {
-        role = mapped;
-        break;
-      }
-    }
-    if (role === undefined) {
-      irBump(acc.ignored, raw === '' ? 'message:unmapped' : 'message:' + raw);
-      return null;
-    }
-  }
-  const content = payload['content'] ?? payload['message'] ?? payload['segments'] ?? payload['text'] ?? payload['parts'];
-  const blocks: IrBlock[] = content === undefined ? [] : genericBlocksOf(content, acc.ignored, 'zed');
-  const id = pickString(payload, ['id', 'message_id', 'messageId']) ?? pickString(item, ['id', 'message_id']);
-  const time = pickTime(payload, ['timestamp', 'created_at', 'createdAt', 'time'])
-    ?? pickTime(item, ['timestamp', 'created_at', 'createdAt', 'updated_at']);
-  const pushed = splitToolResults(role, blocks, { id, time });
-  return pushed.length === 0 ? null : pushed;
+  return indexes.map((i) => paths[i] as string);
 }
 
+/* ---------------- 内容块方言映射 ---------------- */
+
+/** `raw_input` / `input.value` 是原始 JSON 文本：能解析就解析，不能就原样 */
+function toolInputOfText(text: string): unknown {
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return text;
+    }
+  }
+  return text;
+}
+
+/** v0.3.0 工具结果 content（`[{"Text":…}|{"Image":…}]`）→ 文本；图片只计数 */
+function v3ResultText(result: Record<string, unknown>, acc: ZedAcc): string {
+  const parts: string[] = [];
+  const nodes = Array.isArray(result['content']) ? result['content'] : [];
+  for (const item of nodes) {
+    if (isRecord(item) && typeof item['Text'] === 'string' && item['Text'] !== '') parts.push(item['Text']);
+    else if (isRecord(item) && item['Image'] !== undefined) irBump(acc.ignored, 'block:image');
+  }
+  if (parts.length === 0 && typeof result['output'] === 'string' && result['output'] !== '') {
+    parts.push(result['output']);
+  }
+  return parts.join(String.fromCharCode(10));
+}
+
+/** legacy 工具结果 content（形状不固定，容错取 text）→ 文本 */
+function legacyResultText(result: Record<string, unknown>): string {
+  const parts: string[] = [];
+  if (Array.isArray(result['content'])) {
+    for (const item of result['content']) {
+      if (typeof item === 'string' && item !== '') parts.push(item);
+      else if (isRecord(item) && typeof item['text'] === 'string' && item['text'] !== '') parts.push(item['text']);
+    }
+  }
+  const output = result['output'];
+  if (typeof output === 'string' && output !== '') parts.push(output);
+  else if (isRecord(output) && typeof output['text'] === 'string' && output['text'] !== '') parts.push(output['text']);
+  return parts.join(String.fromCharCode(10));
+}
+
+/** v0.3.0 的 ToolUse → tool_call 块（input 是 `{type,value}`，raw_input 是原始 JSON 文本） */
+function v3ToolCall(toolUse: unknown): IrBlock | null {
+  if (!isRecord(toolUse)) return null;
+  const id = pickString(toolUse, ['id']) ?? '';
+  const name = pickString(toolUse, ['name']) ?? '';
+  if (id === '' || name === '') return null;
+  const rawInput = toolUse['raw_input'];
+  if (typeof rawInput === 'string' && rawInput !== '') return irToolCallBlock(id, name, toolInputOfText(rawInput));
+  const wrapped = toolUse['input'];
+  if (isRecord(wrapped)) {
+    const value = wrapped['type'] === 'text' && typeof wrapped['value'] === 'string'
+      ? toolInputOfText(wrapped['value'])
+      : (wrapped['value'] ?? {});
+    return irToolCallBlock(id, name, value);
+  }
+  return irToolCallBlock(id, name, {});
+}
+
+/** legacy 的 ToolUse.input 是对象或字符串 */
+function legacyToolCall(toolUse: unknown): IrBlock | null {
+  if (!isRecord(toolUse)) return null;
+  const id = pickString(toolUse, ['id']) ?? '';
+  const name = pickString(toolUse, ['name']) ?? '';
+  if (id === '' || name === '') return null;
+  const input = toolUse['input'];
+  return irToolCallBlock(id, name, typeof input === 'string' ? toolInputOfText(input) : (input ?? {}));
+}
+
+/** v0.3.0 消息单元（serde 外部标签：{User:…} / {Agent:…} / {Compaction:…} / 裸字符串 "Resume"） */
+function zedV3Records(messages: readonly unknown[], acc: ZedAcc): TranscriptRecord[] {
+  const out: TranscriptRecord[] = [];
+  for (const msg of messages) {
+    if (typeof msg === 'string') continue; // unit 变体 "Resume"：UI 续聊标记
+    if (!isRecord(msg)) {
+      acc.bad++;
+      continue;
+    }
+    if (isRecord(msg['User'])) {
+      const blocks: IrBlock[] = [];
+      const content = msg['User']['content'];
+      for (const block of Array.isArray(content) ? content : []) {
+        if (isRecord(block) && typeof block['Text'] === 'string' && block['Text'] !== '') {
+          blocks.push(irTextBlock(block['Text']));
+        } else if (isRecord(block) && block['Image'] !== undefined) {
+          irBump(acc.ignored, 'block:image');
+        } else if (isRecord(block) && block['Mention'] !== undefined) {
+          irBump(acc.ignored, 'block:mention');
+        } else {
+          irBump(acc.ignored, 'block:unmapped');
+        }
+      }
+      if (blocks.length > 0) out.push({ role: 'user', blocks });
+      continue;
+    }
+    if (isRecord(msg['Agent'])) {
+      const agent = msg['Agent'];
+      const blocks: IrBlock[] = [];
+      const content = agent['content'];
+      for (const block of Array.isArray(content) ? content : []) {
+        if (isRecord(block) && typeof block['Text'] === 'string' && block['Text'] !== '') {
+          blocks.push(irTextBlock(block['Text']));
+        } else if (isRecord(block) && isRecord(block['Thinking'])
+          && typeof block['Thinking']['text'] === 'string' && block['Thinking']['text'] !== '') {
+          // IR 只有 text/tool_call/tool_result（reasoning 需共享层改动才能保留）→ 逐类计数
+          irBump(acc.ignored, 'block:thinking');
+        } else if (isRecord(block) && block['ToolUse'] !== undefined) {
+          const call = v3ToolCall(block['ToolUse']);
+          if (call === null) irBump(acc.ignored, 'block:tool-use-invalid');
+          else blocks.push(call);
+        } else {
+          irBump(acc.ignored, 'block:unmapped');
+        }
+      }
+      // 同一 Agent 消息上的 tool_results 对象（键 = tool_use_id）；合成器只把 tool_result 归入
+      // **已打开的 step** → 拆到用户侧记录后再挂回（splitToolResults）
+      const results = agent['tool_results'];
+      if (isRecord(results)) {
+        for (const [toolUseId, result] of Object.entries(results)) {
+          if (!isRecord(result)) {
+            irBump(acc.ignored, 'block:unmapped');
+            continue;
+          }
+          blocks.push(irToolResultBlock(toolUseId, v3ResultText(result, acc), result['is_error'] === true));
+        }
+      }
+      if (blocks.length > 0) out.push(...splitToolResults('assistant', blocks, {}));
+      continue;
+    }
+    if (isRecord(msg['Compaction'])) {
+      // 压缩落点：本地合成器没有原生压缩检查点（需共享层改动）→ 显式计数
+      irBump(acc.ignored, 'message:compaction');
+      continue;
+    }
+    irBump(acc.ignored, 'message:unmapped');
+  }
+  return out;
+}
+
+/** legacy 方言（role + segments/tool_uses/tool_results/is_visible） */
+function zedLegacyRecords(messages: readonly unknown[], acc: ZedAcc): TranscriptRecord[] {
+  const out: TranscriptRecord[] = [];
+  for (const msg of messages) {
+    if (!isRecord(msg)) {
+      acc.bad++;
+      continue;
+    }
+    if (msg['is_visible'] === false) {
+      irBump(acc.ignored, 'message:invisible');
+      continue;
+    }
+    const role = (pickString(msg, ['role']) ?? '').toLowerCase();
+    if (role === 'system') {
+      irBump(acc.ignored, 'role:system');
+      continue;
+    }
+    const blocks: IrBlock[] = [];
+    const segments = msg['segments'];
+    for (const seg of Array.isArray(segments) ? segments : []) {
+      if (isRecord(seg) && seg['type'] === 'text' && typeof seg['text'] === 'string' && seg['text'] !== '') {
+        blocks.push(irTextBlock(seg['text']));
+      } else if (isRecord(seg) && (seg['type'] === 'thinking' || seg['type'] === 'RedactedThinking')) {
+        irBump(acc.ignored, 'block:' + String(seg['type']));
+      } else if (isRecord(seg)) {
+        irBump(acc.ignored, 'block:unmapped');
+      }
+    }
+    if (role === 'assistant') {
+      for (const toolUse of Array.isArray(msg['tool_uses']) ? msg['tool_uses'] : []) {
+        const call = legacyToolCall(toolUse);
+        if (call === null) irBump(acc.ignored, 'block:tool-use-invalid');
+        else blocks.push(call);
+      }
+    }
+    if (Array.isArray(msg['tool_results'])) {
+      for (const result of msg['tool_results']) {
+        if (!isRecord(result)) continue;
+        const id = pickString(result, ['tool_use_id', 'toolUseId']) ?? '';
+        if (id === '') {
+          irBump(acc.ignored, 'block:tool-result-invalid');
+          continue;
+        }
+        blocks.push(irToolResultBlock(id, legacyResultText(result), result['is_error'] === true));
+      }
+    }
+    if (role === 'user' || role === 'assistant') {
+      if (blocks.length === 0) continue;
+      const pushed = splitToolResults(role, blocks, {});
+      // 用户消息同时带正文与结果：结果记录排在正文之前（同 read-goose.ts 的理由）
+      if (role === 'user' && pushed.length > 1) pushed.reverse();
+      out.push(...pushed);
+    } else if (role !== '') {
+      irBump(acc.ignored, 'role:' + role);
+    }
+  }
+  return out;
+}
+
+/** 线程 JSON → 归一记录（v0.3.0 外部标签方言优先；其余走 legacy） */
 function zedMessagesOf(thread: unknown, acc: ZedAcc): TranscriptRecord[] {
   if (!isRecord(thread)) {
     acc.bad++;
     return [];
   }
-  let list: unknown[] | undefined;
-  for (const key of ZED_THREAD_MESSAGE_KEYS) {
-    const v = thread[key];
-    if (Array.isArray(v)) {
-      list = v;
-      break;
-    }
-  }
-  if (list === undefined) {
+  const raw = thread['messages'];
+  if (!Array.isArray(raw)) {
     acc.bad++;
     return [];
   }
-  const out: TranscriptRecord[] = [];
-  for (const item of list) {
-    const rec = zedRecordOf(item, acc);
-    if (rec !== null) out.push(...rec);
-  }
-  return out;
+  const version = typeof thread['version'] === 'string' ? thread['version'] : '';
+  return version === '0.3.0' ? zedV3Records(raw, acc) : zedLegacyRecords(raw, acc);
 }
 
-/** cwd：`folder_paths` 的第一个绝对路径 → 线程 JSON 里的 cwd 字段（缺 → undefined，绝不猜） */
+/** cwd：行级 folder_paths（`\n` 分隔 + order 索引）的首项 → 线程 JSON 里的 cwd 字段（缺 → undefined） */
 function zedCwdOf(row: SqliteRow, thread: unknown): string | undefined {
-  const folders = jsonCell(row, ZED_FOLDER_KEYS);
-  if (folders.ok && Array.isArray(folders.value)) {
-    for (const p of folders.value) {
-      if (typeof p === 'string' && p !== '') return p;
-    }
-  }
+  const paths = zedFolderPaths(
+    pickString(row, ZED_FOLDER_KEYS),
+    pickString(row, ZED_FOLDER_ORDER_KEYS),
+  );
+  if (paths.length > 0) return paths[0];
   if (isRecord(thread)) {
     return pickString(thread, ['cwd', 'working_dir', 'working_directory', 'directory', 'root', 'project_path']);
   }
@@ -211,6 +385,7 @@ function zedCwdOf(row: SqliteRow, thread: unknown): string | undefined {
  * 打开着的库 → 每个 thread 一个归一文件；**返回 null ⇔ 读不到 / 不是 zed 库**。
  *
  * 签名判定：必须存在 `threads` 表，且它有 `id` 与 `data` 列（竞品同款「靠结构自证」）。
+ * `parent_id` 非空的行是子代理线程（上游 UI/ThreadStore 都过滤）→ 跳过并计数。
  */
 export function readZedDatabase(db: SqliteHandle, label: string): SqliteReadPart | null {
   const tables = db.tables();
@@ -227,10 +402,16 @@ export function readZedDatabase(db: SqliteHandle, label: string): SqliteReadPart
   let noId = 0;
   let unreadable = 0;
   let zstdMissing = 0;
+  let subagent = 0;
+  const hasParent = ZED_PARENT_KEYS.some((key) => cols.includes(key));
   for (const row of rows) {
     const id = pickString(row, ZED_ID_KEYS);
     if (id === undefined) {
       noId++;
+      continue;
+    }
+    if (hasParent && pickString(row, ZED_PARENT_KEYS) !== undefined) {
+      subagent++;
       continue;
     }
     const decoded = decodeThread(row);
@@ -241,7 +422,9 @@ export function readZedDatabase(db: SqliteHandle, label: string): SqliteReadPart
     }
     const acc: ZedAcc = { ignored: {}, bad: 0 };
     const records = zedMessagesOf(decoded.value, acc);
-    const title = pickString(row, ZED_TITLE_KEYS) ?? '';
+    const rowTitle = pickString(row, ZED_TITLE_KEYS) ?? '';
+    const blobTitle = isRecord(decoded.value) ? (pickString(decoded.value, ZED_TITLE_KEYS) ?? '') : '';
+    const title = rowTitle !== '' ? rowTitle : blobTitle;
     const createdAt: IrTimeMs | undefined = pickTime(row, ZED_TIME_KEYS);
     files.push({
       id,
@@ -263,7 +446,7 @@ export function readZedDatabase(db: SqliteHandle, label: string): SqliteReadPart
   return {
     files,
     skipped,
-    counts: { threads: files.length, 'threads.unreadable': unreadable },
+    counts: { threads: files.length, 'threads.unreadable': unreadable, 'threads.subagent': subagent },
   };
 }
 

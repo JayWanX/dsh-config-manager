@@ -21,11 +21,26 @@
  *  - 合并来源数 > 1 时逐条报 instructions-merged（与 convertCopilot 同口径）；
  *  - frontmatter 只用于分类，不并入正文（Cursor 专属的 globs/description 在注释头里以激活类型体现）。
  *
- * 公共口径（MCP 映射与凭据剥离、SKILL.md frontmatter 校验、路径/名字安全、技能装配）全部走
- * 共享内核 kernel.ts —— 与 Claude Code / Hermes / Codex 同一份实现，口径不可能分叉。
+ * **会话（2026-10-06 起）**：`~/.cursor/projects/<slug>/agent-transcripts/<composer>/<composer>.jsonl`
+ * 由读盘层解析成归一记录（见 read-cursor.ts 的 readCursorSessions / parseCursorTranscript），
+ * 本层只负责装配成 sessions + workspaces 两个分区 —— 与 Hermes / Antigravity 同一条出口。
+ * 会话记录里没有 tool_result（源里只发 tool/call），cwd 靠 slug 的存在性解码；解不出来时
+ * 由 collectSessionSections → transcodeSessionDraft 如实报 `session-missing-cwd`，绝不伪造。
+ *
+ * 公共口径（MCP 映射与凭据剥离、SKILL.md frontmatter 校验、路径/名字安全、技能装配、
+ * 会话 → DSH 字节）全部走共享内核 kernel.ts / session-source.ts —— 与 Claude Code / Hermes /
+ * Antigravity 同一份实现，口径不可能分叉。
  */
 import { isRecord } from '../utils/guards.ts';
-import { collectSkills, instructionsSection, mcpSectionFromEntries, serverEntriesOf } from './kernel.ts';
+import {
+  collectSessionSections,
+  collectSkills,
+  instructionsSection,
+  mcpSectionFromEntries,
+  serverEntriesOf,
+} from './kernel.ts';
+import { draftFromTranscript, transcodeSessionDraft } from './session-source.ts';
+import type { ParsedTranscript } from './session-source.ts';
 import type { ForeignImportResult, ForeignSectionOut, ForeignSkip } from './types.ts';
 
 /** Cursor 的两层作用域：用户级（~/.cursor）与项目级（<项目>/.cursor） */
@@ -56,6 +71,18 @@ export interface CursorSkillInput {
   category?: string;
 }
 
+/** 一个已解析成**归一记录**的 Cursor 会话（读盘层产出；翻译层只负责装配） */
+export interface CursorSessionInput {
+  /**
+   * composer uuid（`agent-transcripts/<composer>/<composer>.jsonl` 的目录名 / 文件名 stem；
+   * 真机布局里两者同值）。它同时是 DSH 侧会话 id —— **必须过 isSafeIrId**，
+   * 不过门的由 transcodeSessionDraft 如实报 session-unsafe-id，绝不静默写盘。
+   */
+  id: string;
+  /** 归一记录（parsed.raw = 转录行原始条数；cwd 由读盘层按 slug 存在性解码后补入） */
+  parsed: ParsedTranscript;
+}
+
 /**
  * Cursor 配置的已读形态（纯数据；翻译层不做任何 fs 访问）。
  *
@@ -73,7 +100,14 @@ export interface CursorInput {
   skills?: CursorSkillInput[];
   /** 旧式 .cursorrules 的位置（**只报告不导入**；正文根本没有承载字段） */
   legacyRules?: { scope: CursorScope }[];
-  /** 读盘层发现（0 字节 / 畸形 / 超限 / 旧式规则命中）——原样带出，调用方无需二次合并 */
+  /** ~/.cursor/projects/<slug>/agent-transcripts/<composer>/<composer>.jsonl 解析出的会话 */
+  sessions?: CursorSessionInput[];
+  /**
+   * 目标机 DSH 的 SESSION_FORMAT_VERSION（**必须由宿主解析后传入**，见 utils/session-format.ts）。
+   * 缺省 = 不转码任何会话并整批报 session-format-version-unknown，绝不猜版本。
+   */
+  targetSessionFormatVersion?: number;
+  /** 读盘层发现（0 字节 / 畸形 / 超限 / 旧式规则命中 / 会话读盘）——原样带出，调用方无需二次合并 */
   readFindings?: ForeignSkip[];
 }
 
@@ -207,6 +241,19 @@ export function convertCursor(input: CursorInput): ForeignImportResult {
     }
     counts['rules.legacy'] = legacy.length;
   }
+
+  /* 会话：读盘层已解析成归一记录 → sessions + workspaces（必须同源产出，见 kernel.collectSessionSections；
+     cwd 缺失在这里变成 session-missing-cwd，即「解不出 slug 就如实跳过」的那条出口） */
+  const formatVersion = input.targetSessionFormatVersion ?? -1;
+  collectSessionSections<CursorSessionInput>({
+    files: input.sessions ?? [],
+    targetFormatVersion: input.targetSessionFormatVersion,
+    transcode: (file) => transcodeSessionDraft(draftFromTranscript(file.id, file.parsed, 'cursor'), { formatVersion }),
+    workspaceIdPrefix: 'cursor',
+    sections,
+    skipped,
+    counts,
+  });
 
   return { source: 'cursor', sections, skipped, credentialRefs, counts };
 }

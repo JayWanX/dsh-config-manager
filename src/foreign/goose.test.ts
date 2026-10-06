@@ -98,16 +98,30 @@ test('goose：probePaths 与真值表逐平台相等；GOOSE_PATH_ROOT 仅绝对
 });
 
 const GOOSE_SCHEMA: readonly (readonly [string, readonly unknown[]])[] = [
-  ['CREATE TABLE sessions (id TEXT PRIMARY KEY, session_type TEXT, working_dir TEXT, name TEXT, created_at INTEGER)', []],
-  ['CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT, role TEXT, content_json TEXT, created_timestamp INTEGER)', []],
-  ['INSERT INTO sessions VALUES (?, ?, ?, ?, ?)', ['g-1', 'chat', '/work/goose', 'Goose run', 1791201800]],
-  ['INSERT INTO messages VALUES (?, ?, ?, ?, ?)', ['g-msg-1', 'g-1', 'user', JSON.stringify([{ type: 'text', text: 'goose user' }]), 1791201801]],
-  ['INSERT INTO messages VALUES (?, ?, ?, ?, ?)', ['g-msg-2', 'g-1', 'assistant', JSON.stringify([
+  ['CREATE TABLE sessions (id TEXT PRIMARY KEY, session_type TEXT, working_dir TEXT, name TEXT, created_at INTEGER, parent_session_id TEXT)', []],
+  ['CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT, role TEXT, content_json TEXT, created_timestamp INTEGER, metadata_json TEXT)', []],
+  // 顶层会话（只有它该成会话）
+  ['INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)', ['g-1', 'chat', '/work/goose', 'Goose run', 1791201800, null]],
+  // 子代理 / 隐藏 / 挂父会话：都不单独成会话（参考 gooseRows 的过滤）
+  ['INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)', ['g-sub', 'sub_agent', '/work/goose', 'sub', 1791201810, null]],
+  ['INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)', ['g-hidden', 'hidden', '/work/goose', 'hidden', 1791201811, null]],
+  ['INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)', ['g-child', 'chat', '/work/goose', 'child', 1791201812, 'g-1']],
+  // 故意乱序插入：读盘层必须按 (created_timestamp, id) 升序还原
+  ['INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)', ['g-msg-4', 'g-1', 'assistant', JSON.stringify([{ type: 'text', text: 'agent-only' }]), 1791201803, JSON.stringify({ userVisible: false })]],
+  ['INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)', ['g-msg-2', 'g-1', 'assistant', JSON.stringify([
     { type: 'text', text: 'goose assistant' },
-    { type: 'toolRequest', id: 't-1', toolCall: { value: { name: 'shell', arguments: { cmd: 'ls' } } } },
-    { type: 'toolResponse', id: 't-1', toolResult: { value: { content: [{ type: 'text', text: 'out' }] } } },
+    // 真实库是 snake_case 信封；camelCase 是旧代码认的形态，两种都要能用
+    { type: 'toolRequest', id: 't-1', tool_call: { status: 'success', value: { name: 'shell', arguments: { cmd: 'ls' } } } },
+    { type: 'toolRequest', id: 't-2', toolCall: { value: { name: 'read', arguments: { path: 'x' } } } },
+    { type: 'toolResponse', id: 't-1', tool_result: { status: 'success', value: { content: [{ type: 'text', text: 'out' }] } } },
     { type: 'thinking', thinking: 'internal' },
-  ]), 1791201802]],
+  ]), 1791201802, null]],
+  ['INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)', ['g-msg-1', 'g-1', 'user', JSON.stringify([{ type: 'text', text: 'goose user' }]), 1791201801, null]],
+  // 用户消息同时带正文与 toolResponse：结果必须排在正文记录之前（否则被判孤儿丢弃）
+  ['INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)', ['g-msg-3', 'g-1', 'user', JSON.stringify([
+    { type: 'text', text: 'carrier follow-up' },
+    { type: 'toolResponse', id: 't-1', tool_result: { status: 'error', error: 'boom' } },
+  ]), 1791201804, null]],
 ];
 
 test('goose：真实临时库 → content_json 块映射 + 工具配对闭合 + build 产出 workspaces', async (t) => {
@@ -124,7 +138,9 @@ test('goose：真实临时库 → content_json 块映射 + 工具配对闭合 + 
   assert.deepEqual(det.paths, ['.local/share/goose/sessions/sessions.db']);
 
   const read = await readGoose({ homeDir: home, platform: 'linux', env: {} });
-  assert.equal(read.files.length, 1);
+  assert.equal(read.files.length, 1, '子代理 / 隐藏 / 挂父会话的行不得单独成会话');
+  assert.equal(read.extraCounts?.['goose.sessions.filtered-type'], 2);
+  assert.equal(read.extraCounts?.['goose.sessions.filtered-parent'], 1);
   const file = read.files[0];
   assert.ok(file !== undefined);
   assert.equal(file.parsed.cwd, '/work/goose');
@@ -132,14 +148,27 @@ test('goose：真实临时库 → content_json 块映射 + 工具配对闭合 + 
   assert.equal(file.parsed.createdAt, 1791201800000, '秒 → 毫秒');
   assert.deepEqual(
     file.parsed.records.map((r) => r.role),
-    ['user', 'assistant', 'user'],
-    'toolResponse 拆到用户侧记录（同一 step 内闭合）',
+    ['user', 'assistant', 'user', 'user', 'user'],
+    '按 created_timestamp 升序；toolResponse 拆到用户侧记录（同一 step 内闭合）',
   );
+  assert.equal(file.parsed.records[0]?.time, 1791201801000, '乱序插入也要按时间还原（缺 ORDER BY 时首条会是 g-msg-2）');
   assert.deepEqual(
     file.parsed.records[1]?.blocks.map((b) => b.type),
-    ['text', 'tool_call'],
+    ['text', 'tool_call', 'tool_call'],
   );
-  assert.deepEqual(file.parsed.records[2]?.blocks.map((b) => b.type), ['tool_result']);
+  const callSnake = file.parsed.records[1]?.blocks[1];
+  assert.deepEqual(callSnake, { type: 'tool_call', id: 't-1', name: 'shell', input: { cmd: 'ls' } }, 'snake_case tool_call 信封解析出工具名与参数');
+  const callCamel = file.parsed.records[1]?.blocks[2];
+  assert.deepEqual(callCamel, { type: 'tool_call', id: 't-2', name: 'read', input: { path: 'x' } }, 'camelCase 信封仍然兼容');
+  assert.deepEqual(file.parsed.records[2]?.blocks, [
+    { type: 'tool_result', id: 't-1', text: 'out', isError: false },
+  ]);
+  // 用户载体：结果记录必须排在正文之前，才能挂回上一条 assistant 的 step
+  assert.deepEqual(file.parsed.records[3]?.blocks, [
+    { type: 'tool_result', id: 't-1', text: 'boom', isError: true },
+  ], 'status=error + error 文本 → isError');
+  assert.deepEqual(file.parsed.records[4]?.blocks, [{ type: 'text', text: 'carrier follow-up' }]);
+  assert.equal(file.parsed.ignored['message:not-user-visible'], 1, 'userVisible=false 的 agent-only 消息不进对话');
   assert.equal(file.parsed.ignored['block:thinking'], 1, 'thinking 不迁移但逐类计数');
 
   const built = await source.build(ctx);

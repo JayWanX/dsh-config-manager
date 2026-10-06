@@ -15,17 +15,20 @@
  *  ④ 与 read-claude-code.ts / read-hermes.ts 同口径，但**刻意不互相 import 私有实现**：
  *     三个读盘层各自持有自己的边界与错误口径，真正共享的是纯内核 kernel.ts。
  *
- * **范围**：本任务只搬 config.toml 的 [mcp_servers.*]、AGENTS(.override).md、~/.agents/skills。
- * Codex 的 ~/.codex/sessions、history.jsonl 等**不在本期范围**（契约 §8.2 未冻结这些行）：
- * 本层不读、不报，绝不因此产出 sessions/workspaces 分区。
+ * **范围**：config.toml 的 [mcp_servers.*]、AGENTS(.override).md、~/.agents/skills，
+ * 以及**会话**（2026-10-06 起）——双根 rollout：sessions/YYYY/MM/DD/rollout-*.jsonl 与
+ * archived_sessions/rollout-*.jsonl（chat-import discovery.mjs:108-110）。
+ * history.jsonl 仍不读（请求历史，不是会话转录；读了就是造垃圾会话）。
  */
 import fs from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import path from 'node:path';
 
-import { dirWalkSkips, resolveLimit, type DirWalkStats } from './session-read.ts';
+// 共享遍历器与本文件私有的 walkFiles（带文件内容）同名 → 显式别名，避免静默用错那一个
+import { dirWalkSkips, resolveLimit, walkFiles as walkTree, type DirWalkStats } from './session-read.ts';
+import { parseCodexRollout } from './codex.ts';
 import type { ForeignLimitOverrides, ForeignSkip } from './types.ts';
-import type { CodexInput, CodexSkillInput } from './codex.ts';
+import type { CodexInput, CodexSessionInput, CodexSkillInput } from './codex.ts';
 
 export interface CodexHomeOptions {
   /** 用户 home（Windows = %USERPROFILE%，macOS/Linux = $HOME） */
@@ -59,6 +62,8 @@ export interface CodexReadOptions extends CodexHomeOptions {
   maxSkillFiles?: number;
   /** 技能数上限（默认 500） */
   maxSkills?: number;
+  /** 会话条数上限（默认 500；超过即报 max-sessions-reached） */
+  maxSessions?: number;
   /** 可选上限覆盖（t36，装配层透传；缺省 = 上面各默认值逐字不变） */
   limits?: ForeignLimitOverrides;
 }
@@ -81,6 +86,17 @@ const DEFAULT_MAX_SKILLS = 500;
 const INSTRUCTIONS_MAX_FILE = 1024 * 1024;
 /** 技能目录的最大下钻深度（防病态深层树；超深即不再下钻） */
 const MAX_SKILL_DEPTH = 4;
+
+/* ---------------- 会话（rollout）常量 ---------------- */
+
+/** rollout 双根（chat-import discovery.mjs:108-110）：sessions/YYYY/MM/DD 与扁平的 archived_sessions/ */
+const SESSION_ROOTS: readonly string[] = ['sessions', 'archived_sessions'];
+/** 会话文件名前缀：同目录别的 jsonl 不是会话转录 */
+const ROLLOUT_PREFIX = 'rollout-';
+/** 会话遍历的最大下钻深度（sessions/YYYY/MM/DD = 3 层，留一层余量） */
+const SESSION_WALK_DEPTH = 4;
+/** 会话条数上限（与 read-hermes 同口径，可被 limits.maxSessionFiles 覆盖） */
+const DEFAULT_MAX_SESSIONS = 500;
 
 /* ================= 最小 TOML 子集解析器（零依赖、绝不抛） ================= */
 
@@ -642,12 +658,83 @@ async function readInstructions(
   return undefined;
 }
 
+/* ================= 会话：读盘（源格式解析在 codex.ts 的纯函数里） ================= */
+
+/** 会话读盘结果（0 会话也是正常结果；子代理 rollout 已剔除并在 readFindings 里报码） */
+export interface CodexSessionPart {
+  readonly files: readonly CodexSessionInput[];
+  readonly readFindings: readonly ForeignSkip[];
+}
+
+/**
+ * 读 <CODEX_HOME> 的**双根** rollout（sessions/YYYY/MM/DD 与扁平的 archived_sessions/）。
+ *
+ * 三条纪律：
+ *  ① 只认 `rollout-*.jsonl`（同目录别的 jsonl 不是会话转录，读了就是造垃圾会话）；
+ *  ② 子代理 rollout（thread_source=subagent / source.subagent）**剔除并报码**，绝不产出碎片会话；
+ *  ③ 读不到 / 超限 / 触顶如实报码，绝不静默少读。
+ */
+export async function readCodexSessions(
+  codexHome: string,
+  maxSessions: number,
+  maxBytes: number,
+): Promise<CodexSessionPart> {
+  const readFindings: ForeignSkip[] = [];
+  const files: CodexSessionInput[] = [];
+  let truncated = false;
+  for (const rootName of SESSION_ROOTS) {
+    if (files.length >= maxSessions) {
+      truncated = true;
+      break;
+    }
+    const root = path.join(codexHome, rootName);
+    const stat = await statOrNull(root);
+    if (stat === null || !stat.isDirectory()) continue; // 目录不存在 = 这里没有会话（不是错误）
+    // 多收一个用来判定「还有没读完的」（walkFiles 到上限即停，不报触顶）
+    const walked = await walkTree(root, {
+      match: (name) => name.startsWith(ROLLOUT_PREFIX) && name.endsWith('.jsonl'),
+      maxDepth: SESSION_WALK_DEPTH,
+      maxFiles: maxSessions - files.length + 1,
+    });
+    for (const hit of walked) {
+      if (files.length >= maxSessions) {
+        truncated = true;
+        break;
+      }
+      // origin 一律是包内相对标签（root/ 相对路径），绝不含机器路径
+      const label = rootName + '/' + hit.rel;
+      const text = await readTextSafe(hit.abs, maxBytes);
+      if (text === null) {
+        readFindings.push({ code: 'source-unreadable', origin: label, detail: 'read-error' });
+        continue;
+      }
+      const rollout = parseCodexRollout(text, hit.name);
+      if (rollout.subagent !== null) {
+        // 子代理 rollout 不是独立会话（对齐 claude/qoder 的「辅助 transcript 跳过」）
+        readFindings.push({
+          code: 'unsupported-session-record',
+          origin: label,
+          detail: 'codex-subagent:' + rollout.subagent,
+          count: 1,
+        });
+        continue;
+      }
+      files.push({ id: rollout.id, parsed: rollout.parsed });
+    }
+  }
+  if (truncated) {
+    readFindings.push({ code: 'source-unreadable', origin: 'sessions', detail: 'max-sessions-reached', count: maxSessions });
+  }
+  return { files, readFindings };
+}
+
 export async function readCodex(opts: CodexReadOptions): Promise<CodexReadResult> {
   const resolved = resolveCodexHome(opts);
   const codexHome = resolved.home;
   const maxFileBytes = resolveLimit(opts.limits?.maxFileBytes, opts.maxFileBytes, DEFAULT_MAX_FILE);
   const maxSkillFiles = resolveLimit(opts.limits?.maxSkillFiles, opts.maxSkillFiles, DEFAULT_MAX_SKILL_FILES);
   const maxSkills = resolveLimit(opts.limits?.maxSkills, opts.maxSkills, DEFAULT_MAX_SKILLS);
+  const maxSessions = resolveLimit(opts.limits?.maxSessionFiles, opts.maxSessions, DEFAULT_MAX_SESSIONS);
   const findings: ForeignSkip[] = [];
   const unreadable: string[] = [];
   const input: CodexInput = {};
@@ -695,6 +782,11 @@ export async function readCodex(opts: CodexReadOptions): Promise<CodexReadResult
     /* 全局指令（override 优先） */
     const instructions = await readInstructions(codexHome, findings, unreadable);
     if (instructions !== undefined) input.instructions = instructions;
+
+    /* 会话：sessions/ 与 archived_sessions/ 双根 rollout（读得出就读，读不出如实报码） */
+    const sessions = await readCodexSessions(codexHome, maxSessions, maxFileBytes);
+    findings.push(...sessions.readFindings);
+    if (sessions.files.length > 0) input.sessions = [...sessions.files];
   }
 
   if (!hasCodexDir && !hasSkillsDir) {

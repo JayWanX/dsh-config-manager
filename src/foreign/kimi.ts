@@ -1,8 +1,10 @@
 /**
  * Kimi（~\.kimi + ~/.kimi-code，双根两代布局）→ DSH bundle 的**纯**翻译层（会话类）。
  *
- * 输入 = 读盘层（read-kimi.ts）已解析好的 `ParsedTranscript`（两代 wire 词汇都已在那一层
- * 归一，cwd 已按「状态文件 → md5 反查 → workspaces 反查」三档解析）；输出 = `ForeignSource`。
+ * 输入 = 读盘层（read-kimi.ts）已解析好的 `ParsedTranscript`（两代 wire 词汇——旧
+ * `{timestamp, message:{type,payload}}` 与新点分小写——都已在那一层归一；cwd 已按
+ * 「状态文件 cwd/workDir → md5 反查 → workspaces 反查（path/root）」三档解析，标题取
+ * state.json 的 custom_title）；输出 = `ForeignSource`。
  * 「草稿 → 字节」的唯一出口是共享骨架 `session-source.ts`（工具配对 / seq / surfaceOp /
  * workspaces 同源产出都在那里，本层不重造）。
  *

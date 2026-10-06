@@ -32,8 +32,11 @@ import fs from 'node:fs/promises';
 import { joinFor, normalizePlatform, sepFor } from './platform-paths.ts';
 import type { ForeignPlatform } from './platform-paths.ts';
 import { DEFAULT_MAX_FILE_BYTES, isDirectory, listDirNames, listFileNames, statOrNull, stemOf } from './session-read.ts';
-import { GENERIC_TRANSCRIPT_SHAPE, parseGenericJsonl } from './session-source.ts';
-import type { ParsedTranscript, RootProbeOptions, SessionReadOutcome, TranscriptShape } from './session-source.ts';
+import { GENERIC_TRANSCRIPT_SHAPE, firstUserText, genericBlocksOf } from './session-source.ts';
+import type { ParsedTranscript, RootProbeOptions, SessionReadOutcome, TranscriptRecord, TranscriptShape } from './session-source.ts';
+import { irBump, irEarlier, irSafeTime, irStr, irToolResultBlock } from './session-ir.ts';
+import type { IrBlock, IrTimeMs } from './session-ir.ts';
+import { isRecord } from '../utils/guards.ts';
 import type { ForeignSkip } from './types.ts';
 
 /** 相对用户 home 的位置标签前缀（回给 GUI/CLI 的**只允许路径**，绝不含用户名/盘符） */
@@ -130,6 +133,156 @@ async function countSubagentTranscripts(sessionDir: string, platform: ForeignPla
   const subDir = joinFor(platform, sessionDir, 'subagents');
   if (!(await isDirectory(subDir))) return 0;
   return (await listFileNames(subDir, (n) => QODER_SESSION_FILE_RE.test(n))).length;
+}
+
+/* ---------------- ② Qoder 逐行解析（纯函数；通用 shape 不承载的字段在这里补齐） ---------------- */
+
+/**
+ * Qoder 的 JSONL 比通用 JSONL 多三类**只在本源有**的事实（所以这里不直接用
+ * `parseGenericJsonl`，否则要再扫一遍原始行才能拿到）：
+ *  ① `ai-title` / `last-prompt` 记录 —— 标题（ai-title > last-prompt > 首问兜底）；
+ *  ② 记录里的 `sessionId` —— 「文件名 stem == sessionId」的主体判定（辅助 / 子代理 transcript 跳过）；
+ *  ③ `tool_result` 缺 `tool_use_id` 时，按**未决调用顺序**回退配对（参考 convert/qoder.mjs）。
+ * `thinking` 块由 `genericBlocksOf` 逐类计数（`block:thinking`）—— 本地 IR 没有 reasoning 承载位，
+ * 只显式计数、绝不伪装成正文。
+ */
+export interface QoderParseResult {
+  readonly parsed: ParsedTranscript;
+  /** 记录里自报的 sessionId（有则用于主体判定） */
+  readonly sessionId?: string | undefined;
+  /** 文件名 stem 与记录 sessionId 不一致（辅助 / 子代理 transcript） */
+  readonly stemMismatch: boolean;
+}
+
+function qoderRoleOf(rec: Record<string, unknown>, msg: Record<string, unknown>): 'user' | 'assistant' | undefined {
+  for (const raw of [irStr(rec['type']), irStr(msg['role']), irStr(rec['role'])]) {
+    if (raw === undefined) continue;
+    const lower = raw.toLowerCase();
+    if (QODER_SHAPE.userValues.includes(lower)) return 'user';
+    if (QODER_SHAPE.assistantValues.includes(lower)) return 'assistant';
+  }
+  return undefined;
+}
+
+function qoderFirstString(rec: Record<string, unknown>, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const v = irStr(rec[key]);
+    if (v !== undefined) return v;
+  }
+  return undefined;
+}
+
+function qoderFirstTime(rec: Record<string, unknown>, keys: readonly string[]): IrTimeMs | undefined {
+  for (const key of keys) {
+    const t = irSafeTime(rec[key]);
+    if (t !== undefined) return t;
+  }
+  return undefined;
+}
+
+/**
+ * `tool_result` 缺 `tool_use_id` 时按**未决调用顺序**回退配对（参考 unresolved 语义）。
+ * 显式带 id 的结果把该 id 从未决队列移除（乱序 / 后置结果）。
+ */
+function pairQoderToolResults(blocks: IrBlock[], unresolved: string[]): void {
+  for (let i = 0; i < blocks.length; i += 1) {
+    const block = blocks[i];
+    if (block === undefined || block.type !== 'tool_result') continue;
+    if (block.id !== '') {
+      const at = unresolved.indexOf(block.id);
+      if (at >= 0) unresolved.splice(at, 1);
+      continue;
+    }
+    const fallback = unresolved.shift();
+    if (fallback === undefined) continue;
+    blocks[i] = irToolResultBlock(fallback, block.text, block.isError);
+  }
+}
+
+/** 一份 Qoder transcript（JSONL）→ 归一记录 + 主体判定（`fileStem` = 文件名去掉 .jsonl） */
+export function parseQoderJsonl(text: string, fileStem = ''): QoderParseResult {
+  const records: TranscriptRecord[] = [];
+  const ignored: Record<string, number> = {};
+  let raw = 0;
+  let bad = 0;
+  let cwd: string | undefined;
+  let createdAt: IrTimeMs | undefined;
+  let sessionId: string | undefined;
+  let model: string | undefined;
+  let aiTitle = '';
+  let lastPrompt = '';
+  // 未决调用 id（按出现顺序；缺 tool_use_id 的结果按它回退配对）
+  const unresolved: string[] = [];
+
+  for (const line of text.split(String.fromCharCode(10))) {
+    if (line.trim() === '') continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      bad += 1;
+      continue;
+    }
+    if (!isRecord(parsed)) {
+      bad += 1;
+      continue;
+    }
+    raw += 1;
+    if (sessionId === undefined) sessionId = irStr(parsed['sessionId']);
+    if (cwd === undefined) cwd = qoderFirstString(parsed, QODER_SHAPE.cwdKeys);
+    createdAt = irEarlier(createdAt, qoderFirstTime(parsed, QODER_SHAPE.timeKeys));
+    const msg = isRecord(parsed['message']) ? parsed['message'] : parsed;
+    if (model === undefined) {
+      model = (isRecord(parsed['message']) ? irStr(parsed['message']['model']) : undefined)
+        ?? qoderFirstString(parsed, QODER_SHAPE.modelKeys);
+    }
+    const type = irStr(parsed['type']);
+    if (type === 'ai-title') {
+      // 重命名后到者胜：首个非空 ai-title 为准（与参考一致）
+      if (aiTitle === '') aiTitle = irStr(parsed['aiTitle']) ?? '';
+      continue;
+    }
+    if (type === 'last-prompt') {
+      if (lastPrompt === '') lastPrompt = irStr(parsed['lastPrompt']) ?? '';
+      continue;
+    }
+    const role = qoderRoleOf(parsed, msg);
+    if (role === undefined) {
+      irBump(ignored, type === undefined ? 'unknown' : type);
+      continue;
+    }
+    const blocks = genericBlocksOf(msg['content'], ignored, 'block');
+    pairQoderToolResults(blocks, unresolved);
+    if (role === 'assistant') {
+      for (const block of blocks) {
+        if (block.type === 'tool_call' && block.id !== '') unresolved.push(block.id);
+      }
+    }
+    if (blocks.length === 0) {
+      irBump(ignored, (type ?? role) + ':no-content');
+      continue;
+    }
+    const time = qoderFirstTime(parsed, QODER_SHAPE.timeKeys);
+    const id = qoderFirstString(parsed, QODER_SHAPE.idKeys);
+    records.push({
+      role,
+      blocks,
+      ...(time !== undefined ? { time } : {}),
+      ...(id !== undefined ? { id } : {}),
+      ...(role === 'assistant' && model !== undefined ? { model } : {}),
+    });
+  }
+
+  // 标题：ai-title > last-prompt > 首问兜底（参考 convert/qoder.mjs）
+  let title = aiTitle.trim();
+  if (title === '') title = lastPrompt.trim();
+  if (title === '') title = firstUserText(records);
+
+  return {
+    parsed: { records, cwd, createdAt, title: title.slice(0, 200), raw, bad, ignored },
+    ...(sessionId !== undefined ? { sessionId } : {}),
+    stemMismatch: sessionId !== undefined && fileStem !== '' && sessionId !== fileStem,
+  };
 }
 
 export async function readQoderSessions(opts: QoderReadOptions): Promise<SessionReadOutcome<QoderSessionFile>> {

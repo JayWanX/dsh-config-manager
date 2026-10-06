@@ -70,6 +70,8 @@ const GOOSE_SESSION_CWD_KEYS = ['working_dir', 'working_directory', 'cwd', 'dire
 const GOOSE_SESSION_TITLE_KEYS = ['name', 'title', 'description', 'summary'];
 const GOOSE_SESSION_TIME_KEYS = ['created_at', 'createdAt', 'time_created', 'updated_at', 'updatedAt'];
 
+const GOOSE_SESSION_TYPE_KEYS = ['session_type', 'sessionType'];
+const GOOSE_SESSION_PARENT_KEYS = ['parent_session_id', 'parentSessionId', 'parentSession'];
 const GOOSE_MESSAGE_SESSION_KEYS = ['session_id', 'sessionId', 'session'];
 const GOOSE_MESSAGE_ID_KEYS = ['id', 'message_id', 'messageId'];
 const GOOSE_MESSAGE_ROLE_KEYS = ['role', 'sender'];
@@ -86,7 +88,19 @@ interface GooseAcc {
  *
  * 竞品取证（read-chat-import §8.4）点名 `content_json` 有 8 种块词汇、工具靠
  * `toolRequest.id ↔ toolResponse.id` 配对 —— 这里保留 id 原样（不伪造），配对交给合成器。
+ *
+ * 信封键名：真实库（serde 默认字段命名）是 **snake_case** `tool_call` / `tool_result`，
+ * 旧代码只认 camelCase `toolCall` / `toolResult` → 工具名/参数/结果全落空；这里两种都接受，
+ * snake_case 优先（参考 lib/convert/goose.mjs mapGooseBlock）。
  */
+function firstRecordValue(record: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> | undefined {
+  for (const key of keys) {
+    const v = record[key];
+    if (isRecord(v)) return v;
+  }
+  return undefined;
+}
+
 function gooseBlock(item: unknown, acc: GooseAcc): IrBlock[] {
   if (typeof item === 'string') return item === '' ? [] : [irTextBlock(item)];
   if (!isRecord(item)) {
@@ -99,7 +113,7 @@ function gooseBlock(item: unknown, acc: GooseAcc): IrBlock[] {
     return text === '' ? [] : [irTextBlock(text)];
   }
   if (type === 'toolrequest' || type === 'tool_request') {
-    const call = isRecord(item['toolCall']) ? item['toolCall'] : undefined;
+    const call = firstRecordValue(item, ['tool_call', 'toolCall']);
     const value = call !== undefined && isRecord(call['value']) ? call['value'] : undefined;
     const id = pickString(item, ['id']) ?? '';
     const name = value === undefined ? '' : (pickString(value, ['name']) ?? '');
@@ -107,12 +121,15 @@ function gooseBlock(item: unknown, acc: GooseAcc): IrBlock[] {
     return [irToolCallBlock(id, name, input)];
   }
   if (type === 'toolresponse' || type === 'tool_response') {
-    const result = isRecord(item['toolResult']) ? item['toolResult'] : undefined;
+    const result = firstRecordValue(item, ['tool_result', 'toolResult']);
     const value = result !== undefined && isRecord(result['value']) ? result['value'] : undefined;
     const id = pickString(item, ['id']) ?? '';
-    const body = value?.['content'] ?? value?.['output'] ?? value?.['text'] ?? value;
+    // 出错时没有 value：结果正文回落到信封的 error 字符串（参考 toolResponseResult）
+    const errorText = result !== undefined && typeof result['error'] === 'string' ? result['error'] : undefined;
+    const body = value?.['content'] ?? value?.['output'] ?? value?.['text'] ?? errorText ?? value;
     const text = flattenText(body, acc.ignored, 'tool-output');
-    const isError = value?.['isError'] === true || value?.['is_error'] === true || item['isError'] === true;
+    const isError = result?.['status'] === 'error'
+      || value?.['isError'] === true || value?.['is_error'] === true || item['isError'] === true;
     return [irToolResultBlock(id, text, isError)];
   }
   if (type === 'thinking' || type === 'redactedthinking' || type === 'reasoning') {
@@ -139,9 +156,26 @@ function gooseBlocks(value: unknown, acc: GooseAcc): IrBlock[] {
   return [];
 }
 
+/** `messages.metadata_json.userVisible === false` = agent-only 消息，不进对话（与上游 message_count 口径一致） */
+function gooseMessageHidden(row: SqliteRow): boolean {
+  const raw = pickString(row, ['metadata_json', 'metadataJson']);
+  if (raw === undefined) return false;
+  try {
+    const meta: unknown = JSON.parse(raw);
+    return isRecord(meta) && meta['userVisible'] === false;
+  } catch {
+    // 畸形 metadata_json 只丢元数据（按 userVisible 默认 true 处理），不影响消息本体
+    return false;
+  }
+}
+
 function gooseRecords(rows: readonly SqliteRow[], acc: GooseAcc): TranscriptRecord[] {
   const out: TranscriptRecord[] = [];
   for (const row of rows) {
+    if (gooseMessageHidden(row)) {
+      irBump(acc.ignored, 'message:not-user-visible');
+      continue;
+    }
     const roleRaw = (pickString(row, GOOSE_MESSAGE_ROLE_KEYS) ?? '').toLowerCase();
     const role = roleRaw === 'user' || roleRaw === 'assistant' ? roleRaw : undefined;
     const cell = jsonCell(row, GOOSE_CONTENT_KEYS);
@@ -155,10 +189,37 @@ function gooseRecords(rows: readonly SqliteRow[], acc: GooseAcc): TranscriptReco
     const id = pickString(row, GOOSE_MESSAGE_ID_KEYS);
     const time = pickTime(row, GOOSE_MESSAGE_TIME_KEYS);
     const pushed = splitToolResults(role, blocks, { id, time });
+    // 用户消息同时带正文与 toolResponse 时，splitToolResults 先产出正文记录 → 合成器会把
+    // 正文当新一轮开始（关闭当前 step），随后的结果记录就成了无 step 可归的孤儿被丢弃。
+    // 结果记录排到正文之前即可挂回上一条 assistant 的 step（参考 convert/goose.mjs：载体正文
+    // 不进新轮）。只调换用户侧的两条记录顺序，其它来源的调用不动。
+    if (role === 'user' && pushed.length > 1) pushed.reverse();
     for (const rec of pushed) out.push(rec);
     if (pushed.length === 0) irBump(acc.ignored, 'message-empty');
   }
   return out;
+}
+
+/** 消息行序：参考按 `(created_timestamp, id)` 升序（库里不保证物理顺序，缺 ORDER BY 会乱序） */
+function gooseMessageOrder(rows: readonly SqliteRow[]): SqliteRow[] {
+  const idOf = (row: SqliteRow): string | number => {
+    const v = row['id'] ?? row['message_id'] ?? row['messageId'];
+    if (typeof v === 'number') return v;
+    if (typeof v === 'string') return v;
+    return '';
+  };
+  return [...rows].sort((a, b) => {
+    const ta = pickTime(a, GOOSE_MESSAGE_TIME_KEYS);
+    const tb = pickTime(b, GOOSE_MESSAGE_TIME_KEYS);
+    if (ta !== undefined || tb !== undefined) {
+      const d = (ta ?? 0) - (tb ?? 0);
+      if (d !== 0) return d;
+    }
+    const ia = idOf(a);
+    const ib = idOf(b);
+    if (typeof ia === 'number' && typeof ib === 'number') return ia - ib;
+    return String(ia).localeCompare(String(ib));
+  });
 }
 
 /**
@@ -182,7 +243,7 @@ export function readGooseDatabase(db: SqliteHandle): SqliteReadPart | null {
   if (messageRows === null) return null;
 
   const bySession = new Map<string, SqliteRow[]>();
-  for (const row of messageRows) {
+  for (const row of gooseMessageOrder(messageRows)) {
     const key = pickString(row, GOOSE_MESSAGE_SESSION_KEYS);
     if (key === undefined) continue;
     const list = bySession.get(key);
@@ -194,10 +255,22 @@ export function readGooseDatabase(db: SqliteHandle): SqliteReadPart | null {
   const skipped: ForeignSkip[] = [];
   let noId = 0;
   let noCwd = 0;
+  let filteredType = 0;
+  let filteredParent = 0;
   for (const row of sessionRows) {
     const id = pickString(row, GOOSE_SESSION_ID_KEYS);
     if (id === undefined) {
       noId++;
+      continue;
+    }
+    // 只取顶层会话：子代理 / 隐藏会话与挂在父会话下的行不单独成会话（参考 gooseRows）
+    const sessionType = (pickString(row, GOOSE_SESSION_TYPE_KEYS) ?? '').toLowerCase();
+    if (sessionType === 'sub_agent' || sessionType === 'hidden') {
+      filteredType++;
+      continue;
+    }
+    if (pickString(row, GOOSE_SESSION_PARENT_KEYS) !== undefined) {
+      filteredParent++;
       continue;
     }
     const cwd = pickString(row, GOOSE_SESSION_CWD_KEYS);
@@ -225,6 +298,8 @@ export function readGooseDatabase(db: SqliteHandle): SqliteReadPart | null {
     sessions: files.length,
     messages: messageRows.length,
     'sessions.without-cwd': noCwd,
+    'sessions.filtered-type': filteredType,
+    'sessions.filtered-parent': filteredParent,
   };
   return { files, skipped, counts };
 }

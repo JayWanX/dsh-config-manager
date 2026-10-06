@@ -25,11 +25,14 @@
 import { isAbsoluteFor, joinFor, normalizePlatform, vscodeUserDataDir } from './platform-paths.ts';
 import type { ForeignPlatform } from './platform-paths.ts';
 import { isFile, listDirNames, statOrNull } from './session-read.ts';
-import { genericBlocksOf } from './session-source.ts';
+import { flattenText, genericBlocksOf } from './session-source.ts';
 import type { ParsedTranscript, RootProbeOptions, SessionReadOutcome, TranscriptRecord } from './session-source.ts';
-import { irBump, irSafeTime, isSafeIrId } from './session-ir.ts';
+import { irBump, irTextBlock, isSafeIrId } from './session-ir.ts';
 import { cellBytes, cellText, openSqliteIfShape, sqliteCapability } from './sqlite.ts';
+// SQLite 批的**唯一**时间口径（秒/毫秒自适应 + 安全整数）在本文件的共享模块里，不再抄第二份
+import { msTime } from './read-opencode.ts';
 import { isRecord } from '../utils/guards.ts';
+import type { IrBlock, IrTimeMs } from './session-ir.ts';
 import type { ForeignSkip } from './types.ts';
 
 /** 四个发行版名（顺序 = chat-import traeUserDataDirs 的判定顺序） */
@@ -42,14 +45,24 @@ const MAX_NODES = 50000;
 const MAX_DEPTH = 8;
 
 const MESSAGE_ARRAY_KEYS: readonly string[] = [
+  // 后三个来自参考 convert/trae.mjs 的 SESSION_MESSAGE_KEYS（旧版 Trae 用它们装消息）
   'messages', 'conversation', 'history', 'chat', 'turns', 'dialogue', 'items', 'records',
+  'chatMessages', 'messageList', 'entries',
 ];
 const ID_KEYS: readonly string[] = [
   'id', 'sessionId', 'session_id', 'chatId', 'chat_id', 'conversationId', 'conversation_id', 'uuid', 'key',
 ];
+/**
+ * cwd 的候选字段。**刻意收紧**（与参考 convert/trae.mjs 的 SESSION_DIRECTORY_KEYS 同口径）：
+ * `path` / `rootPath` 这类键在存储值里到处都是（UI 状态、工具调用、构建脚本），拿它当会话
+ * cwd 会**静默**把会话归到错误的项目下。
+ */
 const CWD_KEYS: readonly string[] = [
   'cwd', 'workspace', 'workspacePath', 'workspace_path', 'projectPath', 'workingDirectory', 'directory',
-  'folder', 'rootPath', 'path',
+];
+/** 消息正文的候选字段（参考 convert/trae.mjs 的 MESSAGE_TEXT_KEYS；parts 是本地既有兜底） */
+const MESSAGE_BODY_KEYS: readonly string[] = [
+  'content', 'text', 'message', 'body', 'prompt', 'response', 'output', 'parts', 'result',
 ];
 const TITLE_KEYS: readonly string[] = ['title', 'name', 'summary', 'topic'];
 const TIME_KEYS: readonly string[] = ['createdAt', 'created_at', 'createTime', 'create_time', 'timestamp', 'startTime', 'time'];
@@ -71,13 +84,33 @@ function str(v: unknown): string | undefined {
   return typeof v === 'string' && v !== '' ? v : undefined;
 }
 
+/** 已确证的主存储键（chat-import §3.1） */
+export const TRAE_STORAGE_KEY = 'memento/icube-ai-agent-storage';
+
 /**
- * 聊天存储键的**候选**判定（保守）。
- * 已确证的键：`memento/icube-ai-agent-storage`；未确证的回退键用模式兜住，
- * **不把它们当成「一定正确」** —— 解析不出内容就走 sessions-not-migrated。
+ * 已确证的**回退键**（参考 lib/sources/trae.mjs 的 TRAE_FALLBACK_KEYS）：
+ * 旧版 / 变体发行版把会话放在这两个键下，只认 icube 模式会**整库漏读**（一条会话都读不出来）。
+ * 后两个本身就含 icube，列出来是为了让「参考认哪些键」这件事在源码里可见。
+ */
+export const TRAE_FALLBACK_KEYS: readonly string[] = [
+  'chat.ChatSessionStore.index',
+  'ChatStore',
+  'memento/icube-ai-chat-storage-7467774676505887760',
+  'memento/icube-ai-ng-chat-storage-7467774676505887760',
+];
+
+/**
+ * 聊天存储键的**候选**判定。
+ * 判据三层：① 已确证的主键；② 已确证的回退键（大小写不敏感，与 SQLite 的按值查询同义）；
+ * ③ 未确证的回退键用模式兜住（含 icube，或含 trae 且含 chat/agent/session/storage）。
+ * 第③层**不把它们当成「一定正确」** —— 解析不出内容就走 sessions-not-migrated。
  */
 export function isTraeChatStorageKey(key: string): boolean {
   const lower = key.toLowerCase();
+  if (lower === TRAE_STORAGE_KEY) return true;
+  for (const fallback of TRAE_FALLBACK_KEYS) {
+    if (fallback.toLowerCase() === lower) return true;
+  }
   if (lower.includes('icube')) return true;
   return lower.includes('trae')
     && (lower.includes('chat') || lower.includes('agent') || lower.includes('session') || lower.includes('storage'));
@@ -104,19 +137,50 @@ function firstOf(node: Record<string, unknown>, keys: readonly string[]): string
   return undefined;
 }
 
+/**
+ * Trae 的时间值 → 毫秒（参考 lib/sources/trae.mjs 的 timeValue）。
+ *
+ * 与 `irSafeTime` 的差异**两条**：① state.vscdb 里秒 / 毫秒两种时间戳都有（< 1e11 按秒换算，
+ * 直接当毫秒会落到 1970）；② 「数字字符串」（`"1700000000"`）也是常见形态，`Date.parse`
+ * 对它得 NaN（于是 createdAt 退化成导入当天）。换算复用 `read-opencode.ts` 的 `msTime`，
+ * 这里只额外剥一层数字串。
+ */
+export function traeTimeValue(v: unknown): IrTimeMs | undefined {
+  if (typeof v === 'string') {
+    const trimmed = v.trim();
+    if (/^\d+$/.test(trimmed)) {
+      const n = Number(trimmed);
+      if (Number.isFinite(n)) return msTime(n);
+    }
+  }
+  return msTime(v);
+}
+
 function timeOf(node: Record<string, unknown>): number | undefined {
   for (const key of TIME_KEYS) {
-    const t = irSafeTime(node[key]);
+    const t = traeTimeValue(node[key]);
     if (t !== undefined) return t;
   }
   return undefined;
 }
 
-/** 结构自证：数组里**至少一条**带角色字段的记录，才把它当消息数组（挡住任意字符串数组） */
+/**
+ * 取值集合：数组原样；**对象取其值**（参考 convert/trae.mjs 的 valuesOf）。
+ *
+ * 为什么必须同时认对象：部分回退存储把会话**按 id 键成对象映射**而不是数组；
+ * 只认数组会让整个库看起来「没有会话」。
+ */
+function valuesOf(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (isRecord(value)) return Object.values(value);
+  return [];
+}
+
+/** 结构自证：集合里**至少一条**带角色字段的记录，才把它当消息集合（挡住任意字符串数组/UI 状态） */
 function messageArrayOf(node: Record<string, unknown>): unknown[] | undefined {
   for (const key of MESSAGE_ARRAY_KEYS) {
-    const candidate = node[key];
-    if (!Array.isArray(candidate) || candidate.length === 0) continue;
+    const candidate = valuesOf(node[key]);
+    if (candidate.length === 0) continue;
     for (const item of candidate) {
       if (!isRecord(item)) continue;
       if (str(item['role']) !== undefined || str(item['type']) !== undefined
@@ -138,7 +202,9 @@ function roleOfItem(item: Record<string, unknown>, ignored: Record<string, numbe
   }
   const lower = rawRole.toLowerCase();
   if (lower === 'user' || lower === 'human' || lower === 'user_message' || lower === 'ask') return 'user';
-  if (lower === 'assistant' || lower === 'ai' || lower === 'model' || lower === 'bot' || lower === 'say') return 'assistant';
+  // `agent` 是 Trae 自己的助手角色名（参考 convert/trae.mjs 的 normalizeRole）
+  if (lower === 'assistant' || lower === 'ai' || lower === 'model' || lower === 'bot' || lower === 'say'
+    || lower === 'agent') return 'assistant';
   irBump(ignored, 'trae:role-' + lower);
   return undefined;
 }
@@ -153,6 +219,67 @@ interface RawSession {
   readonly ignored: Readonly<Record<string, number>>;
 }
 
+/** 计划字段的文本投影（参考 formatPlanValue：先取正文，取不到再 JSON 序列化对象） */
+function planValueText(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  const text = flattenText(value);
+  if (text.trim() !== '') return text;
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return '';
+    }
+  }
+  return String(value);
+}
+
+/** 单条计划项 → 文本（参考 planItemText：thought / tool / arguments / result 带标签） */
+function planItemText(item: unknown): string {
+  if (!isRecord(item)) return typeof item === 'string' ? item.trim() : '';
+  const thought = planValueText(item['thought']);
+  const toolName = str(item['toolName']) ?? str(item['tool']) ?? str(item['name']);
+  const params = planValueText(item['params'] ?? item['arguments'] ?? item['input']);
+  const result = planValueText(item['result'] ?? item['finish']);
+  const content = planValueText(item['content'] ?? item['text']);
+  const lines: string[] = [];
+  if (thought !== '') lines.push('[thought] ' + thought);
+  if (toolName !== undefined) lines.push('[tool] ' + toolName);
+  if (params !== '') lines.push('[arguments] ' + params);
+  if (result !== '') lines.push('[result] ' + result);
+  if (thought === '' && toolName === undefined && params === '' && result === '' && content !== '') lines.push(content);
+  return lines.join(String.fromCharCode(10)).trim();
+}
+
+/**
+ * agentTaskContent.guideline.planItems（回退 content.guideline）→ 正文文本。
+ * 参考 convert/trae.mjs 的 agentPlanText：Agent 模式的 Trae 把正文放在计划项里，
+ * content/text 是空的 —— 不回退就会把整段助手回复读成「无内容」。
+ */
+function agentPlanText(item: Record<string, unknown>): string {
+  for (const source of [item['agentTaskContent'], item['content']]) {
+    if (!isRecord(source)) continue;
+    const guideline = source['guideline'];
+    const raw = isRecord(guideline) ? guideline['planItems'] : undefined;
+    const items = valuesOf(raw);
+    const text = items.map(planItemText).filter((t) => t !== '').join(String.fromCharCode(10, 10)).trim();
+    if (text !== '') return text;
+  }
+  return '';
+}
+
+/** 正文：按候选键取**第一个有实质内容**的（空串/空对象继续往下试），最后回退计划项 */
+function bodyBlocksOf(item: Record<string, unknown>, ignored: Record<string, number>): IrBlock[] {
+  for (const key of MESSAGE_BODY_KEYS) {
+    const raw = item[key];
+    if (raw === undefined || raw === null) continue;
+    const blocks = genericBlocksOf(raw, ignored, 'trae-block');
+    if (blocks.some((b) => b.type !== 'text' || b.text.trim() !== '')) return blocks;
+  }
+  const plan = agentPlanText(item);
+  return plan === '' ? [] : [irTextBlock(plan)];
+}
+
 function recordsOf(items: readonly unknown[], ignored: Record<string, number>): { records: TranscriptRecord[]; raw: number } {
   const records: TranscriptRecord[] = [];
   let raw = 0;
@@ -161,8 +288,7 @@ function recordsOf(items: readonly unknown[], ignored: Record<string, number>): 
     if (!isRecord(item)) { irBump(ignored, 'trae:non-object-item'); continue; }
     const role = roleOfItem(item, ignored);
     if (role === undefined) continue;
-    const content = item['content'] ?? item['text'] ?? item['message'] ?? item['parts'];
-    const blocks = genericBlocksOf(content, ignored, 'trae-block');
+    const blocks = bodyBlocksOf(item, ignored);
     if (blocks.length === 0) { irBump(ignored, 'trae:no-content'); continue; }
     const time = timeOf(item);
     const id = firstOf(item, ['id', 'messageId', 'message_id']);

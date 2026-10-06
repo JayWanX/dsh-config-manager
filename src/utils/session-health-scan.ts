@@ -14,15 +14,39 @@
  *     所以还必须证明「收尾块之后、下一个 turn/start 之前，同一个 turn 还在继续」。
  *
  * 「绝不猜」：任何读不出的东西一律记成事实缺省（`unreadable` / 计数字段），既不当作「没问题」，
- * 也不编造具体原因。需要 DSH codec 才能判定的类（缺 message id / 悬空 tool-call / settlement
- * 非法）本轮**不产出** —— 没有真凭实据就不下结论（详见本文件末尾的说明）。
+ * 也不编造具体原因。
+ *
+ * 工具生命周期判定（T4）全部**只从行文本证明**，不引入 DSH codec：
+ *  ① 缺 message id（user/message 的 data.id、assistant/message 与 tool/result 的 data.message.id）；
+ *  ② 空 tool-call id（tool/call.callId 或 assistant/message 内容里 tool-call 块的 id）；
+ *  ③ 已关闭 step 里的悬空 tool-call（尾部仍开着的 step 是正常崩溃形状，不报）；
+ *  ④ 同一步内重复通告的 tool-call id；
+ *  ⑤ tool/result 的 toolCallId 与 message.source.callId 不配对。
+ *
+ * 严重级**不是注释断言，是真 codec 实测**（2026-10-06；DSH 的
+ * `@deepseek-ai/dsh-session-format-catalog` + `createRestore(header, { recovery:'strict' })`）：
+ *  - v4（headerVersion >= 4）：tool/result 缺 message.id / toolCallId 不配对 → decodeRow 当场拒读 → unloadable；
+ *    user/message 缺 data.id、assistant/message 缺 message.id、tool/call.callId 空、内容块 id 空 →
+ *    格式目录口径（transformed）通过 → nextRequestFails（detail 记 codec-unproven）。
+ *  - pre-v4（headerVersion < 4）：三类消息缺 id / 空 tool-call id 走 v0→v1、v3→v4 迁移并被迁移器拒绝 → unloadable。
+ *  - 版本读不出：按较轻的 nextRequestFails 报，detail 记 codec-uncalibrated（不谎称已验证）。
+ *
+ * 口径说明（如实记录，避免误读）：同一变体在 `validation:'current'`（已安装 Session 校验）下
+ * 更严 —— 真机 v4 日志上，缺 user/assistant message.id 与空 tool-call id 也会被 `finish()` 拒绝。
+ * 本轮按裁决采用 transformed（格式目录）口径，故那几类记 nextRequestFails。
  */
 import fs from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { isSessionLogName, readLogHeaderFromBytes, PROJECT_KEY_RE } from './session-log.ts';
 import { decodeZstdFrame, scanZstdFrames } from './zstd-frame.ts';
-import type { SessionHealthInput, SessionHealthSummary, SessionHealthRow } from '../core/session-health.ts';
+import type {
+  SessionHealthInput,
+  SessionHealthIssueCode,
+  SessionHealthSeverity,
+  SessionHealthSummary,
+  SessionHealthRow,
+} from '../core/session-health.ts';
 import { analyzeSessionHealth } from '../core/session-health.ts';
 import { sessionIdKey } from '../core/session-select.ts';
 import { findSyntheticCloserRun, parseSessionRowFacts, type SessionRowFacts } from './session-row-facts.ts';
@@ -77,6 +101,261 @@ function parseRow(line: string): SessionRowFacts | null {
   return parseSessionRowFacts(line);
 }
 
+/* ---------------- 工具生命周期：只从行文本证明的本地解析（T4） ---------------- */
+
+/**
+ * 只看这些行类型（其余事件不解第二次 JSON）—— `session-row-facts` 是另一任务的写作用域，
+ * 需要的新行级事实在本模块本地解析，绝不改动它。
+ */
+const LIFECYCLE_ROW_TYPES: ReadonlySet<string> = new Set([
+  'user/message', 'assistant/message', 'tool/result', 'tool/call',
+  'step/start', 'step/end', 'turn/start', 'turn/end',
+]);
+
+/** 一行里「从行文本可证明」的生命周期事实（读不出的一律缺省 → 不参与判定）。 */
+interface LifecycleRow {
+  type: string;
+  /** `data.turn` / `data.step`（安全非负整数才记） */
+  turn?: number;
+  step?: number;
+  /** 消息载体的 id 是否合法（仅 user/message、assistant/message、tool/result 有值；false = 缺失/非字符串/空串） */
+  messageIdOk?: boolean;
+  /** tool/call 的 `data.callId` 原文（缺失 = undefined；可能是空串或非字符串） */
+  rawCallId?: unknown;
+  /** assistant/message 内容里 tool-call 块的 id 原文（含缺省项） */
+  blockIds?: unknown[];
+  /** tool/result 的配对信息（仅 tool/result 有值） */
+  result?: { sourceCallId: unknown; toolCallId: unknown };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function readCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value !== '';
+}
+
+/** 本地解析（只做生命周期判定所需的字段；JSON 解析失败 = undefined，调用方已按不可解析行计数）。 */
+function parseLifecycleRow(line: string, type: string): LifecycleRow | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  const rec = asRecord(parsed);
+  if (rec === undefined) return undefined;
+  const data = asRecord(rec['data']);
+  const row: LifecycleRow = { type };
+  const turn = readCount(data?.['turn']);
+  const step = readCount(data?.['step']);
+  if (turn !== undefined) row.turn = turn;
+  if (step !== undefined) row.step = step;
+  if (type === 'user/message') {
+    // user/message 的 data **本身即 message**，id 在 data.id
+    row.messageIdOk = isNonEmptyString(data?.['id']);
+  } else if (type === 'assistant/message') {
+    const message = asRecord(data?.['message']);
+    row.messageIdOk = isNonEmptyString(message?.['id']);
+    const content = message?.['content'];
+    if (Array.isArray(content)) {
+      const ids: unknown[] = [];
+      for (const block of content) {
+        const blockRec = asRecord(block);
+        if (blockRec?.['type'] === 'tool-call') ids.push(blockRec['id']);
+      }
+      if (ids.length > 0) row.blockIds = ids;
+    }
+  } else if (type === 'tool/result') {
+    const message = asRecord(data?.['message']);
+    row.messageIdOk = isNonEmptyString(message?.['id']);
+    const sourceCallId = asRecord(message?.['source'])?.['callId'];
+    // 代际差异（真机实测）：v4 行把 toolCallId 放在 message 上（content[0] 是文本块）；
+    // v0/v3 行沿用 content[0].toolCallId（block 形状）。两处都读，取实际存在的那一个。
+    let toolCallId: unknown;
+    if (message !== undefined && Object.prototype.hasOwnProperty.call(message, 'toolCallId')) {
+      toolCallId = message['toolCallId'];
+    } else {
+      const content = message?.['content'];
+      const first = Array.isArray(content) ? asRecord(content[0]) : undefined;
+      if (first !== undefined && Object.prototype.hasOwnProperty.call(first, 'toolCallId')) {
+        toolCallId = first['toolCallId'];
+      }
+    }
+    row.result = { sourceCallId, toolCallId };
+  } else if (type === 'tool/call') {
+    row.rawCallId = data?.['callId'];
+  }
+  return row;
+}
+
+/** 生命周期判定的可证明事实（计数）。 */
+interface ToolLifecycleFacts {
+  /** 消息载体 id 不合法的行数（三类载体合计） */
+  missingMessageId: number;
+  /** 其中 tool/result 载体的行数（任何代际下真 codec 都拒读） */
+  missingMessageIdToolResult: number;
+  /** tool/call.callId 或 assistant/message 内容块 id 为空 / 非字符串的次数 */
+  emptyToolCallId: number;
+  /** tool/result 的 toolCallId 缺失 / 非字符串 / 与 source.callId 不一致的次数 */
+  toolResultIdMismatch: number;
+  /** 已关闭 step 里没有配对 tool/result 的 tool/call 数 */
+  danglingClosedStep: number;
+  /** 同一步同一 callId 被多次通告的 (step, callId) 对数 */
+  duplicateToolCallId: number;
+}
+
+interface LifecycleScan {
+  facts: ToolLifecycleFacts;
+  /** 仍开着的 step（键 = `<turn>/<step>`） */
+  openSteps: Set<string>;
+  /** 已关闭的 step（step/end，或它所属回合的 turn/end） */
+  closedSteps: Set<string>;
+  /** 已通告的 tool/call（非空 id 且能定位到 step） */
+  calls: { key: string; callId: string }[];
+  /** 出现过的 tool/result 配对 id（按 message.source.callId） */
+  resultIds: Set<string>;
+  /**
+   * step 键 → callId → 分类通告次数。
+   * **必须分类计数**：健康日志里同一个 callId 本来就会同时出现在 assistant/message 的内容块
+   * 与 tool/call 行里（真机实测），跨类相加会把健康会话误报成重复。
+   */
+  declarations: Map<string, Map<string, { blocks: number; rows: number }>>;
+}
+
+function createLifecycleScan(): LifecycleScan {
+  return {
+    facts: {
+      missingMessageId: 0,
+      missingMessageIdToolResult: 0,
+      emptyToolCallId: 0,
+      toolResultIdMismatch: 0,
+      danglingClosedStep: 0,
+      duplicateToolCallId: 0,
+    },
+    openSteps: new Set<string>(),
+    closedSteps: new Set<string>(),
+    calls: [],
+    resultIds: new Set<string>(),
+    declarations: new Map(),
+  };
+}
+
+function stepKeyOf(row: LifecycleRow): string | undefined {
+  return row.turn !== undefined && row.step !== undefined ? row.turn + '/' + row.step : undefined;
+}
+
+function closeStep(scan: LifecycleScan, key: string): void {
+  scan.openSteps.delete(key);
+  scan.closedSteps.add(key);
+}
+
+function bumpDeclaration(scan: LifecycleScan, key: string, callId: string, kind: 'blocks' | 'rows'): void {
+  let perStep = scan.declarations.get(key);
+  if (perStep === undefined) {
+    perStep = new Map();
+    scan.declarations.set(key, perStep);
+  }
+  const counts = perStep.get(callId) ?? { blocks: 0, rows: 0 };
+  counts[kind] += 1;
+  perStep.set(callId, counts);
+}
+
+/** 应用一行（顺序即日志顺序；边界按 step/start→step/end、turn/start→turn/end 收窄）。 */
+function applyLifecycleRow(scan: LifecycleScan, row: LifecycleRow): void {
+  const key = stepKeyOf(row);
+  switch (row.type) {
+    case 'step/start':
+      if (key !== undefined) {
+        scan.openSteps.add(key);
+        scan.closedSteps.delete(key);
+      }
+      break;
+    case 'step/end':
+      if (key !== undefined) closeStep(scan, key);
+      break;
+    case 'turn/end': {
+      // 回合已结束 → 该回合里仍开着的 step 不可能再有续写（崩溃恢复补写的 closer 也走这条边界）
+      if (row.turn === undefined) break;
+      const prefix = row.turn + '/';
+      for (const open of [...scan.openSteps]) if (open.startsWith(prefix)) closeStep(scan, open);
+      break;
+    }
+    case 'tool/call': {
+      // 空 / 非字符串 callId 只进 ②（能否配对已不可判定），不进悬空判定
+      if (!isNonEmptyString(row.rawCallId)) {
+        scan.facts.emptyToolCallId += 1;
+        break;
+      }
+      // 定位不到 step（turn/step 读不出）→ 无法证明「step 已关闭」→ 不报悬空
+      if (key !== undefined) {
+        scan.calls.push({ key, callId: row.rawCallId });
+        bumpDeclaration(scan, key, row.rawCallId, 'rows');
+      }
+      break;
+    }
+    default:
+      break;
+  }
+  if (row.messageIdOk === false) {
+    scan.facts.missingMessageId += 1;
+    if (row.type === 'tool/result') scan.facts.missingMessageIdToolResult += 1;
+  }
+  if (row.blockIds !== undefined) {
+    for (const id of row.blockIds) {
+      if (!isNonEmptyString(id)) {
+        scan.facts.emptyToolCallId += 1;
+        continue;
+      }
+      if (key !== undefined) bumpDeclaration(scan, key, id, 'blocks');
+    }
+  }
+  if (row.result !== undefined) {
+    if (isNonEmptyString(row.result.sourceCallId)) scan.resultIds.add(row.result.sourceCallId);
+    // toolCallId 缺失 / 非字符串 / 与 source.callId 不一致 → 真 codec 直接拒读（v4 decodeRow；pre-v4 迁移同样拒）
+    if (!isNonEmptyString(row.result.toolCallId)
+      || !isNonEmptyString(row.result.sourceCallId)
+      || row.result.toolCallId !== row.result.sourceCallId) {
+      scan.facts.toolResultIdMismatch += 1;
+    }
+  }
+}
+
+function finalizeLifecycleScan(scan: LifecycleScan): ToolLifecycleFacts {
+  for (const call of scan.calls) {
+    // 只报「所属 step 已经关闭」的悬空调用：日志尾部还开着的 step 是正常崩溃形状（引擎的
+    // interruptedTurnClosers 会补），报它就是误报。
+    if (scan.closedSteps.has(call.key) && !scan.resultIds.has(call.callId)) scan.facts.danglingClosedStep += 1;
+  }
+  let duplicate = 0;
+  for (const perStep of scan.declarations.values()) {
+    for (const counts of perStep.values()) if (counts.blocks >= 2 || counts.rows >= 2) duplicate += 1;
+  }
+  scan.facts.duplicateToolCallId = duplicate;
+  return scan.facts;
+}
+
+/** 缺 message id 的严重级：tool/result 载体任何代际都拒读；其余按代际（见文件头实测口径）。 */
+function missingMessageIdSeverity(facts: ToolLifecycleFacts, headerVersion: number | undefined): SessionHealthSeverity {
+  if (facts.missingMessageIdToolResult > 0) return 'unloadable';
+  if (headerVersion === undefined) return 'nextRequestFails';
+  return headerVersion >= 4 ? 'nextRequestFails' : 'unloadable';
+}
+
+/** 空 tool-call id 的严重级：v4（格式目录口径）通过；pre-v4 迁移器直接拒。 */
+function emptyToolCallIdSeverity(headerVersion: number | undefined): SessionHealthSeverity {
+  if (headerVersion === undefined) return 'nextRequestFails';
+  return headerVersion >= 4 ? 'nextRequestFails' : 'unloadable';
+}
+
+
 /** 行档结论（全部是「从字节可证明」的事实）。 */
 interface RowScanResult {
   unparsable: number;
@@ -86,11 +365,14 @@ interface RowScanResult {
   seqGaps: number;
   /** 合成 closer 块（后面还有真实续写） */
   syntheticCloser: boolean;
+  /** 工具生命周期（T4 四类 + tool/result 配对） */
+  lifecycle: ToolLifecycleFacts;
 }
 
 /** 行档：解压各帧 → 逐行判定（只做能从字节证明的判定）。 */
 function scanRows(frames: readonly { start: number; end: number }[], bytes: Uint8Array): RowScanResult {
   const rows: RowFacts[] = [];
+  const lifecycle = createLifecycleScan();
   let unparsable = 0;
   for (const frame of frames) {
     let text: string;
@@ -112,6 +394,11 @@ function scanRows(frames: readonly { start: number; end: number }[], bytes: Uint
       if (facts.seq !== undefined) entry.seq = facts.seq;
       if (facts.turn !== undefined) entry.turn = facts.turn;
       rows.push(entry);
+      const type = facts.type;
+      if (type !== undefined && LIFECYCLE_ROW_TYPES.has(type)) {
+        const lifecycleRow = parseLifecycleRow(line, type);
+        if (lifecycleRow !== undefined) applyLifecycleRow(lifecycle, lifecycleRow);
+      }
     }
   }
   // ① 字节相同且 seq 相同 → 重放族（同一 seq 被重写，重复的那份可零损失丢弃）
@@ -135,7 +422,7 @@ function scanRows(frames: readonly { start: number; end: number }[], bytes: Uint
   }
   // ③ 合成 closer 块：整块都是收尾类型且含 turn/end，且**后面还有行**（真实续写）
   const syntheticCloser = detectSyntheticCloser(rows);
-  return { unparsable, duplicateRows, seqGaps, syntheticCloser };
+  return { unparsable, duplicateRows, seqGaps, syntheticCloser, lifecycle: finalizeLifecycleScan(lifecycle) };
 }
 
 /** 合成 closer 块探测 —— 委托 `session-row-facts.findSyntheticCloserRun` 的唯一实现（判据见其文件头）。 */
@@ -229,12 +516,34 @@ async function scanUnit(
   const structural = picked?.structural ?? { ok: false, headerUnreadable: true };
   const rows = picked?.rows;
   // 行档结论 → 深度校验事实（**只标 verified=true 当真的逐行解析过**）
-  const deepIssueCodes: { code: 'unparsable-event' | 'replay-duplicate-rows' | 'seq-gap' | 'synthetic-closer'; detail?: string }[] = [];
+  const deepIssues: { code: SessionHealthIssueCode; severity?: SessionHealthSeverity; detail?: string }[] = [];
   if (rows !== undefined) {
-    if (rows.unparsable > 0) deepIssueCodes.push({ code: 'unparsable-event', detail: String(rows.unparsable) + ' line(s)' });
-    if (rows.duplicateRows > 0) deepIssueCodes.push({ code: 'replay-duplicate-rows', detail: String(rows.duplicateRows) });
-    if (rows.seqGaps > 0) deepIssueCodes.push({ code: 'seq-gap', detail: String(rows.seqGaps) });
-    if (rows.syntheticCloser) deepIssueCodes.push({ code: 'synthetic-closer' });
+    if (rows.unparsable > 0) deepIssues.push({ code: 'unparsable-event', detail: String(rows.unparsable) + ' line(s)' });
+    if (rows.duplicateRows > 0) deepIssues.push({ code: 'replay-duplicate-rows', detail: String(rows.duplicateRows) });
+    if (rows.seqGaps > 0) deepIssues.push({ code: 'seq-gap', detail: String(rows.seqGaps) });
+    if (rows.syntheticCloser) deepIssues.push({ code: 'synthetic-closer' });
+    // ---- T4：工具生命周期（只报不修；严重级 = 真 codec 实测口径，见文件头）----
+    const lifecycle = rows.lifecycle;
+    const version = header?.version;
+    if (lifecycle.missingMessageId > 0) {
+      const severity = missingMessageIdSeverity(lifecycle, version);
+      const note = severity === 'unloadable' ? '' : version === undefined ? '; codec-uncalibrated' : '; codec-unproven';
+      deepIssues.push({ code: 'missing-message-id', severity, detail: String(lifecycle.missingMessageId) + ' row(s)' + note });
+    }
+    if (lifecycle.toolResultIdMismatch > 0) {
+      deepIssues.push({ code: 'tool-result-id-mismatch', severity: 'unloadable', detail: String(lifecycle.toolResultIdMismatch) });
+    }
+    if (lifecycle.emptyToolCallId > 0) {
+      const severity = emptyToolCallIdSeverity(version);
+      const note = severity === 'unloadable' ? '' : version === undefined ? '; codec-uncalibrated' : '; codec-unproven';
+      deepIssues.push({ code: 'empty-tool-call-id', severity, detail: String(lifecycle.emptyToolCallId) + note });
+    }
+    if (lifecycle.danglingClosedStep > 0) {
+      deepIssues.push({ code: 'dangling-tool-call', severity: 'unloadable', detail: String(lifecycle.danglingClosedStep) + ' unresolved' });
+    }
+    if (lifecycle.duplicateToolCallId > 0) {
+      deepIssues.push({ code: 'duplicate-tool-call-id', severity: 'nextRequestFails', detail: String(lifecycle.duplicateToolCallId) });
+    }
   }
   const input: SessionHealthInput = {
     unitId: projectKey + '/' + sessionId,
@@ -248,7 +557,7 @@ async function scanUnit(
     ...(header?.version !== undefined ? { headerVersion: header.version } : {}),
     ...(names.length > 0 ? { sizeBytes: totalBytes } : {}),
     ...(rows !== undefined
-      ? { deep: { verified: true, ...(deepIssueCodes.length > 0 ? { issues: deepIssueCodes } : {}) } }
+      ? { deep: { verified: true, ...(deepIssues.length > 0 ? { issues: deepIssues } : {}) } }
       : { deep: { verified: false, unverifiedReason: 'row-scan-not-run' } }),
   };
   return { input, unreadable };

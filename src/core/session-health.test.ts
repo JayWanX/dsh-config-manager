@@ -222,3 +222,69 @@ test('T3：sessionHealthIssues 纯函数不修改输入（宿主可安全复用�
   sessionHealthIssues(base, ctx());
   assert.equal(JSON.stringify(base), snapshot);
 });
+
+/* ---------------- T4：行档问题的严重级可被行档采集器覆盖（实测口径），并按 code 去重取更重 ---------------- */
+
+test('T4 分类：行档问题自带 severity 时优先使用（同 code 不同代际后果不同），缺省才回落静态表', () => {
+  // 静态表里 dangling-tool-call 是 nextRequestFails（「未证明 step 已闭合」的历史默认）
+  const fallback = classifySessionHealth(input({ deep: { verified: true, issues: [{ code: 'dangling-tool-call' }] } }), ctx());
+  assert.equal(fallback.severity, 'nextRequestFails', '缺省回落静态表');
+  // 行档采集器证明「step 已关闭」后自带 unloadable（真 codec 实测拒读）
+  const closed = classifySessionHealth(
+    input({ deep: { verified: true, issues: [{ code: 'dangling-tool-call', severity: 'unloadable', detail: '1 unresolved' }] } }),
+    ctx(),
+  );
+  assert.equal(closed.severity, 'unloadable', '自带 severity 必须压过静态表');
+  assert.equal(closed.issues[0]?.severity, 'unloadable');
+  // 反向：采集器实测较轻（v4 缺 user/assistant message.id 只是下一次请求会失败）
+  const unproven = classifySessionHealth(
+    input({ deep: { verified: true, issues: [{ code: 'missing-message-id', severity: 'nextRequestFails', detail: '1 row(s); codec-unproven' }] } }),
+    ctx(),
+  );
+  assert.equal(unproven.severity, 'nextRequestFails', '不得一律升级成 unloadable');
+});
+
+test('T4 分类：新增三个问题码都有严重级（tool-result-id-mismatch / empty-tool-call-id / duplicate-tool-call-id）', () => {
+  assert.equal(sessionHealthSeverityOf([{ code: 'tool-result-id-mismatch', severity: 'unloadable' }]), 'unloadable');
+  const mismatch = classifySessionHealth(input({ deep: { verified: true, issues: [{ code: 'tool-result-id-mismatch' }] } }), ctx());
+  assert.equal(mismatch.severity, 'unloadable', 'toolCallId 不配对 = 真 codec 直接拒读');
+  const emptyId = classifySessionHealth(input({ deep: { verified: true, issues: [{ code: 'empty-tool-call-id' }] } }), ctx());
+  assert.equal(emptyId.issues[0]?.severity, 'unloadable', '静态回落也是 unloadable（v4 下采集器会自带 nextRequestFails）');
+  const dup = classifySessionHealth(input({ deep: { verified: true, issues: [{ code: 'duplicate-tool-call-id' }] } }), ctx());
+  assert.equal(dup.issues[0]?.severity, 'unloadable');
+});
+
+test('T4 分类：同一个 code 重复出现只留一条，且取更重的严重级', () => {
+  const heavierLast = classifySessionHealth(
+    input({
+      deep: {
+        verified: true,
+        issues: [
+          { code: 'replay-duplicate-rows', severity: 'nextRequestFails', detail: 'light' },
+          { code: 'replay-duplicate-rows', severity: 'unloadable', detail: 'heavy' },
+        ],
+      },
+    }),
+    ctx(),
+  );
+  assert.deepEqual(codes(heavierLast), ['replay-duplicate-rows'], '重复 code 必须去重');
+  assert.equal(heavierLast.issues[0]?.severity, 'unloadable');
+  assert.equal(heavierLast.issues[0]?.detail, 'heavy');
+
+  const heavierFirst = classifySessionHealth(
+    input({
+      deep: {
+        verified: true,
+        issues: [
+          { code: 'replay-duplicate-rows', severity: 'unloadable', detail: 'heavy' },
+          { code: 'replay-duplicate-rows', severity: 'nextRequestFails', detail: 'light' },
+        ],
+      },
+    }),
+    ctx(),
+  );
+  assert.deepEqual(codes(heavierFirst), ['replay-duplicate-rows']);
+  assert.equal(heavierFirst.issues[0]?.severity, 'unloadable', '后来的较轻记录不得把结论说轻');
+  assert.equal(heavierFirst.issues[0]?.detail, 'heavy');
+});
+

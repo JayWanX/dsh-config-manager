@@ -116,6 +116,11 @@ export interface SessionRepairRollbackResult {
  * 应用内**可修**的问题码（与执行器 planSessionLogRepair 的三类动作同源）：
  *  重放重复行 / 可证明的合成收尾块（零损失）；seq 空洞 / 不可解析行（截断，**有损**，需显式确认）。
  * 其余码（撕裂尾帧自愈、格式超前、缺工作区/缺父对话…）一律不给应用内入口。
+ *
+ * T4 的工具生命周期码（`missing-message-id` / `empty-tool-call-id` / `dangling-tool-call` /
+ * `tool-result-id-mismatch` / `duplicate-tool-call-id`）同样**只报不修**，刻意不进本集合：
+ * 修复它们必须真的改写消息/工具行，超出「只读体检」的范围。界面沿用既有**直接渲染机器 code**
+ * 的路径（本轮不新增 locale key、不改渲染路径、不新增散文文案）。
  */
 export const SESSION_REPAIRABLE_ISSUE_CODES: ReadonlySet<string> = new Set([
   'replay-duplicate-rows',

@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import {
   SESSION_REPAIR_REASON_KEYS,
   SESSION_SEVERITY_KEYS,
+  sessionIssueRepairable,
   formatSessionBytes,
   sessionHealthEmpty,
   sessionHealthPhase,
@@ -20,6 +21,7 @@ import {
   sessionSeverityBadgeKind,
 } from './session-inventory-view.ts';
 import type { SessionHealthResponse, SessionHealthRowView } from './session-inventory-view.ts';
+import type { SessionHealthSeverity } from '../core/session-health.ts';
 
 function row(overrides: Partial<SessionHealthRowView> = {}): SessionHealthRowView {
   return {
@@ -160,7 +162,11 @@ test('T9：行 → repairable 覆盖应用内可修的四类（零损失两类 +
     assert.equal(hit?.repairable, true, '应当可修: ' + code);
   }
   // 应用内不动的类别：撕裂尾帧（DSH 自愈）、格式超前、缺工作区/缺父对话、header 不可读
-  for (const code of ['torn-tail', 'format-newer', 'unregistered-workspace', 'subagent-without-parent', 'header-unreadable']) {
+  for (const code of [
+    'torn-tail', 'format-newer', 'unregistered-workspace', 'subagent-without-parent', 'header-unreadable',
+    // T4：工具生命周期码同样只报不修（修复要改写消息/工具行，超出只读体检范围）
+    'missing-message-id', 'empty-tool-call-id', 'dangling-tool-call', 'tool-result-id-mismatch', 'duplicate-tool-call-id',
+  ]) {
     const [miss] = sessionHealthRows(response([row({ severity: 'invisible', issues: [{ code, severity: 'invisible' }] })]));
     assert.equal(miss?.repairable, false, '不得出现「应用内修复」入口: ' + code);
   }
@@ -169,6 +175,38 @@ test('T9：行 → repairable 覆盖应用内可修的四类（零损失两类 +
   // 但可修的行即使当前判为 ok 也必须留在列表里（判据分叉时宁可显示也不藏）
   const [keptOk] = sessionHealthRows(response([row({ issues: [{ code: 'replay-duplicate-rows', severity: 'ok' }] })]));
   assert.equal(keptOk?.repairable, true, '可修行不得被过滤掉');
+});
+
+
+test('T4：工具生命周期新码在展示模型里可被消费（裸 code 上屏、不可应用内修复、计入需处理）', () => {
+  const cases: { code: string; severity: SessionHealthSeverity }[] = [
+    { code: 'missing-message-id', severity: 'unloadable' },
+    { code: 'empty-tool-call-id', severity: 'nextRequestFails' },
+    { code: 'dangling-tool-call', severity: 'unloadable' },
+    { code: 'tool-result-id-mismatch', severity: 'unloadable' },
+    { code: 'duplicate-tool-call-id', severity: 'nextRequestFails' },
+  ];
+  for (const item of cases) {
+    assert.equal(sessionIssueRepairable(item.code), false, '生命周期类没有应用内修复入口: ' + item.code);
+    const [display] = sessionHealthRows(response([
+      row({ severity: item.severity, unitId: '--p--/' + item.code, sessionId: item.code, issues: [{ code: item.code, severity: item.severity }] }),
+    ]));
+    assert.equal(display?.issueCodes.includes(item.code), true, '新码必须能上屏（沿用既有裸 code 渲染路径）: ' + item.code);
+    assert.equal(display?.repairable, false, '不得给「应用内修复」入口: ' + item.code);
+    assert.equal(
+      display?.severityKey,
+      item.severity === 'unloadable' ? SESSION_SEVERITY_KEYS.unloadable : SESSION_SEVERITY_KEYS.nextRequestFails,
+      item.code,
+    );
+    assert.equal(display?.badgeKind, item.severity === 'unloadable' ? 'error' : 'warn', item.code);
+  }
+  const view = sessionHealthSummaryView(response([
+    row({ severity: 'unloadable', unitId: '--p--/a', sessionId: 'a', issues: [{ code: 'tool-result-id-mismatch', severity: 'unloadable' }] }),
+    row({ severity: 'nextRequestFails', unitId: '--p--/b', sessionId: 'b', issues: [{ code: 'duplicate-tool-call-id', severity: 'nextRequestFails' }] }),
+  ]));
+  assert.equal(view?.needsAttention, 2, '新码必须计入「需要处理」');
+  assert.equal(view?.repairable, 0, '新码不进「应用内修复」入口');
+  assert.equal(view?.hiddenHealthy, 0);
 });
 
 test('T11：列表只含有问题的会话（+ 可修行），并如实给出被隐藏的正常会话数', () => {

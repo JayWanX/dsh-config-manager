@@ -3,10 +3,12 @@
  *  - 结构档（首帧 header / 撕裂尾帧 / 非法帧 / 空目录）；
  *  - 行档（不可解析行 / 字节相同的重复已提交行 / seq 空洞 / 能证明撞上真实续写的合成 closer 块）；
  *  - 限额与「未检查如实计数」；
- *  - **只读**：整次扫描前后字节逐字节不变。
+ *  - **只读**：整次扫描前后字节（含 sha256）与 mtime 不变；
+ *  - T4：工具生命周期四类 + tool/result 配对（只报不修；严重级 = 真 codec 实测口径）。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -31,6 +33,10 @@ function logBytes(header: Record<string, unknown>, rows: readonly unknown[] = []
   const parts: Buffer[] = [encodeZstdFrame(Buffer.from(JSON.stringify(header) + '\n', 'utf8'))];
   for (const row of rows) parts.push(encodeZstdFrame(Buffer.from(JSON.stringify(row) + '\n', 'utf8')));
   return Buffer.concat(parts);
+}
+
+function sha256Of(bytes: Uint8Array): string {
+  return createHash('sha256').update(bytes).digest('hex');
 }
 
 async function writeLog(home: string, projectKey: string, sessionId: string, name: string, bytes: Uint8Array): Promise<string> {
@@ -215,3 +221,249 @@ test('T3 采集器：只读 —— 扫描前后文件字节与 mtime 逐字节�
     assert.equal(afterStat.mtimeMs, beforeStat.mtimeMs, '也不得触碰 mtime');
   });
 });
+
+/* ---------------- T4：工具生命周期四类 + tool/result 配对（只报不修；严重级 = 真 codec 实测口径） ---------------- */
+
+const T4_V4 = { type: 'session', version: 4, id: 'session-a', cwd: 'D:\\proj' };
+const T4_V3 = { type: 'session', version: 3, id: 'session-a', cwd: 'D:\\proj' };
+const T4_NEW_CODES = ['missing-message-id', 'empty-tool-call-id', 'dangling-tool-call', 'duplicate-tool-call-id', 'tool-result-id-mismatch'] as const;
+
+/** 健康骨架：turn/start → step/start → user → assistant(含 tool-call 块) → tool/call → tool/result → step/end → turn/end */
+function t4Rows(): Record<string, any>[] {
+  return [
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'step/start', data: { turn: 1, step: 1 } },
+    { type: 'user/message', data: { role: 'user', id: 'u1', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } } },
+    {
+      type: 'assistant/message',
+      data: {
+        turn: 1, step: 1,
+        message: {
+          role: 'assistant', id: 'a1', source: { kind: 'model' },
+          content: [{ type: 'text', text: 'x' }, { type: 'tool-call', id: 'c1', name: 'n', arguments: '{}' }],
+        },
+      },
+    },
+    { type: 'tool/call', data: { turn: 1, step: 1, callId: 'c1', name: 'n', arguments: '{}' } },
+    {
+      type: 'tool/result',
+      data: {
+        turn: 1, step: 1,
+        message: { role: 'tool', id: 'r1', source: { kind: 'tool', callId: 'c1' }, toolCallId: 'c1', content: [{ type: 'text', text: 'ok' }], isError: false },
+      },
+    },
+    { type: 'step/end', data: { turn: 1, step: 1 } },
+    { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+  ];
+}
+
+const T4_USER = 2;
+const T4_ASSISTANT = 3;
+const T4_CALL = 4;
+const T4_RESULT = 5;
+
+function t4Clone(rows: Record<string, any>[]): Record<string, any>[] {
+  return JSON.parse(JSON.stringify(rows)) as Record<string, any>[];
+}
+
+async function t4Scan(
+  entries: { id: string; header: Record<string, unknown>; rows: readonly unknown[] }[],
+  opts: Record<string, unknown> = {},
+) {
+  return withTmp(async (home) => {
+    for (const e of entries) await writeLog(home, KEY, e.id, 'session.jsonl.zstd', logBytes(e.header, e.rows));
+    return scanSessionHealth({ homeDir: home, targetFormatVersion: 4, ...opts });
+  });
+}
+
+function t4Row(result: Awaited<ReturnType<typeof t4Scan>>, id: string) {
+  const row = result.rows.find((r) => r.sessionId === id);
+  assert.ok(row !== undefined, '缺少体检行: ' + id);
+  return row;
+}
+
+function t4Codes(row: { issues: readonly { code: string }[] }): string[] {
+  return row.issues.map((issue) => issue.code);
+}
+
+test('T4 行档 ①：current 格式缺 message id —— user/assistant → nextRequestFails(codec-unproven)，tool/result → unloadable', { skip: !CAPABLE }, async () => {
+  const healthy = t4Clone(t4Rows());
+  const noUser = t4Clone(t4Rows());
+  delete noUser[T4_USER]!.data.id;
+  const noAssistant = t4Clone(t4Rows());
+  delete noAssistant[T4_ASSISTANT]!.data.message.id;
+  const noResult = t4Clone(t4Rows());
+  delete noResult[T4_RESULT]!.data.message.id;
+  const result = await t4Scan([
+    { id: 'healthy', header: T4_V4, rows: healthy },
+    { id: 'no-user', header: T4_V4, rows: noUser },
+    { id: 'no-assistant', header: T4_V4, rows: noAssistant },
+    { id: 'no-result', header: T4_V4, rows: noResult },
+  ]);
+  assert.deepEqual(t4Codes(t4Row(result, 'healthy')), [], '健康骨架不得报任何新码');
+  const user = t4Row(result, 'no-user');
+  assert.deepEqual(t4Codes(user), ['missing-message-id']);
+  assert.equal(user.severity, 'nextRequestFails', 'v4 上格式目录口径通过（codec 未证明拒读）');
+  assert.match(String(user.issues[0]?.detail), /codec-unproven/);
+  assert.equal(t4Row(result, 'no-assistant').severity, 'nextRequestFails');
+  const toolResult = t4Row(result, 'no-result');
+  assert.deepEqual(t4Codes(toolResult), ['missing-message-id']);
+  assert.equal(toolResult.severity, 'unloadable', 'tool/result 缺 message.id = 真 codec decodeRow 当场拒读');
+});
+
+test('T4 行档 ①：pre-v4 缺 message id → unloadable（v0→v1 / v3→v4 迁移器直接拒）', { skip: !CAPABLE }, async () => {
+  const noUser = t4Clone(t4Rows());
+  delete noUser[T4_USER]!.data.id;
+  const noAssistant = t4Clone(t4Rows());
+  delete noAssistant[T4_ASSISTANT]!.data.message.id;
+  const noResult = t4Clone(t4Rows());
+  delete noResult[T4_RESULT]!.data.message.id;
+  const result = await t4Scan([
+    { id: 'v3-user', header: T4_V3, rows: noUser },
+    { id: 'v3-assistant', header: T4_V3, rows: noAssistant },
+    { id: 'v3-result', header: T4_V3, rows: noResult },
+  ]);
+  for (const id of ['v3-user', 'v3-assistant', 'v3-result']) {
+    const row = t4Row(result, id);
+    assert.deepEqual(t4Codes(row), ['missing-message-id'], id);
+    assert.equal(row.severity, 'unloadable', id);
+  }
+});
+
+test('T4 行档 ②：空 tool-call id 只进 empty-tool-call-id（v4 → nextRequestFails，pre-v4 → unloadable）', { skip: !CAPABLE }, async () => {
+  const emptyCall = t4Clone(t4Rows());
+  emptyCall[T4_CALL]!.data.callId = '';
+  const emptyBlock = t4Clone(t4Rows());
+  emptyBlock[T4_ASSISTANT]!.data.message.content[1].id = '';
+  const nonEmpty = t4Clone(t4Rows());
+  const result = await t4Scan([
+    { id: 'empty-call', header: T4_V4, rows: emptyCall },
+    { id: 'empty-block', header: T4_V4, rows: emptyBlock },
+    { id: 'non-empty', header: T4_V4, rows: nonEmpty },
+    { id: 'v3-empty-call', header: T4_V3, rows: emptyCall },
+  ]);
+  for (const id of ['empty-call', 'empty-block']) {
+    const row = t4Row(result, id);
+    assert.deepEqual(t4Codes(row), ['empty-tool-call-id'], id);
+    assert.equal(row.severity, 'nextRequestFails', id + '：v4 实测通过');
+  }
+  assert.equal(t4Codes(t4Row(result, 'non-empty')).includes('empty-tool-call-id'), false, '反例：非空 id 不报');
+  assert.equal(t4Row(result, 'v3-empty-call').severity, 'unloadable', 'pre-v4 迁移器直接拒');
+});
+
+test('T4 行档 ③：已关闭 step 的悬空 tool/call → unloadable；尾部 step 未闭合 → 不报；空 id 的 call 只进 ②', { skip: !CAPABLE }, async () => {
+  const dangling = t4Clone(t4Rows());
+  dangling.splice(T4_RESULT, 1);
+  const openTail = t4Clone(t4Rows());
+  openTail.splice(T4_RESULT, 1);
+  openTail.splice(openTail.length - 2, 2); // 去掉 step/end + turn/end：尾部 step 仍开着（正常崩溃形状）
+  const emptyCallClosed = t4Clone(t4Rows());
+  emptyCallClosed.splice(T4_RESULT, 1);
+  emptyCallClosed[T4_CALL]!.data.callId = '';
+  const paired = t4Clone(t4Rows());
+  const result = await t4Scan([
+    { id: 'dangling', header: T4_V4, rows: dangling },
+    { id: 'open-tail', header: T4_V4, rows: openTail },
+    { id: 'empty-call-closed', header: T4_V4, rows: emptyCallClosed },
+    { id: 'paired', header: T4_V4, rows: paired },
+  ]);
+  const found = t4Row(result, 'dangling');
+  assert.deepEqual(t4Codes(found), ['dangling-tool-call']);
+  assert.equal(found.severity, 'unloadable');
+  assert.deepEqual(t4Codes(t4Row(result, 'open-tail')), [], '尾部未闭合的 step 是正常崩溃形状（引擎会补 closer），不得报');
+  assert.deepEqual(t4Codes(t4Row(result, 'empty-call-closed')), ['empty-tool-call-id'], '空 id 的 call 只进 ②，不得同时进 dangling');
+  assert.equal(t4Codes(t4Row(result, 'paired')).includes('dangling-tool-call'), false, '反例：有配对 tool/result 不报');
+});
+
+test('T4 行档 ③：turn/end 也关闭其回合里仍开着的 step（漏 step/end 的崩溃恢复形状）', { skip: !CAPABLE }, async () => {
+  const dangling = t4Clone(t4Rows());
+  dangling.splice(T4_RESULT, 1);
+  const stepEndIndex = dangling.findIndex((r) => r.type === 'step/end');
+  dangling.splice(stepEndIndex, 1); // 只剩 turn/end
+  const result = await t4Scan([{ id: 'turn-close', header: T4_V4, rows: dangling }]);
+  assert.deepEqual(t4Codes(t4Row(result, 'turn-close')), ['dangling-tool-call']);
+});
+
+test('T4 行档 ④：同一步重复通告同一 callId → nextRequestFails；健康形态「1 内容块 + 1 tool/call 行」不得误报', { skip: !CAPABLE }, async () => {
+  const dupRow = t4Clone(t4Rows());
+  dupRow.splice(T4_CALL + 1, 0, t4Clone(t4Rows())[T4_CALL]!);
+  const dupBlock = t4Clone(t4Rows());
+  dupBlock[T4_ASSISTANT]!.data.message.content.push({ type: 'tool-call', id: 'c1', name: 'n', arguments: '{}' });
+  const healthy = t4Clone(t4Rows());
+  const result = await t4Scan([
+    { id: 'dup-row', header: T4_V4, rows: dupRow },
+    { id: 'dup-block', header: T4_V4, rows: dupBlock },
+    { id: 'healthy', header: T4_V4, rows: healthy },
+  ]);
+  assert.equal(
+    t4Codes(t4Row(result, 'healthy')).includes('duplicate-tool-call-id'),
+    false,
+    '真机健康日志里同一个 callId 本来就会同时出现在内容块与 tool/call 行 —— 跨类相加必然误报',
+  );
+  for (const id of ['dup-row', 'dup-block']) {
+    const row = t4Row(result, id);
+    assert.deepEqual(t4Codes(row), ['duplicate-tool-call-id'], id);
+    assert.equal(row.severity, 'nextRequestFails', id);
+  }
+});
+
+test('T4 行档 ⑤：tool/result 的 toolCallId 缺失或与 source.callId 不一致 → unloadable（B5/B7 两类形状）', { skip: !CAPABLE }, async () => {
+  const missingToolCallId = t4Clone(t4Rows());
+  delete missingToolCallId[T4_RESULT]!.data.message.toolCallId;
+  const sourceMismatch = t4Clone(t4Rows());
+  sourceMismatch[T4_RESULT]!.data.message.source.callId = 'call-other';
+  const v3Shape = t4Clone(t4Rows());
+  {
+    const message = v3Shape[T4_RESULT]!.data.message;
+    delete message.toolCallId;
+    message.content = [{ type: 'tool-result', toolCallId: 'c1', content: [], isError: false }];
+  }
+  const result = await t4Scan([
+    { id: 'missing-toolcallid', header: T4_V4, rows: missingToolCallId },
+    { id: 'source-mismatch', header: T4_V4, rows: sourceMismatch },
+    { id: 'v3-shape', header: T4_V3, rows: v3Shape },
+  ]);
+  const missing = t4Row(result, 'missing-toolcallid');
+  assert.deepEqual(t4Codes(missing), ['tool-result-id-mismatch']);
+  assert.equal(missing.severity, 'unloadable');
+  // source.callId 被改坏后，这条 call 也就没有配对结果了 —— 悬空一并如实报出（不同 code）
+  assert.ok(t4Codes(t4Row(result, 'source-mismatch')).includes('tool-result-id-mismatch'));
+  assert.equal(t4Row(result, 'source-mismatch').severity, 'unloadable');
+  assert.equal(
+    t4Codes(t4Row(result, 'v3-shape')).includes('tool-result-id-mismatch'),
+    false,
+    'v0/v3 形状（content[0].toolCallId 配对）必须放行',
+  );
+});
+
+test('T4 行档：未做行档（deepLimit=0）的会话不得出现任何新 code', { skip: !CAPABLE }, async () => {
+  const broken = t4Clone(t4Rows());
+  delete broken[T4_USER]!.data.id;
+  delete broken[T4_RESULT]!.data.message.toolCallId;
+  broken[T4_CALL]!.data.callId = '';
+  const result = await t4Scan([{ id: 'broken', header: T4_V4, rows: broken }], { deepLimit: 0 });
+  assert.equal(result.summary.deepVerified, 0);
+  assert.equal(result.summary.deepUnverified, 1);
+  const codes = t4Codes(t4Row(result, 'broken'));
+  for (const code of T4_NEW_CODES) assert.equal(codes.includes(code), false, '没跑行档就不得下结论: ' + code);
+});
+
+test('T4 只读：含四类新码的日志扫描前后文件字节与 mtime 逐字节不变', { skip: !CAPABLE }, async () => {
+  await withTmp(async (home) => {
+    const broken = t4Clone(t4Rows());
+    delete broken[T4_USER]!.data.id;                          // ①
+    broken[T4_ASSISTANT]!.data.message.content[1].id = '';   // ②
+    broken.splice(T4_RESULT, 1);                             // ③（step 已关闭）
+    const file = await writeLog(home, KEY, 'session-a', 'session.jsonl.zstd', logBytes(T4_V4, broken));
+    const before = await fs.readFile(file);
+    const beforeStat = await fs.stat(file);
+    const result = await scanSessionHealth({ homeDir: home, targetFormatVersion: 4 });
+    assert.ok(result.rows[0]!.issues.some((i) => T4_NEW_CODES.includes(i.code as typeof T4_NEW_CODES[number])));
+    const after = await fs.readFile(file);
+    const afterStat = await fs.stat(file);
+    assert.equal(before.equals(after), true, '体检绝不允许改写会话字节');
+    assert.equal(sha256Of(after), sha256Of(before), 'sha256 也不得变化');
+    assert.equal(afterStat.mtimeMs, beforeStat.mtimeMs, '也不得触碰 mtime');
+  });
+});
+

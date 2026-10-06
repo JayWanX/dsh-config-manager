@@ -49,10 +49,16 @@ export type SessionHealthIssueCode =
   | 'synthetic-closer'
   /** 真实 seq 空洞 */
   | 'seq-gap'
-  /** user/assistant/tool-result 事件缺 message id（loader 拒整份日志） */
+  /** 消息载体缺 message id（缺失 / 非字符串 / 空串）——当前格式的 replay 边界直接拒载整份日志 */
   | 'missing-message-id'
-  /** 空 / 悬空 tool-call id（能加载，但下一个模型请求 400） */
+  /** tool/call.callId 或 assistant/message 内容里 tool-call 块的 id 为空 / 非字符串 */
+  | 'empty-tool-call-id'
+  /** 已关闭的 step 里存在没有配对 tool/result 的 tool/call（按 message.source.callId 配对） */
   | 'dangling-tool-call'
+  /** tool/result 的 toolCallId 缺失 / 非字符串 / 与 message.source.callId 不一致 */
+  | 'tool-result-id-mismatch'
+  /** 同一步（同 data.turn + data.step）内同一个 callId 被通告多次 */
+  | 'duplicate-tool-call-id'
   /** assistant/message|attempt 的 settlement 字段非法 */
   | 'invalid-settlement'
   /** 步进继续了已关闭的 turn */
@@ -89,7 +95,11 @@ export interface SessionStructuralProbe {
 export interface SessionDeepProbe {
   /** 是否用 DSH codec 真的校验过（false = 未验证，不得据此宣称可读） */
   verified: boolean;
-  issues?: { code: SessionHealthIssueCode; detail?: string }[];
+  /**
+   * 问题清单。`severity` 可选：**行档采集器实测出的严重级优先**（同一个 code 在旧格式迁移路径下
+   * 的后果可能与当前格式不同），缺省时回落到 {@link DEEP_SEVERITY} 的静态默认。
+   */
+  issues?: { code: SessionHealthIssueCode; severity?: SessionHealthSeverity; detail?: string }[];
   /** 校验器自身失败的原因（未验证的原因） */
   unverifiedReason?: string;
 }
@@ -161,7 +171,16 @@ export interface SessionHealthSummary {
  */
 export function sessionHealthIssues(input: SessionHealthInput, ctx: SessionHealthContext): SessionHealthIssue[] {
   const issues: SessionHealthIssue[] = [];
+  // 同一 code 只留一条：重复出现时取**更重**的严重级（不因一条较轻的重复记录把结论说轻）。
   const push = (code: SessionHealthIssueCode, severity: SessionHealthSeverity, detail?: string): void => {
+    const existing = issues.find((issue) => issue.code === code);
+    if (existing !== undefined) {
+      if (SEVERITY_RANK[severity] < SEVERITY_RANK[existing.severity]) {
+        existing.severity = severity;
+        if (detail !== undefined) existing.detail = detail;
+      }
+      return;
+    }
     issues.push(detail === undefined ? { code, severity } : { code, severity, detail });
   };
 
@@ -196,7 +215,8 @@ export function sessionHealthIssues(input: SessionHealthInput, ctx: SessionHealt
   const deep = input.deep;
   if (deep !== undefined && deep.verified) {
     for (const issue of deep.issues ?? []) {
-      push(issue.code, DEEP_SEVERITY[issue.code] ?? 'unloadable', issue.detail);
+      // 行档采集器可给出**实测**的严重级（如「step 已闭合的悬空 tool/call」）；缺省才回落静态表。
+      push(issue.code, issue.severity ?? DEEP_SEVERITY[issue.code] ?? 'unloadable', issue.detail);
     }
   }
 
@@ -221,14 +241,23 @@ export function sessionHealthIssues(input: SessionHealthInput, ctx: SessionHealt
   return issues.sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity]);
 }
 
-/** 深度校验问题码 → 严重级（与 §10.2 的后果分类一致）。 */
+/**
+ * 深度校验问题码 → **回落**严重级（与 §10.2 的后果分类一致）。
+ *
+ * 这是「问题没有自带 severity 时」的静态默认，不是唯一事实源：行档采集器对四类生命周期问题
+ * （缺 message id / 空 tool-call id / 悬空 tool-call / 重复 tool-call id）会用**真 codec 实测**
+ * 出的严重级覆盖它（见 `utils/session-health-scan.ts` 的校准注释）。
+ */
 const DEEP_SEVERITY: Partial<Record<SessionHealthIssueCode, SessionHealthSeverity>> = {
   'unparsable-event': 'unloadable',
   'replay-duplicate-rows': 'nextRequestFails',
   'synthetic-closer': 'nextRequestFails',
   'seq-gap': 'unloadable',
   'missing-message-id': 'unloadable',
+  'empty-tool-call-id': 'unloadable',
   'dangling-tool-call': 'nextRequestFails',
+  'tool-result-id-mismatch': 'unloadable',
+  'duplicate-tool-call-id': 'unloadable',
   'invalid-settlement': 'nextRequestFails',
   'closed-turn-continued': 'nextRequestFails',
 };

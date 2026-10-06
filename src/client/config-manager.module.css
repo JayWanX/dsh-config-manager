@@ -571,6 +571,8 @@
 .statusText {
   overflow: hidden;
   text-overflow: ellipsis;
+  /* flex 行内的文本需要显式 min-width:0 才会真正省略，否则自动最小尺寸 = 内容宽度 */
+  min-width: 0;
 }
 
 .statusSpacer {
@@ -2426,6 +2428,13 @@
   color: inherit;
   text-align: left;
   cursor: pointer;
+  /* v3 修正（真机反馈「进度条与文字紧贴着」）：按钮里并排三段 —— 状态文本 / 任务名 /
+     细进度条。它们此前是普通内联内容，没有任何间距。inline-flex + gap 给出一致的行内
+     节奏（flex 会把连续文本包成匿名 flex 项，所以「1 个任务进行中」与任务名之间也有间距）。 */
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .statusAction:hover {

@@ -21,7 +21,15 @@ import { randomBytes } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 
 import { isSessionLogName } from './session-log.ts';
-import { findSyntheticCloserRun, parseSessionRowFacts, type SessionRowFacts } from './session-row-facts.ts';
+import {
+  collectSessionRowReferences,
+  findSyntheticCloserRun,
+  parseSessionRowFacts,
+  referencesContain,
+  sessionRowMayHaveReferences,
+  walkSessionRowContinuity,
+  type SessionRowFacts,
+} from './session-row-facts.ts';
 import { decodeZstdFrame, encodeZstdFrame, scanZstdFrames, zstdAvailable } from './zstd-frame.ts';
 
 /** 修复失败原因（机器可读；文案由调用方输出层决定）。 */
@@ -38,6 +46,10 @@ export type SessionRepairFailure =
   | 'invalid-header'
   /** 没有发现任何可零损失修复的问题 */
   | 'nothing-to-fix'
+  /** 行跨度**不可判定**（packed 行形状不合法 / 无 seq 且非 packed 行）—— refuse 而不是猜 */
+  | 'undecidable'
+  /** 引用完整性：本次动作会让保留行引用到的 seq 失去承载行或被改指（fail-closed） */
+  | 'dropped-ref'
   /** 只有有损修复可用（截断），但调用方没有显式放行 */
   | 'lossy-required'
   /** 写前校验不过（**拒绝修复**） */
@@ -79,6 +91,8 @@ export interface SessionLogRepairOutcome {
   actions?: SessionRepairAction[];
   /** 计划里有有损动作（应用期必须显式 allowLossy） */
   lossy?: boolean;
+  /** 可见告警（例如先前就存在的悬空引用）——**不影响 ok**，只是让调用方如实汇报 */
+  warnings?: string[];
 }
 
 /** 一行已解压的会话事件（facts = null 表示这行不是合法 JSON 对象）。 */
@@ -87,12 +101,21 @@ interface InspectedRow {
   facts: SessionRowFacts | null;
 }
 
+/** 容器里的一帧：字节区间 + 它承载的事件行下标（帧 0 = header，事件行下标为空）。 */
+interface InspectedFrame {
+  start: number;
+  end: number;
+  rowIndexes: number[];
+}
+
 /** 只读的**检查**结果（不判断怎么修）。 */
 interface SessionLogInspection {
   ok: boolean;
   reason?: SessionRepairFailure;
   headerText?: string;
   rows?: InspectedRow[];
+  /** 帧映射（idx 0 = header 帧）；行下标指向 rows —— 帧级最小写靠它逐字节复用未触及帧 */
+  frames?: InspectedFrame[];
 }
 
 /**
@@ -132,13 +155,20 @@ function inspectSessionLog(bytes: Uint8Array): SessionLogInspection {
     return { ok: false, reason: 'invalid-header' };
   }
   const rows: InspectedRow[] = [];
-  for (let f = 1; f < texts.length; f += 1) {
-    for (const line of texts[f]!.split('\n')) {
-      if (line.trim() === '') continue;
-      rows.push({ raw: line, facts: parseSessionRowFacts(line) });
+  const frameMap: InspectedFrame[] = [];
+  for (let f = 0; f < texts.length; f += 1) {
+    const rowIndexes: number[] = [];
+    // 帧 0 = header（**不承载事件行**，也永不重写）；空行口径与旧实现一致（跳过空白行）
+    if (f > 0) {
+      for (const line of texts[f]!.split('\n')) {
+        if (line.trim() === '') continue;
+        rowIndexes.push(rows.length);
+        rows.push({ raw: line, facts: parseSessionRowFacts(line) });
+      }
     }
+    frameMap.push({ start: frames[f]!.start, end: frames[f]!.end, rowIndexes });
   }
-  return { ok: true, headerText, rows };
+  return { ok: true, headerText, rows, frames: frameMap };
 }
 
 /**
@@ -184,25 +214,15 @@ export function duplicateRowIndexes(rows: readonly { raw: string; seq?: number }
 }
 
 /**
- * 保留行是否仍是**合法的 seq 序列**（首个数字 seq 必须是 0，之后逐个 +1；无 seq 的打包行跳过）。
+ * 保留行是否仍是**合法的 seq 序列**（from 0、逐个 +1；packed 行按其跨度整体覆盖）。
  *
  * 为什么必须有这一关：合成收尾块被丢掉后，若真实续写**没有**复用那一段 seq，序列就会留下空洞 ——
  * 那正是 DSH 拒读的形态。证明不了连续性就不发布（否则等于把「能读的坏日志」修成「读不了的日志」）。
+ * **不可判定行（opaque）一律视为不连续** —— 绝不跨越它下「干净」结论。
  */
 function planIsContiguous(facts: readonly (SessionRowFacts | null)[]): boolean {
-  let prev: number | undefined;
-  for (const fact of facts) {
-    if (fact === null) return false;
-    const seq = fact.seq;
-    if (seq === undefined) continue;
-    if (prev === undefined) {
-      if (seq !== 0) return false;
-    } else if (seq !== prev + 1) {
-      return false;
-    }
-    prev = seq;
-  }
-  return true;
+  const walk = walkSessionRowContinuity(facts);
+  return walk.firstAnomalyIndex === -1 && walk.firstOpaqueIndex === -1;
 }
 
 /** 修复计划（**纯函数**，不碰文件系统；预览与应用共用同一份判定）。 */
@@ -217,31 +237,124 @@ export interface SessionLogRepairPlan {
   headerText?: string;
   droppedRows?: number;
   keptRows?: number;
+  /** 可见告警（先前就存在的悬空引用等）—— 不影响 ok */
+  warnings?: string[];
+  /** 帧级最小写计划（ok=true 才有）—— 未触及帧按原字节区间逐字节复用 */
+  frames?: SessionRepairFramePlan[];
 }
 
 /**
- * 按字节算出一份修复计划（**只读、纯函数**）。
+ * 一帧的写入计划（**帧级最小写**）。
  *
- * 顺序固定（后续步骤只看前一步的结果，避免互相打架）：
- *   ① 去重（字节相同 + seq 相同）→ ② 丢可证明的合成收尾块 → ③ 首个异常处截断（需显式放行）。
- * 任何一步之后都必须能通过「seq 从 0 连续」的检查，否则拒绝。
+ * header 帧永不重写；未被本次改动触及（帧内无被丢弃行）的帧 `reuse=true`，调用方直接拷贝
+ * 原容器里的 `[start, end)` 字节；其余帧用 `chunks`（每项 ≤ SESSION_REPAIR_MAX_ROWS_PER_FRAME 行）重编码。
  */
-/** 在给定行序列里找**第一个异常**的下标：不可解析 / 首个数字 seq 不是 0 / seq 空洞 / seq 回退。 */
-function firstAnomalyIndex(rows: readonly InspectedRow[], kept: readonly number[]): number {
-  let lastSeq: number | undefined;
-  for (let k = 0; k < kept.length; k += 1) {
-    const facts = rows[kept[k]!]!.facts;
-    if (facts === null) return k;
-    const seq = facts.seq;
-    if (seq === undefined) continue;
-    if (lastSeq === undefined) {
-      if (seq !== 0) return k;
-    } else if (seq !== lastSeq + 1) {
-      return k;
-    }
-    lastSeq = seq;
+export interface SessionRepairFramePlan {
+  /** 原容器内的帧字节区间（半开）；reuse=true 时逐字节拷贝这段 */
+  start: number;
+  end: number;
+  /** true = 逐字节复用原帧字节；false = 用 chunks 重新编码 */
+  reuse: boolean;
+  /** reuse=false 时：每个元素一帧（行文本按 ≤ 常量 行分组） */
+  chunks: string[][];
+}
+
+/** 在给定行序列里走一遍跨度模型（体检与执行器共用的**唯一**判据）。 */
+function walkRows(rows: readonly InspectedRow[], kept: readonly number[]): { firstAnomalyIndex: number; firstOpaqueIndex: number } {
+  return walkSessionRowContinuity(kept.map((index) => rows[index]!.facts));
+}
+
+/** 保留行里第一个引用了 `seqs` 中任一 seq 的行下标；没有 = undefined。 */
+function firstKeptRowReferencing(rows: readonly InspectedRow[], kept: readonly number[], seqs: ReadonlySet<number>): number | undefined {
+  if (seqs.size === 0) return undefined;
+  for (const index of kept) {
+    const raw = rows[index]!.raw;
+    if (!sessionRowMayHaveReferences(raw)) continue;
+    const refs = collectSessionRowReferences(raw);
+    for (const seq of seqs) if (referencesContain(refs, seq)) return index;
   }
-  return -1;
+  return undefined;
+}
+
+/** seq → 承载行原始字节（**后者覆盖前者**：同一 seq 多次出现时取最后一次，与「当前有效行」一致）。 */
+function seqIdentity(rows: readonly InspectedRow[], indexes: readonly number[]): Map<number, string> {
+  const map = new Map<number, string>();
+  for (const index of indexes) {
+    const row = rows[index]!;
+    const seq = row.facts?.seq;
+    if (seq === undefined) continue;
+    map.set(seq, row.raw);
+  }
+  return map;
+}
+
+/** 引用闭包的前后对比结果。 */
+interface ReferenceClosure {
+  /** 计划前存在、计划后不存在（exists→missing） */
+  missing: number[];
+  /** 计划前后都存在，但承载行字节身份变了（被改指） */
+  redirected: number[];
+  /** 计划前就不存在（历史悬空）—— 只告警 */
+  dangling: number[];
+}
+
+/**
+ * **引用闭包前后对比**（fail-closed 后置断言的核心）。
+ *
+ * 只对「**保留行实际引用到的 seq 集合 R**」比较计划前后（R 来源 = `referenceIndexes` 里各行的引用），
+ * 绝不比对所有被重占用的 seq —— 否则 drop-synthetic-closer（其成立条件就是保留行 seq 稠密 ⇒
+ * 每个被丢 seq 必被重占用）会恒不成立，动作变成死动作（R1 补遗-2 §1）。
+ *
+ * 三类结论：
+ *  - `missing`：引用目标由「存在」变「不存在」→ 调用方 refuse；
+ *  - `redirected`：引用目标的行身份 A → B → 调用方 refuse；
+ *  - `dangling`：计划前就不存在（历史悬空）→ **只告警**（否则任何带历史悬空引用的日志都会变得不可修）。
+ */
+function compareReferenceClosure(
+  rows: readonly InspectedRow[],
+  before: ReadonlyMap<number, string>,
+  referenceIndexes: readonly number[],
+  afterIndexes: readonly number[],
+): ReferenceClosure {
+  const after = seqIdentity(rows, afterIndexes);
+  const candidates = new Set<number>([...before.keys(), ...after.keys()]);
+  const missing = new Set<number>();
+  const redirected = new Set<number>();
+  const dangling = new Set<number>();
+  const classify = (seq: number): void => {
+    const existedBefore = before.has(seq);
+    const existsAfter = after.has(seq);
+    if (!existedBefore) {
+      dangling.add(seq);
+      return;
+    }
+    if (!existsAfter) {
+      missing.add(seq);
+      return;
+    }
+    if (before.get(seq) !== after.get(seq)) redirected.add(seq);
+  };
+  for (const index of referenceIndexes) {
+    const raw = rows[index]!.raw;
+    if (!sessionRowMayHaveReferences(raw)) continue;
+    const refs = collectSessionRowReferences(raw);
+    for (const seq of refs.seqs) classify(seq);
+    for (const range of refs.ranges) {
+      let hit = false;
+      for (const seq of candidates) {
+        if (seq < range.start || seq > range.end) continue;
+        hit = true;
+        classify(seq);
+      }
+      // 区间里一个已知 seq 都没有 → 整段区间是历史悬空（只告警）
+      if (!hit) dangling.add(range.start);
+    }
+  }
+  return {
+    missing: [...missing].sort((a, b) => a - b),
+    redirected: [...redirected].sort((a, b) => a - b),
+    dangling: [...dangling].sort((a, b) => a - b),
+  };
 }
 
 export function planSessionLogRepair(bytes: Uint8Array, opts: { allowLossy?: boolean } = {}): SessionLogRepairPlan {
@@ -250,6 +363,13 @@ export function planSessionLogRepair(bytes: Uint8Array, opts: { allowLossy?: boo
     return { ok: false, reason: inspection.reason ?? 'corrupt-container', actions: [], lossy: false };
   }
   const rows = inspection.rows;
+  const warnings: string[] = [];
+
+  // 不可判定行（packed 形状不合法 / 无 seq 且非 packed）**永远不能被静默处理**：整份计划 refuse。
+  // 注意用的是**全量行**（不是去重后的）—— 非法行即便「看起来」能被去重掉也不许猜。
+  if (walkSessionRowContinuity(rows.map((row) => row.facts)).firstOpaqueIndex >= 0) {
+    return { ok: false, reason: 'undecidable', actions: [], lossy: false };
+  }
 
   // ① 重放重复行（零损失；只丢「同一 seq + 同一字节」的那一份，不可能制造新的异常）
   const dupIndexes = duplicateRowIndexes(rows.map((row) => (row.facts?.seq !== undefined ? { raw: row.raw, seq: row.facts.seq } : { raw: row.raw })));
@@ -260,48 +380,87 @@ export function planSessionLogRepair(bytes: Uint8Array, opts: { allowLossy?: boo
   // ② 可证明的合成收尾块（零损失）—— 但**只允许丢完仍然连续**：
   //    若真实续写没有复用那一段 seq，丢掉收尾块会留下空洞（DSH 照样拒读），此时宁可不动它。
   const closerRun = findSyntheticCloserRun(keptAfterDup.map((index) => rows[index]!.facts ?? {}));
-  const anomalyBeforeCloser = firstAnomalyIndex(rows, keptAfterDup);
+  const anomalyBeforeCloser = walkRows(rows, keptAfterDup).firstAnomalyIndex;
   let closerDrop = new Set<number>();
+  let closerSkippedByReference = false;
   let kept = keptAfterDup;
   if (closerRun !== undefined) {
     const tentative = new Set<number>();
     for (let k = closerRun.start; k < closerRun.end; k += 1) tentative.add(keptAfterDup[k]!);
     const keptWithoutCloser = keptAfterDup.filter((index) => !tentative.has(index));
-    const anomalyAfter = firstAnomalyIndex(rows, keptWithoutCloser);
-    const makesNewAnomaly = anomalyAfter >= 0 && (anomalyBeforeCloser < 0 || anomalyAfter < anomalyBeforeCloser);
-    if (!makesNewAnomaly) {
-      closerDrop = tentative;
-      kept = keptWithoutCloser;
+    const candidateSeqs = new Set<number>();
+    for (const index of tentative) {
+      const seq = rows[index]!.facts?.seq;
+      if (seq !== undefined) candidateSeqs.add(seq);
+    }
+    // 前置条件（WS1-B）：收尾块区间被**保留行**引用时**不计划该动作**（不静默丢弃、不把引用改指）。
+    const referencing = firstKeptRowReferencing(rows, keptWithoutCloser, candidateSeqs);
+    if (referencing !== undefined) {
+      closerSkippedByReference = true;
+      warnings.push('收尾块区间的 seq 被保留行引用 → 本次不丢弃该收尾块（避免把引用静默改指）');
+    } else {
+      const anomalyAfter = walkRows(rows, keptWithoutCloser).firstAnomalyIndex;
+      const makesNewAnomaly = anomalyAfter >= 0 && (anomalyBeforeCloser < 0 || anomalyAfter < anomalyBeforeCloser);
+      if (!makesNewAnomaly) {
+        closerDrop = tentative;
+        kept = keptWithoutCloser;
+      }
     }
   }
 
   // ③ 首个异常（不可解析 / seq 空洞 / seq 回退）→ 截断（**有损**，必须显式放行）
   const effectiveCloser = closerDrop.size > 0;
-  let anomaly = effectiveCloser ? firstAnomalyIndex(rows, kept) : anomalyBeforeCloser;
+  const anomaly = walkRows(rows, kept).firstAnomalyIndex;
   if (closerRun !== undefined && !effectiveCloser && anomalyBeforeCloser < 0) {
+    if (closerSkippedByReference) {
+      // 引用前置条件让零损动作让路：日志本身没有异常 ⇒ 本次**没有可做的动作**（绝不降级成有损截断）
+      return { ok: false, reason: 'nothing-to-fix', actions: [], lossy: false, warnings };
+    }
     // 收尾块被判定为「丢了会制造空洞」→ 直接拒绝（绝不发布带空洞的日志）
-    return { ok: false, reason: 'verification-refused', actions: [], lossy: false };
+    return { ok: false, reason: 'verification-refused', actions: [], lossy: false, warnings };
   }
   let truncateRows = 0;
   if (anomaly === 0) {
     // 异常就在第一行（例如首个 seq 不是 0）：截断之后什么都不剩 —— 没有任何合法内容可发布
-    return { ok: false, reason: 'verification-refused', actions: [], lossy: false };
+    return { ok: false, reason: 'verification-refused', actions: [], lossy: false, warnings };
   }
+  const before = seqIdentity(rows, rows.map((_, index) => index));
   if (anomaly > 0) {
+    const keptAfterTruncation = kept.slice(0, anomaly);
+    // 引用闭包判定必须发生在**计划产出时**：候选截断若会让保留行的引用由存在变不存在（或被改指），
+    // 整个计划直接 refuse —— 绝不返回一个「注定在 apply 期被拒」的有损预览。
+    const closure = compareReferenceClosure(rows, before, kept, keptAfterTruncation);
+    if (closure.missing.length > 0 || closure.redirected.length > 0) {
+      warnings.push(
+        '截断会让保留行的引用失去目标或被改指（seq ' +
+          [...closure.missing, ...closure.redirected].sort((a, b) => a - b).join(', ') +
+          '）→ 拒绝本次修复',
+      );
+      return { ok: false, reason: 'dropped-ref', actions: [], lossy: false, warnings };
+    }
     if (opts.allowLossy !== true) {
-      const previewActions = buildActions(dupIndexes.length, effectiveCloser, closerRun, 0);
-      return { ok: false, reason: 'lossy-required', actions: previewActions, lossy: true };
+      // 预览必须带**真实**的截断规模（rows = allowLossy=true 时会丢的行数），不得为空
+      const previewActions = buildActions(dupIndexes.length, effectiveCloser, closerRun, kept.length - anomaly);
+      return { ok: false, reason: 'lossy-required', actions: previewActions, lossy: true, warnings };
     }
     truncateRows = kept.length - anomaly;
-    kept = kept.slice(0, anomaly);
+    kept = keptAfterTruncation;
   }
   const actions = buildActions(dupIndexes.length, effectiveCloser, closerRun, truncateRows);
   const lossy = actions.some((action) => action.lossy);
-  if (kept.length === 0) return { ok: false, reason: 'verification-refused', actions, lossy };
+  if (kept.length === 0) return { ok: false, reason: 'verification-refused', actions, lossy, warnings };
   if (!planIsContiguous(kept.map((index) => rows[index]!.facts))) {
-    return { ok: false, reason: 'verification-refused', actions, lossy };
+    return { ok: false, reason: 'verification-refused', actions, lossy, warnings };
   }
-  if (actions.length === 0) return { ok: false, reason: 'nothing-to-fix', actions: [], lossy: false };
+  if (actions.length === 0) return { ok: false, reason: 'nothing-to-fix', actions: [], lossy: false, warnings };
+  // fail-closed 后置断言：最终保留行的引用不得指向被丢弃的行（或被改指）。
+  // 先前就存在的悬空引用（引用的 seq 本来就不在日志里）**只告警**，绝不 refuse。
+  const finalClosure = compareReferenceClosure(rows, before, kept, kept);
+  if (finalClosure.missing.length > 0 || finalClosure.redirected.length > 0) {
+    warnings.push('保留行引用到本次将被丢弃的行（seq ' + [...finalClosure.missing, ...finalClosure.redirected].join(', ') + '）→ 拒绝本次修复');
+    return { ok: false, reason: 'dropped-ref', actions, lossy: false, warnings };
+  }
+  for (const seq of finalClosure.dangling) warnings.push('先前就存在的悬空引用：seq ' + String(seq) + '（本次修复未丢弃它）');
   return {
     ok: true,
     actions,
@@ -310,6 +469,8 @@ export function planSessionLogRepair(bytes: Uint8Array, opts: { allowLossy?: boo
     headerText: inspection.headerText,
     keptRows: kept.length,
     droppedRows: rows.length - kept.length,
+    warnings,
+    frames: inspection.frames === undefined ? undefined : buildFramePlan(inspection.frames, rows, kept),
   };
 }
 
@@ -348,10 +509,83 @@ function buildActions(
   return actions;
 }
 
-/** 按 DSH 的物理布局重建日志：首帧仅 header 行 + 一个事件帧（与既有实现同形）。 */
+/** 重新编码时的**单帧事件行上限**（超过就分批；任何情况下都不得产生「单帧承载全量事件」）。 */
+export const SESSION_REPAIR_MAX_ROWS_PER_FRAME = 200;
+
+/** 把行文本按 ≤ SESSION_REPAIR_MAX_ROWS_PER_FRAME 分组（每组一帧）。 */
+function chunkRows(lines: readonly string[]): string[][] {
+  const out: string[][] = [];
+  for (let i = 0; i < lines.length; i += SESSION_REPAIR_MAX_ROWS_PER_FRAME) {
+    out.push(lines.slice(i, i + SESSION_REPAIR_MAX_ROWS_PER_FRAME));
+  }
+  return out;
+}
+
+/**
+ * **帧级最小写**计划：header 帧永不重写；帧内没有任何被丢弃行的帧按原字节区间逐字节复用；
+ * 其余帧用保留行重编码（≤ SESSION_REPAIR_MAX_ROWS_PER_FRAME 行/帧）。
+ *
+ * 帧映射不可靠（拿不到帧映射 / 行数对不上）时整体走分批重编码（header 帧仍逐字节复用）——
+ * 宁可多压一段，也绝不「按猜测的帧边界」拼接字节。
+ */
+function buildFramePlan(
+  frames: readonly InspectedFrame[],
+  rows: readonly InspectedRow[],
+  kept: readonly number[],
+): SessionRepairFramePlan[] {
+  const keptSet = new Set<number>(kept);
+  const mapped = frames.reduce((total, frame) => total + frame.rowIndexes.length, 0);
+  const header = frames[0];
+  const reliable = header !== undefined && frames.length > 0 && mapped === rows.length;
+  if (!reliable) {
+    return [
+      ...(header === undefined ? [] : [{ start: header.start, end: header.end, reuse: true, chunks: [] }]),
+      { start: 0, end: 0, reuse: false, chunks: chunkRows(kept.map((index) => rows[index]!.raw)) },
+    ];
+  }
+  const plan: SessionRepairFramePlan[] = [{ start: header.start, end: header.end, reuse: true, chunks: [] }];
+  for (let f = 1; f < frames.length; f += 1) {
+    const frame = frames[f]!;
+    const keptInFrame = frame.rowIndexes.filter((index) => keptSet.has(index));
+    if (keptInFrame.length === frame.rowIndexes.length) {
+      plan.push({ start: frame.start, end: frame.end, reuse: true, chunks: [] });
+      continue;
+    }
+    plan.push({
+      start: frame.start,
+      end: frame.end,
+      reuse: false,
+      chunks: keptInFrame.length === 0 ? [] : chunkRows(keptInFrame.map((index) => rows[index]!.raw)),
+    });
+  }
+  return plan;
+}
+
+/** 按帧计划拼出新的容器字节（reuse 的帧逐字节拷贝，其余重编码）。 */
+function encodeSessionLogFromPlan(bytes: Uint8Array, plan: readonly SessionRepairFramePlan[]): Buffer {
+  const parts: Buffer[] = [];
+  for (const frame of plan) {
+    if (frame.reuse) {
+      parts.push(Buffer.from(bytes.subarray(frame.start, frame.end)));
+      continue;
+    }
+    for (const chunk of frame.chunks) {
+      if (chunk.length === 0) continue;
+      parts.push(encodeZstdFrame(Buffer.from(chunk.join('\n') + '\n', 'utf8')));
+    }
+  }
+  return Buffer.concat(parts);
+}
+
+/**
+ * 兜底编码（拿不到帧计划时）：header 行 + 保留行分批（≤ SESSION_REPAIR_MAX_ROWS_PER_FRAME 行/帧）。
+ * 绝不把全部事件塞进一帧。
+ */
 function encodeSessionLog(headerText: string, lines: readonly string[]): Buffer {
   const frames: Buffer[] = [encodeZstdFrame(Buffer.from(headerText, 'utf8'))];
-  if (lines.length > 0) frames.push(encodeZstdFrame(Buffer.from(lines.join('\n') + '\n', 'utf8')));
+  for (const chunk of chunkRows(lines)) {
+    frames.push(encodeZstdFrame(Buffer.from(chunk.join('\n') + '\n', 'utf8')));
+  }
   return Buffer.concat(frames);
 }
 
@@ -429,6 +663,7 @@ export async function repairSessionLogFile(
       reason: plan.reason ?? 'verification-refused',
       actions: plan.actions,
       lossy: plan.lossy,
+      warnings: plan.warnings,
       bytesBefore: size,
       bytesAfter: size,
     };
@@ -440,12 +675,15 @@ export async function repairSessionLogFile(
       lossy: plan.lossy,
       droppedRows: plan.droppedRows,
       keptRows: plan.keptRows,
+      warnings: plan.warnings,
       bytesBefore: size,
       bytesAfter: size,
     };
   }
 
-  const next = encodeSessionLog(plan.headerText, plan.keptLines);
+  // 帧级最小写：未触及的帧逐字节复用原区间；其余帧按 ≤200 行/帧重编码（拿不到帧计划才整体兜底）
+  const next =
+    plan.frames === undefined ? encodeSessionLog(plan.headerText, plan.keptLines) : encodeSessionLogFromPlan(bytes, plan.frames);
   const stamp = (opts.now ?? (() => new Date()))().toISOString().replace(/[:.]/g, '-');
   const temp = join(dirname(absPath), '.cm-repair-' + randomBytes(6).toString('hex') + '.tmp');
   let written = false;
@@ -475,6 +713,7 @@ export async function repairSessionLogFile(
       lossy: plan.lossy,
       droppedRows: plan.droppedRows,
       keptRows: plan.keptRows,
+      warnings: plan.warnings,
       backupPath,
       bytesBefore: size,
       bytesAfter: next.length,

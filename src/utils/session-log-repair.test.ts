@@ -19,8 +19,9 @@ import {
   rollbackSessionLogFile,
   sessionLogSelfCheck,
   SESSION_REPAIR_BACKUP_SUFFIX,
+  SESSION_REPAIR_MAX_ROWS_PER_FRAME,
 } from './session-log-repair.ts';
-import { encodeZstdFrame, zstdAvailable } from './zstd-frame.ts';
+import { decodeZstdFrame, encodeZstdFrame, scanZstdFrames, zstdAvailable } from './zstd-frame.ts';
 import { findSyntheticCloserRun } from './session-row-facts.ts';
 
 const CAPABLE = zstdAvailable();
@@ -40,6 +41,39 @@ function logBytes(rows: readonly unknown[], header: Record<string, unknown> = { 
   const parts: Buffer[] = [encodeZstdFrame(Buffer.from(JSON.stringify(header) + NL, 'utf8'))];
   for (const row of rows) parts.push(encodeZstdFrame(Buffer.from(JSON.stringify(row) + NL, 'utf8')));
   return Buffer.concat(parts);
+}
+
+/** 一份会话日志：首帧 header + **每帧多行**（用于帧级最小写 / 分批的用例）。 */
+function frameLogBytes(frames: readonly (readonly unknown[])[], header: Record<string, unknown> = { type: 'session', version: 3, id: 'session-a', cwd: 'C:/proj' }): Buffer {
+  const parts: Buffer[] = [encodeZstdFrame(Buffer.from(JSON.stringify(header) + NL, 'utf8'))];
+  for (const frame of frames) parts.push(encodeZstdFrame(Buffer.from(frame.map((row) => JSON.stringify(row)).join(NL) + NL, 'utf8')));
+  return Buffer.concat(parts);
+}
+
+/** 容器里**事件帧**各自承载的非空行数（帧 0 = header 不计）。 */
+function eventFrameRowCounts(bytes: Buffer): number[] {
+  const scan = scanZstdFrames(bytes);
+  return scan.frames.slice(1).map((frame) => decodeZstdFrame(bytes.subarray(frame.start, frame.end)).toString('utf8').split(NL).filter((line) => line.trim() !== '').length);
+}
+
+/** 容器里的帧字节区间（用于断言「逐字节复用」）。 */
+function frameRanges(bytes: Buffer): { start: number; end: number }[] {
+  return scanZstdFrames(bytes).frames;
+}
+
+/** 官方 v0 released 打包行（无 seq；展开为 payload.length 个事件）。 */
+function packedRow(seq0: number, texts: readonly string[], turn = 1): Record<string, unknown> {
+  return {
+    type: 'text-chunks',
+    seq0,
+    time0: 1000,
+    data: { turn, step: 1, index: 0, dt: texts.slice(1).map(() => 1), texts: [...texts] },
+  };
+}
+
+/** 显式 seq 的普通行（turn 放在 data.turn，与真机形状一致）。 */
+function seqRow(seq: number, over: Record<string, unknown> = {}): Record<string, unknown> {
+  return { type: 'step/start', seq, data: { turn: 1, step: 1 }, ...over };
 }
 
 test('T6：自我校验（严格档）—— 合法日志通过；撕裂尾帧 / 非法容器 / 坏 header / seq 回退一律拒绝', { skip: !CAPABLE }, () => {
@@ -308,3 +342,228 @@ test('T14：turn/end 之后同一 turn 又有**续写事件** → 仍判合成�
   assert.ok(run !== undefined, '续写事件必须能让收尾块被判为合成块');
   assert.equal(run.turn, 1);
 });
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WS1-A packed 行跨度模型（真机 407/1194 份 v0 日志被误判有损的根因）
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+/** captain 定的 M8 负例：收尾块可丢，保留行带**先前就存在**的越界引用 [99]。 */
+function m8Rows(): unknown[] {
+  const J = (seq: number, over: Record<string, unknown>) => ({ time: 1, ...over, seq });
+  return [
+    J(0, { type: 'turn/start', data: { turn: 1 } }),
+    J(1, { type: 'assistant/message', data: { turn: 1, step: 1, message: { role: 'assistant', id: 'a', content: [{ type: 'text', text: 'x' }], source: { kind: 'model' } } } }),
+    J(2, { type: 'step/start', data: { turn: 1, step: 1 } }),
+    J(3, { type: 'step/end', data: { turn: 1, step: 1 } }),
+    J(4, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } }),
+    J(3, { type: 'assistant/chunk', data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'real' } } }),
+    J(4, { type: 'assistant/chunk', data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'more' } } }),
+    J(5, { type: 'request/context', sourceEventSeqs: [99], data: { provider: 'p', model: 'm' } }),
+  ];
+}
+
+test('WS1-A：packed 行按跨度覆盖区间 → 标量 0..16 + packed@17(三项) + 标量 20 = nothing-to-fix', { skip: !CAPABLE }, () => {
+  const rows: unknown[] = [];
+  for (let seq = 0; seq <= 16; seq += 1) rows.push(seqRow(seq));
+  rows.push(packedRow(17, ['a', 'b', 'c']));
+  rows.push(seqRow(20, { type: 'turn/end', data: { turn: 1 } }));
+  const bytes = frameLogBytes([rows]);
+  const strict = planSessionLogRepair(bytes, { allowLossy: false });
+  assert.equal(strict.ok, false);
+  assert.equal(strict.reason, 'nothing-to-fix', JSON.stringify({ reason: strict.reason, actions: strict.actions }));
+  assert.deepEqual(strict.actions, []);
+  const lossy = planSessionLogRepair(bytes, { allowLossy: true });
+  assert.equal(lossy.reason, 'nothing-to-fix', 'packed 行不是有损修复对象');
+  assert.equal(lossy.droppedRows, undefined);
+});
+
+test('WS1-A：畸形 packed 行（缺 seq0 / 载荷非数组 / 空载荷 / 多带 seq 键）→ refuse（undecidable），绝不 lossy-required、绝不截断', { skip: !CAPABLE }, () => {
+  const cases: Record<string, unknown>[] = [
+    { type: 'text-chunks', time0: 1, data: { turn: 1, texts: ['a'], dt: [] } },
+    { type: 'reasoning-chunks', seq0: 1, time0: 1, data: { turn: 1, texts: 'abcdef', dt: [] } },
+    { type: 'text-chunks', seq0: 1, time0: 1, data: { turn: 1, texts: [], dt: [] } },
+    { type: 'text-chunks', seq: 2, seq0: 1, time0: 1, data: { turn: 1, texts: ['a', 'b'], dt: [1] } },
+  ];
+  for (const bad of cases) {
+    const bytes = frameLogBytes([[seqRow(0), bad, seqRow(1, { type: 'turn/end', data: { turn: 1 } })]]);
+    const strict = planSessionLogRepair(bytes, { allowLossy: false });
+    assert.equal(strict.ok, false, JSON.stringify(bad));
+    assert.equal(strict.reason, 'undecidable', JSON.stringify(bad));
+    assert.deepEqual(strict.actions, [], '不可判定时不得给出任何动作（尤其不得截断）');
+    const lossy = planSessionLogRepair(bytes, { allowLossy: true });
+    assert.equal(lossy.reason, 'undecidable', 'allowLossy 也不许越过不可判定行：' + JSON.stringify(bad));
+    assert.deepEqual(lossy.actions, []);
+  }
+});
+
+test('WS1-A：packed seq0 不对齐 = 真空洞（ADV-2）→ 有损预览必须带**真实**截断规模（rows = allowLossy=true 的实际丢弃数）', { skip: !CAPABLE }, () => {
+  const bytes = frameLogBytes([[seqRow(0), packedRow(3, ['a', 'b']), seqRow(5, { type: 'turn/end', data: { turn: 1 } })]]);
+  const strict = planSessionLogRepair(bytes, { allowLossy: false });
+  assert.equal(strict.ok, false);
+  assert.equal(strict.reason, 'lossy-required');
+  assert.deepEqual(strict.actions.map((a) => [a.code, a.rows]), [['truncate-tail', 2]], '预览必须带真实截断规模，不得为空');
+  assert.equal(strict.lossy, true);
+  const lossy = planSessionLogRepair(bytes, { allowLossy: true });
+  assert.equal(lossy.ok, true, JSON.stringify(lossy));
+  assert.equal(lossy.droppedRows, 2);
+  assert.deepEqual(lossy.actions.map((a) => [a.code, a.rows]), [['truncate-tail', 2]], '预览口径必须与实际丢弃行数一致');
+});
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WS1-B 引用完整性（前置条件 + fail-closed 后置断言）
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+test('WS1-B 负例：先前就存在的悬空引用（seq 99）**只告警不 refuse**，closer-drop 照常执行', { skip: !CAPABLE }, async () => {
+  const bytes = frameLogBytes([m8Rows()]);
+  const plan = planSessionLogRepair(bytes, { allowLossy: false });
+  assert.equal(plan.ok, true, JSON.stringify(plan));
+  assert.deepEqual(plan.actions.map((a) => a.code), ['drop-synthetic-closer']);
+  assert.equal(plan.keptRows, 6);
+  assert.equal(plan.warnings?.some((w) => w.includes('99')), true, '先前悬空引用必须可见：' + JSON.stringify(plan.warnings));
+  await withTmp(async (dir) => {
+    const file = path.join(dir, 'session.jsonl.zstd');
+    await fs.writeFile(file, bytes);
+    const outcome = await repairSessionLogFile(file, { apply: true });
+    assert.equal(outcome.ok, true, JSON.stringify(outcome));
+    assert.equal(outcome.droppedRows, 2);
+    assert.equal(outcome.warnings?.some((w) => w.includes('99')), true, '应用期同样要如实回传告警');
+    assert.equal(sessionLogSelfCheck(await fs.readFile(file)).ok, true);
+  });
+});
+
+test('WS1-B 正例：前向引用 + 截断使引用目标由存在变不存在 → refuse（dropped-ref，绝不返回有损预览）', { skip: !CAPABLE }, () => {
+  const rows = [
+    seqRow(0, { type: 'turn/start', data: { turn: 1 } }),
+    { type: 'request/context', seq: 1, time: 1, sourceEventSeqs: [5], data: { provider: 'p', model: 'm' } },
+    seqRow(3, { type: 'turn/start', data: { turn: 2 } }),
+    seqRow(4, { type: 'turn/end', data: { turn: 2 } }),
+    seqRow(5, { type: 'workspace/changes', data: { turn: 2 } }),
+  ];
+  const bytes = frameLogBytes([rows]);
+  const strict = planSessionLogRepair(bytes, { allowLossy: false });
+  assert.equal(strict.ok, false);
+  assert.equal(strict.reason, 'dropped-ref', JSON.stringify(strict.warnings));
+  assert.equal(strict.actions.length, 0, '拒绝时不得推销注定失败的有损计划');
+  const lossy = planSessionLogRepair(bytes, { allowLossy: true });
+  assert.equal(lossy.ok, false);
+  assert.equal(lossy.reason, 'dropped-ref', 'allowLossy 也不得执行');
+});
+
+/** supplement-3 的等价状态：真实续写复用 seq，compaction 行引用被复用区间内的 seq。 */
+function closerReferencedRows(continuationTurn: number): unknown[] {
+  const J = (seq: number, over: Record<string, unknown>) => ({ time: 1, ...over, seq });
+  return [
+    J(0, { type: 'turn/start', data: { turn: 1 } }),
+    J(1, { type: 'assistant/message', data: { turn: 1, step: 1, message: { role: 'assistant', id: 'a', content: [{ type: 'text', text: 'x' }], source: { kind: 'model' } } } }),
+    J(2, { type: 'step/start', data: { turn: 1, step: 1 } }),
+    J(3, { type: 'step/end', data: { turn: 1, step: 1 } }),
+    J(4, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } }),
+    J(3, { type: 'assistant/chunk', data: { turn: continuationTurn, step: 1, chunk: { type: 'text-delta', index: 0, text: 'real continuation' } } }),
+    J(4, { type: 'assistant/chunk', data: { turn: continuationTurn, step: 1, chunk: { type: 'text-delta', index: 0, text: 'more' } } }),
+    J(5, { type: 'compaction/summary', sourceEventSeqs: [3], data: { compactionId: 'c1', summary: 's', shadowedRange: [3, 4], shadowedSeqs: [3, 4], shadowedTokenCount: 2, provider: 'p', model: 'm' } }),
+  ];
+}
+
+test('WS1-B：跳过 closer-drop 之后管线不得降级成有损截断（等价状态 B → refuse，不是 lossy-required + truncate-tail）', { skip: !CAPABLE }, () => {
+  for (const turn of [1, 2]) {
+    const bytes = frameLogBytes([closerReferencedRows(turn)]);
+    const strict = planSessionLogRepair(bytes, { allowLossy: false });
+    assert.equal(strict.ok, false, 'turn=' + String(turn));
+    assert.equal(strict.reason, 'dropped-ref', 'turn=' + String(turn) + ' ' + JSON.stringify({ reason: strict.reason, actions: strict.actions }));
+    assert.notEqual(strict.reason, 'lossy-required');
+    assert.equal(strict.actions.some((a) => a.code === 'truncate-tail'), false, '不得出现 truncate-tail 预览');
+    const lossy = planSessionLogRepair(bytes, { allowLossy: true });
+    assert.equal(lossy.reason, 'dropped-ref', 'allowLossy 同样 refuse：turn=' + String(turn));
+  }
+});
+
+test('WS1-B 前置条件：closer 区间被保留行引用 → **不计划该动作**（nothing-to-fix + 告警，不静默丢弃）', { skip: !CAPABLE }, () => {
+  const rows = [
+    seqRow(0, { type: 'turn/start', data: { turn: 1 } }),
+    seqRow(1, { type: 'assistant/message', data: { turn: 1, step: 1 } }),
+    seqRow(2, { type: 'step/end', data: { turn: 1, step: 1 } }),
+    seqRow(3, { type: 'turn/end', data: { turn: 1 } }),
+    seqRow(4, { type: 'assistant/chunk', data: { turn: 1, step: 1 } }),
+    { type: 'compaction/summary', seq: 5, time: 1, sourceEventSeqs: [2], data: { compactionId: 'c1' } },
+  ];
+  const bytes = frameLogBytes([rows]);
+  const plan = planSessionLogRepair(bytes, { allowLossy: false });
+  assert.equal(plan.ok, false);
+  assert.equal(plan.reason, 'nothing-to-fix', JSON.stringify({ reason: plan.reason, actions: plan.actions }));
+  assert.deepEqual(plan.actions, []);
+  assert.equal(plan.warnings?.some((w) => w.includes('收尾块')), true, '跳过动作必须可见：' + JSON.stringify(plan.warnings));
+});
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WS1-C 帧级最小写
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+test('WS1-C 帧复用：只有第 2 帧含重复行 → 第 0/1/3 帧逐字节复用；备份=原件、写后复验、临时文件清理', { skip: !CAPABLE }, async () => {
+  await withTmp(async (dir) => {
+    const file = path.join(dir, 'session.jsonl.zstd');
+    const before = frameLogBytes([[seqRow(0)], [seqRow(1), seqRow(1)], [seqRow(2)]]);
+    await fs.writeFile(file, before);
+    const beforeRanges = frameRanges(before);
+    assert.equal(beforeRanges.length, 4, 'header + 3 个事件帧');
+    const outcome = await repairSessionLogFile(file, { apply: true, now: () => new Date('2026-10-01T00:00:00.000Z') });
+    assert.equal(outcome.ok, true, JSON.stringify(outcome));
+    assert.equal(outcome.droppedRows, 1);
+    assert.equal(outcome.keptRows, 3);
+    const after = await fs.readFile(file);
+    const afterRanges = frameRanges(after);
+    assert.equal(afterRanges.length, 4, '第 2 帧重编码，帧数不变：' + JSON.stringify(afterRanges.length));
+    for (const index of [0, 1, 3]) {
+      const got = after.subarray(afterRanges[index]!.start, afterRanges[index]!.end);
+      const want = before.subarray(beforeRanges[index]!.start, beforeRanges[index]!.end);
+      assert.equal(got.equals(want), true, '帧 ' + String(index) + ' 必须逐字节复用原文');
+    }
+    assert.equal(sessionLogSelfCheck(after).rows?.length, 3);
+    assert.equal((await fs.readFile(outcome.backupPath!)).equals(before), true, '备份必须等于修复前原件');
+    assert.deepEqual((await fs.readdir(dir)).filter((n) => n.startsWith('.cm-repair-')), [], '临时文件必须清理干净');
+  });
+});
+
+test('WS1-C 行数口径：重编码时**打包行按 1 行计**（帧内行数 = 非空行数）', { skip: !CAPABLE }, async () => {
+  await withTmp(async (dir) => {
+    const file = path.join(dir, 'session.jsonl.zstd');
+    // seq 0、packed@1（1 个事件）、seq 2、seq 2（重放重复）→ 去重后 3 行（含 packed 1 行）
+    const before = frameLogBytes([[seqRow(0), packedRow(1, ['a']), seqRow(2), seqRow(2)]]);
+    await fs.writeFile(file, before);
+    const outcome = await repairSessionLogFile(file, { apply: true });
+    assert.equal(outcome.ok, true, JSON.stringify(outcome));
+    assert.equal(outcome.droppedRows, 1);
+    const after = await fs.readFile(file);
+    assert.deepEqual(eventFrameRowCounts(after), [3], 'packed 行只算 1 行');
+    assert.equal(sessionLogSelfCheck(after).rows?.length, 3);
+  });
+});
+
+test('WS1-C 分批：>500 行的单帧需要重编码 → 没有任何事件帧承载超过 200 行', { skip: !CAPABLE }, async () => {
+  await withTmp(async (dir) => {
+    const file = path.join(dir, 'session.jsonl.zstd');
+    const rows: unknown[] = [];
+    for (let seq = 0; seq < 600; seq += 1) rows.push(seqRow(seq));
+    rows.splice(300, 0, seqRow(299)); // 重放重复行（同一 seq + 同一字节）→ 601 行，去重后 600 行
+    const before = frameLogBytes([rows]);
+    await fs.writeFile(file, before);
+    assert.deepEqual(eventFrameRowCounts(before), [601], '原文是一个 601 行的单帧');
+    const outcome = await repairSessionLogFile(file, { apply: true });
+    assert.equal(outcome.ok, true, JSON.stringify(outcome));
+    assert.equal(outcome.droppedRows, 1);
+    const after = await fs.readFile(file);
+    const counts = eventFrameRowCounts(after);
+    assert.equal(counts.reduce((sum, count) => sum + count, 0), 600, '保留 600 行：' + JSON.stringify(counts));
+    for (const count of counts) {
+      assert.ok(count <= SESSION_REPAIR_MAX_ROWS_PER_FRAME, '任一事件帧不得超过 ' + String(SESSION_REPAIR_MAX_ROWS_PER_FRAME) + ' 行：' + JSON.stringify(counts));
+    }
+    assert.ok(counts.length >= 2, '绝不能产生「单帧承载全量事件」：' + JSON.stringify(counts));
+    assert.equal(sessionLogSelfCheck(after).rows?.length, 600);
+  });
+});
+

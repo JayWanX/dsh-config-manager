@@ -28,6 +28,7 @@ import {
   type SessionVerifyResult,
 } from './session-verify.ts';
 import { encodeZstdFrame, zstdAvailable } from './zstd-frame.ts';
+import { applySessionRepair, readSessionRepairLedger } from './session-repair-service.ts';
 
 const CAPABLE = zstdAvailable();
 const HEADER = { type: 'session', version: 4, id: 'session-abc', cwd: 'C:/proj' };
@@ -92,13 +93,20 @@ function childrenCatalogSource(currentVersion: number): string {
   ].join('\n');
 }
 
-/** 只带静态 catalog（**没有** children 版）的假包。 */
+/**
+ * 只带静态 catalog（**没有** children 版）的假包。
+ *
+ * createRestore 对「非本代 header」直接抛（与真 codec 同形：真 0.1.5-rc.2 对 v4 日志抛
+ * "stored Session uses newer format v4; this build writes v3"）—— 缓存一旦放它过 v3→v4 边界，
+ * 后果就是「v4 被判 decode-failed ⇒ 误回滚」，正是 V2-F1(b) 的现场。
+ */
 function staticOnlyCatalogSource(currentVersion: number): string {
   return [
     'function build() {',
     '  return {',
     '    currentVersion: ' + currentVersion + ',',
-    '    createRestore() {',
+    '    createRestore(header) {',
+    '      if (header.version !== ' + currentVersion + ') throw new Error("stored Session uses newer format v" + header.version + "; this build writes v' + currentVersion + '");',
     '      let count = 0;',
     '      return { decodeRow() { count += 1; }, finish() { return { header: { version: ' + currentVersion + ' }, events: new Array(count).fill(0) }; } };',
     '    },',
@@ -241,7 +249,9 @@ test('session-verify：unavailable —— catalog-disabled / no-catalog / 代际
       dshPackageJsonCandidates: [path.join(dir, 'nowhere', '@deepseek-ai', 'dsh', 'package.json')],
     });
     assert.equal(missing.verified, false);
-    assert.match(String(missing.verified === false ? missing.detail : ''), /anchor:not-found/, 'detail 必须写清尝试过的候选与原因');
+    const missingDetail = String(missing.verified === false ? missing.detail : '');
+    assert.match(missingDetail, /no-installed-version/, '权威已装版本读不到 → 不猜');
+    assert.match(missingDetail, /anchor/, 'detail 必须写清试过的来源（不写绝对路径）');
 
     // 代际对不上：catalog 说 currentVersion=4，同一 anchor 的已装 DSH 说 SESSION_FORMAT_VERSION=3
     const mismatchAnchor = await writeFakePackage(path.join(dir, 'mismatch'), { catalogSource: childrenCatalogSource(4), sessionVersion: '3' });
@@ -355,4 +365,107 @@ test('session-verify：候选布局与两处根（hoisted + pnpm 嵌套）与 se
   assert.ok(isSessionVerifyReason('unavailable') && isSessionVerifyReason('finish-failed'));
   assert.equal(isSessionVerifyReason('nope'), false);
   assert.equal(isSessionVerifyReason(3), false);
+});
+
+/* ------------------------- t22：V2-F1（缓存不得跳闸门）/ V2-F2（权威已装版本）确定性回归 */
+
+const PROJECT_KEY = '--p--';
+const SESSION_ID = 'session-abc';
+const LOG_NAME = 'session.v4.jsonl.zstd';
+const DUPLICATED = [{ type: 'turn/start', seq: 0 }, { type: 'step/start', seq: 1 }, { type: 'step/start', seq: 1 }, { type: 'turn/end', seq: 2 }];
+const later = (): Date => new Date(Date.now() + 120_000);
+
+/** 建一个真实的 v4 会话单元（带重放重复行、mtime 在静止期之外），供服务层回归用。 */
+async function makeServiceUnit(dir: string): Promise<{ homeDir: string; dataDir: string; file: string }> {
+  const homeDir = path.join(dir, 'home');
+  const dataDir = path.join(dir, 'data');
+  const unitDir = path.join(homeDir, 'sessions', PROJECT_KEY, SESSION_ID);
+  await fs.mkdir(unitDir, { recursive: true });
+  await fs.mkdir(dataDir, { recursive: true });
+  const file = path.join(unitDir, LOG_NAME);
+  await fs.writeFile(file, logBytes(HEADER, DUPLICATED));
+  const old = new Date(Date.now() - 600_000);
+  await fs.utimes(file, old, old);
+  return { homeDir, dataDir, file };
+}
+
+test('t22/V2-F1(a)：同进程连续两次 verify 同一份 v4 日志 → 逐字段一致（缓存不得丢 currentVersion）', { skip: !CAPABLE }, async () => {
+  await withTmp(async (dir) => {
+    const anchor = await writeFakePackage(dir, { catalogSource: childrenCatalogSource(4), sessionVersion: '4' });
+    clearSessionVerifyCache();
+    const bytes = logBytes(HEADER, ROWS);
+    const first = await verifySessionLogBytes(bytes, { dshPackageJsonCandidates: [anchor] });
+    assert.equal(first.verified, true, JSON.stringify(first));
+    assert.equal(first.verified === true ? first.equivalentToReadPath : undefined, true, 'v4 日志对 v4 catalog = 现役读盘可读');
+    const second = await verifySessionLogBytes(bytes, { dshPackageJsonCandidates: [anchor] });
+    assert.deepEqual(second, first, '同输入同进程第二次必须逐字段一致（尤其 equivalentToReadPath）');
+    // 中间插一次 v3-header 复验（会走缓存命中），不得污染后续 v4 的结论
+    const v3 = await verifySessionLogBytes(logBytes({ ...HEADER, version: 3 }, ROWS), { dshPackageJsonCandidates: [anchor] });
+    assert.equal(v3.verified, true, JSON.stringify(v3));
+    const third = await verifySessionLogBytes(bytes, { dshPackageJsonCandidates: [anchor] });
+    assert.deepEqual(third, first, 'v3 复验之后 v4 的结论不得翻转');
+  });
+});
+
+test('t22/V2-F1(b)：先验 v3 日志预热缓存，再对 v4 单元 applySessionRepair → unavailable（不回滚 + 写台账），不得 verify-failed', { skip: !CAPABLE }, async () => {
+  await withTmp(async (dir) => {
+    // 「0.1.5 那样」的候选：静态-only catalog（currentVersion 3，非本代直接抛）
+    const anchor = await writeFakePackage(path.join(dir, 'anchor'), { catalogSource: staticOnlyCatalogSource(3), sessionVersion: '3' });
+    clearSessionVerifyCache();
+    const warm = await verifySessionLogBytes(logBytes({ ...HEADER, version: 3 }, ROWS), { dshPackageJsonCandidates: [anchor] });
+    assert.equal(warm.verified, true, JSON.stringify(warm));
+    assert.equal(warm.verified === true ? warm.equivalentToReadPath : undefined, true);
+
+    const unit = await makeServiceUnit(dir);
+    const before = await fs.readFile(unit.file);
+    const applied = await applySessionRepair({
+      homeDir: unit.homeDir, dataDir: unit.dataDir, unitId: PROJECT_KEY + '/' + SESSION_ID, now: later,
+      verify: { dshPackageJsonCandidates: [anchor] },
+    });
+    assert.equal(applied.ok, true, JSON.stringify(applied));
+    assert.notEqual(applied.reason, 'verify-failed', '缓存命中也不得把 v4 交给 v3 catalog 判确定性失败');
+    assert.equal(applied.rolledBack, undefined, 'unavailable 路径不得回滚');
+    const verify = applied.verify;
+    assert.equal(verify?.verified, false);
+    assert.equal(verify !== undefined && verify.verified === false ? verify.reason : '', 'unavailable');
+    assert.equal(applied.ledgerRecorded, true, 'unavailable 必须写台账（保住回滚入口）');
+    assert.equal((await readSessionRepairLedger(unit.dataDir)).repairs.length, 1);
+    assert.equal((await fs.readFile(unit.file)).equals(before), false, '不回滚：写入保持');
+  });
+});
+
+test('t22/V2-F2：权威「已装版本」来自运行时锚点/installAnchor，不由候选自己那棵树自证', { skip: !CAPABLE }, async () => {
+  await withTmp(async (dir) => {
+    // 运行时锚点树：**只有** dsh-session（SESSION_FORMAT_VERSION=4），没有 catalog
+    const resources = path.join(dir, 'resources');
+    const rt = path.join(resources, 'app.asar', 'dsh', 'node_modules', '@deepseek-ai');
+    await fs.mkdir(path.join(rt, 'dsh'), { recursive: true });
+    await fs.writeFile(path.join(rt, 'dsh', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '9.9.9' }));
+    await fs.mkdir(path.join(rt, 'dsh-session', 'lib'), { recursive: true });
+    await fs.writeFile(path.join(rt, 'dsh-session', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-session', version: '9.9.9', type: 'module' }));
+    await fs.writeFile(path.join(rt, 'dsh-session', 'lib', 'index.js'), 'export const SESSION_FORMAT_VERSION = 4;\n');
+    // profile 树：0.1.5 那样（catalog currentVersion 3 + 同树 dsh-session 3）—— 候选自己就在这棵树里
+    const homeDir = path.join(dir, 'home');
+    await writeFakePackage(path.join(homeDir, 'profiles'), { catalogSource: staticOnlyCatalogSource(3), sessionVersion: '3' });
+
+    const proc = process as { resourcesPath?: string };
+    const had = Object.prototype.hasOwnProperty.call(proc, 'resourcesPath');
+    const saved = proc.resourcesPath;
+    clearSessionVerifyCache();
+    try {
+      if (had) delete proc.resourcesPath;
+      const byProfileTree = await verifySessionLogBytes(logBytes({ ...HEADER, version: 3 }, ROWS), { homeDir });
+      assert.equal(byProfileTree.verified, true, '没有运行时锚点时，权威解析只能落到 profile 树（本机 CLI 的现实情形）');
+      clearSessionVerifyCache();
+      proc.resourcesPath = resources;
+      const byRuntimeAnchor = await verifySessionLogBytes(logBytes({ ...HEADER, version: 3 }, ROWS), { homeDir });
+      assert.equal(byRuntimeAnchor.verified, false, JSON.stringify(byRuntimeAnchor));
+      assert.match(String(byRuntimeAnchor.verified === false ? byRuntimeAnchor.detail : ''), /generation-mismatch/,
+        '权威已装版本是运行时锚点的 4，候选自己那棵树的 3 不得自证');
+    } finally {
+      if (had) proc.resourcesPath = saved;
+      else delete proc.resourcesPath;
+      clearSessionVerifyCache();
+    }
+  });
 });

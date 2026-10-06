@@ -37,17 +37,36 @@
  *  ③ **<home>/profiles/node_modules/@deepseek-ai/dsh-session-format-catalog**（以及 <home>/profiles/<profile>/… ）
  *     —— 与 src/index.ts 的 dshPackageJsonCandidates 第 ②③ 条同源，每处再试 hoisted 与 pnpm 嵌套两种布局
  *     （deriveRoots 与 utils/session-format.ts 的 resolveSessionFormatVersion 逐字同款）。
- *  代际闸门：候选 catalog 必须暴露 currentVersion，且必须等于**同一 anchor**解析出的已装 DSH
- *     SESSION_FORMAT_VERSION（utils/session-format.ts 的 readSessionFormatVersionAt）——读不到任一侧就换下一个候选；
- *     全部候选都不匹配 → unavailable，detail 里写清每个候选的失败原因（generation-mismatch 等）。
+ *  代际闸门：候选 catalog 必须暴露 currentVersion，且必须等于**权威「已装版本」**——
+ *     install-anchor（profileContext.installAnchor，最高优先）→ runtime-anchor（<resources>/app.asar|app 下的
+ *     dsh/node_modules）→ profiles-tree（<home>/profiles/**），取第一个读得出来的 @deepseek-ai/dsh-session 常量
+ *     （utils/session-format.ts 的 readSessionFormatVersionAt；顺序与 src/index.ts 的 dshPackageJsonCandidates 同源）。
+ *     调用方显式给了 dshPackageJsonCandidates 时，它**就是**权威清单（标签 anchor）。
+ *     读不到任一侧 → 换下一个候选；全部不匹配 → unavailable，detail 写清试过的来源与失败原因
+ *     （generation-mismatch / no-installed-version(<来源>) 等）。
  *  API 闸门：包内没有 createSessionFormatCatalogWithChildren（只有静态 sessionFormatCatalog）时，
  *     **仅当** header.version === catalog.currentVersion 才可用（本代日志不过 v3→v4 边界、不需要 child 事实）；
  *     否则 unavailable(detail='children-required')。例：磁盘上那份 0.1.5-rc.2（currentVersion=3）对 v4 日志必须
  *     unavailable，而不是被当成「日志有错」。
- *  detail 只写**机器可读码 + 候选标签**（bare-module / runtime-anchor / profiles-tree / anchor），
+ *  detail 只写**机器可读码 + 候选标签**（bare-module / runtime-anchor / profiles-tree / anchor / install-anchor），
  *     **绝不写绝对路径**（结果会经路由回传浏览器）。
+ *  缓存纪律（V2-F1 修复点）：进程内缓存只存**与日志无关**的候选事实（catalog / currentVersion / viaChildren /
+ *     当时的权威版本），**绝不缓存「某个 headerVersion 下判定通过」这个结论** —— 依赖日志 header 的 API 闸门
+ *     与 equivalentToReadPath **每次调用都按本日志的 headerVersion 重算**；权威版本变了缓存条目即作废。
+ *     旧实现按根命中就直接返回（还丢掉 currentVersion），后果有二：同一份 v4 日志同进程第二次复验的
+ *     equivalentToReadPath 由 true 翻 false（CLI 文案在「现役读盘可读 / 迁移链可还原」间翻转）；以及
+ *     本机 0.1.5-rc.2 静态 catalog 被复用到 v4 单元 → createRestore 抛
+ *     "stored Session uses newer format v4; this build writes v3" → 判 **decode-failed ⇒ 误回滚 + 不写台账**，
+ *     而新进程同输入是 unavailable（不回滚 + 写台账）。两条确定性回归测试钉住这两个后果。
+ *  V2-F2（已修）：旧实现用**被判定候选自己那棵树**的 SESSION_FORMAT_VERSION 当「已装版本」（自证），于是
+ *     磁盘上 0.1.5-rc.2 那棵树（currentVersion 3）把 v3 日志标成「现役读盘可读」，而真实运行的 DSH 是
+ *     asar 里的 0.2.0（v4）—— 结论对运行环境不诚实。现在「已装版本」一律走上面的权威解析顺序
+ *     （installAnchor 同源），候选自己那棵树只作为**被判定对象**；权威侧读不到 → unavailable（不猜）。
  *  已知缺口（交由文档任务登记）：**asar 抽取不作为产品路径** —— 打包安装下 app.asar 对普通 node 不可读，
  *     本模块不做任何「自己解 asar」的事；R1 的 .tmp/m1/vendor 只用于验证，不参与本模块任何代码路径。
+ *     F2 的连带后果（同一条缺口）：纯 node 的 CLI/救生台拿不到 asar 里的真 codec，只能落到 profiles-tree 那份
+ *     旧 catalog —— 这在**该上下文里**是可得的最好知识，但它不等于「正在跑的 DSH 的现役版本」，
+ *     所以 equivalentToReadPath 只在权威版本确实等于 header 版本时才为 true。
  *
  * ── recovery / validation（对着已安装包实测确定，不抄文档）────────────────────
  *  · recovery: 'strict' 写死。日志是**我们刚改写过的字节**，必须逐行严格成立；用 'recoverable' 会接受
@@ -109,8 +128,16 @@ export interface SessionVerifyCatalog {
 }
 
 export interface SessionVerifyOptions {
-  /** 显式 @deepseek-ai/dsh/package.json 候选（顺序即真伪顺序；给了就只试它，标签 anchor）。 */
+  /**
+   * 显式 @deepseek-ai/dsh/package.json 候选（顺序即真伪顺序；给了就**只**试它，标签 anchor）。
+   * 给了它 = 调用方声明「这就是本机权威候选清单」⇒「已装版本」也从它解析（不回落 profile 树）。
+   */
   dshPackageJsonCandidates?: readonly string[];
+  /**
+   * 拉起本宿主的运行时锚（= src/index.ts 的 `profileContext.installAnchor`，优先级最高）。
+   * 宿主侧拿到 profileContext 时必须传它：「已装版本」的权威解析第一顺位（V2-F2）。
+   */
+  installAnchor?: string;
   /** 显式直接子会话事实；缺省 = []（显式声明没有子会话）。 */
   children?: readonly unknown[];
   /** 注入 catalog（测试用）。传 null = 直接判 unavailable（不探测）。 */
@@ -205,8 +232,22 @@ function profileCandidates(homeDir?: string, profile?: string): string[] {
 
 /** 已 import 的 catalog 模块（键 = 文件 URL；失败也缓存，避免反复探测）。 */
 const moduleCache = new Map<string, unknown>();
-/** 已装配的 children 版 catalog（键 = 根路径；只缓存「显式声明无子会话」的默认装配）。 */
-const catalogCache = new Map<string, SessionVerifyCatalog>();
+/**
+ * 已装配的候选**事实**（键 = node_modules 根；只缓存「显式声明无子会话」的默认装配）。
+ *
+ * V2-F1 修复点：这里**只**存与日志无关的事实（catalog / currentVersion / viaChildren / 当时的权威版本），
+ * **绝不**把「某个 headerVersion 下判定通过」这个结论也缓存进去 —— 依赖日志 header 的闸门（API 闸门）
+ * 与 equivalentToReadPath 每次调用都按本日志的 headerVersion 重算（见 headerGateFailure / pickCandidate）。
+ */
+interface CachedCandidate {
+  catalog: SessionVerifyCatalog;
+  currentVersion: number;
+  /** 模块是否导出 children 版装配函数（= 能过 v3→v4 边界） */
+  viaChildren: boolean;
+  /** 入缓存时的权威「已装版本」；权威版本变了就作废重判 */
+  installedVersion: number;
+}
+const catalogCache = new Map<string, CachedCandidate>();
 
 /** 清空进程内缓存（测试隔离用）。 */
 export function clearSessionVerifyCache(): void {
@@ -255,27 +296,55 @@ function isSessionVerifyCatalog(value: unknown): value is SessionVerifyCatalog {
   return typeof value === 'object' && value !== null && typeof (value as { createRestore?: unknown }).createRestore === 'function';
 }
 
-/** 一个候选的判定结果：要么给出可用 catalog（含两侧代际），要么给出失败码。 */
-type CandidateVerdict =
-  | { ok: true; catalog: SessionVerifyCatalog; currentVersion: number; installedVersion: number }
-  | { ok: false; code: string };
+/**
+ * 权威候选清单（**带来源标签**，与 src/index.ts 的 dshPackageJsonCandidates 同序）：
+ * install-anchor（profileContext.installAnchor）→ runtime-anchor（asar / 解包 app）→ profiles-tree。
+ * 调用方显式给了 dshPackageJsonCandidates 时，它**就是**权威清单（标签 anchor）。
+ */
+function authoritativePlans(options: SessionVerifyOptions): { label: string; candidates: string[] }[] {
+  if (options.dshPackageJsonCandidates !== undefined) return [{ label: 'anchor', candidates: [...options.dshPackageJsonCandidates] }];
+  const plans: { label: string; candidates: string[] }[] = [];
+  if (options.installAnchor !== undefined && options.installAnchor !== '') plans.push({ label: 'install-anchor', candidates: [options.installAnchor] });
+  const runtime = runtimeAnchorCandidates();
+  if (runtime.length > 0) plans.push({ label: 'runtime-anchor', candidates: runtime });
+  const profiles = profileCandidates(options.homeDir, options.profile);
+  if (profiles.length > 0) plans.push({ label: 'profiles-tree', candidates: profiles });
+  return plans;
+}
 
 /**
- * 单个候选（模块 + 它的 node_modules 根）的资格审查。
+ * 权威「已装 DSH 格式版本」：按 [installAnchor → 运行时锚点(asar/app) → <home>/profiles/**] 顺序，取第一个
+ * 读得出来的 @deepseek-ai/dsh-session 常量（与 utils/session-format.ts 的 resolveSessionFormatVersion 同源同序）。
+ * 读不到 → undefined：**不猜**，调用方据此直接判 unavailable。
  *
- * 闸门顺序固定：createRestore 存在 → **代际闸门**（catalog.currentVersion === 同 anchor 的已装 SESSION_FORMAT_VERSION）
- * → **API 闸门**（只有静态 catalog 时须 header.version === currentVersion）。
+ * V2-F2 修复点：**绝不拿被判定的那个 catalog 候选自己那棵树当权威**。旧实现用 readSessionFormatVersionAt(候选根)
+ * 自证，于是磁盘上 0.1.5-rc.2 那棵树（currentVersion 3）把 v3 日志标成「现役读盘可读」，而真实运行的 DSH 是 v4
+ * （asar 里的 0.2.0）—— 同一输入在新/旧进程给出不同代际结论，且对运行环境不诚实。
  */
-function judgeCandidate(mod: unknown, root: string, children: readonly unknown[], headerVersion: unknown): CandidateVerdict {
+function resolveAuthoritativeVersion(options: SessionVerifyOptions): { version?: number; tried: string[] } {
+  const tried: string[] = [];
+  for (const plan of authoritativePlans(options)) {
+    for (const root of nodeModulesRootsFor(plan.candidates)) {
+      const version = readSessionFormatVersionAt(root);
+      if (version !== undefined) return { version, tried };
+    }
+    tried.push(plan.label);
+  }
+  return { tried };
+}
+
+/** 装配一个候选模块（**与日志无关**的那一半判定）。 */
+function assembleCandidate(
+  mod: unknown,
+  children: readonly unknown[],
+): { ok: true; catalog: SessionVerifyCatalog; currentVersion: number; viaChildren: boolean } | { ok: false; code: string } {
   // 注意：官方 catalog 包**不导出模块级 createRestore**（导出的只有 createSessionFormatCatalogWithChildren /
   // sessionFormatCatalog / historicalSessionFormatCatalog 等），createRestore 是**装配出的 catalog 对象**上的方法
   // —— 所以这里只判「装配结果是不是一个带 createRestore 的 catalog」，别按模块级导出判（那会把真包判死）。
   const record = mod as Record<string, unknown>;
-  const installedVersion = readSessionFormatVersionAt(root);
-  if (installedVersion === undefined) return { ok: false, code: 'no-installed-version' };
   const assemble = record['createSessionFormatCatalogWithChildren'];
-  let catalog: unknown;
   const viaChildren = typeof assemble === 'function';
+  let catalog: unknown;
   if (viaChildren) {
     try {
       catalog = (assemble as (facts: readonly unknown[]) => unknown)(children);
@@ -287,10 +356,48 @@ function judgeCandidate(mod: unknown, root: string, children: readonly unknown[]
   }
   if (!isSessionVerifyCatalog(catalog)) return { ok: false, code: 'no-createRestore' };
   const currentVersion = catalog.currentVersion;
-  if (typeof currentVersion !== 'number' || currentVersion !== installedVersion) return { ok: false, code: 'generation-mismatch' };
-  // API 闸门：静态 catalog 无法在 v3→v4 边界绑定 child 事实，只有「本来就等于本代」才是可信读盘
-  if (!viaChildren && headerVersion !== currentVersion) return { ok: false, code: 'children-required' };
-  return { ok: true, catalog, currentVersion, installedVersion };
+  if (typeof currentVersion !== 'number') return { ok: false, code: 'no-current-version' };
+  return { ok: true, catalog, currentVersion, viaChildren };
+}
+
+/**
+ * **每次调用都必须重跑**的、依赖本日志 header 的闸门（V2-F1 修复点）。
+ *
+ * 静态 catalog（模块没导出 children 版装配函数）在 v3→v4 边界绑不了 child 事实，只有「这份日志本来就等于它的
+ * 现役代际」才是可信读盘，否则 unavailable(children-required)。**缓存命中也不例外** —— 旧实现命中缓存就直接
+ * 返回（还丢掉了 currentVersion），于是同一份 v4 日志在同进程第二次调用会由「现役可读」翻成「迁移链可还原」，
+ * 甚至把 v4 交给 v3 codec 判 decode-failed ⇒ 误回滚。
+ */
+function headerGateFailure(facts: { viaChildren: boolean; currentVersion: number }, headerVersion: unknown): string | undefined {
+  if (facts.viaChildren) return undefined;
+  return headerVersion === facts.currentVersion ? undefined : 'children-required';
+}
+
+/** 试一个候选根：缓存只提供「与日志无关的事实」，依赖 header 的闸门每次重跑。 */
+function pickCandidate(
+  mod: unknown,
+  root: string,
+  children: readonly unknown[],
+  headerVersion: unknown,
+  installedVersion: number,
+  label: string,
+): { ok: true; resolution: CatalogResolution } | { ok: false; code: string } {
+  let facts: CachedCandidate | undefined;
+  if (children.length === 0) {
+    const cached = catalogCache.get(root);
+    // 权威版本变了（换锚点 / 装了别的）→ 缓存作废，重跑与日志无关的那一半
+    if (cached !== undefined && cached.installedVersion === installedVersion) facts = cached;
+  }
+  if (facts === undefined) {
+    const verdict = assembleCandidate(mod, children);
+    if (!verdict.ok) return { ok: false, code: verdict.code };
+    if (verdict.currentVersion !== installedVersion) return { ok: false, code: 'generation-mismatch' };
+    facts = { catalog: verdict.catalog, currentVersion: verdict.currentVersion, viaChildren: verdict.viaChildren, installedVersion };
+    if (children.length === 0) catalogCache.set(root, facts);
+  }
+  const gate = headerGateFailure(facts, headerVersion);
+  if (gate !== undefined) return { ok: false, code: gate };
+  return { ok: true, resolution: { catalog: facts.catalog, currentVersion: facts.currentVersion, installedVersion, detail: label } };
 }
 
 /** 解析 catalog 的结果；detail 只放候选标签 + 失败码（**不放路径** —— 它会回传浏览器）。 */
@@ -304,6 +411,7 @@ interface CatalogResolution {
 async function resolveCatalog(options: SessionVerifyOptions, headerVersion: unknown): Promise<CatalogResolution> {
   if (options.catalog === null) return { detail: 'catalog-disabled' };
   if (options.catalog !== undefined) {
+    // 注入 catalog = 调用方声明「这就是判定用的本机 codec」⇒ 它的 currentVersion 即权威版本（不再另找）
     return {
       catalog: options.catalog,
       ...(typeof options.catalog.currentVersion === 'number' ? { currentVersion: options.catalog.currentVersion } : {}),
@@ -320,6 +428,13 @@ async function resolveCatalog(options: SessionVerifyOptions, headerVersion: unkn
     notes.push(entry);
   };
 
+  // 「已装版本」先**独立**解析（权威解析，与被判定的候选自己那棵树无关）；读不到 → 不猜（detail 带上试过的来源）
+  const authority = resolveAuthoritativeVersion(options);
+  if (authority.version === undefined) {
+    return { detail: authority.tried.length > 0 ? 'no-installed-version(' + authority.tried.join('+') + ')' : 'no-installed-version' };
+  }
+  const installedVersion = authority.version;
+
   // ① 裸模块（第一顺位）：已装插件自己依赖树里的那一份
   const bare = await importBareCatalog();
   if (bare === undefined) {
@@ -329,9 +444,9 @@ async function resolveCatalog(options: SessionVerifyOptions, headerVersion: unkn
     if (root === undefined) {
       note('bare-module', 'no-version-anchor');
     } else {
-      const verdict = judgeCandidate(bare, root, children, headerVersion);
-      if (verdict.ok) return { catalog: verdict.catalog, currentVersion: verdict.currentVersion, installedVersion: verdict.installedVersion, detail: 'bare-module' };
-      note('bare-module', verdict.code);
+      const picked = pickCandidate(bare, root, children, headerVersion, installedVersion, 'bare-module');
+      if (picked.ok) return picked.resolution;
+      note('bare-module', picked.code);
     }
   }
 
@@ -361,22 +476,14 @@ async function resolveCatalog(options: SessionVerifyOptions, headerVersion: unkn
       note(plan.label, 'not-found');
       continue;
     }
-    const cached = catalogCache.get(plan.root);
-    if (cached !== undefined && children.length === 0) {
-      return { catalog: cached, currentVersion: undefined, detail: plan.label + ':cached' };
-    }
     const mod = await importCatalogModule(file);
     if (mod === undefined) {
       note(plan.label, 'import-failed');
       continue;
     }
-    const verdict = judgeCandidate(mod, plan.root, children, headerVersion);
-    if (!verdict.ok) {
-      note(plan.label, verdict.code);
-      continue;
-    }
-    if (children.length === 0) catalogCache.set(plan.root, verdict.catalog);
-    return { catalog: verdict.catalog, currentVersion: verdict.currentVersion, installedVersion: verdict.installedVersion, detail: plan.label };
+    const picked = pickCandidate(mod, plan.root, children, headerVersion, installedVersion, plan.label);
+    if (picked.ok) return picked.resolution;
+    note(plan.label, picked.code);
   }
 
   // 全部候选都不匹配时：只要任一候选卡在「静态 catalog 过不了 v3→v4 边界」，最终结论就是 children-required

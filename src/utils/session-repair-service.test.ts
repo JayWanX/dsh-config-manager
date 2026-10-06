@@ -204,6 +204,7 @@ test('M1-WS2：复验确定性失败 → 自动回滚（逐字节还原）且不
     assert.equal(applied.reason, 'verify-failed');
     assert.equal(applied.rolledBack, true, '必须用本次备份自动还原');
     assert.equal(applied.verify?.verified, false);
+    assert.equal(applied.verify?.equivalentToReadPath, false, '确定性失败同样不得声称「现役可读」');
     assert.equal((await fs.readFile(file)).equals(before), true, '确定性失败必须逐字节还原');
     assert.equal((await listSessionRepairs(dataDir)).repairs.length, 0, '确定性失败不得记录台账');
   });
@@ -218,6 +219,7 @@ test('M1-WS2：复验 unavailable → 不回滚、不宣称已验证，但台账
     assert.equal(applied.ok, true, JSON.stringify(applied));
     const verify = applied.verify;
     assert.equal(verify?.verified, false, '能力不可用时绝不宣称已验证');
+    assert.equal(verify?.equivalentToReadPath, false, '能力不可用时也不得声称「现役可读」');
     assert.equal(verify !== undefined && verify.verified === false ? verify.reason : '', 'unavailable');
     assert.equal((await fs.readFile(file)).equals(before), false, 'unavailable 不回滚：写入保持');
     assert.equal(applied.ledgerRecorded, true, 'unavailable 仍要写台账（否则这次写入失去回滚入口）');
@@ -225,6 +227,7 @@ test('M1-WS2：复验 unavailable → 不回滚、不宣称已验证，但台账
     const record = (await readSessionRepairLedger(dataDir)).repairs[0];
     assert.ok(record !== undefined);
     assert.equal(record.verify?.verified, false, '台账必须如实标注未验证');
+    assert.equal(record.verify?.equivalentToReadPath, false, '台账里的 equivalentToReadPath 必须一并如实落盘');
     assert.equal(record.targetSha256After, sha256Hex(repaired), '台账必须记下修复后目标的 sha256');
     const backupBytes = await fs.readFile(path.join(unitDir, record.backupName));
     assert.equal(record.backupSha256, sha256Hex(backupBytes), '台账必须记下备份的 sha256');

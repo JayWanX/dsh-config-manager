@@ -8,53 +8,69 @@
  *     —— 它经 utils/zstd-frame.ts 间接依赖 node:zlib，core 必须与 DSH 存储格式 + node 内建模块解耦。
  *   · 本模块只读字节（绝不动文件系统），失败一律**返回结论**，绝不 throw 到调用方。
  *
- * ── 判定口径：recovery / validation（对着已安装包实测确定，不抄文档）────────────
- * 实测对象 = 已装包 <anchor>/node_modules/@deepseek-ai/dsh-session-format-catalog/lib/index.js
- * （行号按该文件；本机已装 0.2.0-rc.2 为 5717 B）。
+ * ── 官方引证（@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js，行号按已装包 142847 B / 3528 行）──
+ * 现役读盘路径 = parseHeaderRecord：
+ *   L970 function parseHeaderRecord(record) { … }
+ *   L971   首帧形状：非空 + 唯一换行符就是最后一个字节（本模块 extractFrames 逐字复刻）
+ *   L974   JSON.parse 首行 → L978 必须是 JSON 对象
+ *   L979   refuseForeignFormatVersion(parsed)   // L964-968：version !== SESSION_FORMAT_VERSION 直接拒绝
+ *   L981   isHeaderLine(parsed)
+ *   L984-987 restore = sessionFormatCatalog.createRestore(parsed, { recovery: "strict", validation: "transformed" })
+ * 两点必须写清：
+ *   ① 该 createRestore **只在 header.version === SESSION_FORMAT_VERSION(本机 4) 时可达** ——
+ *      L979 的 refuseForeignFormatVersion 会先把「非本代」的 header 挡掉。所以我们判定 v4 日志用的
+ *      { strict, transformed } 正是官方现役读盘口径。
+ *   ② 对 **pre-v4** 日志，本门走的是**迁移链**（v0→v1→…→v4 后恢复），它**不等价于 DSH 读盘路径**：
+ *      官方的 resolveCurrentLog（L2850-2861）对 sourceVersion === SESSION_FORMAT_VERSION 返回现役日志、
+ *      对 < 本代**返回 undefined**（= 这份日志没有「现役代际」）、对 > 本代抛错；而官方的历史读取路径
+ *      （L2222-2224）用的是 { recovery: "recoverable", validation: "current" }，与现役口径**不同**。
+ *      所以结果里另有 equivalentToReadPath：仅当 header.version === catalog.currentVersion === 已装
+ *      SESSION_FORMAT_VERSION 才为 true（「DSH 现在就能直接读」）；pre-v4 迁移链成功时 verified:true
+ *      但 equivalentToReadPath:false（「迁移链能还原，但这不是 DSH 的现役读盘」）。
  *
- * ① recovery: 'strict'（写死）：日志是**我们刚改写过的字节**，必须逐行严格成立。
- *    用 'recoverable' 会接受「丢掉一行 + 丢掉其后未提交后缀」的残缺前缀
- *    （dsh-session-format/README.md 第 48 行：The recoverable decoder returns the accepted logical prefix.
- *    A codec may drop one malformed or sequence-gapped row and its uncommitted suffix），
- *    那等于把「DSH 只能读到一半」判成通过。
- * ② validation: 'transformed' —— **判定口径**。源码证据（catalog/lib/index.js）：
- *    · L355 / L357：createRestore 只有 validation === 'current' 时取 options.restoreCurrent，
- *      其余（含 'transformed'）一律取 options.restoreTransformedCurrent；
- *    · L56-68：restoreCurrent = restoreReleasedV4Artifact(artifact, KNOWN_SESSION_EVENT_TYPES)
- *      **再加** validateInstalledCurrentSessionArtifact(...)；而 restoreTransformedCurrent
- *      **就是** restoreReleasedV4Artifact(...) 本身 —— 即**官方 stored-log 读盘路径**（代际自有的 V4 恢复）。
- *    · 旁证：dsh-session-format-v3-to-v4/README.md 第 280-281 行表格把 validation:'transformed'
- *      记为「迁移后跑代际自有 V4 恢复、跳过已安装 Session 的通用校验」。用 'current' 当判定门会把
- *      「已安装 build 的语义校验」当硬失败，对「官方读盘路径能读」的日志造成**假回滚**。
- * ③ validation: 'current' 只作**可选增强**（结果里的 strong / strongDetail）：
- *    它跑完整安装侧校验，能指出「能读但语义不完全干净」；**绝不参与判定**，也绝不影响回滚与否。
+ * ── catalog 解析顺序与资格审查（缺一即 unavailable，绝不猜）─────────────────
+ *  ① **裸模块动态 import**（第一顺位）：await import('@deepseek-ai/dsh-session-format-catalog') ——
+ *     已装插件自己依赖树里的那一份（开发树 / 档案 node_modules / app.asar 内均按 Node 解析规则命中）；
+ *     再用 createRequire(import.meta.url).resolve('<pkg>/package.json') 反推它的 node_modules 根，供代际闸门用。
+ *  ② **运行时锚点的 asar 路径**：<process.resourcesPath>/app.asar/dsh/node_modules（含 .unpacked 与解包 app 两种形态）
+ *     —— 这是 profileContext.installAnchor 在服务层（拿不到 profileContext 的地方）的进程内等价物。
+ *  ③ **<home>/profiles/node_modules/@deepseek-ai/dsh-session-format-catalog**（以及 <home>/profiles/<profile>/… ）
+ *     —— 与 src/index.ts 的 dshPackageJsonCandidates 第 ②③ 条同源，每处再试 hoisted 与 pnpm 嵌套两种布局
+ *     （deriveRoots 与 utils/session-format.ts 的 resolveSessionFormatVersion 逐字同款）。
+ *  代际闸门：候选 catalog 必须暴露 currentVersion，且必须等于**同一 anchor**解析出的已装 DSH
+ *     SESSION_FORMAT_VERSION（utils/session-format.ts 的 readSessionFormatVersionAt）——读不到任一侧就换下一个候选；
+ *     全部候选都不匹配 → unavailable，detail 里写清每个候选的失败原因（generation-mismatch 等）。
+ *  API 闸门：包内没有 createSessionFormatCatalogWithChildren（只有静态 sessionFormatCatalog）时，
+ *     **仅当** header.version === catalog.currentVersion 才可用（本代日志不过 v3→v4 边界、不需要 child 事实）；
+ *     否则 unavailable(detail='children-required')。例：磁盘上那份 0.1.5-rc.2（currentVersion=3）对 v4 日志必须
+ *     unavailable，而不是被当成「日志有错」。
+ *  detail 只写**机器可读码 + 候选标签**（bare-module / runtime-anchor / profiles-tree / anchor），
+ *     **绝不写绝对路径**（结果会经路由回传浏览器）。
+ *  已知缺口（交由文档任务登记）：**asar 抽取不作为产品路径** —— 打包安装下 app.asar 对普通 node 不可读，
+ *     本模块不做任何「自己解 asar」的事；R1 的 .tmp/m1/vendor 只用于验证，不参与本模块任何代码路径。
+ *
+ * ── recovery / validation（对着已安装包实测确定，不抄文档）────────────────────
+ *  · recovery: 'strict' 写死。日志是**我们刚改写过的字节**，必须逐行严格成立；用 'recoverable' 会接受
+ *    「丢掉一行 + 丢掉其后未提交后缀」的残缺前缀（dsh-session-format/README.md 第 48 行明说），
+ *    那等于把「DSH 只能读到一半」判成通过。官方现役路径（L984-987）也是 strict。
+ *  · validation: 'transformed' 为**判定门**（与官方现役路径逐字一致）：catalog/lib/index.js L355/L357 显示
+ *    非 'current' 时取 options.restoreTransformedCurrent，而 L61-63 里 restoreTransformedCurrent 就是
+ *    restoreReleasedV4Artifact(...)；L56-59 的 restoreCurrent 才额外跑 validateInstalledCurrentSessionArtifact
+ *    （已安装 build 的语义校验）。用 'current' 当判定门会把「已安装 build 的语义校验」当硬失败，
+ *    对「官方读盘路径能读」的日志造成**假回滚**，所以它只作结果里的 strong / strongDetail 增强字段。
+ *    （旁证：dsh-session-format-v3-to-v4/README.md L280-281 表格把 validation:'transformed' 记为
+ *      「迁移后跑代际自有 V4 恢复、跳过已安装 Session 的通用校验」。）
  *
  * ── children（v3→v4 迁移的显式子会话事实）──────────────────────────────────
- * 优先 createSessionFormatCatalogWithChildren(children)：静态 sessionFormatCatalog 的 v3→v4 边在
- * createStage() 时无条件抛「V3 catalog migration requires explicit historical child facts,
- * including an empty array for a parent without children」（catalog 实测；旁证
- * dsh-session-format-v3-to-v4/README.md 第 51 行）。该行同时明确：**空数组 = 显式声明「这份父会话没有子会话」**，
- * 是合法绑定 —— 所以默认 []。调用方可用 opts.children 注入真实直接子会话事实。
+ * 优先 createSessionFormatCatalogWithChildren(children)：静态 sessionFormatCatalog 的 v3→v4 边在 createStage()
+ * 时无条件抛「V3 catalog migration requires explicit historical child facts, including an empty array for a
+ * parent without children」（catalog 实测；旁证 dsh-session-format-v3-to-v4/README.md 第 51 行）。
+ * 该行同时明确：**空数组 = 显式声明「这份父会话没有子会话」**，是合法绑定 —— 所以默认 []。
  * 若 codec 仍抛 children 相关错误 → 判 unavailable（detail='children-required'）：我们缺的是**事实**，
  * 而不是日志有问题；服务层据此**不回滚、不宣称已验证**（诚实优于伪造）。
- *
- * ── 两道解析闸门（缺一即 unavailable，绝不猜）─────────────────────────────
- * ① **代际闸门**：候选 catalog 必须暴露 currentVersion，且它必须等于**同一 anchor**解析出的已装 DSH
- *    SESSION_FORMAT_VERSION（复用 utils/session-format.ts 的 readSessionFormatVersionAt —— 同一套
- *    install anchor 口径）。读不到版本、或对不上 → unavailable：拿别的 build 的 codec 去判生死会造假结论。
- * ② **API 闸门**：包内没有 children 版装配函数时，只能用静态 sessionFormatCatalog ——
- *    此时**仅当**日志 header.version === catalog.currentVersion 才可用（本代日志不过 v3→v4 边界，不需要 child 事实）；
- *    否则 → unavailable(detail='children-required')。例：磁盘上那份 0.1.5-rc.2（currentVersion=3）
- *    对 v4 日志必须判 unavailable，而不是被当成「日志有错」。
- *
- * ── 定位已装 catalog ─────────────────────────────────────────────────────
- * 复用 utils/session-format.ts 的 install anchor 解析口径（**不新造一套、绝不按 semver 猜**）：
- * 候选是 @deepseek-ai/dsh/package.json 的绝对路径（宿主可传 dshPackageJsonCandidates(home, profile, installAnchor)），
- * 每处再试 hoisted 与 pnpm 嵌套两种布局（与 resolveSessionFormatVersion 逐字同款）。
- * 解析不到 / import 失败 / 包内无 createRestore → unavailable。
- * 注意 detail **只放机器可读码，不放绝对路径**（结果会经路由回传浏览器）。
  */
 import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -63,9 +79,9 @@ import { decodeZstdFrame, scanZstdFrames, zstdAvailable } from './zstd-frame.ts'
 
 /** 复验结论里的失败原因（机器可读；文案由调用方输出层决定）。 */
 export type SessionVerifyReason =
-  /** 能力不可用：没有 zstd / 找不到已装 catalog / import 失败 / 代际对不上 / 缺子会话事实 */
+  /** 能力不可用：没有 zstd / 找不到可信 catalog / import 失败 / 代际对不上 / 缺子会话事实 */
   | 'unavailable'
-  /** 首帧不是「恰好一行 header」（官方 assertZstdHeaderFrame），或容器结构性不合法（撕裂/魔数/保留位） */
+  /** 首帧不是「恰好一行 header」（官方 assertZstdHeaderFrame / parseHeaderRecord），或容器结构性不合法（撕裂/魔数/保留位） */
   | 'invalid-header'
   /** createRestore 或某一行 decodeRow 失败（含官方迁移拒绝） */
   | 'decode-failed'
@@ -88,10 +104,12 @@ export interface SessionVerifyRestore {
 /** 官方 catalog 的最小接口（判定口径固定为 strict + transformed / current）。 */
 export interface SessionVerifyCatalog {
   createRestore(header: unknown, options: { recovery: 'strict'; validation: 'transformed' | 'current' }): SessionVerifyRestore;
+  /** 该 catalog 的现役代际（官方 createSessionFormatCatalog 装配时给；判定 equivalentToReadPath 要用）。 */
+  currentVersion?: unknown;
 }
 
 export interface SessionVerifyOptions {
-  /** @deepseek-ai/dsh/package.json 候选（顺序即真伪顺序；缺省 = 运行时锚点 + 本机 profile 树）。 */
+  /** 显式 @deepseek-ai/dsh/package.json 候选（顺序即真伪顺序；给了就只试它，标签 anchor）。 */
   dshPackageJsonCandidates?: readonly string[];
   /** 显式直接子会话事实；缺省 = []（显式声明没有子会话）。 */
   children?: readonly unknown[];
@@ -103,14 +121,24 @@ export interface SessionVerifyOptions {
   profile?: string;
 }
 
-/** 复验结论。verified:true 时 strong/strongDetail 是**额外信息**，不参与判定。 */
+/**
+ * 复验结论。
+ *
+ * equivalentToReadPath 的语义（**不许曲解**）：true 当且仅当
+ * header.version === catalog.currentVersion === 已装 DSH SESSION_FORMAT_VERSION ——
+ * 即「DSH 的现役读盘路径此刻就能直接读它」。pre-v4 日志经迁移链还原成功时 verified:true 但
+ * equivalentToReadPath:false（官方 resolveCurrentLog 对 < 本代返回 undefined）。未验证时恒 false
+ * （含义是「没有任何可声称的现役等价」，不是「已证明不等价」）。
+ * verified:true 时 strong/strongDetail 也只是额外信息，不参与判定。
+ */
 export type SessionVerifyResult =
-  | { verified: true; events: number; strong: boolean; strongDetail?: string }
-  | { verified: false; reason: SessionVerifyReason; detail?: string };
+  | { verified: true; events: number; strong: boolean; strongDetail?: string; equivalentToReadPath: boolean }
+  | { verified: false; reason: SessionVerifyReason; detail?: string; equivalentToReadPath: false };
 
 /* ------------------------------------------------- 候选与布局（与 session-format.ts 同款） */
 
 const DSH_PKG_REL = join('@deepseek-ai', 'dsh');
+const CATALOG_PKG = '@deepseek-ai/dsh-session-format-catalog';
 const CATALOG_PKG_REL = join('@deepseek-ai', 'dsh-session-format-catalog');
 const CATALOG_ENTRY_REL = join('lib', 'index.js');
 
@@ -138,7 +166,7 @@ export function nodeModulesRootsFor(dshPackageJsonCandidates: readonly string[])
  * 缺省候选：**运行时锚点优先**（拉起本进程的那份 runtime），其次本机 profile 树。
  *
  *  ① Electron 桌面端：<resources>/app.asar/dsh/node_modules/@deepseek-ai/dsh/package.json
- *     —— 这是 profileContext.installAnchor 在服务层（拿不到 profileContext 的地方）的进程内等价物；
+ *     —— profileContext.installAnchor 在服务层（拿不到 profileContext 的地方）的进程内等价物；
  *     app.asar.unpacked 与解包安装的 app 两种形态一并列出（存在即用，不存在即跳过，绝不猜）。
  *  ② 与 src/index.ts 的 dshPackageJsonCandidates 第 ②③ 条逐字同款：<home>/profiles/<profile>/、
  *     <home>/profiles/、<home>/profiles/web/。
@@ -147,20 +175,29 @@ export function nodeModulesRootsFor(dshPackageJsonCandidates: readonly string[])
  * 桌面端实际跑的是 app.asar 里的 0.2.0-rc.2 —— 所以锚点必须排在前面。
  */
 export function defaultDshPackageJsonCandidates(homeDir?: string, profile?: string): string[] {
+  return [...runtimeAnchorCandidates(), ...profileCandidates(homeDir, profile)];
+}
+
+/** 运行时锚点候选（Electron resources 下的 asar / 解包 app）；非 Electron 进程为空。 */
+function runtimeAnchorCandidates(): string[] {
   const out: string[] = [];
   const resources = (process as { resourcesPath?: unknown }).resourcesPath;
-  if (typeof resources === 'string' && resources !== '') {
-    const bases = [join('app.asar', 'dsh', 'node_modules'), join('app.asar.unpacked', 'dsh', 'node_modules'), join('app', 'dsh', 'node_modules')];
-    for (const base of bases) out.push(join(resources, base, DSH_PKG_REL, 'package.json'));
-  }
+  if (typeof resources !== 'string' || resources === '') return out;
+  const bases = [join('app.asar', 'dsh', 'node_modules'), join('app.asar.unpacked', 'dsh', 'node_modules'), join('app', 'dsh', 'node_modules')];
+  for (const base of bases) out.push(join(resources, base, DSH_PKG_REL, 'package.json'));
+  return out;
+}
+
+/** 本机 profile 树候选（与 src/index.ts 的 dshPackageJsonCandidates ②③ 同源）。 */
+function profileCandidates(homeDir?: string, profile?: string): string[] {
   const home = homeDir !== undefined && homeDir !== '' ? homeDir : process.env['DSH_HOME'];
-  if (home !== undefined && home !== '') {
-    if (profile !== undefined && profile !== '') out.push(join(home, 'profiles', profile, 'node_modules', DSH_PKG_REL, 'package.json'));
-    out.push(
-      join(home, 'profiles', 'node_modules', DSH_PKG_REL, 'package.json'),
-      join(home, 'profiles', 'web', 'node_modules', DSH_PKG_REL, 'package.json'),
-    );
-  }
+  if (home === undefined || home === '') return [];
+  const out: string[] = [];
+  if (profile !== undefined && profile !== '') out.push(join(home, 'profiles', profile, 'node_modules', DSH_PKG_REL, 'package.json'));
+  out.push(
+    join(home, 'profiles', 'node_modules', DSH_PKG_REL, 'package.json'),
+    join(home, 'profiles', 'web', 'node_modules', DSH_PKG_REL, 'package.json'),
+  );
   return out;
 }
 
@@ -168,7 +205,7 @@ export function defaultDshPackageJsonCandidates(homeDir?: string, profile?: stri
 
 /** 已 import 的 catalog 模块（键 = 文件 URL；失败也缓存，避免反复探测）。 */
 const moduleCache = new Map<string, unknown>();
-/** 已装配的 children 版 catalog（键 = 文件 URL；只缓存「显式声明无子会话」的默认装配）。 */
+/** 已装配的 children 版 catalog（键 = 根路径；只缓存「显式声明无子会话」的默认装配）。 */
 const catalogCache = new Map<string, SessionVerifyCatalog>();
 
 /** 清空进程内缓存（测试隔离用）。 */
@@ -189,86 +226,162 @@ async function importCatalogModule(file: string): Promise<unknown> {
   return mod;
 }
 
+/** 裸模块动态 import（第一顺位候选）；失败返回 undefined。 */
+async function importBareCatalog(): Promise<unknown> {
+  const key = '\u0000bare\u0000' + CATALOG_PKG;
+  if (moduleCache.has(key)) return moduleCache.get(key);
+  let mod: unknown;
+  try {
+    mod = await import(CATALOG_PKG);
+  } catch {
+    mod = undefined;
+  }
+  moduleCache.set(key, mod);
+  return mod;
+}
+
+/** 裸模块自己的 node_modules 根（供代际闸门读同树的 dsh-session 常量）；反推不到 → undefined（不猜）。 */
+function bareCatalogRoot(): string | undefined {
+  try {
+    const require = createRequire(import.meta.url);
+    const pkgJson = require.resolve(CATALOG_PKG + '/package.json');
+    return join(dirname(pkgJson), '..', '..');
+  } catch {
+    return undefined;
+  }
+}
+
 function isSessionVerifyCatalog(value: unknown): value is SessionVerifyCatalog {
   return typeof value === 'object' && value !== null && typeof (value as { createRestore?: unknown }).createRestore === 'function';
 }
 
-/** 解析 catalog 的结果；detail 只放机器可读码（**不放路径** —— 它会回传浏览器）。 */
+/** 一个候选的判定结果：要么给出可用 catalog（含两侧代际），要么给出失败码。 */
+type CandidateVerdict =
+  | { ok: true; catalog: SessionVerifyCatalog; currentVersion: number; installedVersion: number }
+  | { ok: false; code: string };
+
+/**
+ * 单个候选（模块 + 它的 node_modules 根）的资格审查。
+ *
+ * 闸门顺序固定：createRestore 存在 → **代际闸门**（catalog.currentVersion === 同 anchor 的已装 SESSION_FORMAT_VERSION）
+ * → **API 闸门**（只有静态 catalog 时须 header.version === currentVersion）。
+ */
+function judgeCandidate(mod: unknown, root: string, children: readonly unknown[], headerVersion: unknown): CandidateVerdict {
+  // 注意：官方 catalog 包**不导出模块级 createRestore**（导出的只有 createSessionFormatCatalogWithChildren /
+  // sessionFormatCatalog / historicalSessionFormatCatalog 等），createRestore 是**装配出的 catalog 对象**上的方法
+  // —— 所以这里只判「装配结果是不是一个带 createRestore 的 catalog」，别按模块级导出判（那会把真包判死）。
+  const record = mod as Record<string, unknown>;
+  const installedVersion = readSessionFormatVersionAt(root);
+  if (installedVersion === undefined) return { ok: false, code: 'no-installed-version' };
+  const assemble = record['createSessionFormatCatalogWithChildren'];
+  let catalog: unknown;
+  const viaChildren = typeof assemble === 'function';
+  if (viaChildren) {
+    try {
+      catalog = (assemble as (facts: readonly unknown[]) => unknown)(children);
+    } catch {
+      return { ok: false, code: 'assemble-failed' };
+    }
+  } else {
+    catalog = record['sessionFormatCatalog'];
+  }
+  if (!isSessionVerifyCatalog(catalog)) return { ok: false, code: 'no-createRestore' };
+  const currentVersion = catalog.currentVersion;
+  if (typeof currentVersion !== 'number' || currentVersion !== installedVersion) return { ok: false, code: 'generation-mismatch' };
+  // API 闸门：静态 catalog 无法在 v3→v4 边界绑定 child 事实，只有「本来就等于本代」才是可信读盘
+  if (!viaChildren && headerVersion !== currentVersion) return { ok: false, code: 'children-required' };
+  return { ok: true, catalog, currentVersion, installedVersion };
+}
+
+/** 解析 catalog 的结果；detail 只放候选标签 + 失败码（**不放路径** —— 它会回传浏览器）。 */
 interface CatalogResolution {
   catalog?: SessionVerifyCatalog;
+  currentVersion?: number;
+  installedVersion?: number;
   detail: string;
 }
 
 async function resolveCatalog(options: SessionVerifyOptions, headerVersion: unknown): Promise<CatalogResolution> {
   if (options.catalog === null) return { detail: 'catalog-disabled' };
-  if (options.catalog !== undefined) return { catalog: options.catalog, detail: 'injected' };
-  const candidates = options.dshPackageJsonCandidates ?? defaultDshPackageJsonCandidates(options.homeDir, options.profile);
+  if (options.catalog !== undefined) {
+    return {
+      catalog: options.catalog,
+      ...(typeof options.catalog.currentVersion === 'number' ? { currentVersion: options.catalog.currentVersion } : {}),
+      detail: 'injected',
+    };
+  }
   const children = options.children ?? [];
   const notes: string[] = [];
-  for (const root of nodeModulesRootsFor(candidates)) {
-    const file = join(root, CATALOG_PKG_REL, CATALOG_ENTRY_REL);
+  const noted = new Set<string>();
+  const note = (label: string, code: string): void => {
+    const entry = label + ':' + code;
+    if (noted.has(entry)) return;
+    noted.add(entry);
+    notes.push(entry);
+  };
+
+  // ① 裸模块（第一顺位）：已装插件自己依赖树里的那一份
+  const bare = await importBareCatalog();
+  if (bare === undefined) {
+    note('bare-module', 'import-failed');
+  } else {
+    const root = bareCatalogRoot();
+    if (root === undefined) {
+      note('bare-module', 'no-version-anchor');
+    } else {
+      const verdict = judgeCandidate(bare, root, children, headerVersion);
+      if (verdict.ok) return { catalog: verdict.catalog, currentVersion: verdict.currentVersion, installedVersion: verdict.installedVersion, detail: 'bare-module' };
+      note('bare-module', verdict.code);
+    }
+  }
+
+  // ②③ 显式候选（标签 anchor）或运行时锚点（runtime-anchor）+ profile 树（profiles-tree）
+  const plans: { label: string; root: string }[] = [];
+  const seenRoots = new Set<string>();
+  const pushPlan = (label: string, root: string): void => {
+    if (seenRoots.has(root)) return;
+    seenRoots.add(root);
+    plans.push({ label, root });
+  };
+  if (options.dshPackageJsonCandidates !== undefined) {
+    for (const root of nodeModulesRootsFor(options.dshPackageJsonCandidates)) pushPlan('anchor', root);
+  } else {
+    for (const root of nodeModulesRootsFor(runtimeAnchorCandidates())) pushPlan('runtime-anchor', root);
+    for (const root of nodeModulesRootsFor(profileCandidates(options.homeDir, options.profile))) pushPlan('profiles-tree', root);
+  }
+  for (const plan of plans) {
+    const file = join(plan.root, CATALOG_PKG_REL, CATALOG_ENTRY_REL);
     let present = false;
     try {
       present = existsSync(file);
     } catch {
       present = false;
     }
-    if (!present) continue;
+    if (!present) {
+      note(plan.label, 'not-found');
+      continue;
+    }
+    const cached = catalogCache.get(plan.root);
+    if (cached !== undefined && children.length === 0) {
+      return { catalog: cached, currentVersion: undefined, detail: plan.label + ':cached' };
+    }
     const mod = await importCatalogModule(file);
     if (mod === undefined) {
-      notes.push('import-failed');
+      note(plan.label, 'import-failed');
       continue;
     }
-    const record = mod as Record<string, unknown>;
-    // 代际闸门（前半）：同一 anchor 里已装 DSH 的 SESSION_FORMAT_VERSION —— 读不到就不猜
-    const expected = readSessionFormatVersionAt(root);
-    if (expected === undefined) {
-      notes.push('no-installed-version');
+    const verdict = judgeCandidate(mod, plan.root, children, headerVersion);
+    if (!verdict.ok) {
+      note(plan.label, verdict.code);
       continue;
     }
-    const assemble = record['createSessionFormatCatalogWithChildren'];
-    if (typeof assemble === 'function') {
-      const cached = catalogCache.get(file);
-      if (cached !== undefined && children.length === 0) return { catalog: cached, detail: 'cached' };
-      let assembled: unknown;
-      try {
-        assembled = (assemble as (facts: readonly unknown[]) => unknown)(children);
-      } catch {
-        notes.push('assemble-failed');
-        continue;
-      }
-      if (!isSessionVerifyCatalog(assembled)) {
-        notes.push('no-createRestore');
-        continue;
-      }
-      // 代际闸门（后半）：装配出的 catalog 的 currentVersion 必须等于同一 anchor 的已装版本
-      const currentVersion = (assembled as { currentVersion?: unknown }).currentVersion;
-      if (typeof currentVersion !== 'number' || currentVersion !== expected) {
-        notes.push('generation-mismatch');
-        continue;
-      }
-      if (children.length === 0) catalogCache.set(file, assembled);
-      return { catalog: assembled, detail: 'resolved' };
-    }
-    // API 闸门：只有静态 catalog —— 仅当这份日志本来就等于它的 currentVersion 才是可信读盘
-    const staticCatalog = record['sessionFormatCatalog'];
-    if (!isSessionVerifyCatalog(staticCatalog)) {
-      notes.push('no-createRestore');
-      continue;
-    }
-    const currentVersion = (staticCatalog as { currentVersion?: unknown }).currentVersion;
-    if (typeof currentVersion !== 'number' || currentVersion !== expected) {
-      notes.push('generation-mismatch');
-      continue;
-    }
-    if (headerVersion !== currentVersion) {
-      notes.push('children-required');
-      continue;
-    }
-    return { catalog: staticCatalog, detail: 'static' };
+    if (children.length === 0) catalogCache.set(plan.root, verdict.catalog);
+    return { catalog: verdict.catalog, currentVersion: verdict.currentVersion, installedVersion: verdict.installedVersion, detail: plan.label };
   }
-  if (notes.includes('children-required')) return { detail: 'children-required' };
-  return { detail: notes.length > 0 ? notes.join('+') : 'no-catalog' };
+
+  // 全部候选都不匹配时：只要任一候选卡在「静态 catalog 过不了 v3→v4 边界」，最终结论就是 children-required
+  if (notes.some((entry) => entry.endsWith(':children-required'))) return { detail: 'children-required' };
+  return { detail: notes.length > 0 ? notes.join('+') : 'no-candidate' };
 }
 
 /* ---------------------------------------------------------------- 字节 → header + 行 */
@@ -290,8 +403,8 @@ type FrameExtraction =
   | { ok: false; reason: SessionVerifyReason; detail: string };
 
 /**
- * 解帧 → 首帧**恰好一行** header（官方 assertZstdHeaderFrame：非空且唯一的换行符就是最后一个字节）
- * → 其余帧逐行 JSON.parse 成物理行对象。
+ * 解帧 → 首帧**恰好一行** header（官方 parseHeaderRecord L971 / assertZstdHeaderFrame：非空且唯一的换行符
+ * 就是最后一个字节）→ 其余帧逐行 JSON.parse 成物理行对象。
  *
  * 归类：结构性不合法（帧扫描抛错 / 撕裂尾帧 / 首帧不是单行 header）→ invalid-header；
  * 字节级解压失败或行不是 JSON 对象 → decode-failed。两者都是**确定性**结论（服务层据此自动回滚）。
@@ -410,26 +523,32 @@ function runRestore(
 /**
  * 复验一份会话日志字节：**本机 DSH 的官方 codec 能不能把它读到底**。
  *
- * 判定口径固定 { recovery: 'strict', validation: 'transformed' }（选择 + 源码证据见文件头）；
+ * 判定口径固定 { recovery: 'strict', validation: 'transformed' }（= 官方现役读盘口径，选择 + 源码证据见文件头）；
  * validation: 'current' 只作为结果里的 strong / strongDetail 增强信息，**绝不影响判定**。
- * 任何能力缺失（没有 zstd / 找不到 catalog / 代际对不上 / 缺子会话事实）→ unavailable：
+ * 任何能力缺失（没有 zstd / 找不到可信 catalog / 代际对不上 / 缺子会话事实）→ unavailable：
  * **绝不 throw，绝不宣称通过**。
  */
 export async function verifySessionLogBytes(bytes: Uint8Array, options: SessionVerifyOptions = {}): Promise<SessionVerifyResult> {
   const framed = extractFrames(bytes);
-  if (!framed.ok) return { verified: false, reason: framed.reason, detail: framed.detail };
+  if (!framed.ok) return { verified: false, reason: framed.reason, detail: framed.detail, equivalentToReadPath: false };
+  const headerVersion = (framed.header as { version?: unknown }).version;
   let resolution: CatalogResolution;
   try {
-    resolution = await resolveCatalog(options, (framed.header as { version?: unknown }).version);
+    resolution = await resolveCatalog(options, headerVersion);
   } catch {
     // 理论上到不了（resolveCatalog 内部全 try/catch）；兜底仍判 unavailable，绝不 throw 给调用方
-    return { verified: false, reason: 'unavailable', detail: 'resolver-failed' };
+    return { verified: false, reason: 'unavailable', detail: 'resolver-failed', equivalentToReadPath: false };
   }
-  if (resolution.catalog === undefined) return { verified: false, reason: 'unavailable', detail: resolution.detail };
+  if (resolution.catalog === undefined) return { verified: false, reason: 'unavailable', detail: resolution.detail, equivalentToReadPath: false };
+  // equivalentToReadPath：仅当 header.version === catalog.currentVersion === 已装 SESSION_FORMAT_VERSION
+  // （代际闸门已经保证后两者相等，所以这里等价于 header.version === currentVersion）
+  const equivalentToReadPath = typeof headerVersion === 'number'
+    && resolution.currentVersion === headerVersion
+    && (resolution.installedVersion === undefined || resolution.installedVersion === resolution.currentVersion);
   const verdict = runRestore(resolution.catalog, framed.header, framed.rows, 'transformed');
-  if (!verdict.ok) return { verified: false, reason: verdict.reason, detail: verdict.detail };
+  if (!verdict.ok) return { verified: false, reason: verdict.reason, detail: verdict.detail, equivalentToReadPath: false };
   // 可选增强（不参与判定）：跑完整安装侧校验，用来区分「能读且干净」与「能读但语义不完全干净」
   const strong = runRestore(resolution.catalog, framed.header, framed.rows, 'current');
-  if (strong.ok) return { verified: true, events: verdict.events, strong: true };
-  return { verified: true, events: verdict.events, strong: false, strongDetail: strong.detail };
+  if (strong.ok) return { verified: true, events: verdict.events, strong: true, equivalentToReadPath };
+  return { verified: true, events: verdict.events, strong: false, strongDetail: strong.detail, equivalentToReadPath };
 }

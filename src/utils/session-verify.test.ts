@@ -113,6 +113,7 @@ test('session-verify：verified —— strict + transformed 判定；strong(curr
   const calls: { recovery: string; validation: string }[] = [];
   const seen: unknown[][] = [];
   const catalog: SessionVerifyCatalog = {
+    currentVersion: 4,
     createRestore(_header, options) {
       calls.push({ recovery: options.recovery, validation: options.validation });
       const bucket: unknown[] = [];
@@ -127,6 +128,7 @@ test('session-verify：verified —— strict + transformed 判定；strong(curr
   assert.equal(result.verified, true, JSON.stringify(result));
   assert.equal(result.verified === true ? result.events : -1, 2, 'events 必须是官方 finish() 产物里的数量');
   assert.equal(result.verified === true ? result.strong : undefined, true, 'current 增强校验也通过');
+  assert.equal(result.equivalentToReadPath, true, 'header v4 === catalog.currentVersion 4 才算「DSH 现役读盘」');
   assert.deepEqual(calls, [
     { recovery: 'strict', validation: 'transformed' },
     { recovery: 'strict', validation: 'current' },
@@ -238,20 +240,21 @@ test('session-verify：unavailable —— catalog-disabled / no-catalog / 代际
     const missing = await verifySessionLogBytes(bytes, {
       dshPackageJsonCandidates: [path.join(dir, 'nowhere', '@deepseek-ai', 'dsh', 'package.json')],
     });
-    assert.equal(missing.verified === false ? missing.detail : '', 'no-catalog');
+    assert.equal(missing.verified, false);
+    assert.match(String(missing.verified === false ? missing.detail : ''), /anchor:not-found/, 'detail 必须写清尝试过的候选与原因');
 
     // 代际对不上：catalog 说 currentVersion=4，同一 anchor 的已装 DSH 说 SESSION_FORMAT_VERSION=3
     const mismatchAnchor = await writeFakePackage(path.join(dir, 'mismatch'), { catalogSource: childrenCatalogSource(4), sessionVersion: '3' });
     clearSessionVerifyCache();
     const mismatch = await verifySessionLogBytes(bytes, { dshPackageJsonCandidates: [mismatchAnchor] });
     assert.equal(mismatch.verified, false);
-    assert.equal(mismatch.verified === false ? mismatch.detail : '', 'generation-mismatch');
+    assert.match(String(mismatch.verified === false ? mismatch.detail : ''), /generation-mismatch/);
 
     // 读不到同一 anchor 的已装版本 → 不猜
     const noSessionPkg = await writeFakePackage(path.join(dir, 'noversion'), { catalogSource: childrenCatalogSource(4) });
     clearSessionVerifyCache();
     const noVersion = await verifySessionLogBytes(bytes, { dshPackageJsonCandidates: [noSessionPkg] });
-    assert.equal(noVersion.verified === false ? noVersion.detail : '', 'no-installed-version');
+    assert.match(String(noVersion.verified === false ? noVersion.detail : ''), /no-installed-version/);
   });
 });
 
@@ -299,6 +302,43 @@ test('session-verify：unavailable 绝不能被当成成功（调用方必须据
   });
   assert.equal(verified.verified, true);
   assert.equal(verified.verified === true ? verified.events : -1, 2);
+});
+
+test('session-verify：equivalentToReadPath —— 只有 header.version === currentVersion 才是「DSH 现役读盘」', { skip: !CAPABLE }, async () => {
+  const makeCatalog = (): SessionVerifyCatalog => ({
+    currentVersion: 4,
+    createRestore() {
+      return { decodeRow() {}, finish() { return { header: { version: 4 }, events: [0, 1] }; } };
+    },
+  });
+  const current = await verifySessionLogBytes(logBytes({ ...HEADER, version: 4 }, ROWS), { catalog: makeCatalog() });
+  assert.equal(current.verified, true, JSON.stringify(current));
+  assert.equal(current.equivalentToReadPath, true, '本代日志 = DSH 现役读盘路径');
+
+  // pre-v4：走迁移链可还原（verified:true），但**不等价于** DSH 读盘路径（官方 resolveCurrentLog 对 < 本代返回 undefined）
+  const historical = await verifySessionLogBytes(logBytes({ ...HEADER, version: 3 }, ROWS), { catalog: makeCatalog() });
+  assert.equal(historical.verified, true, JSON.stringify(historical));
+  assert.equal(historical.equivalentToReadPath, false, '迁移链 ≠ 现役读盘');
+
+  // 替身不暴露 currentVersion → 无从声称等价，只能如实 false
+  const unknown = await verifySessionLogBytes(logBytes(HEADER, ROWS), {
+    catalog: { createRestore() { return { decodeRow() {}, finish() { return { header: { version: 4 }, events: [0] }; } }; } },
+  });
+  assert.equal(unknown.verified, true);
+  assert.equal(unknown.equivalentToReadPath, false);
+});
+
+test('session-verify：detail 只写候选标签 + 原因，绝不回传绝对路径', { skip: !CAPABLE }, async () => {
+  await withTmp(async (dir) => {
+    const anchor = await writeFakePackage(dir, { catalogSource: childrenCatalogSource(4), sessionVersion: '3' });
+    clearSessionVerifyCache();
+    const result = await verifySessionLogBytes(logBytes(HEADER, ROWS), { dshPackageJsonCandidates: [anchor] });
+    assert.equal(result.verified, false);
+    const detail = String(result.verified === false ? result.detail : '');
+    assert.match(detail, /anchor:generation-mismatch/);
+    assert.equal(detail.includes(dir), false, 'detail 不得含绝对路径: ' + detail);
+    assert.equal(/[A-Za-z]:[\\/]/.test(detail), false, 'detail 不得含盘符路径: ' + detail);
+  });
 });
 
 test('session-verify：候选布局与两处根（hoisted + pnpm 嵌套）与 session-format.ts 同款', () => {

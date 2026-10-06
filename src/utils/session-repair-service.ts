@@ -16,14 +16,17 @@
  *      备份内容与台账 sha256 一致，再把备份原子换回去。
  *
  * 复验门的三种结论（语义固定；文案映射由界面做）：
- *   · verified:true → 保持成功语义，结果与台账都带上 verify。
+ *   · verified:true → 保持成功语义，结果与台账都带上 verify。注意 verify 里还有
+ *     **equivalentToReadPath**：true 才是「DSH 现役读盘路径此刻就能直接读」；pre-v4 日志经迁移链还原成功时
+ *     verified:true 但 equivalentToReadPath:false（只能说明「迁移链能还原」，不是现役可读）。
  *   · 确定性失败（invalid-header / decode-failed / finish-failed）→ **不发布**：用本次时间戳备份走既有
  *     rollbackSessionLogFile 自动还原（rolledBack 如实回传），返回 ok:false + reason='verify-failed'，
  *     **不写台账**（这次修复没有留下来）。
  *   · unavailable（拿不到可信 codec：没有 catalog / 代际对不上 / 缺子会话事实）→ **不回滚**：
  *     字节已写、结构自检已过，但我们**证明不了** DSH 能加载它；返回 ok:true + verify:{verified:false,...}
  *     并照常写台账（台账是「可回滚凭据」而不是成功声明 —— 不写反而会让这次已生效的写入失去回滚入口）。
- *     「不宣称成功」由 verify 字段保证：调用方必须据它区分「已验证可加载」与「未验证」。
+ *     ok:true 的含义严格限于「**操作完成**：字节已写 + 结构复验通过」，**不是**「已验证可加载」；
+ *     调用方必须据 verify.verified / verify.equivalentToReadPath 区分「现役可读」「迁移链可还原」「未验证」。
  *
  * 「绝不猜」：任何一步证明不了就拒绝，绝不「修得更狠」；台账里的绝对路径不回传浏览器
  * （回传的是 sessionId / 日志文件名 / 备份文件名这些标识，不含目录）。
@@ -43,7 +46,6 @@ import {
 } from './session-log-repair.ts';
 import { sha256Hex } from './hashing.ts';
 import {
-  defaultDshPackageJsonCandidates,
   isSessionVerifyReason,
   verifySessionLogBytes,
   type SessionVerifyOptions,
@@ -269,18 +271,19 @@ function toVerifyRecord(value: unknown): SessionVerifyResult | undefined {
     const events = value['events'];
     if (typeof events !== 'number' || !Number.isFinite(events) || events < 0) return undefined;
     const strong = value['strong'] === true;
+    const equivalentToReadPath = value['equivalentToReadPath'] === true;
     const strongDetail = value['strongDetail'];
     return typeof strongDetail === 'string' && strongDetail !== ''
-      ? { verified: true, events, strong, strongDetail }
-      : { verified: true, events, strong };
+      ? { verified: true, events, strong, strongDetail, equivalentToReadPath }
+      : { verified: true, events, strong, equivalentToReadPath };
   }
   if (verified !== false) return undefined;
   const reason = value['reason'];
   if (!isSessionVerifyReason(reason)) return undefined;
   const detail = value['detail'];
   return typeof detail === 'string' && detail !== ''
-    ? { verified: false, reason, detail }
-    : { verified: false, reason };
+    ? { verified: false, reason, detail, equivalentToReadPath: false }
+    : { verified: false, reason, equivalentToReadPath: false };
 }
 
 function toRepairRecord(value: unknown): SessionRepairRecord | undefined {
@@ -453,14 +456,15 @@ export interface SessionRepairApplyOptions extends SessionRepairCallOptions {
  * 只是这里拿不到 profileContext.installAnchor，改用进程内运行时锚点 + 本机 profile 树）。
  */
 async function runVerifyGate(bytes: Buffer | undefined, options: SessionRepairApplyOptions): Promise<SessionVerifyResult> {
-  if (bytes === undefined) return { verified: false, reason: 'unavailable', detail: 'unreadable-after-write' };
+  if (bytes === undefined) return { verified: false, reason: 'unavailable', detail: 'unreadable-after-write', equivalentToReadPath: false };
   const injected = options.verify;
-  const candidates = injected?.dshPackageJsonCandidates ?? defaultDshPackageJsonCandidates(options.homeDir);
   try {
-    return await verifySessionLogBytes(bytes, { ...injected, dshPackageJsonCandidates: candidates });
+    // 候选缺省由门自己按 homeDir 走 install anchor 口径（裸模块 → 运行时锚点 → profile 树）；
+    // 显式给了 dshPackageJsonCandidates 就用给的（顺序即真伪顺序）。
+    return await verifySessionLogBytes(bytes, { ...injected, homeDir: injected?.homeDir ?? options.homeDir });
   } catch {
     // 兜底：门承诺绝不 throw，这里再兜一层，任何意外都只能得到「未验证」而绝不能变成「成功」
-    return { verified: false, reason: 'unavailable', detail: 'verify-threw' };
+    return { verified: false, reason: 'unavailable', detail: 'verify-threw', equivalentToReadPath: false };
   }
 }
 

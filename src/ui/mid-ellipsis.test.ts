@@ -136,7 +136,7 @@ test('收敛守卫：全 src 只有 src/ui/mid-ellipsis.ts 一处 midEllipsis �
   assert.deepEqual(definitions, ['ui/mid-ellipsis.ts'], 'midEllipsis 只允许一处定义（其余必须是引用）')
 })
 
-test('收敛守卫：三处原定义点改为引用（前两处再导出、第三处直接 import 且调用点未丢失）', () => {
+test('收敛守卫：原定义点改为引用（两处再导出；第三处调用点已于 v3 随功能下线移除）', () => {
   const SRC = path.resolve(import.meta.dirname, '..')
   const read = (rel: string) => stripComments(fs.readFileSync(path.join(SRC, rel), 'utf8'))
 
@@ -150,13 +150,8 @@ test('收敛守卫：三处原定义点改为引用（前两处再导出、第�
     /export\s*\{\s*midEllipsis\s*\}\s*from\s*'\.\.\/\.\.\/ui\/mid-ellipsis\.ts'/,
     'history-model.ts 应以再导出引用唯一实现',
   )
-  // UI v2：OverviewPanel 已改名并搬到 client/home/HomePanel.tsx（第 4 步）。
-  // 守卫要钉的是「第三处定义点仍是引用」，所以跟着真实路径走。
-  const home = read('client/home/HomePanel.tsx')
-  assert.match(
-    home,
-    /import\s*\{\s*midEllipsis\s*\}\s*from\s*'\.\.\/\.\.\/ui\/mid-ellipsis\.ts'/,
-    'HomePanel.tsx 应 import 唯一实现',
-  )
-  assert.match(home, /midEllipsis\(backupDir,\s*52\)/, 'HomePanel.tsx 的调用点应保留（显式 52，行为不变）')
+  // UI v3（2026-10-06）：首页与设置弹窗的「备份位置」整组下线（用户要求），HomePanel 不再渲染
+  // 任何长路径 → 第三处调用点随之消失，该文件退出本守卫。
+  // 这不是放宽防线：守卫的本意是「不许出现第三份定义」，由上面的 DEFINITION_RE 收敛断言独立兜底；
+  // 若将来又在 HomePanel 渲染长路径，必须重新 import 唯一实现并在此钉住显式上限（52）。
 })

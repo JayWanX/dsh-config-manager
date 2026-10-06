@@ -24,7 +24,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from '
 import type { ReactNode } from 'react'
 import type { SnapshotMeta } from '../../core/restore.ts'
 import type { BackupScheduleStatus } from '../../ui/backup-schedule.ts'
-import { backupRunOutcome, normalizeRetentionPolicy, type BackupSkipReason } from '../../ui/backup-schedule.ts'
+import { backupRunOutcome, type BackupSkipReason } from '../../ui/backup-schedule.ts'
 import type { BackupFileMeta } from '../../sync/backup-files.ts'
 import type { SyncApi, SyncStatusResponse } from '../sync/sync-api.ts'
 import type { HistoryApi, HistoryListResult } from '../history/history-api.ts'
@@ -36,8 +36,6 @@ import { runStore } from '../run-store.ts'
 import type { ArtifactKind } from '../../ui/artifact-view.ts'
 import { toast } from '../common/toast-store.ts'
 import { toRecoveryView } from '../recovery/recovery-view.ts'
-import { formatBytes } from '../../ui/report.ts'
-import { midEllipsis } from '../../ui/mid-ellipsis.ts'
 import {
   buildOverviewMetrics,
   overviewActivity,
@@ -121,31 +119,6 @@ function renderRelTime(ms: number, t: TranslateNS<'config-manager'>): string {
 }
 
 
-/** 下次定时备份估算（固定间隔 = 上次 + 间隔；custom = 下个周一时刻近似）。 */
-function nextRunText(schedule: BackupScheduleStatus, t: TranslateNS<'config-manager'>): string | null {
-  if (!schedule.enabled) return null
-  const last = schedule.lastRunAt !== undefined ? Date.parse(schedule.lastRunAt) : Number.NaN
-  const pad = (n: number): string => String(n).padStart(2, '0')
-  const fmt = (d: Date): string => `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-  const intervalMs: Record<Exclude<BackupScheduleStatus['interval'], 'custom'>, number> = {
-    '6h': 6 * 3_600_000,
-    '12h': 12 * 3_600_000,
-    '24h': 24 * 3_600_000,
-    '7d': 7 * 24 * 3_600_000,
-  }
-  if (schedule.interval !== 'custom' && Number.isFinite(last)) {
-    return fmt(new Date(last + intervalMs[schedule.interval]))
-  }
-  if (schedule.interval === 'custom' && schedule.customSchedule !== undefined) {
-    // 每周固定时刻：取「从现在起下一个匹配的周几」
-    const target = schedule.customSchedule.dayOfWeek
-    const now = new Date()
-    const delta = (target - now.getDay() + 7) % 7 || 7
-    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + delta, schedule.customSchedule.hour, schedule.customSchedule.minute)
-    return fmt(next)
-  }
-  return null
-}
 
 /** [REDACTED] 可读化：宿主侧强脱敏 token → 用户可理解的文案（历史条目不可变，仅展示层替换）。 */
 function displaySummary(summary: string, t: TranslateNS<'config-manager'>): string {
@@ -155,14 +128,9 @@ function displaySummary(summary: string, t: TranslateNS<'config-manager'>): stri
   return r.replaceAll('[REDACTED].zip', redactedName).replaceAll('[REDACTED]', '…')
 }
 
-/** 从文件路径取目录（纯字符串；win32 反斜杠与 posix 斜杠都认）。 */
-function dirOf(path: string): string {
-  const i = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
-  return i > 0 ? path.slice(0, i) : path
-}
 
 /**
- * 总览页（控制中心）：状态条 + 动作工具栏 + 备份位置 + 分区构成 + 最近活动。
+ * 总览页（控制中心）：状态条 + 动作工具栏 + 最近活动（最后一个数据块，吃掉剩余高度）。
  */
 export function HomePanel({ api, syncApi, historyApi, t, syncT, openForeignImport }: HomePanelProps) {
   /**
@@ -316,12 +284,6 @@ export function HomePanel({ api, syncApi, historyApi, t, syncT, openForeignImpor
   const activity = overviewActivity(inputs.history, 30)
   const emptyState = overviewEmptyState(inputs)
 
-  /* —— 备份位置数据（全部来自已加载的只读列表） —— */
-  const firstBackup = data.backups !== null && data.backups.length > 0 ? data.backups[0]! : null
-  const backupDir = firstBackup !== null ? dirOf(firstBackup.path) : null
-  const totalSize = data.backups !== null ? data.backups.reduce((n, b) => n + b.sizeBytes, 0) : null
-  const scheduleStatus = data.schedule
-  const nextRun = scheduleStatus !== null ? nextRunText(scheduleStatus, t) : null
 
   /** 指标段渲染模型（名词在前：label dim + 值 bold；附注仅时间/告警）。 */
   const segModels = metrics.map((m) => {
@@ -482,47 +444,6 @@ export function HomePanel({ api, syncApi, historyApi, t, syncT, openForeignImpor
           onClose={() => { setScheduleOpen(false) }}
         />
         <Modal.Body scroll>
-          {/* 「定时备份」设置弹窗里的位置与配额：首页不再常驻这张卡（2026-10-06 用户要求移除），
-              但「这台机器的备份放在哪、有多少、保留几个」仍要能看到 —— 放在设置弹窗里最贴它的语义。 */}
-          <div className={css.groupHeader}>
-            <span className={css.groupLabel}>{t('overview.location.title')}</span>
-          </div>
-          <div className={css.factGrid}>
-            {backupDir !== null && (
-              <div className={css.factCell}>
-                <span className={css.factLabel}>{t('overview.location.dir')}</span>
-                <span className={`${css.factValue} ${css.mono}`} title={backupDir}>
-                  {midEllipsis(backupDir, 52)}
-                  <CopyButton text={backupDir} label={t('overview.activity.copy')} t={t} />
-                </span>
-              </div>
-            )}
-            {totalSize !== null && (
-              <div className={css.factCell}>
-                <span className={css.factLabel}>{t('overview.location.totalSize')}</span>
-                <span className={`${css.factValue} ${css.mono}`}>{formatBytes(totalSize)}</span>
-              </div>
-            )}
-            <div className={css.factCell}>
-              <span className={css.factLabel}>{t('overview.location.retention')}</span>
-              <span className={`${css.factValue} ${css.mono}`}>
-                {t('overview.location.retentionValue', {
-                  used: String(data.snapshots?.length ?? 0),
-                  limit: String(normalizeRetentionPolicy(scheduleStatus?.retention).keepLast),
-                })}
-              </span>
-            </div>
-            <div className={css.factCell}>
-              <span className={css.factLabel}>{scheduleStatus !== null && scheduleStatus.enabled && nextRun !== null ? t('overview.location.nextRun') : t('overview.location.lastRun')}</span>
-              <span className={`${css.factValue} ${css.mono}`}>
-                {scheduleStatus !== null && scheduleStatus.enabled && nextRun !== null
-                  ? nextRun
-                  : (scheduleStatus?.lastRunAt !== undefined
-                    ? renderRelTime(Date.parse(scheduleStatus.lastRunAt) || 0, t)
-                    : '—')}
-              </span>
-            </div>
-          </div>
           <BackupScheduleCard
             api={api}
             t={t}

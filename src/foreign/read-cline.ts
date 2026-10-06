@@ -5,16 +5,19 @@
  *   现代：<dataDir>/sessions/<sessionId>/{<id>.json, <id>.messages.json, <id>.compaction.json}
  *         <dataDir> = $CLINE_SESSION_DATA_DIR（直接用）| $CLINE_DATA_DIR + '/sessions'
  *                     | ($CLINE_DIR | <home>/.cline) + '/data/sessions'
- *   遗留：<legacyRoot>/tasks/<taskId>/{api_conversation_history.json, ui_messages.json, state/taskHistory.json}
+ *   遗留：<legacyRoot>/tasks/<taskId>/{api_conversation_history.json, ui_messages.json}
+ *         <legacyRoot>/state/taskHistory.json = **tasks/ 兄弟目录**的任务索引（cwd/标题/时间的权威来源）
  *         <legacyRoot> = $CLINE_LEGACY_GLOBAL_STORAGE_DIR | $CLINE_VSCODE_GLOBAL_STORAGE_DIR（命中即**只此一根**）
  *                       | {Code, Code - Insiders, VSCodium} × VS Code User 根 + '/globalStorage/saoudrizwan.claude-dev'
+ *   现代元数据索引：<dataDir>/db/sessions.db（**只存元数据**；消息仍在 <id>.messages.json）
  *
  * 平台纪律：三分支逐字对齐 chat-import 的 clineLegacyStorageDirs（win32 = %APPDATA%、
  * darwin = ~/Library/Application Support、linux = $XDG_CONFIG_HOME|~/.config），**全部经 joinFor**。
  *
  * 归一纪律：消息映射是**容错**的（role / say|ask / text|content 三形态并存），不认识的记录类型
- * **逐类计数**（进 `ignored` → 下游 unsupported-session-record），绝不静默丢；cwd 只认源里的
- * 明文字段（找不到就落 session-missing-cwd，**绝不猜**）。
+ * **逐类计数**（进 `ignored` → 下游 unsupported-session-record），绝不静默丢；cwd 只认**权威来源**
+ * （现代：db/sessions.db 或 manifest 的 cwd/workspace_root；遗留：state/taskHistory.json 的
+ * cwdOnTaskInitialization）—— 绝不从消息正文深搜（否则会把工具入参里的 `path` 当会话 cwd）。
  */
 import { dirname } from 'node:path';
 

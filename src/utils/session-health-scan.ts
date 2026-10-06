@@ -23,14 +23,17 @@
  *  ④ 同一步内重复通告的 tool-call id；
  *  ⑤ tool/result 的 toolCallId 与 message.source.callId 不配对。
  *
- * 严重级**不是注释断言，是真 codec 实测**（2026-10-06，真机日志 + 官方读取路径；t13 口径订正后）：
+ * 严重级**不是注释断言，是真 codec 实测**（2026-10-06，真机日志 + 官方读取路径；t13/t16 口径订正后）：
  *  - v4（headerVersion === 4）：tool/result 缺 message.id / toolCallId 不配对 → decodeRow 当场拒读；
- *    user/message 缺 data.id、assistant/message 缺 message.id、tool/call.callId 空、内容块 id 空 →
- *    被**已安装 Session 的 seed/restore 闸门**拒读。以上一律 **unloadable**。
+ *    user/message 缺 data.id、assistant/message 缺 message.id、tool/call.callId 空、内容块 id 空、
+ *    **同一步重复通告同一 advertised tool call** → 被**已安装 Session 的 seed/restore 闸门**拒读。
+ *    以上一律 **unloadable**。
  *    真机原始输出（v4 日志 + `validation:'current'`）：
  *      `finish: seed user/message at index 9 lacks an identified message`
  *      `finish: tool call id requires a nonempty string`
- *  - pre-v4（headerVersion < 4）：三类消息缺 id / 空 tool-call id 走 v0→v1、v3→v4 迁移并被迁移器拒绝 → unloadable。
+ *      `finish: assistant/message repeats advertised tool call call_00_rCbEBWsfXGrfOhog9cud3396`
+ *  - pre-v4（headerVersion < 4）：三类消息缺 id / 空 tool-call id / 重复通告同一 callId 走 v0→v1、v3→v4
+ *    迁移并被迁移器拒绝 → unloadable。
  *  - 版本读不出：按较轻的 nextRequestFails 报，detail 记 codec-uncalibrated（不谎称已验证）。
  *
  * **两种校验收口必须分清**（官方源码 `@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js`）：
@@ -43,9 +46,9 @@
  *    历史代际（version <= 3）走 `historicalSessionFormatCatalog.createRestore(header,
  *    { recovery:'recoverable', validation:'current' })`。
  *  · current / Session.fromRestore（**拒绝**）：上面那个 seed/restore 闸门就在 v4 的读盘路径上，
- *    是用户真实会撞到的拒读 —— v4 日志里缺 user/assistant message.id 或空 tool-call id，transformed
- *    口径能过、这条闸门过不去。因此本模块按**闸门**定严重级（unloadable）；transformed 的容忍
- *    只作为口径差异记录在此，不再用于降级。
+ *    是用户真实会撞到的拒读 —— v4 日志里缺 user/assistant message.id、空 tool-call id、重复通告同一
+ *    advertised tool call，transformed 口径能过、这条闸门过不去。因此本模块按**闸门**定严重级
+ *    （unloadable）；transformed 的容忍只作为口径差异记录在此，不再用于降级。
  */
 import fs from 'node:fs/promises';
 import { join } from 'node:path';
@@ -378,6 +381,18 @@ function emptyToolCallIdSeverity(headerVersion: number | undefined): SessionHeal
   return headerVersion === undefined ? 'nextRequestFails' : 'unloadable';
 }
 
+/**
+ * 重复通告同一 advertised tool call 的严重级（t16 口径订正）。
+ *
+ * v4：`Session.fromRestore` 闸门拒读（真机原始输出：
+ *     `assistant/message repeats advertised tool call call_00_rCbEBWsfXGrfOhog9cud3396`）→ unloadable；
+ * pre-v4：v0→v1 迁移同样拒读（生态矩阵 #5909 记录同一结论）→ unloadable；
+ * 只有**版本读不出**才取较轻的 nextRequestFails 并在 detail 注明未校准。
+ */
+function duplicateToolCallIdSeverity(headerVersion: number | undefined): SessionHealthSeverity {
+  return headerVersion === undefined ? 'nextRequestFails' : 'unloadable';
+}
+
 
 /** 行档结论（全部是「从字节可证明」的事实）。 */
 interface RowScanResult {
@@ -566,7 +581,9 @@ async function scanUnit(
       deepIssues.push({ code: 'dangling-tool-call', severity: 'unloadable', detail: String(lifecycle.danglingClosedStep) + ' unresolved' });
     }
     if (lifecycle.duplicateToolCallId > 0) {
-      deepIssues.push({ code: 'duplicate-tool-call-id', severity: 'nextRequestFails', detail: String(lifecycle.duplicateToolCallId) });
+      const severity = duplicateToolCallIdSeverity(version);
+      const note = version === undefined ? '; codec-uncalibrated' : '';
+      deepIssues.push({ code: 'duplicate-tool-call-id', severity, detail: String(lifecycle.duplicateToolCallId) + note });
     }
   }
   const input: SessionHealthInput = {

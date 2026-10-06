@@ -251,7 +251,7 @@ test('T4 分类：新增三个问题码都有严重级（tool-result-id-mismatch
   const emptyId = classifySessionHealth(input({ deep: { verified: true, issues: [{ code: 'empty-tool-call-id' }] } }), ctx());
   assert.equal(emptyId.issues[0]?.severity, 'unloadable', '静态回落也是 unloadable（v4 已实测被 seed/restore 闸门拒读）');
   const dup = classifySessionHealth(input({ deep: { verified: true, issues: [{ code: 'duplicate-tool-call-id' }] } }), ctx());
-  assert.equal(dup.issues[0]?.severity, 'nextRequestFails', '未实测「已安装 Session」口径 → 保持较轻结论');
+  assert.equal(dup.issues[0]?.severity, 'unloadable', 'v4 实测被 Session.fromRestore 闸门拒读（assistant/message repeats advertised tool call）');
 });
 
 test('T4 分类：同一个 code 重复出现只留一条，且取更重的严重级', () => {

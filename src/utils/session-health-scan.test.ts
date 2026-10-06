@@ -351,18 +351,21 @@ test('T4 行档 ②（t13 口径订正）：空 tool-call id 只进 empty-tool-c
   assert.equal(t4Row(result, 'v3-empty-call').severity, 'unloadable', 'pre-v4 迁移器直接拒');
 });
 
-test('T4 行档（t13）：版本读不出 → 两个码仍取较轻的 nextRequestFails 并注明未校准（口径不变）', { skip: !CAPABLE }, async () => {
+test('T4 行档（t13/t16）：版本读不出 → 三个码仍取较轻的 nextRequestFails 并注明未校准（口径不变）', { skip: !CAPABLE }, async () => {
   // header 缺 version 字段：readLogHeaderFromBytes 只认「非负安全整数」，缺字段 = 版本不可读
   const noVersion = { type: 'session', id: 'session-a', cwd: 'D:\\proj' };
   const noUser = t4Clone(t4Rows());
   delete noUser[T4_USER]!.data.id;
   const emptyCall = t4Clone(t4Rows());
   emptyCall[T4_CALL]!.data.callId = '';
+  const dupBlock = t4Clone(t4Rows());
+  dupBlock[T4_ASSISTANT]!.data.message.content.push({ type: 'tool-call', id: 'c1', name: 'n', arguments: '{}' });
   const result = await t4Scan([
     { id: 'nover-user', header: noVersion, rows: noUser },
     { id: 'nover-call', header: noVersion, rows: emptyCall },
+    { id: 'nover-dup', header: noVersion, rows: dupBlock },
   ]);
-  for (const id of ['nover-user', 'nover-call']) {
+  for (const id of ['nover-user', 'nover-call', 'nover-dup']) {
     const row = t4Row(result, id);
     assert.equal(row.severity, 'nextRequestFails', id + '：版本不可读 → 宁可取较轻并注明，不谎称已校准');
     assert.match(String(row.issues[0]?.detail), /codec-uncalibrated/, id);
@@ -402,7 +405,7 @@ test('T4 行档 ③：turn/end 也关闭其回合里仍开着的 step（漏 step
   assert.deepEqual(t4Codes(t4Row(result, 'turn-close')), ['dangling-tool-call']);
 });
 
-test('T4 行档 ④：同一步重复通告同一 callId → nextRequestFails；健康形态「1 内容块 + 1 tool/call 行」不得误报', { skip: !CAPABLE }, async () => {
+test('T4 行档 ④（t16 口径订正）：同一步重复通告同一 callId → unloadable；健康形态「1 内容块 + 1 tool/call 行」不得误报', { skip: !CAPABLE }, async () => {
   const dupRow = t4Clone(t4Rows());
   dupRow.splice(T4_CALL + 1, 0, t4Clone(t4Rows())[T4_CALL]!);
   const dupBlock = t4Clone(t4Rows());
@@ -421,7 +424,7 @@ test('T4 行档 ④：同一步重复通告同一 callId → nextRequestFails；
   for (const id of ['dup-row', 'dup-block']) {
     const row = t4Row(result, id);
     assert.deepEqual(t4Codes(row), ['duplicate-tool-call-id'], id);
-    assert.equal(row.severity, 'nextRequestFails', id);
+    assert.equal(row.severity, 'unloadable', id + '：v4 走 Session.fromRestore 闸门 → assistant/message repeats advertised tool call');
   }
 });
 

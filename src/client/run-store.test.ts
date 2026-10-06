@@ -146,7 +146,6 @@ test('m2-refresh: 非敏感表单状态往返恢复，敏感字段与导出结�
   const { storage } = makeStorage()
   const first = new RunStore({ storage })
   first.patch({
-    view: 'import',
     export: {
       selection: ['settings', 'plugins'],
       includeSecrets: true,
@@ -168,7 +167,6 @@ test('m2-refresh: 非敏感表单状态往返恢复，敏感字段与导出结�
   // 新实例 + 同一存储 = 模拟页面刷新
   const second = new RunStore({ storage })
   const st = second.getSnapshot()
-  assert.equal(st.view, 'import')
   assert.deepEqual(st.export.selection, ['settings', 'plugins'])
   assert.equal(st.export.includeSecrets, true)
   assert.equal(st.export.encrypt, true, 'encrypt 为非敏感选项，刷新后恢复')
@@ -226,10 +224,10 @@ test('损坏或版本不符的存储数据回退默认并清除脏键', () => {
   // 非 JSON
   let s = makeStorage()
   let store = new RunStore({ storage: s.storage })
-  store.patch({ view: 'import' })
+  store.patch({ panel: 'library' })
   s = makeStorage()
   store = new RunStore({ storage: s.storage })
-  assert.equal(store.getSnapshot().view, 'export')
+  assert.equal(store.getSnapshot().panel, 'home')
   // 损坏 JSON
   const c1 = makeStorage()
   c1.storage.setItem(STATE_KEY, '{not-json')
@@ -675,14 +673,14 @@ test('subscribe/notify: patch 触发监听器，退订后不再通知', () => {
   const store = new RunStore({ storage: null })
   let notified = 0
   const unsub = store.subscribe(() => { notified += 1 })
-  store.patch({ view: 'import' })
+  store.patch({ panel: 'library' })
   assert.equal(notified, 1)
   unsub()
-  store.patch({ view: 'export' })
+  store.patch({ panel: 'home' })
   assert.equal(notified, 1)
   // getSnapshot 引用在 patch 后替换（useSyncExternalStore 要求）
   const before = store.getSnapshot()
-  store.patch({ view: 'import' })
+  store.patch({ panel: 'library' })
   assert.notEqual(store.getSnapshot(), before)
 })
 
@@ -692,13 +690,13 @@ test('回归: subscribe/getSnapshot 以裸引用调用时 this 绑定实例（us
   // 若为原型方法则 this 为 undefined 直接崩溃（备份与迁移页空白根因）。
   const bareGet = store.getSnapshot
   const bareSub = store.subscribe
-  assert.equal(bareGet().view, 'export', '裸引用 getSnapshot 不崩（this 绑定实例）')
+  assert.equal(bareGet().panel, 'home', '裸引用 getSnapshot 不崩（this 绑定实例）')
   let notified = 0
   const unsub = bareSub(() => { notified += 1 })
-  store.patch({ view: 'import' })
+  store.patch({ panel: 'library' })
   assert.equal(notified, 1, '裸引用 subscribe 不崩且能退订')
   unsub()
-  store.patch({ view: 'export' })
+  store.patch({ panel: 'home' })
   assert.equal(notified, 1, '退订后不再通知')
 })
 
@@ -986,7 +984,7 @@ test('低频面板: 同步/市场/快照切片与当前面板刷新往返恢复�
     plan,
   }
   first.patch({
-    panel: 'market',
+    panel: 'library',
     market: {
       search: 'deepseek',
       category: 'sync',
@@ -1080,8 +1078,7 @@ test('低频面板: 旧版 v1 载荷（无 panel/sync/market/snapshots 字段）
   }))
   const store = new RunStore({ storage })
   const st = store.getSnapshot()
-  assert.equal(st.view, 'import')
-  assert.equal(st.panel, 'import', '旧载荷无 panel（旧「主视图」缺省）→ 由 view 映射到具体页面（Workbench Rebuild）')
+  assert.equal(st.panel, 'home', 'v3：旧载荷无 panel / view 字段 → 首页（view 字段已退役）')
   assert.equal(st.sync.channel, 'git')
   assert.equal(st.sync.byChannel.git.syncSections.length, 0)
   assert.equal(st.sync.byChannel.webdav.syncMode, 'advanced', 'webdav 通道缺省（恒 advanced）')
@@ -1124,7 +1121,7 @@ test('低频面板: 旧版顶层 syncMode 载荷 → 迁移为 git 通道的 byC
 
 /* -------------------------------------------------- 聚合优化（2026-08）：一级 tab 8→6 的旧值迁移 */
 
-test('UI v2 迁移: 旧 panel "recovery" → 环境页（维护与诊断的宿主）', () => {
+test('UI v3 迁移: 旧 panel "recovery" → 环境页 + 维护与诊断子视图', () => {
   const { storage } = makeStorage()
   storage.setItem(STATE_KEY, JSON.stringify({
     v: 1, view: 'export', panel: 'recovery',
@@ -1135,15 +1132,15 @@ test('UI v2 迁移: 旧 panel "recovery" → 环境页（维护与诊断的宿�
   } as Record<string, unknown>))
   const store = new RunStore({ storage })
   const st = store.getSnapshot()
-  // v2：备份与快照页已解散 —— 事故恢复归「环境 → 维护与诊断」。
-  // 落到环境页即可：维护与诊断是它的子视图，用户一步就能点开。
-  assert.equal(st.panel, 'profiles', '旧 recovery tab → 环境页')
-  // 快照切片**照旧恢复**（它仍是非敏感界面状态），但 subTab 会被归一：
-  // 'restore' 这个子视图已随产物搬进产物库 ⇒ 归一为当前存在的第一个（schedule）。
-  assert.equal(st.snapshots.subTab, 'schedule', '旧 subTab=restore → 归一为 schedule（该子视图已不存在）')
+  // v3：备份与快照页已解散 —— 事故恢复归「环境 → 维护与诊断」。
+  // 旧 recovery tab 是**急救入口**：落到环境页还不够，必须同时落到维护与诊断子视图，
+  // 否则用户看到的是档案列表（v2 只落到页面，等于把急救入口丢在半路）。
+  assert.equal(st.panel, 'environment', '旧 recovery tab → 环境页')
+  assert.equal(st.profiles.subView, 'maintenance', '并直达维护与诊断子视图')
+  assert.equal('subTab' in st.snapshots, false, 'v1 的 snapshots.subTab 字段已删除')
 })
 
-test('UI v2：旧 panel "about"/"history"/"more" → overview；旧 more 载荷被忽略（面板是瞬态）', () => {
+test('UI v3：旧 panel "about"/"history"/"more" → home；旧 more 载荷被忽略（面板是瞬态）', () => {
   const { storage } = makeStorage()
   const load = (panel: string, extra: Record<string, unknown> = {}): RunStore => {
     storage.setItem(STATE_KEY, JSON.stringify({
@@ -1155,7 +1152,7 @@ test('UI v2：旧 panel "about"/"history"/"more" → overview；旧 more 载荷�
   }
 
   for (const panel of ['about', 'history', 'more']) {
-    assert.equal(load(panel).getSnapshot().panel, 'overview', `旧 ${panel} tab → 总览`)
+    assert.equal(load(panel).getSnapshot().panel, 'home', `旧 ${panel} tab → 首页`)
   }
 
   // v2：抽屉整体删除，活动/历史/关于变成 task 面板。**面板是否打开是瞬态** ——
@@ -1171,56 +1168,54 @@ test('低频面板: 快照恢复 running 为瞬态——不写入 sessionStorage
   const { storage, raw } = makeStorage()
   const first = new RunStore({ storage })
   first.patch({
-    // UI v2：快照切片现由产物库承载（panel 只是「当前页」标记，与本用例的断言无关）
+    // UI v3：快照切片现由产物库承载（panel 只是「当前页」标记，与本用例的断言无关）
     panel: 'library',
-    snapshots: {
-      selectedId: 'snap-1', running: true,
-      importBackup: { zipPath: '/exports/x.zip', name: 'x.zip' },
-    },
+    snapshots: { selectedId: 'snap-1', running: true },
+    library: { pendingZip: { zipPath: '/exports/x.zip', name: 'x.zip' } },
   })
-  const persisted = JSON.parse(raw() ?? '{}') as { snapshots?: { running?: boolean; importBackup?: unknown } }
+  const persisted = JSON.parse(raw() ?? '{}') as { snapshots?: { running?: boolean }; library?: { pendingZip?: unknown } }
   assert.equal(persisted.snapshots?.running, false, 'running 恒不落盘（白名单剔除）')
-  assert.equal(persisted.snapshots?.importBackup, null, 'importBackup 恒不落盘（一次性瞬态剔除）')
+  assert.equal(persisted.library?.pendingZip, null, '一键导入请求（pendingZip）恒不落盘（一次性瞬态剔除）')
 
-  // 即便旧载荷携带 running=true / importBackup，applyPersisted 也硬性归零——绝不把浏览器
-  // 陈旧状态当成「恢复仍在执行」的依据（宿主 /runs 是唯一权威，resume() 负责重新置位）
+  // 即便旧载荷携带 running=true / pendingZip，applyPersisted 也硬性归零——绝不把浏览器
+  // 陈旧状态当成「恢复仍在执行 / 上一次导入请求」的依据（宿主 /runs 是唯一权威）
   storage.setItem(STATE_KEY, JSON.stringify({
     ...persisted,
-    snapshots: {
-      ...persisted.snapshots,
-      running: true,
-      importBackup: { zipPath: '/exports/stale.zip', name: 'stale.zip' },
-    },
+    snapshots: { ...persisted.snapshots, running: true },
+    library: { ...persisted.library, pendingZip: { zipPath: '/exports/stale.zip', name: 'stale.zip' } },
   }))
   const second = new RunStore({ storage })
   assert.equal(second.getSnapshot().snapshots.running, false, '刷新后 running 复位（不读存储）')
-  assert.equal(second.getSnapshot().snapshots.importBackup, null, '刷新后 importBackup 复位（不读存储）')
+  assert.equal(second.getSnapshot().library.pendingZip, null, '刷新后 pendingZip 复位（不读存储）')
   assert.equal(second.getSnapshot().snapshots.selectedId, 'snap-1', '非瞬态字段仍恢复')
 })
 
-test('备份页二级 tab: subTab 持久化——切换后刷新恢复；已消失的旧值落到 schedule', () => {
-  const { storage, raw } = makeStorage()
-  const first = new RunStore({ storage })
-  // v2：本页只剩 schedule / maintenance / recovery 三个子视图，缺省是 schedule
-  assert.equal(first.getSnapshot().snapshots.subTab, 'schedule', '缺省为定时备份')
-  first.patch({ snapshots: { subTab: 'recovery' } })
-  const persisted = JSON.parse(raw() ?? '{}') as { snapshots?: { subTab?: string } }
-  assert.equal(persisted.snapshots?.subTab, 'recovery', 'subTab 非敏感可持久化')
-
-  const second = new RunStore({ storage })
-  assert.equal(second.getSnapshot().snapshots.subTab, 'recovery', '刷新后恢复上次子 tab')
-
-  // 旧载荷（无 subTab 字段）→ 回退缺省 schedule
-  storage.setItem(STATE_KEY, JSON.stringify({ ...persisted, snapshots: { ...persisted.snapshots, subTab: undefined } }))
-  const third = new RunStore({ storage })
-  assert.equal(third.getSnapshot().snapshots.subTab, 'schedule', '旧载荷缺省回退 schedule')
-
-  // v2 迁移：restore / files 两个子视图已随产物搬进产物库 —— 旧值不得把用户丢在一个不存在的视图上
-  for (const stale of ['restore', 'files']) {
-    storage.setItem(STATE_KEY, JSON.stringify({ ...persisted, snapshots: { ...persisted.snapshots, subTab: stale } }))
-    const restored = new RunStore({ storage })
-    assert.equal(restored.getSnapshot().snapshots.subTab, 'schedule', `旧值 ${stale} → schedule`)
+test('UI v3 迁移: 旧 panel "market" → 产物库 + 市场来源筛选；已删的 subTab 字段被忽略', () => {
+  const { storage } = makeStorage()
+  const legacy = {
+    v: 1,
+    view: 'export',
+    export: { mode: 'quick', selection: [], includeSecrets: false, encrypt: false, fileName: '', note: '', error: null },
+    import: { step: 'select', selectedFileName: null, containerEncrypted: false, error: null },
   }
+  const load = (panel: string, extra: Record<string, unknown> = {}): RunStore => {
+    storage.setItem(STATE_KEY, JSON.stringify({ ...legacy, panel, ...extra } as Record<string, unknown>))
+    return new RunStore({ storage })
+  }
+  // v3 §3.1：市场退出导航 —— 旧「市场页」落到产物库，并预置「市场产物」来源筛选
+  assert.equal(load('market').getSnapshot().panel, 'library', '旧 market 页 → 产物库')
+  assert.equal(load('market').getSnapshot().library.sourceFilter, 'market', '并预置市场来源筛选')
+  // v1 的 snapshots 子视图已解散：restore/files → 产物库；schedule → 首页；recovery → 环境+维护
+  const stale = load('snapshots', { snapshots: { subTab: 'restore', importBackup: null } })
+  assert.equal(stale.getSnapshot().panel, 'library', '旧 snapshots（subTab=restore）→ 产物库')
+  assert.equal('subTab' in stale.getSnapshot().snapshots, false, 'v1 的 snapshots.subTab 字段已删除（不残留）')
+  assert.equal('importBackup' in stale.getSnapshot().snapshots, false, 'v1 的 snapshots.importBackup 字段已删除（不残留）')
+  assert.equal(load('snapshots', { snapshots: { subTab: 'schedule' } }).getSnapshot().panel, 'home', '旧定时备份子视图 → 首页')
+  const rec = load('snapshots', { snapshots: { subTab: 'recovery' } }).getSnapshot()
+  assert.equal(rec.panel, 'environment', '旧事故恢复子视图 → 环境页')
+  assert.equal(rec.profiles.subView, 'maintenance', '并直达维护与诊断')
+  // 认不出的旧值绝不丢页面 —— 一律首页
+  assert.equal(load('nonsense-panel').getSnapshot().panel, 'home', '未知 panel 值 → 首页（不丢页面）')
 })
 
 test('m2-resume: 活跃 restore run 经 /runs 恢复 running 并轮询到完成回填报告（宿主为权威）', async () => {
@@ -1277,8 +1272,8 @@ test('recovery: running 为瞬态——不写入 sessionStorage、刷新后复�
   const { storage, raw } = makeStorage()
   const first = new RunStore({ storage })
   first.patch({
-    // UI v2：事故恢复归「环境 → 维护与诊断」（panel 只是「当前页」标记）
-    panel: 'profiles',
+    // UI v3：事故恢复归「环境 → 维护与诊断」（panel 只是「当前页」标记）
+    panel: 'environment',
     recovery: {
       status: { incidents: [], running: [] },
       selectedOperationId: '00000000-0000-4000-8000-0000000000aa',
@@ -1308,7 +1303,7 @@ test('recovery: status/preview/verifyResult 非敏感可持久化——刷新后
   const { storage, raw } = makeStorage()
   const first = new RunStore({ storage })
   first.patch({
-    panel: 'profiles',
+    panel: 'environment',
     recovery: {
       status: {
         incidents: [{
@@ -1632,8 +1627,8 @@ test('P0-9: 持久化字段清单显式化（键集合断言 —— 新增字段
     'sectionFilter', 'selectionState', 'sortKey', 'source', 'subView',
   ])
   assert.deepEqual(keys(p.snapshots), [
-    'actionError', 'backupDraft', 'changeSummary', 'error', 'importBackup', 'plan', 'report',
-    'running', 'selectedId', 'subTab',
+    'actionError', 'backupDraft', 'changeSummary', 'error', 'plan', 'report',
+    'running', 'selectedId',
   ])
   assert.deepEqual(keys(p.profiles), [
     'copyIncludeModules', 'copyResult', 'copyTargetName', 'copyValue', 'copying',
@@ -1649,7 +1644,7 @@ test('P0-9: 持久化字段清单显式化（键集合断言 —— 新增字段
   assert.equal('task' in p, false, 'task 面板不持久化')
   // 瞬态与凭据不得出现在任何切片（回归护栏）
   assert.equal(p.snapshots.running, false)
-  assert.equal(p.snapshots.importBackup, null)
+  assert.equal(p.library.pendingZip, null, '一键导入请求恒不落盘（一次性瞬态剔除）')
   assert.equal(p.recovery.running, false)
 })
 

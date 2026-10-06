@@ -12,7 +12,7 @@ import {
 } from './commands.ts'
 
 const TITLES: Record<string, string> = {
-  'nav.overview': '总览',
+  'nav.home': '首页',
   'library.title': '产物库',
   'nav.sync': '同步',
   'nav.market': '市场',
@@ -23,7 +23,9 @@ const TITLES: Record<string, string> = {
   'task.title.runs': '活动记录',
   'task.title.history': '迁移历史',
   'task.title.about': '关于',
+  'task.title.publish': '发布到市场',
   'palette.rescue.recovery': '事故恢复',
+  'palette.rescue.mode': '救援模式',
   'library.source.all': '全部',
   'library.kind.snapshot': '快照',
   'library.kind.backupFile': '备份文件',

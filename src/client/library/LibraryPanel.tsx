@@ -44,6 +44,8 @@ export interface LibraryPanelProps {
   onOpenTask: (kind: 'import' | 'market', marketId?: string) => void
   /** 「手动导出」也是流程，但它属于首页的快捷动作；这里直接开面板即可 */
   onOpenExport: () => void
+  /** 「发布到市场」：市场退出导航后（v3 §3.1），这里是它的常驻入口之一（另一条是 ⌘K 命令） */
+  onOpenPublish: () => void
   /** 外部刷新信号（动作完成 / 恢复 / 删除后递增）→ 重拉四份清单 */
   refreshTick: number
 }
@@ -58,7 +60,7 @@ interface SourceState<T> {
 
 function initialSource<T>(): SourceState<T> { return { status: 'loading', items: [], error: null } }
 
-export function LibraryPanel({ api, syncApi, marketApi, t, uiT, onAction, onOpenTask, onOpenExport, refreshTick }: LibraryPanelProps) {
+export function LibraryPanel({ api, syncApi, marketApi, t, uiT, onAction, onOpenTask, onOpenExport, onOpenPublish, refreshTick }: LibraryPanelProps) {
   const state = useSyncExternalStore(runStore.subscribe, runStore.getSnapshot)
   const lib = state.library
 
@@ -242,6 +244,7 @@ export function LibraryPanel({ api, syncApi, marketApi, t, uiT, onAction, onOpen
         <Button size="sm" onClick={onOpenExport}>{t('library.new.export')}</Button>
         <Button size="sm" onClick={() => { onOpenTask('import') }}>{t('library.new.import')}</Button>
         <Button size="sm" onClick={() => { onOpenTask('market') }}>{t('library.new.market')}</Button>
+        <Button size="sm" onClick={onOpenPublish}>{t('task.title.publish')}</Button>
       </div>
     </div>
   )

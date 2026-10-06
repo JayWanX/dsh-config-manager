@@ -31,6 +31,7 @@ import Download from 'lucide-react/dist/esm/icons/download.mjs'
 import Eye from 'lucide-react/dist/esm/icons/eye.mjs'
 import FolderInput from 'lucide-react/dist/esm/icons/folder-input.mjs'
 import HardDriveDownload from 'lucide-react/dist/esm/icons/hard-drive-download.mjs'
+import History from 'lucide-react/dist/esm/icons/history.mjs'
 import Info from 'lucide-react/dist/esm/icons/info.mjs'
 import Lock from 'lucide-react/dist/esm/icons/lock.mjs'
 import MessageSquare from 'lucide-react/dist/esm/icons/message-square.mjs'
@@ -57,6 +58,7 @@ const ICONS = {
   refresh: RotateCw,
   activity: Clock,
   clock: Clock,
+  history: History,
   about: Info,
   info: Info,
   lock: Lock,
@@ -226,6 +228,7 @@ export const SyncIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name=
 export const RefreshIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="refresh" {...p} />
 export const ActivityIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="activity" {...p} />
 export const ClockIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="clock" {...p} />
+export const HistoryIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="history" {...p} />
 export const AboutIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="about" {...p} />
 export const MessageIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="message" {...p} />
 export const PencilIcon = (p: Omit<IconProps, 'name'>): JSX.Element => <Icon name="pencil" {...p} />

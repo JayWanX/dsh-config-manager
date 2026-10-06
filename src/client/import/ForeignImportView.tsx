@@ -42,7 +42,7 @@ export interface ForeignImportViewProps {
   /**
    * 产包成功：把 zipPath 交给**既有导入向导**。
    *
-   * 由上层（ConfigManagerSection）负责「写进 runStore.snapshots.importBackup 并切到导入面板」——
+   * 由上层（ConfigManagerSection）负责「写进 runStore.library.pendingZip 并切到导入面板」——
    * 复用产物库「一键导入」那条已被验证的通道（它连容器形态一起带过去），
    * 而不是在这里再造一条 seed 路径。
    */
@@ -172,7 +172,7 @@ export function ForeignImportView({ api, t, uiT, onReady }: ForeignImportViewPro
     try {
       const result = await api.foreignImport(selected)
       setProduced(result)
-      // 交给上层 → 写进 runStore.snapshots.importBackup → 导入面板消费（复用既有通道）
+      // 交给上层 → 写进 runStore.library.pendingZip → 导入面板消费（复用既有通道）
       onReady(result)
     } catch (err) {
       setImportError(err instanceof Error ? err.message : String(err))

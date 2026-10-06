@@ -73,6 +73,11 @@ export interface MarketPanelProps {
    * 缺省（页面路径、从「逛市场」按钮进入）= 只打开列表，行为不变。
    */
   openItemId?: string
+  /**
+   * 直达的「市场子视图」（v3）：⌘K「发布到市场」与产物库「发布到市场」把 payload 带进来，
+   * 面板挂载时直接落在「我的配置」。缺省 = 按上次持久化的子视图（行为不变）。
+   */
+  initialSubView?: 'browse' | 'myconfigs'
 }
 
 interface MarketUiState {
@@ -178,9 +183,13 @@ function initFromStore(): MarketUiState {
   }
 }
 
-export function MarketPanel({ api, myConfigsApi, importApi, syncApi, t, cmT, openItemId }: MarketPanelProps) {
+export function MarketPanel({ api, myConfigsApi, importApi, syncApi, t, cmT, openItemId, initialSubView }: MarketPanelProps) {
   const uiT = api.t // 展示层翻译器（zh/en）：供应链警示 / 状态行 / 徽章文本走 UiT（market.* 键）
-  const [state, setState] = useState<MarketUiState>(initFromStore)
+  const [state, setState] = useState<MarketUiState>(() => {
+    const s = initFromStore()
+    // v3：⌘K「发布到市场」/ 产物库「发布到市场」直达「我的配置」子视图（payload 传入）
+    return initialSubView === undefined ? s : { ...s, subView: initialSubView }
+  })
   /** 最新 state 镜像（commit/卸载 flush 读取，避免闭包过期值） */
   const stateRef = useRef<MarketUiState>(state)
   /** 挂载守卫：卸载后不再 setState（store 镜像仍执行，异步结果照常落库） */

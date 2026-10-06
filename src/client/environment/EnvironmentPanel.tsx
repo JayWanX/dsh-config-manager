@@ -409,11 +409,11 @@ export function EnvironmentPanel({ api, t, recoveryApi, recoveryT, incidentApi }
       <div className={css.actionRow}>
         <Segmented
           items={[
-            { id: 'profiles', label: t('environment.tab.profiles') },
+            { id: 'list', label: t('environment.tab.profiles') },
             { id: 'maintenance', label: t('environment.tab.maintenance') },
           ]}
           active={subView}
-          onChange={(id) => { patch({ subView: id === 'maintenance' ? 'maintenance' : 'profiles' }) }}
+          onChange={(id) => { patch({ subView: id === 'maintenance' ? 'maintenance' : 'list' }) }}
           ariaLabel={t('environment.title')}
         />
         <span className={css.statusSpacer} />
@@ -433,7 +433,7 @@ export function EnvironmentPanel({ api, t, recoveryApi, recoveryT, incidentApi }
         />
       )}
 
-      {subView === 'profiles' && (
+      {subView === 'list' && (
       <>
       <SectionTitle title={t('profiles.title')} subtitle={t('profiles.subtitle')} />
 

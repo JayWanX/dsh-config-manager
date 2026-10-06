@@ -607,16 +607,15 @@ async function runRemoteDownload(row: ArtifactRow, syncApi: SyncApi): Promise<{ 
   return await syncApi.download({ ...payload, snapshotId: row.ref.remoteId ?? '', name: fileNameOf(row) })
 }
 
-/** 把备份交给导入向导：它消费 runStore.snapshots.importBackup，连容器形态一起带过去（issue #55）。 */
+/** 把备份交给导入向导：它消费 runStore.library.pendingZip，连容器形态一起带过去（issue #55）。 */
 function runStorePatchImport(row: ArtifactRow): void {
   const path = row.ref.path ?? ''
   const name = fileNameOf(row)
   // 不再写 panel：导入不是页面（导航里已无该项）。写 panel='import' 会把页面区切到
   // 一个不存在的页（真机：闪一下 + tab 高亮全灭），并把随后 openTask 的 origin 记成 'import'。
   runStore.patch({
-    view: 'import',
-    snapshots: {
-      importBackup: {
+    library: {
+      pendingZip: {
         zipPath: path,
         name,
         ...(row.badges.includes('encrypted') ? { containerType: 'encrypted' as const } : {}),

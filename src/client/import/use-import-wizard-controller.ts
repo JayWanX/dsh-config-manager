@@ -216,7 +216,7 @@ export function useImportWizardController(api: ConfigManagerApi, t: TranslateNS<
   }
 
   /**
-   * 一键导入（快照面板「备份文件 → 导入」）：消费 runStore.snapshots.importBackup，
+   * 一键导入（产物库「备份文件 → 导入」）：消费 runStore.library.pendingZip，
    * 跳过上传直接对宿主 exports 目录的 zipPath 分析（analyze 零写入）。
    * 一次性瞬态：消费后立即清空，刷新/重挂载不会重放；与 onPickFile 共用
    * pickGeneration 竞态守卫（用户取消选择后晚到的分析结果丢弃）。
@@ -227,9 +227,9 @@ export function useImportWizardController(api: ConfigManagerApi, t: TranslateNS<
    * 先进入解密阶段（decrypt-archive），解锁成功后再走同一个 selectZip。
    */
   useEffect(() => {
-    const req = runStore.getSnapshot().snapshots.importBackup
+    const req = runStore.getSnapshot().library.pendingZip
     if (req === null) return
-    runStore.patch({ snapshots: { importBackup: null } })
+    runStore.patch({ library: { pendingZip: null } })
     // **先完整重置向导**：此前这里只清了 encrypt/decrypt 那几个字段，
     // 于是上一次导入的 step / analysis / plan / result / progress 全部残留 ——
     // 从「上次已执行到某一步」的状态进来时，向导仍停在那一步，

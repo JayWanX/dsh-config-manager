@@ -5,12 +5,13 @@
  *   1. 状态行：健康点 + 指标段 + 右端 **[立即备份]**
  *      （指标段：备份文件 / 安全快照 / 定时备份 / 远程同步；段可点击直达 ——
  *       「定时备份」**不跳页**，直接开设置弹窗，因为设置卡就在下面）
- *   2. 动作工具栏：手动导出 / 从文件导入 / 一键同步 / 活动入口
- *   3. 备份位置卡 + **自动备份设置卡**（v1 独立页签的最后一块内容，§12 第 4 步）
- *   4. 分区构成卡：export-preview 只读预览（两列网格）
- *   5. 最近活动表（fit-content，上限 8 行内滚）
+ *   2. 动作工具栏：立即备份 / 手动导出 / 导入 / 从其它 agent 导入 / 一键同步 / 活动入口
+ *   3. 最近活动表（fit-content，上限 8 行内滚）
  *
- * **移出首页**（§7）：分区构成卡的展开态改在产物库与导出流程里；活动视口归只读面板。
+ * **v3 移出首页**：备份位置与配额（→「定时备份」设置弹窗内的位置小节）、
+ * 分区构成卡（→ 导出流程的「本次将导出」构成卡 + 产物库行展开）。
+ * 移出后首页只留「这台机器现在怎么样 + 我下一步做什么」，且由最近活动表填满剩余高度
+ * （Canvas 纪律：不留底部空洞）。
  * 状态行**不重复**恢复待处理的提示 —— 全局 SAFE MODE 横幅已经承担（§4.4）。
  *
  * 数据流：挂载/刷新时对 5 个**毫秒级**只读 API 做 Promise.allSettled 并行聚合，首屏不等分区预览；
@@ -27,7 +28,7 @@ import { backupRunOutcome, normalizeRetentionPolicy, type BackupSkipReason } fro
 import type { BackupFileMeta } from '../../sync/backup-files.ts'
 import type { SyncApi, SyncStatusResponse } from '../sync/sync-api.ts'
 import type { HistoryApi, HistoryListResult } from '../history/history-api.ts'
-import type { ConfigManagerApi, ExportPreviewResponse } from '../api.ts'
+import type { ConfigManagerApi } from '../api.ts'
 import type { TranslateNS } from '../client-types.ts'
 import type { ConfigManagerKey } from '../locales.ts'
 import { redact } from '../../security/redaction.ts'
@@ -47,9 +48,6 @@ import {
   type OverviewMetricKey,
 } from '../../ui/overview-view.ts'
 import { Badge, Button, Card, Spinner, StatusDot, Stepper } from '../common/ui.tsx'
-import { SectionComposition, type SectionCompositionItem } from '../common/SectionComposition.tsx'
-import { DEFAULT_INCLUDED_SECTION_IDS } from '../../schema/section-registry.ts'
-import { sectionLabeler } from '../common/section-labels.ts'
 import { BackupIcon, ExportIcon, ImportIcon, SyncIcon, ArrowRightIcon } from '../common/Icon.tsx'
 import { CopyButton } from '../common/CopyButton.tsx'
 import { Modal } from '../common/Modal.tsx'
@@ -88,8 +86,6 @@ interface OverviewData {
   schedule: BackupScheduleStatus | null
   sync: SyncStatusResponse | null
   history: HistoryListResult | null
-  /** 分区构成（export-preview 只读预览；null = 未到货/失败 → 卡片先渲染默认分区骨架） */
-  sections: ExportPreviewResponse | null
 }
 
 const initialData: OverviewData = {
@@ -98,7 +94,6 @@ const initialData: OverviewData = {
   schedule: null,
   sync: null,
   history: null,
-  sections: null,
 }
 
 /**
@@ -124,18 +119,6 @@ function renderRelTime(ms: number, t: TranslateNS<'config-manager'>): string {
   if (rt.unit === 'min') return t('overview.time.min', { n: rt.n })
   if (rt.unit === 'hour') return t('overview.time.hour', { n: rt.n })
   return t('overview.time.day', { n: rt.n })
-}
-
-/** 定时间隔 → 字典文案（与 backupSchedule.interval.* 同源）。 */
-function intervalText(interval: BackupScheduleStatus['interval'], t: TranslateNS<'config-manager'>): string {
-  switch (interval) {
-    case '6h': return t('backupSchedule.interval.6h')
-    case '12h': return t('backupSchedule.interval.12h')
-    case '24h': return t('backupSchedule.interval.24h')
-    case '7d': return t('backupSchedule.interval.7d')
-    case 'custom': return t('backupSchedule.interval.custom')
-    default: return String(interval)
-  }
 }
 
 /** 下次定时备份估算（固定间隔 = 上次 + 间隔；custom = 下个周一时刻近似）。 */
@@ -191,8 +174,6 @@ export function HomePanel({ api, syncApi, historyApi, t, syncT, openActivity, op
   const store = useSyncExternalStore(runStore.subscribe, runStore.getSnapshot)
   const [data, setData] = useState<OverviewData>(initialData)
   const [loading, setLoading] = useState(true)
-  /** 分区构成预览是否在途（独立于首屏 loading：它后发且最慢） */
-  const [sectionsLoading, setSectionsLoading] = useState(true)
   const [backupRunning, setBackupRunning] = useState(false)
   /** 卸载后不再 setState（异步回调竞态防护） */
   const aliveRef = useRef(true)
@@ -219,24 +200,17 @@ export function HomePanel({ api, syncApi, historyApi, t, syncT, openActivity, op
     setLoading(false)
   }, [api, syncApi, historyApi])
 
-  /** 分区构成（只读预览）：独立后发；失败只让该卡显示失败态，绝不阻塞首屏 */
-  const loadSections = useCallback(async (): Promise<void> => {
-    setSectionsLoading(true)
-    try {
-      const sections = await api.exportPreview(undefined)
-      if (aliveRef.current) setData((prev) => ({ ...prev, sections }))
-    } catch {
-      // 保持 sections=null：卡片按「读取失败 · 将整体导出」渲染（不静默消失，也不误导为 0 项）
-    } finally {
-      if (aliveRef.current) setSectionsLoading(false)
-    }
-  }, [api])
-
-  /** 全量刷新（挂载、立即备份后、定时备份弹窗关闭后） */
+  /**
+   * 全量刷新（挂载、立即备份后、定时备份弹窗关闭后）。
+   *
+   * v3：首页不再触发 export-preview —— 它是**最慢的一步**（真机 12~30s，要遍历全部默认分区
+   * 含本地插件打包与会话扫描），而唯一的消费者「分区构成卡」已按 §7 移出首页。
+   * 去掉它同时修掉「首屏被最慢请求拖住」的结构性隐患。
+   */
   const load = useCallback(async (): Promise<void> => {
     setLoading(true)
-    await Promise.all([loadFast(), loadSections()])
-  }, [loadFast, loadSections])
+    await loadFast()
+  }, [loadFast])
 
   useEffect(() => {
     void load()
@@ -280,7 +254,7 @@ export function HomePanel({ api, syncApi, historyApi, t, syncT, openActivity, op
    * 一次 patch 直接把面板打开，页面不动，所以也不会闪。
    */
   const openImportTask = (): void => {
-    runStore.patch({ task: { kind: 'import', origin: 'overview' } })
+    runStore.patch({ task: { kind: 'import', origin: 'home' } })
   }
 
   /**
@@ -291,7 +265,7 @@ export function HomePanel({ api, syncApi, historyApi, t, syncT, openActivity, op
    * 复用同一个 task（不新增 kind）：面板仍是导入面板，只是初始停在来源选择页。
    */
   const openForeignImportTask = (): void => {
-    runStore.patch({ task: { kind: 'import', origin: 'overview' } })
+    runStore.patch({ task: { kind: 'import', origin: 'home' } })
     openForeignImport?.()
   }
 
@@ -300,7 +274,7 @@ export function HomePanel({ api, syncApi, historyApi, t, syncT, openActivity, op
    * origin 记当前页 —— 面板只在 origin 上渲染，于是「切走收起、切回续做」不需要额外状态。
    */
   const openExportTask = (): void => {
-    runStore.patch({ task: { kind: 'export', origin: 'overview' } })
+    runStore.patch({ task: { kind: 'export', origin: 'home' } })
   }
 
   /** 指标段跳转：一次 patch 同时写入 page 与目标子视图（备份页 restore/files/schedule，同步页直达）。 */
@@ -318,7 +292,7 @@ export function HomePanel({ api, syncApi, historyApi, t, syncT, openActivity, op
    * v1 跳到备份页的恢复子视图 —— 那条路在第 3 步之后已不存在。
    */
   const navRecovery = (): void => {
-    runStore.patch({ panel: 'profiles' })
+    runStore.patch({ panel: 'environment' })
   }
 
   /** 是否存在待处理恢复事项（null = 状态未知；决定健康段是否作为「事故恢复」入口）。 */
@@ -348,17 +322,6 @@ export function HomePanel({ api, syncApi, historyApi, t, syncT, openActivity, op
   const totalSize = data.backups !== null ? data.backups.reduce((n, b) => n + b.sizeBytes, 0) : null
   const scheduleStatus = data.schedule
   const nextRun = scheduleStatus !== null ? nextRunText(scheduleStatus, t) : null
-
-  /* —— 分区构成卡：预览未到货时先渲染默认分区骨架（loading），失败则整片 failed ——
-     骨架行**不显示 0 项 / 0 B**：0 会被读成「这一项没有内容」，而引擎对清单缺失的分区按
-     整体导出处理，语义正好相反（见 SectionComposition 的类型注释）。 */
-  const previewSections = data.sections !== null && data.sections.sections.length > 0 ? data.sections.sections : null
-  const compositionRows: SectionCompositionItem[] = previewSections ?? DEFAULT_INCLUDED_SECTION_IDS.map((id) => ({
-    section: id,
-    count: 0,
-    sizeBytes: 0,
-    state: sectionsLoading ? 'loading' : 'failed',
-  }))
 
   /** 指标段渲染模型（名词在前：label dim + 值 bold；附注仅时间/告警）。 */
   const segModels = metrics.map((m) => {
@@ -474,82 +437,6 @@ export function HomePanel({ api, syncApi, historyApi, t, syncT, openActivity, op
         </Card>
       ) : (
         <>
-          {/* 3. 备份位置卡：路径行 + 四列网格（体积/配额/间隔/上次） */}
-          {(backupDir !== null || scheduleStatus !== null) && (
-            <Card>
-              <div className={css.groupHeader}>
-                <span className={css.groupLabel}>{t('overview.location.title')}</span>
-              </div>
-              {backupDir !== null && (
-                <div className={css.infoRow} style={{ marginBottom: 4 }}>
-                  <span className={css.infoKey}>{t('overview.location.dir')}</span>
-                  <span className={css.infoValue}>
-                    <span className={css.mono} title={backupDir}>{midEllipsis(backupDir, 52)}</span>
-                    <CopyButton text={backupDir} label={t('overview.activity.copy')} t={t} />
-                  </span>
-                </div>
-              )}
-              <div className={css.factGrid}>
-                {totalSize !== null && (
-                  <div className={css.factCell}>
-                    <span className={css.factLabel}>{t('overview.location.totalSize')}</span>
-                    <span className={`${css.factValue} ${css.mono}`}>{formatBytes(totalSize)}</span>
-                  </div>
-                )}
-                <div className={css.factCell}>
-                  <span className={css.factLabel}>{t('overview.location.retention')}</span>
-                  <span className={`${css.factValue} ${css.mono}`}>
-                    {t('overview.location.retentionValue', {
-                      used: String(data.snapshots?.length ?? 0),
-                      // m-retention：分母取宿主真实策略（用户可配置），不再硬编码 '10'；
-                      // 宿主未返回 retention（旧版宿主/请求失败）→ 回退 DEFAULT_RETENTION_POLICY
-                      limit: String(normalizeRetentionPolicy(scheduleStatus?.retention).keepLast),
-                    })}
-                  </span>
-                </div>
-                <div className={css.factCell}>
-                  <span className={css.factLabel}>{t('overview.location.schedule')}</span>
-                  <span className={css.factValue}>
-                    {scheduleStatus !== null && scheduleStatus.enabled ? intervalText(scheduleStatus.interval, t) : t('overview.location.scheduleOff')}
-                  </span>
-                </div>
-                <div className={css.factCell}>
-                  <span className={css.factLabel}>{scheduleStatus !== null && scheduleStatus.enabled && nextRun !== null ? t('overview.location.nextRun') : t('overview.location.lastRun')}</span>
-                  <span className={`${css.factValue} ${css.mono}`}>
-                    {scheduleStatus !== null && scheduleStatus.enabled && nextRun !== null
-                      ? nextRun
-                      : (scheduleStatus?.lastRunAt !== undefined
-                        ? renderRelTime(Date.parse(scheduleStatus.lastRunAt) || 0, t)
-                        : '—')}
-                  </span>
-                </div>
-              </div>
-            </Card>
-          )}
-
-          {/* 4. 分区构成卡（export-preview 只读；两列网格 + 合计行）
-              预览未到货时也渲染：先给默认分区骨架，避免整页等最慢的一步 */}
-          <Card>
-            <div className={css.groupHeader}>
-              <span className={css.groupLabel}>{t('overview.sections.title')}</span>
-              <span className={css.groupNote}>{t('overview.sections.hint')}</span>
-              <span className={css.statusSpacer} />
-              <span className={css.hint}>
-                {data.sections !== null
-                  ? (
-                    <>
-                      {t('overview.sections.total')} {formatBytes(data.sections.totalSizeBytes)}
-                      {data.sections.sectionsFailed > 0 && ` · ${t('export.previewSkipped', { count: String(data.sections.sectionsFailed) })}`}
-                    </>
-                  )
-                  : sectionsLoading
-                    ? <span className={css.statSeg}><Spinner /></span>
-                    : <span className={css.warnText}>{t('picker.sectionLoadFailed')}</span>}
-              </span>
-            </div>
-            <SectionComposition sections={compositionRows} t={t} sectionLabel={sectionLabeler(t)} />
-          </Card>
-
           {/* 5. 最近活动表（fit-content；类型并入内容列；成功=绿点） */}
           <Card className={css.activityCard}>
             <div className={css.activityHeader}>
@@ -599,6 +486,47 @@ export function HomePanel({ api, syncApi, historyApi, t, syncT, openActivity, op
           onClose={() => { setScheduleOpen(false) }}
         />
         <Modal.Body scroll>
+          {/* v3：备份位置与配额不再是首页的一张常驻卡（P-IA-6）—— 它们属于「备份设置」，随设置弹窗一起看。
+              首页状态条仍给出「备份文件 N 个 · 最近 X」的一眼结论。 */}
+          <div className={css.groupHeader}>
+            <span className={css.groupLabel}>{t('overview.location.title')}</span>
+          </div>
+          <div className={css.factGrid}>
+            {backupDir !== null && (
+              <div className={css.factCell}>
+                <span className={css.factLabel}>{t('overview.location.dir')}</span>
+                <span className={`${css.factValue} ${css.mono}`} title={backupDir}>
+                  {midEllipsis(backupDir, 52)}
+                  <CopyButton text={backupDir} label={t('overview.activity.copy')} t={t} />
+                </span>
+              </div>
+            )}
+            {totalSize !== null && (
+              <div className={css.factCell}>
+                <span className={css.factLabel}>{t('overview.location.totalSize')}</span>
+                <span className={`${css.factValue} ${css.mono}`}>{formatBytes(totalSize)}</span>
+              </div>
+            )}
+            <div className={css.factCell}>
+              <span className={css.factLabel}>{t('overview.location.retention')}</span>
+              <span className={`${css.factValue} ${css.mono}`}>
+                {t('overview.location.retentionValue', {
+                  used: String(data.snapshots?.length ?? 0),
+                  limit: String(normalizeRetentionPolicy(scheduleStatus?.retention).keepLast),
+                })}
+              </span>
+            </div>
+            <div className={css.factCell}>
+              <span className={css.factLabel}>{scheduleStatus !== null && scheduleStatus.enabled && nextRun !== null ? t('overview.location.nextRun') : t('overview.location.lastRun')}</span>
+              <span className={`${css.factValue} ${css.mono}`}>
+                {scheduleStatus !== null && scheduleStatus.enabled && nextRun !== null
+                  ? nextRun
+                  : (scheduleStatus?.lastRunAt !== undefined
+                    ? renderRelTime(Date.parse(scheduleStatus.lastRunAt) || 0, t)
+                    : '—')}
+              </span>
+            </div>
+          </div>
           <BackupScheduleCard
             api={api}
             t={t}

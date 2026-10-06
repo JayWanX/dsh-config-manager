@@ -1,8 +1,13 @@
 # 🎨 DESIGN.md — DSH Config Manager 视觉设计规范（Workbench Design System）
 
 > **本文件是项目 UI / UX / Visual Style 的 Single Source of Truth。**
-> 2026-09 Full UI Rebuild 重写。任何开发者或 AI Agent 在创建、修改前端界面前必读；
-> 若本文件与代码冲突，以代码为准并更新本文件。
+> **2026-10-06 UI v3 重做**（方案与迁移映射见 `docs/design/2026-10-05-ui-redesign-v3.md`）。
+> 任何开发者或 AI Agent 在创建、修改前端界面前必读；若本文件与代码冲突，以代码为准并更新本文件。
+>
+> **v2 章节作废声明**：`docs/design/2026-10-02-ui-rebuild-v2-skeleton.md` 的 §4/§5/§7–§9
+> 与本文 2026-10-06 之前的 §1、§1.1、§2、§3–§5、§9 **已被 v3 取代**（该文档仅作评审记录保留）。
+> v3 的三处结构性变化：① 一级导航收敛为 4 页（市场退出导航、成流程）；
+> ② 语义色改为 `--dsw-*` → `--cm-*` → 组件 的三层单向依赖；③ 字号/间距/圆角/层级有了**源级守卫**。
 
 ---
 
@@ -22,36 +27,43 @@
 
 ---
 
-## 1. IA（信息架构）
+## 1. IA（信息架构，UI v3 2026-10-06）
 
 Shell（`ConfigManagerSection`）：导航条 + 内容区（页面 / 流程面板）+ 状态栏。
 
-- **一级导航（图标 + 短标签页签）**：首页 / 产物库 / 导入 / 同步 / 市场 / 环境（UI v2，2026-10）。
+- **一级导航（图标 + 短标签页签）**：首页 / 产物库 / 同步 / 环境（**v3 收敛为 4 项**）。
+  **市场不再是一级页面** —— 它由 Task 面板承载（入口：产物库底栏「逛市场 / 发布到市场」+ ⌘K 两条命令）。
   页签数量**不随功能增长**：放不下的项由 `navLayout` 从末项起移进「更多 ▾」（见 §6 Shell）。
-- **v2 的四条核心修正**见 §1.1：对象与日志分离 / 每页 ≤3 子视图 / 未知值不显示 0 / 两个同步通道卡恒显示。
-### 1.1 UI v2 的页面构成（2026-10 重建，替代 v1 的子 tab 堆叠）
+  v3 是「4 页签 + 4 图标」（⌘K / 活动 / 历史 / 关于），中英双语都留有余量。
+- **容器判据（唯一规则，v3 三条）**：多阶段向导 → Task 面板；**只读浏览 → Task 面板**（同壳）；
+  单次决策 + 报告 → Modal；其余常驻任务域 → 页面。**没有第四种容器。**
+- **命令面板**：`⌘/Ctrl+K`，命令表 `src/ui/commands.ts`（19 条）—— 增一个功能 = 注册一条命令。
+- **状态栏（28px 圆角条）**：状态点 + 就绪/进行中/恢复待处理 + 进行中**任务名 + 不定态细进度条**
+  （本层只有「在跑 / 没跑」的布尔，真实百分比住宿主 `/progress`；编一个百分比就是撒谎）；
+  在跑时整句可点开「活动记录」；右侧是插件与 DSH 版本。
+- **救援可达性（不变量，不得打折）**：全局 SAFE MODE 横幅常驻；命令面板里**「事故恢复」与「救援模式」两条命令**；
+  环境页「维护与诊断」子视图是它们的共同落点。
 
-| 页面 | 内容 | 子视图 |
-|---|---|---|
-| **首页** | 状态行（备份位置 / 最近备份 / 同步 / 恢复）+ 动作网格（带走配置 / 装进配置 / 回到过去）+ 最近产物（3 行） | 无（单页） |
-| **产物库** | 四源合一扁平列表（本机快照 / 备份文件 / 远端快照 / 市场产物） | 源筛选（全部 + 四源） |
-| **同步** | **Git 卡 + WebDAV 卡恒显示**（未配置走矮态 ≈56px）+ 同步记录 + 指路行 | 无（两张卡各自展开） |
-| **环境** | 档案（本机概况卡 + 档案列表）/ 维护与诊断（恢复面板 + 磁盘占用） | 2 个（Segmented） |
+### 1.1 v3 的页面构成（2026-10-06 重做，替代 v2 的五页签）
 
-三条**不得回退**的结构原则：
+| 页面 | PanelId | 回答的问题 | 子视图 |
+|---|---|---|---|
+| **首页** | `home` | 这台机器现在怎么样？我下一步做什么？ | 无（状态条 + 工具栏 + 最近活动表） |
+| **产物库** | `library` | 我手上有什么产物？能对它做什么？ | 源筛选（全部 + 四源） |
+| **同步** | `sync` | 跨机同步这条管道通不通？怎么配？ | 无（每通道一张卡：Git / WebDAV / S3 / Gist） |
+| **环境** | `environment` | 这台机器有哪些 DSH 实例？健康吗？ | 2 个：档案 / 维护与诊断 |
 
-1. **对象 vs 日志分离**：产物库放「东西」（快照 / 备份文件 / 远端快照），同步页只留「发生过什么」（操作日志）。
-   v1 把远端快照行与自动同步行混在同一张表里，主标识一个是 UUID 一个是时间戳 —— 而用户要回答
-   「我有哪些备份」和「上次同步成功了吗」是**两个问题**，不该共用一张表。
-2. **每页 ≤3 子视图**：v1 的备份页有 4 个子 tab（安全快照 / 备份文件 / 定时备份 / 事故恢复），
-   而它们在语义上是三类东西（历史对象 / 设置 / 事故处理）。v2 拆到产物库 + 环境两页。
-3. **未知值不显示 0**：读不到就是读不到 —— 磁盘占用读不到的子区标 `unreadable` 而不是 0；
-   恢复面板进度未知时显示占位而非 0%。数字撒谎比没有数字更糟。
+三条**不得回退**的结构原则（v2 保留 + v3 修订）：
 
-**同步：分区选择在通道卡内，不是全局一节**（`autosync` 与 `sync-selection` 都按通道独立，schema v2）——
-做成全局一节会让用户以为两个通道共用一份选择。
-**两个通道卡恒显示**：未配置的走矮态。不做「只显示已配置的」——配完 Git 回来后发现 WebDAV 的卡
-消失了只会被当成 bug；也不做手动折叠（少一层用户状态、少一个持久化字段）。
+1. **对象 vs 日志分离**：产物库放「东西」，同步页只留「发生过什么」。两个问题的答案不共用一张表。
+2. **每页 ≤2 个并列子视图，且必须同域**：跨域一律 Task / Modal / 独立页面
+   （v2 的「≤3」改成更本质的「禁止跨域」——数字限制拦不住「一页四种心智」，域归属才拦得住）。
+3. **未知值不显示 0**：读不到就是读不到；磁盘未统计的子区标 `unreadable`，进度未知显示占位。
+
+**同步：一切按通道，且只在通道卡内**（`autosync` / `sync-selection` / 加密 / 解密都按通道独立）——
+v3 删掉了页面级那张绑定「隐式当前通道」的分区卡（它此前在页面级与通道卡内**重复渲染**两次），
+分区选择现在只存在于它所属的通道卡内。四个通道（git / webdav / s3 / gist）**恒显示**，未配置走 56px 矮态：
+页面结构不随配置状态变化，配置入口永远在同一位置。
 
 ---
 - **流程任务层（Task Mode，2026-10）**：导出 / 导入 / 逛市场 / 发布市场是**多阶段流程**，
@@ -80,34 +92,43 @@ Shell（`ConfigManagerSection`）：导航条 + 内容区（页面 / 流程面�
 
 ---
 
-## 3. Colors（DSH Design System Token）
+## 3. Colors（三层单向依赖：DSH token → `--cm-*` → 组件）
 
-| 语义角色 | Token |
-|---|---|
-| 主要/次级/弱化文字 | `--dsw-alias-label-primary / secondary / tertiary` |
-| 主按钮填充 / hover | `--dsw-alias-button-info-fill / -hover` |
-| 交互 hover 底色 | `--dsw-alias-interactive-bg-hover` |
-| 页面底色 / 卡片表面 | `--dsw-alias-bg-base / bg-layer-2` |
-| 边框 L1 / L2 | `--dsw-alias-border-l1 / -l2` |
-| 输入框背景 | `--dsw-specific-input-major` |
-| 业务主色 / 成功 / 警告 / 错误 / 中性 | `--dsw-alias-state-business-primary / success / warn / error / info` |
-| 正文字体 | `--dsw-font-family`；等宽栈 `ui-monospace, SFMono-Regular, Menlo, Consolas, monospace` |
+**方向不可逆**：组件规则只消费 `--cm-*`；`--dsw-*` 只允许出现在 `--cm-*` 的定义行里。
 
-语义映射：成功=ok、业务信息=info、警告=warn、错误/危险=error（Badge/Banner/kindTag 一一对应）。
+| 语义角色 | 中间层 token（组件只写这层） | 来源 |
+|---|---|---|
+| 主要 / 次级 / 弱化文字 | `--cm-text-1/2/3` | `--dsw-alias-label-primary/secondary/tertiary` |
+| 主色按钮上的文字 | `--cm-text-on-accent` | `--dsw-alias-label-primary-foreground` |
+| 页面 / 卡片表面、hover 底 | `--cm-surface-1/2`、`--cm-surface-hover` | `--dsw-alias-bg-layer-1/2`、`--dsw-alias-interactive-bg-hover` |
+| 描边 L1 / L2 | `--cm-line-1/2` | `--dsw-alias-border-l1/l2` |
+| 输入框背景 | `--cm-input-bg` | `--dsw-specific-input-major` |
+| 主色（focus / 选中 / 进度） | `--cm-accent` | `--dsw-alias-state-business-primary` |
+| 主按钮填充 / hover | `--cm-accent-fill` / `--cm-accent-hover` | `--dsw-alias-button-info-fill/hover` |
+| 四态 ok / info / warn / error | `--cm-ok` `--cm-info` `--cm-warn` `--cm-error` | `--dsw-alias-state-{success,info,warn,error}-primary` |
+| 正文字体 | `--dsw-font-family`（基础层直用）；等宽栈 `ui-monospace, SFMono-Regular, Menlo, Consolas, monospace` | — |
+
+- tint 一律 `color-mix(in srgb, var(--cm-*) <pct>%, transparent)`；**零硬编码色值**（扫描器已在 `ui-audit` 验证：命中全在注释）。
+- 语义映射：成功=ok、业务信息=info、警告=warn、错误/危险=error。
+- **执行者**：`src/client/css-token-guard.test.ts` —— 四态/主色 token 只允许出现在 §1 TOKENS 定义行；
+  组件规则里出现裸 `--dsw-alias-state-*` / `--dsw-alias-button-info-*` 即红灯。
+  结构类 token（label / border / bg / hover / input）**不受约束**：它们语义稳定，直用更短、更易读。
 
 ---
 
-## 4. Typography（唯一允许的 scale）
+## 4. Typography（**4 档**，唯一允许的 scale）
 
-| 用途 | 字号 | 字重 |
+| 档 | 字号 | 用途 |
 |---|---|---|
-| 页面区块标题 `.sectionTitle` | 13px | 700 |
-| 卡片头分组标签 `.groupLabel` | 11px | 700 |
-| 正文/按钮/输入 | 12.5px | 400（按钮 600） |
-| 表格正文 `.dataTable` | 12px | 400 |
-| 元数据/说明 `.hint/.cellMeta` | 11–11.5px | 400 |
-| 状态栏/徽章 | 11px / 10.5px | 400 / 600 |
-| 等宽值 `.mono` | 11–11.5px | 400 |
+| meta | **11px** | 徽章 / hint / 元数据 / 等宽值 / 日志 / 骨架 caption |
+| table | **12px** | 数据表 / 密集列表 / 行内名称与值 |
+| base | **12.5px** | 正文 / 按钮 / 输入 / 标签（基准） |
+| title | **13px** | 页面与区块标题 |
+
+行高 **2 档**：**1.25**（标题）/ **1.5**（正文）。
+v3 收敛记录：9.5 / 10 / 10.5 → 11；14 → 13；30 随死类删除；11.5px（28 处）逐条归类为
+「次级文本 → 11、内容/名称/值（表内数字、单元名、恢复计划路径…）→ 12」（见 v3 文档 §12.8）。
+**执行者**：`css-scale-guard.test.ts`（font-size 越界即红灯）。
 
 - 数字一律 `font-variant-numeric: tabular-nums`（`.section` 全局启用）。
 - 中文文案统一全角标点；插入语遵循 `line-break: strict`（`.quickActionHint` 等）。
@@ -117,7 +138,10 @@ Shell（`ConfigManagerSection`）：导航条 + 内容区（页面 / 流程面�
 
 ## 5. Spacing & Shape
 
-- 间距网格：4 / 8 / 10 / 12 / 16；区块间距统一 10px。
+- 间距网格（**9 档**）：2 / 4 / 6 / 8 / 10 / 12 / 14 / 16 / 24；区块间距统一 10px。
+  `14` 与 `24` 是数据挣来的档位（前者被 `session-dialog-mount.test.ts` 硬钉、是用户实测「挤在一起」后定的值；
+  后者用于空态 hero 大内边距与宽间距）。**布局偏移**（`-4px` 图标对齐、`22px/38px` 深层缩进）走显式豁免白名单，
+  不污染节奏档 —— 豁免逐条写在 `css-scale-guard.test.ts` 里并注明理由与上限。
   **落地方式（2026-09 修正）**：区块间距由**容器**统一提供，不靠各区块自带外边距 ——
   `.viewBody`（页面主体，纵向 flex）显式 `gap: 10px`，并把**直接子元素**的上/下外边距归零
   （flex 容器不折叠 margin，不归零就变成 20px）。此前间距靠「上一个元素恰好的下外边距」，
@@ -128,11 +152,14 @@ Shell（`ConfigManagerSection`）：导航条 + 内容区（页面 / 流程面�
   内容一长，最后一排按钮就被压到底部状态栏上（用户实测）。伪元素是真实盒子，必然计入溢出。
 - 嵌套容器里的小节标题（卡片、面板小节）自带 `margin-bottom: 10px`（`.sectionTitleBlock`）；
   页面主体内该外边距被上面的归零规则接管。
-- 圆角：卡片 8px、控件（按钮/输入/选择）6px、分段容器 7px、徽章 9px、小标签 4px；
-  顶部页签条 / 底部状态栏为 8px 圆角分段条（条内 .navTab 6px 药丸），
-  激活态 = 主色 16% 淡底 + 45% 主色内描边（`.navStrip` / `.statusBar` 同款语言）。
-- 控件高度：按钮 28px（sm 24）、输入/选择 28px、表格行 ~32px、活动行 28px、
-  顶部页签条 32px（条内页签 24px）、状态条 32px、状态栏 28px、图标按钮 26px。
+- 圆角（**4 档**）：小标签 4px、控件（按钮/输入/选择）6px、卡片与分段条 8px、药丸 999px（徽章/进度条）；
+  另有 `0` 与 `50%`（圆形）两个结构性豁免。激活态 = 主色 16% 淡底 + 45% 主色内描边（`.navStrip` / `.statusBar` 同款语言）。
+- 控件高度（**3 档** `--cm-h-sm/md/lg` = 24 / 28 / 32）：按钮 28px（sm 24）、输入/选择 28px、
+  表格行 ~32px、活动行 28px、顶部页签条 32px（条内页签 24px）、状态条 32px、状态栏 28px、图标按钮 26px。
+- 层级（**6 档语义** `--cm-z-*`）：raise 1 / sticky 2 / task 90 / mask 100 / modal 101 / pop 110 / toast 120。
+- 阴影（**2 档**）+ 焦点环（1 档）：`--cm-shadow-1`（浮层 Select/MoreMenu）、`--cm-shadow-2`（弹窗卡片）、
+  `--cm-ring`（统一焦点/选中环）；**不得再写一次性阴影值**。
+- **执行者**：`css-scale-guard.test.ts` 同时钉住 border-radius / line-height / z-index（z-index 必须走 `--cm-z-*`，不得写字面量）。
 - 动效：**令牌统一** —— `.section` 上定义 `--cm-motion-fast/base/slow`（120/180/300ms；
   slow 就是进度条的 300ms 推进）、
   `--cm-motion-ease-out`（`cubic-bezier(0.16,1,0.3,1)`，入场用）、`--cm-motion-ease-in-out`
@@ -455,6 +482,10 @@ Shell（`ConfigManagerSection`）：导航条 + 内容区（页面 / 流程面�
 
 ### Shell 与 Overlays
 - Shell：`.shellNav/.navStrip/.navTab/.navMore/.navActions/.shellContent/.shellMain/.pagePad/.statusBar`；
+  **v3**：状态栏在执行期显示「任务名 + `.statusProgress` 不定态细条」（本层只有在跑/没跑的布尔，
+  真实百分比住宿主 `/progress`；**绝不编造百分比**）；SAFE MODE 横幅槽位用 `.bannerSlot` 类
+  （v2 的壳层内联 `style` 已删除）；语义 token 层定义在 `.section` 的 §1 TOKENS 块，由
+  `css-token-guard.test.ts` 与 `css-scale-guard.test.ts` 钉住。
   `.shellMain` 与 `.pagePad` 构成纵向 flex 链，页面可伸展填充（`.fillCard/.fillViewport`）。
   - **导航容量（v2，取代 v1 的溢出遮罩）**：放不下就从**末项**开始移进「更多 ▾」，
     绝不把页签藏在视口外（v1 是隐藏滚动条 + 两侧渐隐遮罩，用户得按住 shift 才滚得动）。
@@ -1132,3 +1163,12 @@ history 无 ⓘ 故不要求）；**不跨命名空间传 `t`**（`TranslateNS<'
     `ViewSwitch`；容器内部有要保留的状态时改用 `Collapse`（不重建，只改高度）。
     `Collapse` 侧的同款红线：**不得**为省 DOM 在收起时卸载内容 —— 那条路只能得到展开侧动画
     （被卸载的子树没有高度可插值，收起必然瞬塌）。
+16. **绕过 `--cm-*` 直接写 `--dsw-alias-state-*` / `--dsw-alias-button-info-*`**（v3）——
+    四态与主色必须经语义中间层，否则改一次语义要扫全文件（v2 实测 140 处散落、四态 5 份实现）。
+    执行者：`css-token-guard.test.ts`。
+17. **在 scale 之外新造字号 / 间距 / 圆角 / z-index**（v3）—— 先改 §3–§5 的档位表与守卫白名单，再改代码；
+    就地写一个「差不多」的值是这条规范此前失效的唯一原因（实测 10 档字号 / 9 档圆角 / 10 档 gap）。
+    执行者：`css-scale-guard.test.ts`（含反自检：注入越界值必须被抓到）。
+18. **把隐式全局状态做成看起来全局的控件**（v3）—— 例：页面级的「加密与密钥 / 解密密码」卡绑定一个
+    被别的按钮悄悄切换的「当前通道」。控件必须与它**作用的实体同屏**（在通道卡内 / 或在以该通道为题的弹窗内），
+    否则用户会以为两个通道共用一份设置（不变量 §3-19）。

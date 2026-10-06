@@ -187,7 +187,8 @@ const KEEP_PINS: readonly KeepPin[] = [
   { key: 'mode.decryptPasswordSaved', file: 'src/client/sync/DecryptPasswordCard.tsx', kind: '状态' },
   { key: 'syncflow.noSnapshots', file: 'src/client/sync/SyncPanel.tsx', kind: '状态' },
   { key: 'history.corruptedCount', file: 'src/client/history/HistoryPanel.tsx', kind: '状态' },
-  { key: 'overview.sections.total', file: 'src/client/home/HomePanel.tsx', kind: '状态' },
+  // v3：首页的「分区构成卡」已按 §7 移出（其等价合计在导出流程的「本次将导出」构成卡里，
+  // 走 export.composition* 键）。本键随卡片删除，不再是任何界面的渲染点 —— 故从 KEEP 台账移除。
   { key: 'import.skipPending', file: 'src/client/import/ImportWizardView.tsx', kind: '状态' },
   // ⑧ Modal 内决策 / 危险操作说明
   { key: 'syncflow.adoptHint', file: 'src/client/sync/SyncConfirmView.tsx', kind: 'Modal决策' },

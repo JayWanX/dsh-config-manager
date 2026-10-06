@@ -34,10 +34,11 @@ export const COMMAND_GROUP_ORDER: readonly CommandGroup[] = ['navigate', 'librar
 
 /** 命令文案键：必须是 `src/client/locales.ts` 里存在的键（由壳层的 t() 编译校验）。 */
 export type PaletteTitleKey =
-  | 'nav.overview' | 'library.title' | 'nav.sync' | 'nav.market' | 'environment.title'
+  | 'nav.home' | 'library.title' | 'nav.sync' | 'environment.title'
+  | 'nav.market' | 'task.title.publish'
   | 'nav.export' | 'nav.import' | 'environment.tab.maintenance'
   | 'task.title.runs' | 'task.title.history' | 'task.title.about'
-  | 'palette.rescue.recovery'
+  | 'palette.rescue.recovery' | 'palette.rescue.mode'
   | 'library.source.all' | 'library.kind.snapshot' | 'library.kind.backupFile'
   | 'library.kind.remote' | 'library.kind.market'
 
@@ -79,23 +80,23 @@ export const COMMAND_RESULT_LIMIT = 40
  * 命令清单（UI v2 §5.3 的完整覆盖面）。
  *
  * 三条纪律：
- *   ① **每个可达去处都有一条命令** —— 页面（总览/产物库/同步/市场/环境）、只读视图
- *      （活动记录 / 迁移历史 / 关于）、流程面板（导出 / 导入）、维护与诊断（事故恢复在其中）。
+ *   ① **每个可达去处都有一条命令** —— 页面（首页/产物库/同步/环境）、只读视图
+ *      （活动记录 / 迁移历史 / 关于）、流程面板（导出 / 导入 / 逛市场 / 发布到市场）、
+ *      维护与诊断（事故恢复与救援模式在其中）。
  *      壳层的 `runCommand` 认不出 id 就什么都不做，所以「dispatch 里有、这里没有」= 死代码。
  *   ② **文案统一复用导航与任务面板已有的键**：用户在导航条/面板标题上学到的名字，
  *      在命令面板里必须还能用（新造一套名字会让搜索无果）。
  *   ③ 关键词补齐中英同义说法与口语（"恢复" 也要命中事故恢复、"磁盘" 也要命中维护与诊断）。
  */
 export const COMMANDS: readonly CommandItem[] = [
-  // —— 前往：四个一级页面 + 总览 ——
-  { id: 'go.overview', group: 'navigate', titleKey: 'nav.overview', keywords: ['home', 'overview', '首页', '总览'] },
+  // —— 前往：四个一级页面（v3 §3.1；市场不再是页面）——
+  { id: 'go.home', group: 'navigate', titleKey: 'nav.home', keywords: ['home', 'overview', '首页', '总览'] },
   { id: 'go.library', group: 'navigate', titleKey: 'library.title', keywords: ['library', 'artifact', '产物', '快照'] },
   { id: 'go.sync', group: 'navigate', titleKey: 'nav.sync', keywords: ['sync', ...SYNC_CHANNEL_TERMS, '同步'] },
-  { id: 'go.market', group: 'navigate', titleKey: 'nav.market', keywords: ['market', '市场'] },
   {
-    // 环境 = 档案 + 维护与诊断（§5.4）。文案用导航条上的名字（environment.title），
+    // 环境 = 档案 + 维护与诊断。文案用导航条上的名字（environment.title），
     // 不用旧的 nav.profiles（'档案'）—— 面板里找不到「档案」这个页面。
-    id: 'go.profiles',
+    id: 'go.environment',
     group: 'navigate',
     titleKey: 'environment.title',
     keywords: ['profile', 'profiles', 'environment', '档案', '环境', '实例'],
@@ -108,7 +109,24 @@ export const COMMANDS: readonly CommandItem[] = [
   { id: 'library.source.remote', group: 'library', titleKey: 'library.kind.remote', keywords: ['remote', 'sync', '远端', '同步快照'] },
   { id: 'library.source.market', group: 'library', titleKey: 'library.kind.market', keywords: ['market', '市场', '配置'] },
 
-  // —— 动作：两个大流程 + 维护与诊断 ——
+  // —— 动作：市场（流程面板）+ 导出/导入 + 维护与诊断 ——
+  {
+    // 市场退出导航（v3）：逛市场是**流程**，由 Task 面板承载。
+    // 文案沿用导航条上曾经的名字（nav.market）—— 用户学到的词不能被换掉。
+    id: 'market.open',
+    group: 'action',
+    titleKey: 'nav.market',
+    keywords: ['market', 'browse', '市场', '逛市场', '配置市场'],
+  },
+  {
+    // 发布到市场 = 市场面板的「我的配置」子视图（payload 让面板直开那一页）。
+    // 文案复用 task.title.publish（字典里已有 zh/en）。
+    id: 'market.publish.open',
+    group: 'action',
+    titleKey: 'task.title.publish',
+    keywords: ['publish', 'upload', '发布', '上传', '我的配置'],
+  },
+
   {
     // 导出不是页面（Task Mode 的侧滑面板），所以它是 action 不是 navigate。
     // 但文案沿用 nav.export —— 用户在导航条上学到的名字，在命令面板里必须还能用。
@@ -154,7 +172,15 @@ export const COMMANDS: readonly CommandItem[] = [
     id: 'recovery.open',
     group: 'rescue',
     titleKey: 'palette.rescue.recovery',
-    keywords: ['rescue', 'recovery', 'safe', 'safe mode', '救援', '事故', '恢复'],
+    keywords: ['rescue', 'recovery', 'safe', 'safe mode', '事故', '恢复', '去处理'],
+  },
+  {
+    // 救援模式（DSH 起不来时的唯一出口）：与事故恢复同一子视图，但必须**独立成条** ——
+    // 不变量 §3-18 要求命令面板里「救援模式」「事故恢复」两条命令都在。
+    id: 'rescue.open',
+    group: 'rescue',
+    titleKey: 'palette.rescue.mode',
+    keywords: ['rescue', 'mode', 'profile', 'bundles', '救援', '救援模式', '逃生'],
   },
 ]
 

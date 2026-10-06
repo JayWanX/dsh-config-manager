@@ -270,22 +270,22 @@ test('import-reselect-works: 取消后重新选择同一文件也生效（input 
  * （缺少中央目录结束记录）」。下面钉住两侧：`containerType` 的传递（瞬态请求字段）
  * 与「加密 → 进解锁阶段、明文 → 行为不变」的状态语义。
  */
-test('issue#55：快照面板的一键导入请求携带容器形态，且仍是消费即清空的一次性瞬态', () => {
+test('issue#55：产物库的一键导入请求携带容器形态，且仍是消费即清空的一次性瞬态', () => {
   const store = new RunStore({ storage: null })
   store.patch({
-    snapshots: {
-      importBackup: {
+    library: {
+      pendingZip: {
         zipPath: '/home/.dsh/dsh-config-manager/exports/dsh-config-enc.zip',
         name: 'dsh-config-enc.zip',
         containerType: 'encrypted',
       },
     },
   })
-  const req = store.getSnapshot().snapshots.importBackup
+  const req = store.getSnapshot().library.pendingZip
   assert.equal(req?.containerType, 'encrypted', '容器形态随瞬态请求一起交给向导（决定是否先进解锁阶段）')
   // 旧宿主（列表不回 containerType）→ undefined，必须等同于「明文路径」而不是被当成加密
-  store.patch({ snapshots: { importBackup: { zipPath: '/exports/plain.zip', name: 'plain.zip' } } })
-  assert.equal(store.getSnapshot().snapshots.importBackup?.containerType, undefined, '缺字段 = 明文路径（旧宿主）')
+  store.patch({ library: { pendingZip: { zipPath: '/exports/plain.zip', name: 'plain.zip' } } })
+  assert.equal(store.getSnapshot().library.pendingZip?.containerType, undefined, '缺字段 = 明文路径（旧宿主）')
 })
 
 test('issue#55：加密备份的一键导入状态必须是「停在解密阶段、未解锁前不分析」', () => {

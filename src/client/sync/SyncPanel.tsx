@@ -1296,26 +1296,9 @@ export function SyncPanel({ api, t, cmT }: SyncPanelProps) {
             />
           )}
 
-          {/* 同步分区（当前通道）：全部选择收敛进「选择同步分区」弹窗（点按钮打开）。
-              **没有「快速导出 / 自定义导出」之分** —— 勾选集合就是同步范围。 */}
-          <Card>
-            {/* ⓘ 同通道卡：跟在相关标题/操作右边，不单独成行 */}
-            <span className={css.groupLabel}>{t('mode.title')} <InfoHint text={t('mode.hint')} label={t('common.infoHint')} /></span>
-            <span className={css.categoryDesc}>
-              {state.catalog.length === 0
-                ? t('common.loading')
-                : t('mode.selectedCount', { n: String(chState.syncSections.length) })}
-            </span>
-            {/* .actionRowTop = 上方紧跟说明文案的操作行（自带 10px 上边距）：
-                普通 .actionRow 没有上边距，按钮会与上面的计数文字贴在一起。 */}
-            <div className={css.actionRowTop}>
-              <Button onClick={() => { setSectionPickerOpen(true) }} disabled={state.busy !== null}>
-                {t('mode.choose')}
-              </Button>
-              <InfoHint text={t('mode.persistHint')} label={t('common.infoHint')} />
-            </div>
-            {chState.syncSections.length === 0 && <Banner kind="warn">{t('mode.atLeastOne')}</Banner>}
-          </Card>
+          {/* v3：页面级的「同步分区」卡已删除 —— 同一张卡此前在**每个已配置通道卡内**
+             与页面级各渲染一次（重复表达），且页面级那张绑定的是隐式的「当前通道」。
+             分区选择现在只存在于它所属的通道卡内（§2.2-6、不变量 §3-19）。 */}
 
           {/* 同步分区弹窗（渲染段拆到 SyncSectionPickerDialog，t42） */}
           <SyncSectionPickerDialog

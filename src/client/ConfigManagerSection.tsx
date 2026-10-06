@@ -48,7 +48,7 @@ import { toRecoveryView } from './recovery/recovery-view.ts'
 import { ConfirmDialog } from './common/ConfirmDialog.tsx'
 import { MODAL_ROOT_ID } from './common/Modal.tsx'
 import { Banner, IconButton, StatusDot } from './common/ui.tsx'
-import { ActivityIcon, AboutIcon, ChevronDownIcon, Icon } from './common/Icon.tsx'
+import { ActivityIcon, AboutIcon, ChevronDownIcon, HistoryIcon, Icon } from './common/Icon.tsx'
 import { evaluateStarPrompt } from '../ui/star-prompt.ts'
 import { evaluateReleaseNotesPrompt } from '../ui/release-notes-prompt.ts'
 import { ReleaseNotesDialog } from './about/ReleaseNotesDialog.tsx'
@@ -66,18 +66,18 @@ interface NavItem {
   label: string
 }
 
-/** 一级导航（Workbench IA：7 页签；export/import 为独立页面）。 */
+/**
+ * 一级导航（UI v3 §3.1）：首页 / 产物库 / 同步 / 环境。
+ *
+ * v3 把**市场**移出一级导航（回到 v2 的定案）：它由 Task 面板承载，
+ * 入口是产物库底栏「逛市场 / 发布到市场」与 ⌘K 的两条命令。
+ * 于是导航容量从「5 项 + 4 图标」降到「4 项 + 4 图标」，中英双语都留有余量。
+ */
 const NAV_ITEMS: NavItem[] = [
-  { id: 'overview', label: 'nav.overview' },
-  // UI v2：一级页面收敛为「首页 / 产物库 / …」。snapshots 是**过渡页** ——
-  // 它只剩「定时备份」「事故恢复」两个子视图，第 3/4 步分别归入环境页与首页后即删。
+  { id: 'home', label: 'nav.home' },
   { id: 'library', label: 'library.title' },
-  // v2：导出与导入都**不再是页签** —— 它们是 Task Mode 的侧滑面板
-  // （入口：首页快捷动作 / 产物库行内「导入」/ ⌘K）。少两个页签，564px 下更不容易溢出。
   { id: 'sync', label: 'nav.sync' },
-  { id: 'market', label: 'nav.market' },
-  // v2：档案页升级为「环境」（档案 + 维护与诊断）
-  { id: 'profiles', label: 'environment.title' },
+  { id: 'environment', label: 'environment.title' },
 ]
 
 /** 与 CSS `.navStrip { gap: 2px }` 必须一致（导航布局判定要用真实间距）。 */
@@ -297,36 +297,20 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
     : false
 
   /* ---------------- 导航 ---------------- */
-  /**
-   * 切页。
-   *
-   * **导入不再是页面**（问题 3/8 的定案）：它是多阶段流程，只由 Task 面板承载。
-   * 任何把它当页面打开的入口都要**落到产物库并开面板** —— 否则会出现
-   * 「导航进导入页 + 侧拉面板里也是导入」两处渲染同一个向导。
-   */
+  /** 切页（v3：4 个一级页面；流程一律由 Task 面板承载，不再有「导入页」这种中间态）。 */
   const goto = (id: PanelId): void => {
-    if (id === 'import') {
-      runStore.patch({ panel: 'library', view: 'import' })
-      openTaskFrom('library', 'import')
-      return
-    }
     runStore.patch({ panel: id })
-  }
-
-  /** 从**指定页**发起流程面板（goto 在切页的同时开面板，origin 必须是切换后的那一页） */
-  const openTaskFrom = (origin: PanelId, kind: TaskState['kind'], payload?: unknown): void => {
-    runStore.patch({ task: { kind, origin, ...(payload === undefined ? {} : { payload }) } })
   }
 
   /**
    * 打开流程面板（Task Mode，§5.8）。origin 记发起页：面板只在 `panel === origin` 时渲染，
    * 于是「切走收起、切回续做」不需要额外的状态。
+   *
+   * v3 起 origin 恒为当前页 —— 四个页面都是真实存在的 PanelId，
+   * 不再有 v1/v2 那种「origin 被记成已不存在的中间页」的成因。
    */
   const openTask = (kind: TaskState['kind'], payload?: unknown): void => {
-    // origin 必须是**真实存在的页面**：否则 activeTask（task.origin === panel）恒不成立、
-    // 面板永远不出来 —— 真机「点导入闪一下但不出面板」的成因之一就是 origin 被记成了
-    // 一个已不存在的 page（'import'）。这里兜底把它归到产物库。
-    const origin: PanelId = panel === 'import' ? 'library' : panel
+    const origin: PanelId = panel
     runStore.patch({ panel: origin, task: { kind, origin, ...(payload === undefined ? {} : { payload }) } })
   }
 
@@ -347,7 +331,7 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
    * （§4.4：急救入口不是「把用户送到某个页面」），只 patch `panel` 会落在「档案」列表上，等于没送到。
    */
   const openMaintenance = (): void => {
-    runStore.patch({ panel: 'profiles', profiles: { subView: 'maintenance' } })
+    runStore.patch({ panel: 'environment', profiles: { subView: 'maintenance' } })
   }
 
   /** tablist 方向键导航（ARIA tabs，manual activation）：←/→ 移动焦点，Enter/Space 原生激活。 */
@@ -365,6 +349,25 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
       next.focus()
     }
   }
+
+  /**
+   * 进行中任务的**名字**（v3 §3.1：状态栏兑现「任务名 + 细进度条」）。
+   *
+   * 为什么进度条是**不定态**：本层只有「在跑 / 没跑」的布尔，真实百分比住在宿主
+   * /progress 的轮询结果里；编一个百分比、或把结束态画成静止满格，都是在撒谎
+   * （与「未知不显示 0」同一条原则）。
+   */
+  const runningLabel = state.export.running
+    ? t('task.title.export')
+    : state.import.running
+      ? t('task.title.import')
+      : state.sync.busy !== null
+        ? t('nav.sync')
+        : state.snapshots.running
+          ? t('shell.running.restore')
+          : state.recovery.running
+            ? t('palette.rescue.recovery')
+            : null
 
   /* ---------------- 状态栏数据 ---------------- */
   const runningCount =
@@ -408,11 +411,10 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
    */
   const runCommand = (id: string): void => {
     switch (id) {
-      case 'go.overview': goto('overview'); return
+      case 'go.home': goto('home'); return
       case 'go.library': goto('library'); return
       case 'go.sync': goto('sync'); return
-      case 'go.market': goto('market'); return
-      case 'go.profiles': goto('profiles'); return
+      case 'go.environment': goto('environment'); return
       // 产物库来源筛选：切页 + 落定筛选（列表本体读 runStore.library.sourceFilter）
       case 'library.source.all': openLibrarySource(null); return
       case 'library.source.snapshot': openLibrarySource('snapshot'); return
@@ -420,8 +422,11 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
       case 'library.source.remote': openLibrarySource('remote-snapshot'); return
       case 'library.source.market': openLibrarySource('market'); return
       case 'export.open': openTask('export'); return
-      // 导入不是页面：goto('import') 会落到产物库并把导入面板打开
-      case 'import.open': goto('import'); return
+      case 'import.open': openTask('import'); return
+      // 市场不再是页面（v3）：逛市场 / 发布到市场各开一个 Task 面板
+      case 'market.open': openTask('market'); return
+      // 发布 = 市场面板的「我的配置」子视图：payload 让面板直开那一页（M4 接线）
+      case 'market.publish.open': openTask('market', { subView: 'myconfigs' }); return
       // 维护与诊断是全屏子视图：命令直达它，而不是只把用户送到环境页
       case 'maintenance.open': openMaintenance(); return
       case 'activity.open': openTask('runs'); return
@@ -429,6 +434,8 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
       case 'about.open': openTask('about'); return
       // 急救入口直达**环境 → 维护与诊断**（§4.4 第三条：不是只把用户送到某个页面）
       case 'recovery.open': openMaintenance(); return
+      // 救援模式：与事故恢复同一子视图（救援卡在其中）；两条命令都必须存在（§3.6）
+      case 'rescue.open': openMaintenance(); return
       default: return
     }
   }
@@ -436,7 +443,7 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
     /** 当前页面内容（pagePad 统一内边距）。 */
   let page: ReactNode
   switch (panel) {
-    case 'overview':
+    case 'home':
       page = (
         <HomePanel
           api={api}
@@ -447,26 +454,11 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
           openActivity={() => { openTask('history') }}
           // 直达来源选择：开导入面板 + 把面板切到「从其它 agent 导入」那一步
           openForeignImport={() => {
-            openTaskFrom('overview', 'import')
+            openTask('import')
             setForeignImportOpen(true)
           }}
         />
       )
-      break
-    case 'import':
-      // 导航已无此项（导入只走侧拉面板）。仅当旧持久化/深链把 panel 定到 import 时走到这里：
-      // 渲染产物库（而不是向导），并靠上面的 goto 语义把用户带回面板路径。
-      page = <LibraryPanel
-        api={api}
-        syncApi={syncApi}
-        marketApi={marketApi}
-        t={t}
-        uiT={uiT}
-        onAction={(capability, row) => { setLibraryAction({ capability, row }) }}
-        onOpenTask={(kind, marketId) => { openTask(kind, marketId === undefined ? undefined : { marketId }) }}
-        onOpenExport={() => { openTask('export') }}
-        refreshTick={libraryTick}
-      />
       break
     case 'library':
       page = (
@@ -479,6 +471,7 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
           onAction={(capability, row) => { setLibraryAction({ capability, row }) }}
           onOpenTask={(kind, marketId) => { openTask(kind, marketId === undefined ? undefined : { marketId }) }}
           onOpenExport={() => { openTask('export') }}
+          onOpenPublish={() => { openTask('market', { subView: 'myconfigs' }) }}
           refreshTick={libraryTick}
         />
       )
@@ -486,10 +479,7 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
     case 'sync':
       page = <SyncPanel api={syncApi} t={syncT} cmT={t} />
       break
-    case 'market':
-      page = <MarketPanel api={marketApi} myConfigsApi={myConfigsApi} syncApi={syncApi} importApi={api} t={marketT} cmT={t} />
-      break
-    case 'profiles':
+    case 'environment':
       page = (
         <EnvironmentPanel
           api={api}
@@ -499,7 +489,6 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
           incidentApi={incidentApi}
         />
       )
-      break
       break
   }
 
@@ -527,7 +516,7 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
               className={css.navTab}
               onClick={() => { goto(item.id) }}
             >
-              {item.id === 'profiles' && recoveryRequired && <span className={css.navDot} aria-hidden="true" />}
+              {item.id === 'environment' && recoveryRequired && <span className={css.navDot} aria-hidden="true" />}
               {t(item.label as Parameters<TranslateNS<'config-manager'>>[0])}
             </button>
           ))}
@@ -558,6 +547,12 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
             onClick={() => { openTask('runs') }}
           />
           <IconButton
+            icon={<HistoryIcon size={14} />}
+            label={t('task.title.history')}
+            active={activeTask?.kind === 'history'}
+            onClick={() => { openTask('history') }}
+          />
+          <IconButton
             icon={<AboutIcon size={14} />}
             label={t('overview.nav.about')}
             active={activeTask?.kind === 'about'}
@@ -568,7 +563,7 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
 
       {/* 全局 SAFE MODE 横幅：有未解决恢复事项时，无论当前页面都提示并引导去处理 */}
       {recoveryRequired && (
-        <div style={{ padding: '8px 12px 0' }}>
+        <div className={css.bannerSlot}>
           <Banner kind="error">
             {recoveryT('recovery.banner')}
             <button
@@ -618,7 +613,7 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
             {activeTask.kind === 'import' && (foreignImportOpen ? (
               /* 「从其它 agent 导入」（t17）：页面级步骤，复用同一块面板 ——
                  与既有导入向导并列，避免「弹窗套向导」。产包成功后把 zipPath 写进
-                 runStore.snapshots.importBackup（产物库「一键导入」那条已验证的通道），
+                 runStore.library.pendingZip（产物库「一键导入」那条已验证的通道），
                  关掉本页即回到向导，由它消费该请求开始分析。 */
               <ForeignImportView
                 api={api}
@@ -627,8 +622,8 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
                 onReady={(result) => {
                   setForeignImportOpen(false)
                   runStore.patch({
-                    snapshots: {
-                      importBackup: { zipPath: result.zipPath, name: result.name },
+                    library: {
+                      pendingZip: { zipPath: result.zipPath, name: result.name },
                     },
                   })
                 }}
@@ -651,6 +646,7 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
                 cmT={t}
                 /* 产物库「安装」把要装的条目 id 经 Task 入参带进来 → 面板直开该条目 */
                 openItemId={marketTaskItemId(activeTask.payload)}
+                initialSubView={marketTaskSubView(activeTask.payload)}
               />
             )}
             {/* 三种只读视图（原抽屉内容，§5.9）。三者各有独立入口、面板内不再放切换控件：
@@ -687,6 +683,8 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
             onClick={() => { openTask('runs') }}
           >
             {statusText}
+            {runningLabel !== null && <span className={css.statusTask}>{runningLabel}</span>}
+            <span className={css.statusProgress} aria-hidden="true" />
           </button>
         ) : (
           <span className={css.statusText}>{statusText}</span>
@@ -709,7 +707,7 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
         </button>
         {NAV_ITEMS.map((item) => (
           <button key={item.id} type="button" className={css.navTab} tabIndex={-1}>
-            {item.id === 'profiles' && recoveryRequired && <span className={css.navDot} aria-hidden="true" />}
+            {item.id === 'environment' && recoveryRequired && <span className={css.navDot} aria-hidden="true" />}
             {t(item.label as Parameters<TranslateNS<'config-manager'>>[0])}
           </button>
         ))}
@@ -755,6 +753,13 @@ export function ConfigManagerSection({ api, syncApi, syncT, marketApi, myConfigs
  * 入参是 unknown（可扩展、可序列化），此处只认形如 `{ marketId: string }` 的载荷，
  * 缺字段 / 类型不对一律 undefined（= 打开市场列表，绝不猜）。
  */
+/** Task 入参里取「市场子视图」（⌘K 的「发布到市场」直达「我的配置」）。 */
+function marketTaskSubView(payload: unknown): 'browse' | 'myconfigs' | undefined {
+  if (typeof payload !== 'object' || payload === null) return undefined
+  const v: unknown = (payload as { subView?: unknown }).subView
+  return v === 'myconfigs' || v === 'browse' ? v : undefined
+}
+
 function marketTaskItemId(payload: unknown): string | undefined {
   if (typeof payload !== 'object' || payload === null) return undefined
   const id: unknown = (payload as { marketId?: unknown }).marketId

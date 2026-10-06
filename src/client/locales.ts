@@ -120,7 +120,6 @@ export const zh = {
   'export.includeSecrets': '导出密钥',
   'export.includeSecretsHint': '把真实密钥（凭据值）写入备份。密钥必须以加密形式保存：勾选时会自动选中「加密备份」；取消「加密备份」会同时取消「导出密钥」。',
   'export.run': '开始导出',
-  'export.previewSkipped': '{count} 个分区导出失败已跳过',
   'export.running': '正在导出…',
   'export.download': '下载备份文件',
   'export.saved': '已保存到下载目录：{name}',
@@ -615,7 +614,7 @@ export const zh = {
   'import.compatibility.sectionsTitle': '备份包含的分区',
   // —— 同步状态行（Workbench Rebuild）——
   // —— Shell（Workbench Rebuild 2026-09：导航条/状态栏/抽屉）——
-  'nav.overview': '总览',
+  'nav.home': '首页',
   'nav.backups': '备份',
   'nav.export': '导出',
   'nav.import': '导入',
@@ -625,6 +624,7 @@ export const zh = {
   // 快照详情弹窗（点快照卡片打开；只读）
   // 重启之后不再让人重启（真机反馈）：这一句只陈述「本次启动的实际情况」
   'nav.refresh': '刷新',
+  'shell.running.restore': '快照恢复',
   'shell.status.idle': '就绪',
   'shell.status.running': '{count} 个任务进行中',
   'shell.status.recovery': '恢复待处理',
@@ -702,9 +702,6 @@ export const zh = {
   'overview.location.scheduleOff': '未开启',
   'overview.location.nextRun': '下次备份',
   'overview.location.lastRun': '上次备份',
-  'overview.sections.title': '分区构成',
-  'overview.sections.hint': '按当前配置估算（只读预览，零写入）',
-  'overview.sections.total': '合计',
   'overview.sections.entries': '{count} 项',
   'overview.quick.exportTitle': '生成可迁移的 ZIP 备份文件并下载',
   'overview.quick.importTitle': '从备份文件恢复或迁移到本机',
@@ -802,6 +799,7 @@ export const zh = {
   'palette.view.activity': '活动记录',
   'palette.view.about': '关于',
   'palette.rescue.recovery': '事故恢复',
+  'palette.rescue.mode': '救援模式',
   'import.reason.schemaUnsupported': '包内 schema 版本 v{version} 超出本插件支持范围',
   'import.reason.missingSections': '备份声明但包内缺失 {count} 个分区：{sections}',
   'import.reason.sourceNewer': '备份来自更新的 DSH（{source} → 本机 {target}）：可能有本机不认识的配置',
@@ -1021,7 +1019,6 @@ export const en: Record<keyof typeof zh, string> = {
   'export.includeSecrets': 'Export secrets',
   'export.includeSecretsHint': 'Write the real secrets (credential values) into the backup. Secrets must be stored encrypted: checking this also checks \u201cEncrypt backup\u201d; unchecking \u201cEncrypt backup\u201d unchecks this.',
   'export.run': 'Start Export',
-  'export.previewSkipped': '{count} section(s) failed to export and were skipped',
   'export.running': 'Exporting…',
   'export.download': 'Download backup file',
   'export.saved': 'Saved to downloads: {name}',
@@ -1505,7 +1502,7 @@ export const en: Record<keyof typeof zh, string> = {
   'nextSteps.unresolved.title': 'Failed / skipped ({count})',
   'nextSteps.unresolved.hint': 'These items were not applied; you can retry them from the result page:',
   // —— Shell（Workbench Rebuild 2026-09）——
-  'nav.overview': 'Overview',
+  'nav.home': 'Home',
   'nav.backups': 'Backups',
   'nav.export': 'Export',
   'nav.import': 'Import',
@@ -1515,6 +1512,7 @@ export const en: Record<keyof typeof zh, string> = {
   // Snapshot detail dialog (opened by clicking a snapshot card; read-only)
   // After the restart the banner must stop asking for one (real-machine feedback)
   'nav.refresh': 'Refresh',
+  'shell.running.restore': 'Snapshot restore',
   'shell.status.idle': 'Idle',
   'shell.status.running': '{count} task(s) running',
   'shell.status.recovery': 'Recovery pending',
@@ -1592,9 +1590,6 @@ export const en: Record<keyof typeof zh, string> = {
   'overview.location.scheduleOff': 'Off',
   'overview.location.nextRun': 'Next run',
   'overview.location.lastRun': 'Last run',
-  'overview.sections.title': 'Section composition',
-  'overview.sections.hint': 'Estimated from current config (read-only preview, zero writes)',
-  'overview.sections.total': 'Total',
   'overview.sections.entries': '{count} item(s)',
   'overview.quick.exportTitle': 'Generate a portable ZIP backup and download it',
   'overview.quick.importTitle': 'Restore from a backup file or migrate to this machine',
@@ -1692,6 +1687,7 @@ export const en: Record<keyof typeof zh, string> = {
   'palette.view.activity': 'Activity log',
   'palette.view.about': 'About',
   'palette.rescue.recovery': 'Incident recovery',
+  'palette.rescue.mode': 'Rescue mode',
   'import.reason.schemaUnsupported': 'The bundle uses schema v{version}, beyond what this plugin supports',
   'import.reason.missingSections': 'Declared by the backup but missing from the archive: {count} section(s) — {sections}',
   'import.reason.sourceNewer': 'Backup comes from a newer DSH ({source} → local {target}): it may contain settings this build does not know',

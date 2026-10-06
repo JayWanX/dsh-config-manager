@@ -148,14 +148,16 @@ npm run bundle                   # 仅重建 client bundle
 > **`DESIGN.md` 是 UI/样式决策唯一权威**。涉及 UI/Layout/CSS/颜色/字体/间距/图标/动效/响应式/视觉状态前必读。
 
 **硬性规则：**
-1. 颜色/字体/阴影必走 `--dsw-*` token；**禁止 hardcode**(`#fff`等)，tint 用 `color-mix(in srgb, <token> <pct>%, transparent)`。
-2. 样式只能进 `src/client/config-manager.module.css`；禁止新增 css/内联 `<style>`/第三方 css；类名用 CSS Modules 引用(`css.xxx`)，**勿写字符串 class**(`sync-history-table` 属遗留)。
+1. **颜色三层单向依赖**（v3）：组件只写 `--cm-*`（`.section` 的 §1 TOKENS 块），`--dsw-*` 只允许出现在 `--cm-*` 定义行；禁止 hardcode，tint 用 `color-mix(in srgb, var(--cm-*) <pct>%, transparent)`；四态/主色直写 `--dsw-alias-state-*` 被 `css-token-guard.test.ts` 拦下。
+2. 样式只能进 `src/client/config-manager.module.css`；禁止新增 css/内联 `<style>`/第三方 css；类名用 CSS Modules 引用(`css.xxx`)，**勿写字符串 class**。
+   **scale 有源级守卫**（v3）：字号 4 档 / 间距 9 档 / 圆角 4 档 / 行高 2 档 / z-index 走 `--cm-z-*`，越界红（`css-scale-guard.test.ts`）；新档位先改 DESIGN.md §3–§5。
 3. 复用 `src/client/common/ui.tsx` 原语 + Common 的 `ErrorBanner/ErrorList/ProgressBar/ReportView`；已有公共组件能解决禁止重建，新页面先搜库。
 4. **默认不引入第二套视觉体系**(Tailwind/CSS-in-JS/Sass/UI库/图标库/动画库)。**图标 = `lucide-react`**（`common/Icon.tsx`，深路径导入 + `lucide-icons.d.ts` 兜底）；**形变仅 `ExpandChevron` / `CopyStateIcon`**（`morphicons`，只在「状态确实变化」处用；硬约定 `reducedMotion="user"` / `spring={MORPH_SPRING}`（临界阻尼 k=420，≈1.6 倍速），见 `DESIGN.md §6`，**不得扩大范围**）。确需追加第三方 UI 库时，按 `DEVELOPERS.md` 的「第三方 UI 库准入」7 步流程评估后落地。
 5. 按钮语义：`variant="primary"`(主操作)/默认 ghost(次)/`variant="danger"`(危险如恢复/回滚)；勿用 primary 做危险操作。
 6. 徽章：`Badge kind="ok|info|warn|error"` 与 `Banner` 四态一一对应；先想语义再选 kind。
 7. 文案走 i18n 字典；展示文本渲染前进 `redact()`。
 8. 长列表/大报告限高内滚(`planScroll/reportScroll/confirmScroll/pullScroll/diffScroll`)，禁止撑长整页。
+9. **页落位（v3）**：`home`/`library`/`sync`/`environment` 四页；**市场不是页面**（Task 承载，入口=产物库底栏+⌘K）；容器判据与旧值映射见 DESIGN.md §1；**加页面/改 id 必须同改 `parsePersistedState` 映射与 `run-store.test.ts` 迁移用例**。
 
 ### Missing Design Rule（DESIGN.md 未覆盖）
 - DESIGN.md 未覆盖的设计决策：搜库确认 → 能扩展先扩展 → token+color-mix 组合 → 新规范并**写回 DESIGN.md** → 再使用。步骤全文见 `DEVELOPERS.md`。
@@ -185,6 +187,8 @@ npm test            # 动逻辑/纯函数/引擎/适配器
 npm run build       # 动 client/样式
 npm run smoke       # 大改动
 ```
+
+> **本机环境注意**：`npm run build` 需先把 `TEMP`/`TMP` 指向工作区内（`.tmp/buildtmp`）否则 dts 阶段 `Access is denied` 致 build=1；`npm test` 必须用系统 TEMP（`foreign/qoder.test.ts` 用 `os.tmpdir()`）。
 UI 自查：DESIGN.md 一致(token/组件/spacing/radius/状态语义)、响应式、Hover/Focus/Disabled/Loading/Empty/Error 齐全、Dark Mode 无 hardcode、未建重复组件、新样式进 css+DESIGN.md、新文案进 locale(zh/en)、敏感字段未落 storage/日志/回显。
 
 ## 📚 文档同步

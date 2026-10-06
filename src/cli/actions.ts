@@ -33,6 +33,7 @@ import {
 } from '../sync/backup-files.ts'
 import { EnvironmentLockManager, OWNERSHIP_FILE } from '../utils/env-lock.ts'
 import { scanSessionHealth, type SessionHealthScanResult } from '../utils/session-health-scan.ts'
+import type { SessionVerifyResult } from '../utils/session-verify.ts'
 
 /* ------------------------------------------------------------ 进程/实例事实 */
 
@@ -533,6 +534,15 @@ export interface SessionLogRepairRow {
   /** 备份文件名（与日志同目录，回滚只认台账，不认用户给的路径） */
   backupName?: string
   repairId?: string
+  /**
+   * 写后真 codec 复验结论（**逐字段透传** service 的 SessionVerifyResult，不改造/不丢字段）。
+   * JSON 消费者必须据它区分三态：verified+equivalentToReadPath（现役读盘可读）/
+   * verified+!equivalentToReadPath（只有迁移链能还原）/ !verified（未验证，原因见 reason）。
+   * 预览路径不跑复验门 ⇒ 这一项缺省。
+   */
+  verify?: SessionVerifyResult
+  /** 确定性失败（reason='verify-failed'）时：本次备份的自动回滚是否成功（false = 目标仍是修复后字节） */
+  rolledBack?: boolean
   message: string
 }
 
@@ -543,6 +553,73 @@ export interface InlineRepairOutcome {
   /** 页面用的等价命令 */
   commands: string[]
   error?: string
+}
+
+/* ----------------------------------------------- 会话修复行的文案（纯函数，可单测） */
+
+/**
+ * 真 codec 复验结论 → 一句人话（**三态**；服务层 utils/session-verify.ts 的定义为准）。
+ *
+ *  · verified && equivalentToReadPath   → 「现役读盘可读」= header.version === catalog.currentVersion === 已装版本，
+ *                                          DSH 的现役读盘路径此刻就能直接读它；
+ *  · verified && !equivalentToReadPath  → 只有**迁移链**能还原（pre-v4 日志：官方 resolveCurrentLog 对本代之前的
+ *                                          代际返回 undefined，即「没有现役日志」）；
+ *  · !verified                          → 「**未验证**」= 本机跑不了真 codec 门（如 available catalog 缺席 / 代际对不上 /
+ *                                          缺子会话事实）——**这是最常见的一态，必须说出来**，绝不能让它看起来像成功；
+ *  · verify 缺失（改造前的旧结果 / 预览路径）→ 空串：调用方保持原文案，绝不臆造「已验证」。
+ */
+export function sessionVerifyNoteOf(verify: SessionVerifyResult | undefined): string {
+  if (verify === undefined) return ''
+  if (verify.verified) {
+    return verify.equivalentToReadPath
+      ? '真 codec 复验通过（现役读盘可读）。'
+      : '真 codec 复验通过（迁移链可还原，非现役读盘）。'
+  }
+  return '未验证：本机无法运行真 codec 复验（' + verify.reason + '）。'
+}
+
+/** 会话修复行的文案入参（只吃机器可读事实 —— 便于单测与两边共用）。 */
+export interface SessionRepairRowFacts {
+  ok: boolean
+  reason?: string
+  droppedRows?: number
+  backupName?: string
+  rolledBack?: boolean
+  verify?: SessionVerifyResult
+}
+
+/**
+ * 会话修复行 → message（CLI 与离线救急台**同一份**文案）。
+ *
+ * 成功路径按 verify 分三态；**!verified 时不出现无限定的成功表述**（先声明未验证，再如实说写入已生效）；
+ * verify 缺失时**逐字保持改造前的文案**（向后兼容，不臆造）；verify-failed 时说明已自动回滚 + 官方错误 detail。
+ */
+export function sessionRepairRowMessage(facts: SessionRepairRowFacts): string {
+  const dropped = String(facts.droppedRows ?? 0)
+  const backup = String(facts.backupName ?? '（未落盘）')
+  if (!facts.ok) {
+    if (facts.reason === 'verify-failed') {
+      const rolled = facts.rolledBack === true
+        ? '已自动回滚到修复前字节'
+        : facts.rolledBack === false
+          ? '已自动回滚未成功（目标仍是修复后字节，需人工处理）'
+          : '已自动回滚（服务层未回传结果，请以目标字节为准）'
+      const detail = facts.verify !== undefined && !facts.verify.verified && facts.verify.detail !== undefined && facts.verify.detail !== ''
+        ? '；官方错误：' + facts.verify.detail
+        : ''
+      return '未修复（verify-failed）：真 codec 复验未通过，' + rolled + detail + '。'
+    }
+    return '未修复（' + (facts.reason ?? 'unknown') + '）：原文件未改动。'
+  }
+  if (facts.verify === undefined) {
+    // 向后兼容：没有复验结论就不添油加醋（改造前逐字如此）
+    return '已丢弃 ' + dropped + ' 行重放重复事件；备份 ' + backup
+  }
+  if (facts.verify.verified) {
+    return '已丢弃 ' + dropped + ' 行重放重复事件；备份 ' + backup + '。' + sessionVerifyNoteOf(facts.verify)
+  }
+  return sessionVerifyNoteOf(facts.verify)
+    + '写入已生效（已丢弃 ' + dropped + ' 行重放重复事件；备份 ' + backup + '）——本机 DSH 能否现役读它**没有被证明**，可用 repairId 回滚。'
 }
 
 /**
@@ -598,18 +675,22 @@ export async function repairSessionLogInline(
       homeDir: options.home, dataDir: options.dataDir, unitId,
       ...(expect !== undefined ? { expect } : {}),
     })
-    rows.push({
-      unitId,
+    // 文案与结构化字段同源：verify 逐字段透传（JSON 消费者据它区分三态），message 由纯函数分派
+    const facts = {
       ok: applied.ok,
       ...(applied.reason !== undefined ? { reason: applied.reason } : {}),
       ...(applied.droppedRows !== undefined ? { droppedRows: applied.droppedRows } : {}),
+      ...(applied.backupName !== undefined ? { backupName: applied.backupName } : {}),
+      ...(applied.rolledBack !== undefined ? { rolledBack: applied.rolledBack } : {}),
+      ...(applied.verify !== undefined ? { verify: applied.verify } : {}),
+    };
+    rows.push({
+      unitId,
+      ...facts,
       ...(applied.bytesBefore !== undefined ? { bytesBefore: applied.bytesBefore } : {}),
       ...(applied.bytesAfter !== undefined ? { bytesAfter: applied.bytesAfter } : {}),
-      ...(applied.backupName !== undefined ? { backupName: applied.backupName } : {}),
       ...(applied.repairId !== undefined ? { repairId: applied.repairId } : {}),
-      message: applied.ok
-        ? '已丢弃 ' + String(applied.droppedRows ?? 0) + ' 行重放重复事件；备份 ' + String(applied.backupName ?? '（未落盘）')
-        : '未修复（' + (applied.reason ?? 'unknown') + '）：原文件未改动。',
+      message: sessionRepairRowMessage(facts),
     })
   }
   return { ...base, ok: rows.every((r) => r.ok || !options.apply), rows }

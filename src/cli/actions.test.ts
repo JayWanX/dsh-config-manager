@@ -16,9 +16,10 @@ import path from 'node:path'
 import {
   checkWriteGates, cleanupDisk, collectVerifyResults, diskUsageDirsOf, exportOfflineBackup, isProcessAlive,
   planSnapshotRestore, readBackups, readDiskUsage, readLockState, readProfiles, readRescueStatus,
-  readRunningInstances, readSnapshots, recoverStaleEnvironmentLock, repairSessions, stopProfile,
-  unlockEncryptedBackup,
+  readRunningInstances, readSnapshots, recoverStaleEnvironmentLock, repairSessions, sessionRepairRowMessage,
+  sessionVerifyNoteOf, stopProfile, unlockEncryptedBackup, type SessionLogRepairRow,
 } from './actions.ts'
+import type { SessionVerifyResult } from '../utils/session-verify.ts'
 
 async function withTmp<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dcm-actions-'))
@@ -430,4 +431,86 @@ test('V4-03 恢复计划：不存在的快照 → 如实失败（不抛错、不
     assert.equal(plan.ok, false)
     assert.equal(plan.code, 'plan-failed')
   })
+})
+
+/* -------------------------------------- t17：会话修复行的 verify 三态（纯函数，可单测） */
+
+test('t17 复验三态：现役可读 / 迁移链可还原 / 未验证（带 reason）；缺失给空串不臆造', () => {
+  assert.equal(sessionVerifyNoteOf(undefined), '', '缺失 → 空串：调用方保持原文案，绝不臆造「已验证」')
+  assert.match(
+    sessionVerifyNoteOf({ verified: true, events: 12, strong: true, equivalentToReadPath: true }),
+    /真 codec 复验通过（现役读盘可读）/,
+  )
+  assert.match(
+    sessionVerifyNoteOf({ verified: true, events: 12, strong: true, equivalentToReadPath: false }),
+    /真 codec 复验通过（迁移链可还原，非现役读盘）/,
+  )
+  const unverified = sessionVerifyNoteOf({ verified: false, reason: 'unavailable', detail: 'no-candidate', equivalentToReadPath: false })
+  assert.match(unverified, /未验证/)
+  assert.match(unverified, /unavailable/)
+})
+
+test('t17 成功文案：三态分派；!verified 先声明未验证，不出现无限定的成功表述', () => {
+  const base = { ok: true, droppedRows: 3, backupName: 'session.v4.jsonl.zstd.cm-backup-1' }
+  // verify 缺失 → 逐字保持改造前的文案（向后兼容）
+  const legacy = sessionRepairRowMessage({ ...base })
+  assert.equal(legacy, '已丢弃 3 行重放重复事件；备份 session.v4.jsonl.zstd.cm-backup-1')
+
+  const current = sessionRepairRowMessage({ ...base, verify: { verified: true, events: 3, strong: true, equivalentToReadPath: true } })
+  assert.match(current, /已丢弃 3 行重放重复事件/)
+  assert.match(current, /真 codec 复验通过（现役读盘可读）/)
+
+  const migrated = sessionRepairRowMessage({
+    ...base,
+    verify: { verified: true, events: 3, strong: false, strongDetail: 'x', equivalentToReadPath: false },
+  })
+  assert.match(migrated, /真 codec 复验通过（迁移链可还原，非现役读盘）/)
+
+  const unverified = sessionRepairRowMessage({
+    ...base,
+    verify: { verified: false, reason: 'unavailable', detail: 'no-candidate', equivalentToReadPath: false },
+  })
+  assert.match(unverified, /^未验证/, '未验证必须出现在最前面')
+  assert.match(unverified, /unavailable/)
+  assert.equal(unverified.startsWith('已丢弃'), false, '!verified 不得出现无限定的成功表述')
+  assert.notEqual(unverified, legacy)
+})
+
+test('t17 失败文案：verify-failed 说明已自动回滚 + 官方 detail；其它原因保持原文案', () => {
+  const rollback = sessionRepairRowMessage({
+    ok: false, reason: 'verify-failed', rolledBack: true,
+    verify: { verified: false, reason: 'decode-failed', detail: 'official refusal text', equivalentToReadPath: false },
+  })
+  assert.match(rollback, /已自动回滚/)
+  assert.match(rollback, /official refusal text/)
+  assert.match(rollback, /verify-failed/)
+
+  // 自动回滚**没成功**也必须如实说明（危险态），但仍写明走的是自动回滚这条路
+  const failedRollback = sessionRepairRowMessage({
+    ok: false, reason: 'verify-failed', rolledBack: false,
+    verify: { verified: false, reason: 'invalid-header', detail: 'torn-tail', equivalentToReadPath: false },
+  })
+  assert.match(failedRollback, /已自动回滚/)
+  assert.match(failedRollback, /未成功/)
+  assert.match(failedRollback, /torn-tail/)
+
+  assert.equal(sessionRepairRowMessage({ ok: false, reason: 'busy' }), '未修复（busy）：原文件未改动。')
+  assert.equal(sessionRepairRowMessage({ ok: false }), '未修复（unknown）：原文件未改动。')
+})
+
+test('t17 行结构：verify 逐字段进 JSON（不改造、不丢字段）', () => {
+  const verify: SessionVerifyResult = { verified: true, events: 9, strong: true, strongDetail: 'detail', equivalentToReadPath: false }
+  const row: SessionLogRepairRow = {
+    unitId: '--p--/session-abc',
+    ok: true,
+    droppedRows: 1,
+    backupName: 'b',
+    repairId: 'repair-1',
+    verify,
+    message: sessionRepairRowMessage({ ok: true, droppedRows: 1, backupName: 'b', verify }),
+  }
+  const parsed = JSON.parse(JSON.stringify(row)) as Record<string, unknown>
+  assert.deepEqual(parsed['verify'], { verified: true, events: 9, strong: true, strongDetail: 'detail', equivalentToReadPath: false })
+  assert.equal(parsed['repairId'], 'repair-1')
+  assert.equal(parsed['droppedRows'], 1)
 })

@@ -11,6 +11,66 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 
 ## [Unreleased]
 
+> **全仓对抗审计修复**：本轮对**整仓**做了一次对抗性审计（七个区域审计 + 三轮横向扫查 + 每个修复配独立验证），
+> 收敛出 **44 项缺陷：40 项闭环、5 项部分闭环、2 项等第三方写者落盘后复扫**。修的主要是**静默数据风险**，
+> 而不是看得见的报错。
+>
+> - **同步上传不再把「远端索引 404」当成空集合**（WebDAV + S3）：此前会把远端**仍被引用**的 blob 当成
+>   无人引用而回收 —— **不可恢复**。现在写任何字节之前先自证远端有无历史内容：有证据就中止并说明，
+>   全新远端首次推送行为逐字不变，探针读不到一律按「有内容」处理（fail-closed）。
+> - **「读不到」不等于「没有」**（三处同族）：只有真不存在（ENOENT）才算「本来就没有」，权限 / 占用 / IO
+>   错误一律按「存在」处理。此前一次瞬时 EACCES 会让声明的 `patchedDependencies` 被从**将要写入的**
+>   `pnpm-workspace.yaml` 里剔除（issue #35 的症状）。
+> - **S3 / gist 的错误提示不再显示裸键名**（18 + 16 个键）：传输层的本地文案键与宿主的翻译器互不认识，
+>   真机弹的是 `sync.s3.requestFailed` 这类键名。
+> - **MCP 的 `args` / `url` / `command` / `cwd` 不再进包**，凭据泄漏面收窄；条数触顶与文件过大的
+>   **截断不再静默**，一律计数并回传。
+> - **导入时用户取消勾选的会话不再被算作「搬迁失败」** —— 此前会 no-op 地触发整笔导入回滚。
+> - **恢复面板把「枚举失败」与「确实没有残留」区分开**：失败可见、可重试，但不再让整页失败。
+> - **同 id 工作区记录归并不再抛 `TypeError`**（畸形 `sessionIds` 元素），校验补上元素级检查。
+> - **脱敏口径统一**：`bearer` 按 RFC 7235 / 6750 **大小写不敏感**（规范 `Bearer …` 的行为逐字不变），
+>   且 `sk-` 不再误剥 `task-management` / `risk-assessment` 这类正常词，同时不削弱对真实密钥形态的检出。
+> - **同一语义不再有两套实现**：`redact()` 与扫描器共用同一张值形状表（另加防漂移守卫），
+>   宿主与客户端的同构常量收敛到**零依赖单一来源**。
+> - **文档与计数不再漂移**：路由计数订正为 **77 = 70 + 7** 并加了散文守卫；`AGENTS.md` 的容量余量
+>   从 96 B 提到 2,384 B。
+> - 🧪 **验证**：完整树上 `typecheck` / `typecheck:tests` / `build` 全 0；`npm test` **3690 例 / 3688 通过 /
+>   0 失败 / 2 跳过**（相对基线 +246 例、零新增失败）；客户端产物自包含守卫 1/1；真机隔离实例
+>   **7/7 关键路由 200**、界面数字与磁盘事实逐项一致。
+>
+> **Repository-wide adversarial audit**: this round audited the **whole repository** (seven area audits plus
+> three horizontal sweeps, with an independent verifier for every fix) and converged on **44 defects:
+> 40 closed, 5 partially closed, 2 awaiting a third-party writer**. Nearly all of them were **silent data
+> risks**, not visible errors.
+>
+> - **A remote index 404 is no longer treated as an empty set** on sync upload (WebDAV + S3): blobs that were
+>   still referenced could be garbage-collected — **irrecoverably**. The upload now proves the remote has no
+>   prior content before writing a single byte: with evidence it aborts and says so, a genuinely fresh remote
+>   behaves exactly as before, and an unreadable probe counts as "has content" (fail-closed).
+> - **"Cannot read it" is not "it is not there"** (three places in one family): only ENOENT means "never
+>   existed"; permission, busy and IO errors count as "it exists". A single transient EACCES used to drop a
+>   declared `patchedDependencies` entry from the **about-to-be-written** `pnpm-workspace.yaml` (the issue #35 symptom).
+> - **S3 and gist error messages no longer show raw keys** (18 + 16 keys): their local catalogs were unknown to
+>   the host translator, so users really saw `sync.s3.requestFailed`.
+> - **MCP `args` / `url` / `command` / `cwd` no longer reach the bundle**, narrowing credential exposure, and
+>   truncation (too many entries, oversized files) is **no longer silent** — it is counted and reported.
+> - **Unchecked sessions are no longer reported as a failed relocation**, which used to trigger a full rollback for nothing.
+> - **The recovery panel separates "enumeration failed" from "there is genuinely nothing left"**: visible,
+>   retryable, and no longer fatal to the page.
+> - **Merging duplicate workspace records by id can no longer throw `TypeError`** on malformed `sessionIds`
+>   elements, and validation now checks element types.
+> - **One redaction rule set**: `bearer` is **case-insensitive** per RFC 7235 / 6750 (canonical `Bearer …` is
+>   byte-for-byte unchanged), and `sk-` no longer strips ordinary words such as `task-management` /
+>   `risk-assessment` while every real key form stays detectable.
+> - **No more two implementations of one rule**: `redact()` and the scanner share one value-shape table (with
+>   anti-drift guards), and the host/client duplicate constants collapse into a **zero-dependency single source**.
+> - **Documentation and counters no longer drift**: the route count is corrected to **77 = 70 + 7** with a prose
+>   guard, and `AGENTS.md` headroom went from 96 B to 2,384 B.
+> - 🧪 **Verification**: on the complete tree `typecheck` / `typecheck:tests` / `build` all exit 0; `npm test`
+>   **3690 tests / 3688 passing / 0 failing / 2 skipped** (+246 vs baseline, zero new failures); the client
+>   bundle self-containment guard passes 1/1; a real isolated instance served **7/7 key routes with HTTP 200**
+>   and every UI number matched the on-disk facts.
+
 > **同步通道新增「选择已有仓库 / 新建仓库」**：git 通道的仓库地址此前只能手填 —— 得先去 GitHub 建好仓库、
 > 复制 clone URL、再贴回来，还容易漏掉「必须私有」这条前提。现在配置弹窗可以直接从当前 token 可见的
 > **私有**仓库里选（按最近更新排序，带更新时间与 fork 徽章），或就地新建一个私有仓库并自动选中。

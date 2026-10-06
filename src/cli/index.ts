@@ -4,22 +4,11 @@
  * 离线快照列表/恢复 + 一键重装 DSH 命令，零 DSH 运行时依赖（仅 node 内置 + 本项目
  * core 引擎；绝不 import @deepseek-ai/*，peerDependencies 缺失也能跑）。
  *
- * 子命令：
- *   snapshots [--data-dir <dir>]         列出快照（listSnapshots）
- *   restore [--id <uuid>] [--dry-run]    恢复到导入前状态（planRestore 预览 / restore 执行）
- *           [--data-dir <dir>] [--data-root <dir>] [--profile <name>] [--settings <path>]
- *   reinstall [--version <v>] [--yes] [--list] [--wipe-config] [--dry-run] [--data-root <dir>]
- *             一键重装 DSH 程序（交互多选 + 二次确认 / 跨平台执行）
- *   verify [--id <file|path>] [--json] [--data-dir <dir>]
- *             离线只读自检备份 ZIP（结构 + integrity/checksums 完整性；不改一个字节）
- *   backup [--sections <a,b,c>] [--out <path>] [--dry-run] [--data-dir <dir>]
- *             离线文件级备份（导出目录内生成与 GUI 同结构的 ZIP，落盘后自检）
- *   import --from <source> [--dry-run] [--out <path>] [--cwd <dir>] [--data-dir <dir>]
- *             把本机已装的外部 agent 配置（Claude Code/Hermes/Cursor/Codex/Copilot/Antigravity）
- *             翻译成标准 bundle v1 ZIP（--dry-run 只打印分区摘要，零写入）
- *   web [--port <n>] [--no-open] [--home <dir>] [--data-root <dir>] [--idle-timeout <分钟>]
- *             离线只读救急台（本机网页：实例/SafeMode/锁/快照/备份自检/磁盘/会话体检）
- *   help | --help | -h                    显示全部命令与说明
+ * 子命令一览、选项、退出码的**唯一事实源是 ./help.ts**（速查页 + 每命令详情页）：
+ * 本文件只负责解析参数与执行，不再散写文案。
+ *   dcm help                  速查页（按风险分组的命令表 + 通用选项）
+ *   dcm <命令> --help         单命令详情页（说明 / 选项 / 退出码 / 示例）
+ *   dcm help <命令>           同上
  *
  * 缺省数据目录 = $DSH_HOME/dsh-config-manager/snapshots（$DSH_HOME 缺省 ~/.dsh）。
  * 破坏性命令（restore / reinstall）的 SAFE MODE 门按「控制面根」定位标记：
@@ -48,6 +37,7 @@ import { EnvironmentLockManager, runWithMutationLock, EnvironmentLockUnavailable
 import { runSessionsRepair } from './sessions-repair.ts';
 import { runSessionsInspect } from './sessions-inspect.ts';
 import { runImportSource } from './import-source.ts';
+import { renderCommandHelp, renderOverview } from './help.ts';
 import { collectVerifyResults, readRunningInstances } from './actions.ts';
 import { Phase3Recovery, readSafeModeMarkerSync, safeModeMarkerPath } from '../core/phase3-host.ts';
 import {
@@ -55,7 +45,7 @@ import {
 } from '../core/backup-verify.ts';
 import {
   collectBackupEntries, buildSectionFlags, parseSectionsArg,
-  DEFAULT_BACKUP_SECTIONS, OFFLINE_UNAVAILABLE_SECTIONS,
+  OFFLINE_UNAVAILABLE_SECTIONS,
   type BackupCollection,
 } from '../core/backup-plan.ts';
 import { buildChecksums } from '../utils/hashing.ts';
@@ -72,6 +62,11 @@ export type CliCommand =
 
 export interface CliOptions {
   command: CliCommand;
+  /**
+   * 详情页主题（`dcm help <命令>` / `dcm <命令> --help`）。
+   * 只在 command === 'help' 时有意义；认不认识由运行层判定（解析器不重复维护一份命令表）。
+   */
+  helpTopic?: string;
   /** --data-dir：快照数据目录（verify/backup 下为导出目录）覆盖 */
   dataDir?: string;
   /**
@@ -167,6 +162,9 @@ function parseCliDataDir(argv: readonly string[]): ParseResult {
   const options: CliOptions = { command: 'recover-stale-lock', dryRun: false, profile: 'web', yes: false, list: false, wipeConfig: false, json: false, positionals: [] };
   for (let i = 1; i < argv.length; i += 1) {
     const flag = argv[i]!;
+    if (flag === '--help' || flag === '-h') {
+      return { ok: true, options: { ...options, command: 'help', helpTopic: 'recover-stale-lock' } };
+    }
     if (flag === '--data-dir') {
       const value = argv[i + 1];
       if (value === undefined || value === '' || value.startsWith('-')) {
@@ -205,6 +203,9 @@ function parseCliSessions(argv: readonly string[]): ParseResult {
   const rest = argv.slice(1);
   const action = rest[0];
   if (action === undefined) return { ok: false, error: 'sessions 需要子动作 / missing action: sessions repair' };
+  if (action === '--help' || action === '-h') {
+    return { ok: true, options: { ...options, command: 'help', helpTopic: 'sessions' } };
+  }
   // T6：三个只读/安全动作 —— list（列出会话）/ doctor（体检）/ repair（预览或 --fix 执行）
   if (action !== 'repair' && action !== 'list' && action !== 'doctor') {
     return { ok: false, error: 'sessions 只支持 list / doctor / repair / unsupported action: ' + action };
@@ -212,6 +213,9 @@ function parseCliSessions(argv: readonly string[]): ParseResult {
   options.positionals.push(action);
   for (let i = 1; i < rest.length; i += 1) {
     const flag = rest[i]!;
+    if (flag === '--help' || flag === '-h') {
+      return { ok: true, options: { ...options, command: 'help', helpTopic: 'sessions' } };
+    }
     if (flag === '--fix') { options.fix = true; continue; }
     if (flag === '--apply') { options.fix = true; continue; }  // --apply 是 --fix 的可读别名（T6）
     if (flag === '--json') { options.json = true; continue; }
@@ -256,7 +260,7 @@ function parseCliImport(argv: readonly string[]): ParseResult {
   const rest = argv.slice(1);
   for (let i = 0; i < rest.length; i += 1) {
     const flag = rest[i]!;
-    if (flag === '--help' || flag === '-h') return { ok: true, options: { ...options, command: 'help' } };
+    if (flag === '--help' || flag === '-h') return { ok: true, options: { ...options, command: 'help', helpTopic: 'import' } };
     if (flag === '--dry-run') {
       options.dryRun = true;
       continue;
@@ -288,7 +292,13 @@ function parseCliImport(argv: readonly string[]): ParseResult {
 export function parseCli(argv: readonly string[]): ParseResult {  const command = argv[0];
   if (command === undefined) return { ok: false, error: '缺少子命令 / missing subcommand' };
   if (command === '--help' || command === '-h' || command === 'help') {
-    return { ok: true, options: { command: 'help', dryRun: false, profile: 'web', yes: false, list: false, wipeConfig: false, json: false, positionals: [] } };
+    const base: CliOptions = { command: 'help', dryRun: false, profile: 'web', yes: false, list: false, wipeConfig: false, json: false, positionals: [] };
+    // `dcm help <命令>`：把主题带下去（认不认识由运行层判定，解析器不重复维护一份命令表）
+    const topic = argv[1];
+    if (command === 'help' && topic !== undefined && topic !== '' && !topic.startsWith('-')) {
+      return { ok: true, options: { ...base, helpTopic: topic } };
+    }
+    return { ok: true, options: base };
   }
   if (command !== 'snapshots' && command !== 'restore' && command !== 'reinstall' && command !== 'sessions'
     && command !== 'recover-stale-lock' && command !== 'verify' && command !== 'backup' && command !== 'web'
@@ -310,7 +320,7 @@ export function parseCli(argv: readonly string[]): ParseResult {  const command 
   for (let i = 0; i < rest.length; i += 1) {
     const flag = rest[i]!;
     if (flag === '--help' || flag === '-h') {
-      return { ok: true, options: { ...options, command: 'help' } };
+      return { ok: true, options: { ...options, command: 'help', helpTopic: command } };
     }
     // 位置参数：仅 verify 接受（文件名或路径），其余子命令沿用「未知参数」拒绝
     if (!flag.startsWith('-')) {
@@ -580,92 +590,22 @@ function resolveCliVersion(): string {
 const CLI_EXPORTER_VERSION = resolveCliVersion();
 
 export function printUsage(io: CliIo = defaultIo): void {
-  io.log(
-    [
-      'dsh-config-manager（简写 dcm）— DSH Config Manager CLI（离线救急 / snapshot restore + 一键重装）',
-      '',
-      '用法 / Usage:',
-      '  dsh-config-manager snapshots [--data-dir <dir>]',
-      '      列出快照 / list snapshots',
-      '  dsh-config-manager restore [--id <uuid>] [--dry-run] [--data-dir <dir>]',
-      '                            [--data-root <dir>] [--profile <name>] [--settings <path>]',
-      '      恢复到导入前状态 / restore to pre-import state（--dry-run 只打印计划）',
-      '  dsh-config-manager reinstall [--version <v>] [--yes] [--list] [--wipe-config] [--dry-run]',
-      '                            [--data-root <dir>]',
-      '      一键重装 DSH 程序（交互多选 + 二次确认），DSH 损坏时救急 / reinstall DSH',
-      '  dsh-config-manager recover-stale-lock [--data-dir <dir>]',
-      '      回收残留的环境锁（上次进程被强制结束留下的死锁）',
-      '      / recover a stale environment lock left by a killed process',
-      '      仅当持有者已确证死亡才回收；活锁一律拒绝。GUI 操作报「操作暂时无法执行」',
-      '      且重试无效时使用（另有 GUI「事故恢复」入口）。',
-      '      Refuses unless the owner is proven dead; never touches a live lock.',
-      '  dsh-config-manager verify [--id <file|path>] [--json] [--data-dir <dir>]',
-      '      离线只读自检备份 ZIP（结构 + integrity/checksums 完整性；不改一个字节）',
-      '      / read-only integrity check of backup ZIPs（零写入）',
-      '      无参校验导出目录下全部 *.zip；也可用位置参数指定单个文件或路径。',
-      '      退出码：全部 OK → 0，任一非 OK → 1（便于 CI / 定时任务断言）。',
-      '      Exit code: 0 only when every checked backup is OK.',
-      '  dsh-config-manager backup [--sections <a,b,c>] [--out <path>] [--dry-run]',
-      '                            [--data-dir <dir>]',
-      '      离线文件级备份（导出目录内生成与 GUI 同结构的 ZIP，落盘后自动自检）',
-      '      / offline file-level backup（dropped ZIP is self-verified）',
-      '      只打包离线可直读的分区；凭据类文件（凭据文件名 / .env / *.pem）永不进入备份。',
-      '  dsh-config-manager import --from <source> [--dry-run] [--out <path>] [--cwd <dir>]',
-      '                                [--data-dir <dir>]',
-      '      把本机已装的外部 agent 配置翻译成标准 bundle v1 ZIP（之后用导入流程导入）',
-      '      / translate a foreign agent config into a standard bundle ZIP',
-      '      来源 source：claude-code | hermes | cursor | codex | copilot | antigravity | gemini | reasonix | opencode | mimocode | zcode | grokbuild | openclaw | pi | kimi | kilocode | qoder | chatgpt | workbuddy | qwen | continue | cline | goose | dsh4 | zed | crush | teleagent | trae | vibe | dsh',
-      '      （未知来源 → 退出码 1 并列出可用来源）/ unknown source exits 1 and lists available sources.',
-      '      --dry-run 只打印分区摘要与未迁移项（零写入）；--cwd 给出项目级配置所在目录（缺省进程 cwd）。',
-      '      凭据值绝不进入产物：只保留字段名与「需在 DSH 补录」的引用名。',
-      '      退出码：转换出分区 → 0；未知来源 / 没有可导入内容 / 自检失败 → 1。',
-      '  dsh-config-manager web [--port <n>] [--no-open] [--home <dir>] [--data-root <dir>]',
-      '                        [--idle-timeout <分钟>]',
-      '      启动离线只读救急台（本机网页）：实例心跳 / SAFE MODE / 残留锁 / 快照 / 备份产物',
-      '      （可一键自检）/ 磁盘占用 / 会话体检，全部只读 / offline read-only rescue console',
-      '      只绑 127.0.0.1，端口缺省 0（内核分配）；启动后打印带一次性 token 的 URL 并打开浏览器。',
-      '      Ctrl+C 或空闲超时即退出；等价简写：dcm web',
-      '  dsh-config-manager sessions list   [--home <dir>] [--json]        # 只读：列出本机会话',
-'  dsh-config-manager sessions doctor [--home <dir>] [--json]        # 只读：体检并给处置建议',
-'  dsh-config-manager sessions repair [--home <dir>] [--apply] [--keep <dir>] [--map old=new]...',
-      '      离线修复会话日志布局（DSH 已起不来时的唯一通道）/ offline session layout repair',
-      '      按每条会话 header 的 cwd 把目录归位到 projectKeyOf(cwd)；缺省只报告，--fix 才落盘。',
-      '      --map 用于跨机恢复：old=new 前缀映射会先改写会话日志第 1 帧 header（其余帧逐字节保留）。',
-      '      重复 id（同一会话出现在多个 projectKey 目录）只在 --keep <目录> 点名保留谁时，',
-      '      才把其它副本移进 sessions/.cm-repair-quarantine-<时间戳>/（只搬不删）。',
-      '      Exit code: dry-run 恒 0；--fix 有失败/冲突/回滚 → 1。',
-      '  dsh-config-manager help',
-      '      显示全部命令与说明 / show all commands',
-      '',
-      '选项 / Options:',
-      '  --data-dir <dir>   快照数据目录（缺省 $DSH_HOME/dsh-config-manager/snapshots；verify/backup',
-      '                     下为导出目录；recover-stale-lock 用它定位环境锁所在的数据目录）',
-      '  --data-root <dir>  插件数据根 dataDir（宿主 config.dataDir；SAFE MODE / 环境锁 / journal 所在根）',
-      '                     缺省 $DSH_HOME/dsh-config-manager。插件配置了自定义 dataDir 时，破坏性命令',
-      '                     （restore / reinstall）必须显式传它，否则安全门只按候选位置保守检查。',
-      '  --id <uuid>        目标快照 id（缺省取最近一个非 rolled-back 快照）',
-      '  --dry-run          只打印计划，不执行 / print plan only',
-      '  --profile <name>   管理的 DSH profile（缺省 web）',
-      '  --settings <path>  覆盖 settings 文件路径',
-      '  --version <v>      要安装的 DSH 版本（缺省 latest）',
-      '  --yes              非交互：全选并跳过二次确认 / non-interactive',
-      '  --list             只列出 reinstall 可选清理项 / list selectable items only',
-      '  --wipe-config      一并勾选数据类（settings/plugins/data）/ also wipe ~/.dsh data',
-      '  --json             verify 输出机器可读 JSON / machine-readable output',
-      '  --sections <list>  backup 分区白名单（逗号分隔；缺省 ' + DEFAULT_BACKUP_SECTIONS.join(',') + '）',
-      '  --out <path>       backup / import 输出 ZIP 路径（缺省自动命名，绝不覆盖既有文件）',
-      '  --from <source>    import 的外部来源 id（30 个之一；缺省报错）',
-      '  --cwd <dir>        import 的项目目录（契约 §8.2 的项目级配置；缺省进程 cwd）',
-      '  --home <dir>       sessions repair / web 的 DSH home（缺省 $DSH_HOME，即 ~/.dsh）',
-      '  --port <n>         web：监听端口（缺省 0 = 内核随机分配；恒只绑 127.0.0.1）',
-      '  --no-open          web：启动后不自动打开浏览器 / do not open the browser',
-      '  --idle-timeout <m> web：空闲多少分钟自动退出（0 = 不自动退出；缺省 30）',
-      '  --fix / --apply    sessions repair 真的落盘（缺省只打印计划；写前会检查 DSH 是否在跑）',
-      '  --keep <dir>       重复 id 时保留哪一份会话目录（其余移入隔离目录，不删除）',
-      '  --map old=new      路径前缀映射（可重复；命中即改写会话首帧 cwd）',
-    ].join('\n'),
-  );
+  io.log(renderOverview(CLI_EXPORTER_VERSION).join('\n'));
 }
+
+/**
+ * 打印单命令详情页（`dcm <命令> --help` / `dcm help <命令>`）。
+ *
+ * 返回 false 表示不认识该命令名（调用方决定报错文案）；成功时已写完输出。
+ * 文案与退出码都在 ./help.ts，本函数只做「渲染 → 输出」。
+ */
+export function printCommandUsage(name: string, io: CliIo = defaultIo): boolean {
+  const lines = renderCommandHelp(name, CLI_EXPORTER_VERSION);
+  if (lines === null) return false;
+  io.log(lines.join('\n'));
+  return true;
+}
+
 
 function printSnapshots(metas: SnapshotMeta[], io: CliIo): void {
   if (metas.length === 0) {
@@ -977,7 +917,17 @@ export async function runCli(
   }
   const { options } = parsed;
   if (options.command === 'help') {
-    printUsage(io);
+    const topic = options.helpTopic;
+    if (topic === undefined) {
+      printUsage(io);
+      return 0;
+    }
+    // 认不出的主题不静默回落：先说出来，再给速查页（否则用户以为拼错的名字是有效的）
+    if (!printCommandUsage(topic, io)) {
+      io.error('未知命令 / unknown command: ' + topic);
+      printUsage(io);
+      return 1;
+    }
     return 0;
   }
   if (options.command === 'reinstall') {

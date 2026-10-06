@@ -8,8 +8,9 @@
 
 ## 🗂️ 结构与分层
 ```
-src/cli/      离线 CLI（bin: `dsh-config-manager` / **`dcm`**）：snapshots/restore/reinstall/verify/backup/sessions/**web**
+src/cli/      离线 CLI（bin: `dsh-config-manager` / **`dcm`**）：snapshots/restore/reinstall/verify/backup/**import**/sessions/**web**
               actions.ts = **动作层**（只读判定 + 写动作；CLI 与救急台共用同一实现，返回结构不打印）
+              help.ts = **帮助文案单一事实源**（速查页按风险分组 + 每命令详情页；index.ts 只解析与执行，不再散写文案）
               web/ = 离线救急台（node:http + 复用 routes/kit.ts 围栏/方法白名单/错误映射；页面服务端直出）
 src/index.ts  host 入口(name='config-manager'，apply() 装配 + 保留的 7 条路由)
 src/routes/   路由 kit(单入口 endpoint()：loopback 围栏 + 方法白名单 + readJsonBody/requireJsonObject + 统一错误映射

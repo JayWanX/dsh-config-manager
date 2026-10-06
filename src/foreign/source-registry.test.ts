@@ -161,24 +161,21 @@ for (const snap of HARDCODED_SNAPSHOTS) {
 }
 
 test('清单同步：CLI help 文本里的来源清单与事实源一致（人肉同步的老大难）', async () => {
-  const text = await readSource('src/cli/index.ts');
-  const line = text.split(NL).find((l) => l.includes('claude-code') && l.includes('antigravity'));
-  assert.ok(line !== undefined, 'CLI help 里必须有一行列出全部来源（找不到 = 被删了，请补回并同步事实源）');
-  // 形态 = `来源 source：a | b | c`：先切掉标签（取**最后一个**全角/半角冒号之后），再按竖线切
-  const body = (line ?? '').replace(/^.*[：:]/u, '');
-  // 每个 token 还要剥掉包围它的 JS 字符串字面量标点（行尾的 `',`）。
-  // **必须保留数字**：来源 id 允许数字（`dsh4`），只保留 [a-z-] 会把它静默剥成 `dsh`，
-  // 于是这条断言对含数字的 id **恒红**（2026-10-05 档 B 加 dsh4 时实测踩到）。
-  const listed = body
-    .split('|')
-    .map((s) => s.replace(/[^a-z0-9-]/g, ''))
-    .filter((s) => s !== '');
+  // 2026-10 help 整理后，来源清单从 src/cli/index.ts 的单行文本搬到了 src/cli/help.ts 的
+  // `IMPORT_SOURCE_IDS` 数组字面量（速查页/详情页都从它渲染）。断言随之改成两条：
+  // ① 常量与事实源逐项一致；② 它**真的渲染进了** `dcm import --help`（常量躺在源码里不算数）。
+  const { IMPORT_SOURCE_IDS, renderCommandHelp } = await import('../../src/cli/help.ts');
   assert.deepEqual(
-    listed,
+    [...IMPORT_SOURCE_IDS],
     EXPECTED,
-    'CLI --help 的来源清单与事实源不一致：用户看到的可用来源与本机能力分叉（漏配即红）。' + NL +
-    '  实际：' + listed.join(' | ') + NL + '  应为：' + EXPECTED.join(' | '),
+    'CLI help 的来源清单与事实源不一致：用户看到的可用来源与本机能力分叉（漏配即红）。' + NL +
+    '  实际：' + IMPORT_SOURCE_IDS.join(' | ') + NL + '  应为：' + EXPECTED.join(' | '),
   );
+  const lines = renderCommandHelp('import', '0.0.0-test');
+  assert.ok(lines !== null, 'dcm import --help 的详情页必须存在');
+  const text = lines!.join(NL);
+  const missing = EXPECTED.filter((id) => !text.includes(id));
+  assert.deepEqual(missing, [], 'dcm import --help 必须列出全部来源，缺：' + missing.join(' | '));
 });
 
 /* ---------------- 7. 覆盖度自检（护栏自己的护栏） ---------------- */

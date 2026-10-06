@@ -419,22 +419,40 @@ npm install -g dsh-config-manager@latest --omit=peer
 
 > ⚠️ Installing/updating the plugin (`dsh plugin --profile web add ...`) only enables the GUI — it does **not** create the `dsh-config-manager` command. Run the install command above, then any of the commands below.
 
-All commands (also shown by `dsh-config-manager help`):
+All commands (also shown by `dsh-config-manager help`, which groups them by risk; `dsh-config-manager <command> --help` prints one command's options, exit codes and examples):
 
 ```text
-dsh-config-manager help                                        # list all commands & options
+# Rescue console (local web page — the least typing)
+dsh-config-manager web [--port <n>] [--no-open] [--home <dir>]
+                       [--data-root <dir>] [--idle-timeout <min>]
+
+# Inspect (never touches your config)
 dsh-config-manager snapshots [--data-dir <dir>]                # list snapshots (newest first)
-dsh-config-manager restore [--id <id>] [--dry-run]
-                           [--profile <name>] [--settings <path>]
-dsh-config-manager reinstall [--version <v>] [--yes] [--list]
-                             [--wipe-config] [--dry-run]       # one-click reinstall of DSH itself
-dsh-config-manager recover-stale-lock [--data-dir <dir>]       # clear a leftover lock (see below)
-dsh-config-manager verify [--id <file|path>] [--json]         # read-only check of backup ZIPs
-                          [--data-dir <dir>]
-dsh-config-manager backup [--sections <a,b,c>] [--out <path>] # offline file-level backup
+dsh-config-manager verify [<file|path>] [--json]               # read-only check of backup ZIPs
+                           [--data-dir <dir>]
+dsh-config-manager sessions list   [--home <dir>] [--json]     # list local sessions
+dsh-config-manager sessions doctor [--home <dir>] [--json]     # health check + advice
+
+# Backup & migrate (only writes new files)
+dsh-config-manager backup [--sections <a,b,c>] [--out <path>]  # offline file-level backup
                           [--dry-run] [--data-dir <dir>]
-dsh-config-manager sessions repair [--home <dir>] [--fix]     # offline session layout repair
+dsh-config-manager import --from <source> [--dry-run]          # foreign agent config → bundle ZIP
+                           [--out <path>] [--cwd <dir>] [--data-dir <dir>]
+
+# Repair (writes to this machine — preview with --dry-run first)
+dsh-config-manager restore [--id <id>] [--dry-run]             # roll back to a pre-import snapshot
+                           [--data-dir <dir>] [--data-root <dir>]
+                           [--profile <name>] [--settings <path>]
+dsh-config-manager sessions repair [--home <dir>] [--fix]      # offline session layout repair
                                    [--keep <dir>] [--map old=new]...
+dsh-config-manager recover-stale-lock [--data-dir <dir>]       # clear a leftover lock (see below)
+
+# Dangerous (changes your DSH install / may wipe data)
+dsh-config-manager reinstall [--version <v>] [--yes] [--list]
+                             [--wipe-config] [--dry-run] [--data-root <dir>]
+
+# Help
+dsh-config-manager help [command]                              # overview / one command's detail
 ```
 
 **`reinstall` — rescue when DSH is broken.** It reinstalls the `@deepseek-ai/dsh` launcher across platforms (uses the right command per OS: PowerShell on Windows, bash on Unix). By default it reinstalls the launcher + clears global caches; interactively it asks which **dangerous** clean-up items to include (settings / plugins / session data & credentials) — those are **not** selected by default, and any destructive choice requires a second confirmation by typing `YES` before anything runs. Before wiping any `~/.dsh` data it makes an emergency backup at `.reinstall-backup` (the `snapshots/` folder is deliberately never touched).

@@ -56,7 +56,7 @@
 | G-21 | 路径映射页把内部枚举当文案渲染：源路径「永远是 missing」（真机反馈） | ✅ 已修复（改用真实判定，见 §1） |
 | G-22 | 加密备份里的凭据「有值却不进计划」+ 本机已配置就被跳过（真机反馈） | ✅ 已修复（判据「值的有无」优先于本机状态，见 §1） |
 | G-23 | 会话日志格式版本跨 DSH 版本**单向**不兼容，且 DSH 对读不出的格式**静默跳过**（不报错、不在工作区列表里 → 「对话消失」） | ✅ 已修复（导入/同步分析期体检 + 档案页版本可见 + **导入/同步的三选一处置开关**，见 §1） |
-| G-24 | 本机**存量**会话损坏（重放族 / 撕裂帧 / 位置错位 / 缺工作区 / 缺父对话）此前既无诊断入口、也无安全修复通道 | ✅ 已修复（只读体检路由 + 事故恢复面板 + 离线 CLI 安全修复 + **应用内零损失修复（T8，重放重复行）**，见 §1） |
+| G-24 | 本机**存量**会话损坏（重放族 / 撕裂帧 / 位置错位 / 缺工作区 / 缺父对话）此前既无诊断入口、也无安全修复通道 | ✅ 已修复（只读体检路由 + 事故恢复面板 + 离线 CLI 安全修复 + **应用内零损失修复（T8，重放重复行）**）；**M1 加固（2026-10-06）**：v0 打包行误判修复 + 真 codec 复验门 + 只读检测扩展 + 有损预览可见 + 引用闭包闸门 + CLI/救急台 verify 三态（**剩余未做项见 §3「G-24 剩余未做项」**，见 §1） |
 | G-25 | `file:` 指向**已打包 tarball** 的本地插件被打包环节当目录 spawn（`spawn ENOTDIR`），代码静默不进备份而备份仍报成功（issue #57） | ✅ 已修复（stat 判形态 → 文件直读收编 / 目录走 npm pack / 判不出回落并告警，见 §1） |
 | G-26 | 包缺少 git 安装所需的构建入口：`dsh plugin add git+https://...` 必失败（issue #58） | ✅ 已修复（补 `scripts.prepare` + 三条 G-21 打包门禁；**pnpm 11 的 `allowBuilds` 仍须用户逐字授权一次**，见 §3.3） |
 | G-27 | 加密同步快照 >64 MiB 时远端列表恒为空、拉取报「快照损坏」、自动同步恒 `upToDate`，而 push 报成功（issue #59） | ✅ 已修复（读取侧改用自产载荷专用上限 + 读不出来的一律回传可见，见 §1） |
@@ -258,6 +258,8 @@
 | 不变量（未放宽） | ① **应用内只做能从字节证明的修复、且必须过写入门**（T8/T9：core 仍不 import 会话字节工具；写路径只经 `utils/session-repair-service.ts` 的三道写入门 + 预览指纹；有损截断必须显式放行；证明不了怎么修的类别一律零写入）；② **绝不猜**：读不到 = 事实缺省，未做深度校验一律记 `verified: false` 并在界面/CLI 里**显示「未检查 N 条」**（把「没检查」说成「没问题」是本轮明确要消灭的谎报）；③ **检测 ≠ 发明**：缺 message id / 悬空 tool-call / settlement 非法这类需要 DSH codec 才能判定的**本轮不产出结论**（没有真凭实据就不下结论）；④ 修不了的走 `export`（转写保内容）与 `quarantine`（移出 DSH 视野，**不删除**）——本轮 CLI 保留了既有的重复 id 隔离目录语义（`.cm-repair-quarantine-<时间戳>/`）。 |
 | 验证方式 | `src/core/session-health.test.ts`（13 例：每类问题一条 + 严重级排序 + 「读不到一律 unknown」+ 未验证不下结论）；`src/utils/session-health-scan.test.ts`（10 例：结构档四形态 / 行档四类 / 限额与 `untested` 计数 / 非 projectKey 目录跳过 / **只读**：扫描前后字节与 mtime 逐字节不变）；`src/ui/session-inventory-view.test.ts`（7 例：徽章语义、摘要口径、空态/截断/相位、体积格式化、离线命令恒三条）；`src/utils/session-log-repair.test.ts`（7 例：自我校验四形态、重复行判定、预览零写入、**apply 全序列**（备份=原件、原子换入、写后复验、临时文件清理）、**拒绝路径零写入零备份**、备份名冲突加序号）；`src/routes/session-format.test.ts`（处置解析优先级与损坏配置回退）。 |
 | 生态对照 | 只读体检的检查清单采用 `dsh-backup`「零依赖结构体检、明确不修复」的路线；「深度解码作为可选增强」采用 `dsh-chatsync` 的路线（能力探测 + 失败即回退「未验证」）；安全姿态照抄 `dsh-session-rescue` / `dsh-session-surgeon`（先备份、原子换入、要求先关 DSH）。**本轮只实现「能从字节证明」的那部分，DSH codec 深度解码留作后续**（见下方「后续」）。 |
+| M1 落地（2026-10-06，本轮） | ① **v0 打包行误判修复**：真机 1194 份日志里 **407 份**被判「需要损失性修复」，按 `allowLossy` 计划会丢 **865,098/876,680 行 = 98.7%**；成因是打包行（`text-chunks`/`reasoning-chunks`/`tool-call-chunks`）**没有 `seq` 成员**（官方 `decodePackedRun`：`firstSeq = seq0`、`eventCount = payload.length`），旧判据跳过它却保留 `lastSeq`；判据改为**两层**（形状不可判定 → opaque/refuse；形状可判定但 `seq0` 不衔接 → 真实 seq 空洞，与标量行同待遇），并加**帧粒度规则**（`≤200 行/帧` 只约束重编码帧；未触及帧逐字节复用，真机有 **226 个事件帧 >200 行、最大 8654 行**）。复核脚本 `.tmp/probe-session-repair.mjs`。 ② **真 codec 复验门**（`src/utils/session-verify.ts`）：官方 `createSessionFormatCatalogWithChildren` + 逐行 `decodeRow` + `finish`；能力不可用 → `unavailable`（unverified）且绝不宣称成功；确定性失败 → 备份自动回滚；`unavailable` 不写成功台账、不触发回滚，但**仍写台账**以保可回滚。 ③ **只读检测扩展**：新增 `empty-tool-call-id` / `duplicate-tool-call-id` / `tool-result-id-mismatch`，并让 `missing-message-id` / `dangling-tool-call` 真正产出；严重级按**代际 + 载体**分级（v4 与 pre-v4 下缺 message id、空 tool-call id、重复通告同一 advertised tool call 都被**前台读盘管线拒读** → `unloadable`；版本读不出 → `nextRequestFails` + `codec-uncalibrated`）；**只报不修**。 ④ **有损计划预览可见**：`lossy-required` 必须给出真实 `truncate-tail` 条目与丢弃行数（旧实现给空动作清单）。 ⑤ **引用闭包闸门**：closer-drop 候选被保留行引用 → 不计划该动作；截断造成「引用目标由存在变不存在」→ 在 planner 内整体 refuse。 ⑥ **CLI / 离线救急台的 verify 三态**（现役可读 / 迁移链可还原 / 未验证）进用户可见输出。 |
+| M1 口径（不得夸大，同批证据） | ① **修掉 packed 误判 ≠ 这些 v0 日志变得可读**：真 codec 对 407 份复验 = **405 失败 / 2 通过**；失败原因是 v0→v1 迁移拒绝（`summary requires notice form` / `unsupported descriptor version 2` / `unclassified message source`），与 seq 无关；那 2 份的正确表述是「**可被迁移链还原**」，不是「DSH 能直接读」（官方 `resolveCurrentLog` 对 `sourceVersion < SESSION_FORMAT_VERSION` 返回 `undefined`）。 ② 其中 `session-66add64c-…`（1160 行，**真 codec 可读**）正是会被旧有损路径毁掉的那一份（现状只留 **23 行**、丢 **1137 行**）—— 本轮最强动机。 ③ **收益为零的三件事要如实说**：修复执行覆盖 **0**（真机修复计划恒为 `nothing-to-fix`）；新增只读检测真机命中 **0**（120 个静止单元行档全扫 + 实时抽样 100 单元）；真 codec 门真机覆盖有限（本机最新代际 < v4 占 **80.67%**）。 ④ 数字口径（2026-10-06 快照）：units **1195**（日志 **1194**）、最新代际 {v0: **442** / v3: **522** / v4: **231**}、`KNOWN_SESSION_EVENT_TYPES.size = **59**`、`SESSION_FORMAT_VERSION = **4**`。 |
 | 后续（未做，如实登记） | ⓪ **已落地（T8，2026-10）**：应用内修复「重放重复行」（见「修复位置」⑦）。以下仍未做：① DSH codec 深度校验（动态 import 已装 DSH 同树的 `@deepseek-ai/dsh-session-format-catalog`）——本轮的「行档」用零依赖方式覆盖了其中一部分，剩下的类（缺 message id / 悬空 tool-call / settlement 非法）需要真 codec；② header 重建（首帧不可读时按目录名 + 最早可解事件重建）——设计稿 §10.2 列为「低损失」，但**重建 header 等于发明数据**，需要先确定不会与「绝不猜」冲突再落地；③ CLI `sessions export`（转写 Markdown）与 `quarantine` 动作的网络化（目前 quarantine 只在重复 id 场景生效）；④ **同步通道的 UI 三选一**：一键同步的两条路径已**服务端**支持三态并显式传 `guide`（预览发生时尚无决策界面），但同步确认弹窗里还没有三选一控件。 |
 
 ### G-25 `file:*.tgz` 的本地插件在导出打包时被跳过（issue #57）
@@ -540,6 +542,22 @@
 | 影响面 | ② 的暴露面 = 「第三方 agent 配置 / 用户设置里恰好用大写前缀写密钥」，概率低但**一旦发生即明文落盘**；① 的暴露面更小（纯字母小写 token）。两者都用 `refs`/`skipped` 为空证明**不可见**（用户侧零提示）。 |
 | 验证方式 | `node --test src/security/secret-scanner.test.ts`（`t72-a` 大小写变体命中 / `t72-b` 规范形态不变 / `t72-c` 过剥控制 / `t72-d` 厂商前缀边界钉事实）；真实管道：`node --test src/foreign/mcp-value-shape.test.ts` 的 `t72-e`（env/headers/args 三通道零残留 + 引用名/码可见）。 |
 | 证据 | 来源 = `outputs/bug-audit/review-foreign-envhdr/REVIEW-t58-t40-report.md`（t58 §1/§2 的 payload 原文与谓词对照）+ `t58-verify-probe.mjs` / `t58-pipeline-check.mjs`；修复与本条登记 = t72。 |
+
+### G-24 剩余未做项（M1 复核，2026-10-06）
+
+> 本轮（M1）落地清单与口径见 §1 的「M1 落地」「M1 口径」两行。以下是**仍未做**的部分，逐条登记：
+
+| 项 | 内容 | 现状 |
+|---|---|---|
+| ① | **header 重建**（首帧不可读时按目录名 + 最早可解事件重建）——设计稿 §10.2 视为「低损失」，但**重建 header 等于发明数据**，需先确定不与「绝不猜」冲突 | ❌ 未做 |
+| ② | **跨版本转码**（把 pre-v4 代际真正升级成当前代际并发布新 generation） | ❌ 未做（真 codec 门只**验证**，不改写代际） |
+| ③ | **issue code 的 UI 本地化**：Panel 仍原样渲染机器 code（`src/client/recovery/RecoveryPanel.tsx` 的 `issueCodes.join(' · ')`）；注意 **issue `detail` 不进 UI 模型**（`SessionHealthDisplayRow` 只有 `issueCodes`） | ❌ 未做 |
+| ④ | **磁盘级恢复**（会话目录/索引层面的重建与修复） | ❌ 未做 |
+| ⑤ | **真 codec 门是低覆盖护栏**：官方 catalog 只在 DSH 安装树（桌面端在 `app.asar` 内），磁盘副本可能是旧代际且没有 children 版 API；本机 1195 units 中最新代际 v0=**442** / v3=**522** / v4=**231**（< v4 占 **80.67%**）。细化：默认解析下 **v0 与 v4 均 `unavailable`**（v4 因 catalog.currentVersion 3 ≠ 4），**v3 是例外**（`header.version === 该 catalog 的 currentVersion`，静态版按 API 闸门放行并 `verified`）；**asar 抽取未作为产品路径** | ⚠️ 已知（护栏而非全库体检） |
+| ⑥ | **React 面板仍把 `unavailable` 的修复呈现为成功**，且**未映射** `verify-failed` / `target-changed` 两个新 reason（CLI 与离线救急台已如实标注三态） | ❌ 未做 |
+| ⑦ | （后续建议，未实现）体检按**文件名**取「最新一份日志」，而官方 `resolveCurrentLog` 对 pre-v4 视为「没有当前日志」——建议把「本机 DSH 不直接读该代际（pre-v4，需迁移）」做成**可见告警**，否则体检会对 DSH 根本不会打开的代际下结论 | 💡 建议 |
+| ⑧ | **新增检测的 client 渲染未验证**（契约明确本轮不改渲染路径；新码会以英文 token 上屏） | ❌ 未做 |
+| ⑨ | **两条低危观察（只登记，不改代码）**：<br>· **空事件日志（仅 header）**当前返回 `verification-refused` 而非 `nothing-to-fix`（真机无此形状）。<br>· **`buildFramePlan` 的 `reliable` 兜底按构造不可达**（防御性代码）。<br>· 另两条**刻意更宽的检测判据**：结果缺 `surfaceOp="append"`、或仅有 `tool/call` 行而无内容块声明 —— 全语料 1201 份实测 **0 命中**（89,489 条 `tool/result` 中 381 条非 append，但同一次遍历里官方 pending 与实现判据的 dangling 计数 **2 vs 2、delta 0**；`tool/call` 的 callId **89110 条全部有内容块声明**），登记为已知差异，**改窄需先有真机证据** | ⚠️ 登记 |
 
 ---
 ## 4. 不是缺口、但已知的有损点

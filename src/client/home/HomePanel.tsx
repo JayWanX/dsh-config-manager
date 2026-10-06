@@ -6,10 +6,10 @@
  *      （指标段：备份文件 / 安全快照 / 定时备份 / 远程同步；段可点击直达 ——
  *       「定时备份」**不跳页**，直接开设置弹窗，因为设置卡就在下面）
  *   2. 动作工具栏：立即备份 / 手动导出 / 导入 / 从其它 agent 导入 / 一键同步
- *   3. 备份位置卡（路径 + 体积 / 快照保留 / 定时备份 / 下次或上次）；2026-10-06 用户要求保留在首页
- *   4. 最近活动表（**首页最后一个数据块**：吃掉剩余高度、列表自身内滚）
+ *   3. 最近活动表（**首页最后一个数据块**：吃掉剩余高度、列表自身内滚）
  *
- * **v3 移出首页**：分区构成卡（→ 导出流程的「本次将导出」构成卡 + 产物库行展开）。
+ * **v3 移出首页**：分区构成卡（→ 导出流程的「本次将导出」构成卡 + 产物库行展开）；
+ * 备份位置与配额（→「定时备份」设置弹窗内的位置小节，2026-10-06 用户要求首页不再常驻这张卡）。
  * 首页只回答「这台机器现在怎么样 + 我下一步做什么」，并由最近活动表填满剩余高度
  * （Canvas 纪律：不留底部空洞）。
  * 状态行**不重复**恢复待处理的提示 —— 全局 SAFE MODE 横幅已经承担（§4.4）。
@@ -120,17 +120,6 @@ function renderRelTime(ms: number, t: TranslateNS<'config-manager'>): string {
   return t('overview.time.day', { n: rt.n })
 }
 
-/** 定时间隔 → 字典文案（与 backupSchedule.interval.* 同源）。 */
-function intervalText(interval: BackupScheduleStatus['interval'], t: TranslateNS<'config-manager'>): string {
-  switch (interval) {
-    case '6h': return t('backupSchedule.interval.6h')
-    case '12h': return t('backupSchedule.interval.12h')
-    case '24h': return t('backupSchedule.interval.24h')
-    case '7d': return t('backupSchedule.interval.7d')
-    case 'custom': return t('backupSchedule.interval.custom')
-    default: return String(interval)
-  }
-}
 
 /** 下次定时备份估算（固定间隔 = 上次 + 间隔；custom = 下个周一时刻近似）。 */
 function nextRunText(schedule: BackupScheduleStatus, t: TranslateNS<'config-manager'>): string | null {
@@ -444,58 +433,7 @@ export function HomePanel({ api, syncApi, historyApi, t, syncT, openForeignImpor
         </Card>
       ) : (
         <>
-          {/* 3. 备份位置卡：路径行 + 四列网格（体积/配额/间隔/下次）。
-              2026-10-06 用户要求保留在首页（此前一度被移进「定时备份」设置弹窗）。 */}
-          {(backupDir !== null || scheduleStatus !== null) && (
-            <Card>
-              <div className={css.groupHeader}>
-                <span className={css.groupLabel}>{t('overview.location.title')}</span>
-              </div>
-              {backupDir !== null && (
-                <div className={`${css.infoRow} ${css.infoRowTight}`}>
-                  <span className={css.infoKey}>{t('overview.location.dir')}</span>
-                  <span className={css.infoValue}>
-                    <span className={css.mono} title={backupDir}>{midEllipsis(backupDir, 52)}</span>
-                    <CopyButton text={backupDir} label={t('overview.activity.copy')} t={t} />
-                  </span>
-                </div>
-              )}
-              <div className={css.factGrid}>
-                {totalSize !== null && (
-                  <div className={css.factCell}>
-                    <span className={css.factLabel}>{t('overview.location.totalSize')}</span>
-                    <span className={`${css.factValue} ${css.mono}`}>{formatBytes(totalSize)}</span>
-                  </div>
-                )}
-                <div className={css.factCell}>
-                  <span className={css.factLabel}>{t('overview.location.retention')}</span>
-                  <span className={`${css.factValue} ${css.mono}`}>
-                    {t('overview.location.retentionValue', {
-                      used: String(data.snapshots?.length ?? 0),
-                      limit: String(normalizeRetentionPolicy(scheduleStatus?.retention).keepLast),
-                    })}
-                  </span>
-                </div>
-                <div className={css.factCell}>
-                  <span className={css.factLabel}>{t('overview.location.schedule')}</span>
-                  <span className={css.factValue}>
-                    {scheduleStatus !== null && scheduleStatus.enabled ? intervalText(scheduleStatus.interval, t) : t('overview.location.scheduleOff')}
-                  </span>
-                </div>
-                <div className={css.factCell}>
-                  <span className={css.factLabel}>{scheduleStatus !== null && scheduleStatus.enabled && nextRun !== null ? t('overview.location.nextRun') : t('overview.location.lastRun')}</span>
-                  <span className={`${css.factValue} ${css.mono}`}>
-                    {scheduleStatus !== null && scheduleStatus.enabled && nextRun !== null
-                      ? nextRun
-                      : (scheduleStatus?.lastRunAt !== undefined
-                        ? renderRelTime(Date.parse(scheduleStatus.lastRunAt) || 0, t)
-                        : '—')}
-                  </span>
-                </div>
-              </div>
-            </Card>
-          )}
-          {/* 4. 最近活动表（**首页最后一个数据块**：吃掉剩余高度，列表自身内滚） */}
+          {/* 3. 最近活动表（**首页最后一个数据块**：吃掉剩余高度，列表自身内滚） */}
           <Card className={`${css.activityCard} ${css.fillCard}`}>
             <div className={css.activityHeader}>
               <span className={css.activityTitle}>{t('overview.activity.title')}</span>
@@ -544,6 +482,47 @@ export function HomePanel({ api, syncApi, historyApi, t, syncT, openForeignImpor
           onClose={() => { setScheduleOpen(false) }}
         />
         <Modal.Body scroll>
+          {/* 「定时备份」设置弹窗里的位置与配额：首页不再常驻这张卡（2026-10-06 用户要求移除），
+              但「这台机器的备份放在哪、有多少、保留几个」仍要能看到 —— 放在设置弹窗里最贴它的语义。 */}
+          <div className={css.groupHeader}>
+            <span className={css.groupLabel}>{t('overview.location.title')}</span>
+          </div>
+          <div className={css.factGrid}>
+            {backupDir !== null && (
+              <div className={css.factCell}>
+                <span className={css.factLabel}>{t('overview.location.dir')}</span>
+                <span className={`${css.factValue} ${css.mono}`} title={backupDir}>
+                  {midEllipsis(backupDir, 52)}
+                  <CopyButton text={backupDir} label={t('overview.activity.copy')} t={t} />
+                </span>
+              </div>
+            )}
+            {totalSize !== null && (
+              <div className={css.factCell}>
+                <span className={css.factLabel}>{t('overview.location.totalSize')}</span>
+                <span className={`${css.factValue} ${css.mono}`}>{formatBytes(totalSize)}</span>
+              </div>
+            )}
+            <div className={css.factCell}>
+              <span className={css.factLabel}>{t('overview.location.retention')}</span>
+              <span className={`${css.factValue} ${css.mono}`}>
+                {t('overview.location.retentionValue', {
+                  used: String(data.snapshots?.length ?? 0),
+                  limit: String(normalizeRetentionPolicy(scheduleStatus?.retention).keepLast),
+                })}
+              </span>
+            </div>
+            <div className={css.factCell}>
+              <span className={css.factLabel}>{scheduleStatus !== null && scheduleStatus.enabled && nextRun !== null ? t('overview.location.nextRun') : t('overview.location.lastRun')}</span>
+              <span className={`${css.factValue} ${css.mono}`}>
+                {scheduleStatus !== null && scheduleStatus.enabled && nextRun !== null
+                  ? nextRun
+                  : (scheduleStatus?.lastRunAt !== undefined
+                    ? renderRelTime(Date.parse(scheduleStatus.lastRunAt) || 0, t)
+                    : '—')}
+              </span>
+            </div>
+          </div>
           <BackupScheduleCard
             api={api}
             t={t}

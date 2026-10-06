@@ -2824,27 +2824,6 @@
   margin-bottom: 10px;
 }
 
-.infoRow {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  min-width: 0;
-  font-size: 12px;
-  padding: 2px 0;
-}
-
-/* 备份位置卡的目录行与下方事实网格之间的紧凑间距（原先写在内联 style 里，v3 收进类）。 */
-.infoRowTight {
-  margin-bottom: 4px;
-}
-
-.infoKey {
-  flex: none;
-  width: 76px;
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 11px;
-}
-
 .infoValue {
   flex: 1 1 auto;
   min-width: 0;

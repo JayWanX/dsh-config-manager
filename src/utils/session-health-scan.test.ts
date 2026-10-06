@@ -381,6 +381,9 @@ test('T4 行档 ③：已关闭 step 的悬空 tool/call → unloadable；尾部
   const emptyCallClosed = t4Clone(t4Rows());
   emptyCallClosed.splice(T4_RESULT, 1);
   emptyCallClosed[T4_CALL]!.data.callId = '';
+  // 内容块的 id 也必须置空：T18 起「只由 assistant 内容块声明、没有结果、step 已闭合」本身就是悬空，
+  // 若这里仍留着合法的 c1，这条样本就会同时（正确地）报出 dangling，污染本断言。
+  emptyCallClosed[T4_ASSISTANT]!.data.message.content[1].id = '';
   const paired = t4Clone(t4Rows());
   const result = await t4Scan([
     { id: 'dangling', header: T4_V4, rows: dangling },
@@ -394,6 +397,44 @@ test('T4 行档 ③：已关闭 step 的悬空 tool/call → unloadable；尾部
   assert.deepEqual(t4Codes(t4Row(result, 'open-tail')), [], '尾部未闭合的 step 是正常崩溃形状（引擎会补 closer），不得报');
   assert.deepEqual(t4Codes(t4Row(result, 'empty-call-closed')), ['empty-tool-call-id'], '空 id 的 call 只进 ②，不得同时进 dangling');
   assert.equal(t4Codes(t4Row(result, 'paired')).includes('dangling-tool-call'), false, '反例：有配对 tool/result 不报');
+});
+
+test('T18（W3-F1）：只由 assistant 内容块声明的悬空调用 —— step 已闭合要报、尾部未闭合不报', { skip: !CAPABLE }, async () => {
+  // block-only：删掉 tool/call 行与 tool/result，只留 assistant/message 内容块里的 c1
+  const blockOnlyClosed = t4Clone(t4Rows());
+  blockOnlyClosed.splice(T4_RESULT, 1);
+  blockOnlyClosed.splice(T4_CALL, 1);
+  const blockOnlyByTurn = t4Clone(blockOnlyClosed);
+  blockOnlyByTurn.splice(blockOnlyByTurn.findIndex((r) => r.type === 'step/end'), 1); // 只剩 turn/end
+  const blockOnlyOpenTail = t4Clone(blockOnlyClosed);
+  blockOnlyOpenTail.splice(blockOnlyOpenTail.length - 2, 2); // 去掉 step/end + turn/end：尾部 step 仍开着
+  const result = await t4Scan([
+    { id: 'block-only-closed', header: T4_V4, rows: blockOnlyClosed },
+    { id: 'block-only-turn-close', header: T4_V4, rows: blockOnlyByTurn },
+    { id: 'block-only-open-tail', header: T4_V4, rows: blockOnlyOpenTail },
+  ]);
+  for (const id of ['block-only-closed', 'block-only-turn-close']) {
+    const row = t4Row(result, id);
+    assert.deepEqual(t4Codes(row), ['dangling-tool-call'], id);
+    assert.equal(row.severity, 'unloadable', id);
+    assert.equal(row.issues[0]?.detail, '1 unresolved', id);
+  }
+  assert.deepEqual(
+    t4Codes(t4Row(result, 'block-only-open-tail')),
+    [],
+    '尾部 step 仍开着 = 正常崩溃形状（引擎补 closer），不得报',
+  );
+});
+
+test('T18（W3-F1）：既有 tool/call 行 + assistant 内容块同 callId 只报一次（不双报）', { skip: !CAPABLE }, async () => {
+  // 行与块都声明 c1、都没有结果、step 已闭合：共用一个 calls 队列 → 只应计 1 处悬空
+  const bothCarriers = t4Clone(t4Rows());
+  bothCarriers.splice(T4_RESULT, 1);
+  const result = await t4Scan([{ id: 'both-carriers', header: T4_V4, rows: bothCarriers }]);
+  const row = t4Row(result, 'both-carriers');
+  assert.deepEqual(t4Codes(row), ['dangling-tool-call']);
+  assert.equal(row.severity, 'unloadable');
+  assert.equal(row.issues[0]?.detail, '1 unresolved', '同一 callId 的两个载体只算一次');
 });
 
 test('T4 行档 ③：turn/end 也关闭其回合里仍开着的 step（漏 step/end 的崩溃恢复形状）', { skip: !CAPABLE }, async () => {

@@ -19,7 +19,10 @@
  * 工具生命周期判定（T4）全部**只从行文本证明**，不引入 DSH codec：
  *  ① 缺 message id（user/message 的 data.id、assistant/message 与 tool/result 的 data.message.id）；
  *  ② 空 tool-call id（tool/call.callId 或 assistant/message 内容里 tool-call 块的 id）；
- *  ③ 已关闭 step 里的悬空 tool-call（尾部仍开着的 step 是正常崩溃形状，不报）；
+ *  ③ 已关闭 step 里的悬空 tool-call —— **两种声明载体合并判定**：tool/call 行，以及只由
+ *     assistant/message 内容块（type:`tool-call`）声明、没有对应 tool/call 行的调用
+ *     （官方 ToolCallRecovery 的待恢复集合正是以 assistant 内容块为入口）；尾部仍开着的 step
+ *     是正常崩溃形状，不报；
  *  ④ 同一步内重复通告的 tool-call id；
  *  ⑤ tool/result 的 toolCallId 与 message.source.callId 不配对。
  *
@@ -233,8 +236,13 @@ interface LifecycleScan {
   openSteps: Set<string>;
   /** 已关闭的 step（step/end，或它所属回合的 turn/end） */
   closedSteps: Set<string>;
-  /** 已通告的 tool/call（非空 id 且能定位到 step） */
+  /**
+   * 已通告的调用（非空 id 且能定位到 step）。**两种载体共用一个队列**：tool/call 行与
+   * assistant/message 内容块；同一个 callId 两者都有时只入队一次（否则悬空会双报）。
+   */
   calls: { key: string; callId: string }[];
+  /** step 键 → 已入队的 callId（入队去重；嵌套 Map 避免拼接分隔符带来的碰撞面） */
+  queuedCalls: Map<string, Set<string>>;
   /** 出现过的 tool/result 配对 id（按 message.source.callId） */
   resultIds: Set<string>;
   /**
@@ -258,6 +266,7 @@ function createLifecycleScan(): LifecycleScan {
     openSteps: new Set<string>(),
     closedSteps: new Set<string>(),
     calls: [],
+    queuedCalls: new Map(),
     resultIds: new Set<string>(),
     declarations: new Map(),
   };
@@ -281,6 +290,23 @@ function bumpDeclaration(scan: LifecycleScan, key: string, callId: string, kind:
   const counts = perStep.get(callId) ?? { blocks: 0, rows: 0 };
   counts[kind] += 1;
   perStep.set(callId, counts);
+}
+
+/**
+ * 把一个调用放进悬空判定队列（去重）。
+ *
+ * 两种声明载体都走这里：`tool/call` 行与 `assistant/message` 内容块。健康日志里同一个 callId
+ * 两个载体都有，不去重就会把**同一次调用**数成两处悬空。
+ */
+function queueCall(scan: LifecycleScan, key: string, callId: string): void {
+  let ids = scan.queuedCalls.get(key);
+  if (ids === undefined) {
+    ids = new Set<string>();
+    scan.queuedCalls.set(key, ids);
+  }
+  if (ids.has(callId)) return;
+  ids.add(callId);
+  scan.calls.push({ key, callId });
 }
 
 /** 应用一行（顺序即日志顺序；边界按 step/start→step/end、turn/start→turn/end 收窄）。 */
@@ -311,7 +337,7 @@ function applyLifecycleRow(scan: LifecycleScan, row: LifecycleRow): void {
       }
       // 定位不到 step（turn/step 读不出）→ 无法证明「step 已关闭」→ 不报悬空
       if (key !== undefined) {
-        scan.calls.push({ key, callId: row.rawCallId });
+        queueCall(scan, key, row.rawCallId);
         bumpDeclaration(scan, key, row.rawCallId, 'rows');
       }
       break;
@@ -329,7 +355,11 @@ function applyLifecycleRow(scan: LifecycleScan, row: LifecycleRow): void {
         scan.facts.emptyToolCallId += 1;
         continue;
       }
-      if (key !== undefined) bumpDeclaration(scan, key, id, 'blocks');
+      // 与 tool/call 行走**同一份** calls → 同一 closedSteps / resultIds 判定（绝不另起一套）
+      if (key !== undefined) {
+        queueCall(scan, key, id);
+        bumpDeclaration(scan, key, id, 'blocks');
+      }
     }
   }
   if (row.result !== undefined) {
@@ -345,8 +375,8 @@ function applyLifecycleRow(scan: LifecycleScan, row: LifecycleRow): void {
 
 function finalizeLifecycleScan(scan: LifecycleScan): ToolLifecycleFacts {
   for (const call of scan.calls) {
-    // 只报「所属 step 已经关闭」的悬空调用：日志尾部还开着的 step 是正常崩溃形状（引擎的
-    // interruptedTurnClosers 会补），报它就是误报。
+    // 只报「所属 step 已经关闭」的悬空调用（无论它是由 tool/call 行还是 assistant 内容块声明）：
+    // 日志尾部还开着的 step 是正常崩溃形状（引擎的 interruptedTurnClosers 会补），报它就是误报。
     if (scan.closedSteps.has(call.key) && !scan.resultIds.has(call.callId)) scan.facts.danglingClosedStep += 1;
   }
   let duplicate = 0;

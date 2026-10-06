@@ -255,7 +255,8 @@ const DEEP_SEVERITY: Partial<Record<SessionHealthIssueCode, SessionHealthSeverit
   'seq-gap': 'unloadable',
   'missing-message-id': 'unloadable',
   'empty-tool-call-id': 'unloadable',
-  'dangling-tool-call': 'nextRequestFails',
+  /** 采集器只在**证明 step 已闭合**时才发这个码，而真 codec 对该形状直接拒读（step/end leaves unresolved tool call） */
+  'dangling-tool-call': 'unloadable',
   'tool-result-id-mismatch': 'unloadable',
   /** v4/pre-v4 实测被 current/Session.fromRestore 闸门拒读（`assistant/message repeats advertised tool call`） */
   'duplicate-tool-call-id': 'unloadable',

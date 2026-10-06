@@ -120,7 +120,7 @@ test('T3 分类：深度校验的问题按 §10.2 映射严重级（重放族 = 
   assert.equal(missingId.severity, 'unloadable', 'loader 会拒整份日志');
 
   const dangling = classifySessionHealth(input({ deep: { verified: true, issues: [{ code: 'dangling-tool-call' }] } }), ctx());
-  assert.equal(dangling.severity, 'nextRequestFails', '能加载，但下一个模型请求 400');
+  assert.equal(dangling.severity, 'unloadable', '采集器只在 step 已闭合时才发这个码，真 codec 对该形状拒读');
 
   const settlement = classifySessionHealth(input({ deep: { verified: true, issues: [{ code: 'invalid-settlement' }] } }), ctx());
   assert.equal(settlement.severity, 'nextRequestFails');
@@ -226,22 +226,22 @@ test('T3：sessionHealthIssues 纯函数不修改输入（宿主可安全复用�
 /* ---------------- T4：行档问题的严重级可被行档采集器覆盖（实测口径），并按 code 去重取更重 ---------------- */
 
 test('T4 分类：行档问题自带 severity 时优先使用（同 code 不同代际后果不同），缺省才回落静态表', () => {
-  // 静态表里 dangling-tool-call 是 nextRequestFails（「未证明 step 已闭合」的历史默认）
+  // 缺省（无自带 severity）→ 回落静态表；dangling-tool-call 的回落值已与采集器一致（unloadable）
   const fallback = classifySessionHealth(input({ deep: { verified: true, issues: [{ code: 'dangling-tool-call' }] } }), ctx());
-  assert.equal(fallback.severity, 'nextRequestFails', '缺省回落静态表');
-  // 行档采集器证明「step 已关闭」后自带 unloadable（真 codec 实测拒读）
-  const closed = classifySessionHealth(
-    input({ deep: { verified: true, issues: [{ code: 'dangling-tool-call', severity: 'unloadable', detail: '1 unresolved' }] } }),
+  assert.equal(fallback.severity, 'unloadable', '缺省回落静态表');
+  // 自带更重的 severity → 覆盖静态表（replay-duplicate-rows 静态是 nextRequestFails）
+  const heavier = classifySessionHealth(
+    input({ deep: { verified: true, issues: [{ code: 'replay-duplicate-rows', severity: 'unloadable', detail: 'heavy' }] } }),
     ctx(),
   );
-  assert.equal(closed.severity, 'unloadable', '自带 severity 必须压过静态表');
-  assert.equal(closed.issues[0]?.severity, 'unloadable');
-  // 反向：采集器实测较轻（v4 缺 user/assistant message.id 只是下一次请求会失败）
-  const unproven = classifySessionHealth(
-    input({ deep: { verified: true, issues: [{ code: 'missing-message-id', severity: 'nextRequestFails', detail: '1 row(s); codec-unproven' }] } }),
+  assert.equal(heavier.severity, 'unloadable', '自带 severity 更重时必须生效');
+  assert.equal(heavier.issues[0]?.severity, 'unloadable');
+  // 反向：采集器实测较轻（missing-message-id 静态是 unloadable，但版本不可读时会降级）
+  const lighter = classifySessionHealth(
+    input({ deep: { verified: true, issues: [{ code: 'missing-message-id', severity: 'nextRequestFails', detail: '1 row(s); codec-uncalibrated' }] } }),
     ctx(),
   );
-  assert.equal(unproven.severity, 'nextRequestFails', '不得一律升级成 unloadable');
+  assert.equal(lighter.severity, 'nextRequestFails', '自带更轻的值也必须照用，不得一律升级');
 });
 
 test('T4 分类：新增三个问题码都有严重级（tool-result-id-mismatch / empty-tool-call-id / duplicate-tool-call-id）', () => {

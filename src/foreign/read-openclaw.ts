@@ -86,7 +86,7 @@ export function openclawAgentsDir(opts: RootProbeOptions): string {
 }
 
 /**
- * 通用 JSONL 形态（**遗留**：t 起 OpenClaw 走专用事件流解析，本常量只为保留既有公开导出名）。
+ * 通用 JSONL 形态（**遗留**：OpenClaw 已改走专用事件流解析，本常量只为保留既有公开导出名）。
  */
 export const OPENCLAW_SHAPE: TranscriptShape = {
   ...GENERIC_TRANSCRIPT_SHAPE,

@@ -324,10 +324,13 @@ v3 收敛记录：9.5 / 10 / 10.5 → 11；14 → 13；30 随死类删除；11.5
   旧 `.dialogMask/.dialogCard` 类保留供未迁移弹窗兼容。busy 时守卫 `onOpenChange` +
   `onEscapeKeyDown/onPointerDownOutside/onInteractOutside` 双保险禁闭。
   **已迁移（全部弹窗）**：ConfirmDialog、Profiles 切换预览、Market 条目详情、MyConfigs 上传向导 + 装回本地、
-  Snapshots 恢复计划预览 + 备份查看、ReleaseNotes、**SyncSettingsView 全部 5 个弹窗**（通道配置 / 推送预览 /
+  Snapshots 恢复计划预览 + 备份查看、ReleaseNotes、关于页 `PluginUpdateDialog`（新版本 → 立即更新，2026-10）、
+  **SyncSettingsView 全部 5 个弹窗**（通道配置 / 推送预览 /
   推送结果 / 拉取差异 / 一键同步确认 —— 实测为同级独立弹窗而非嵌套，逐个迁为 `<Modal>`，自定义宽度走
   `cardStyle`、限高走 `Modal.Body style`；通道配置弹窗的刷新快照按钮 `🔄` 亦改 Lucide `RefreshIcon`）。
   迁移后全仓再无手写 `dialogMask+dialogCard` 弹窗（`grep css.dialogMask` 仅余注释）。
+  **Release 正文渲染是共享原语**（`src/client/about/ReleaseBody.tsx`）：ReleaseNotes 与新版本弹窗共用同一份
+  纯文本 Markdown 分块 + 行内格式渲染（零 `dangerouslySetInnerHTML`），**不得各自实现一份**。
 - **构建接线**：`tsdown.config.ts` 的 `deps.alwaysBundle: [/^lucide-react(\/.*)?$/, /^@radix-ui\//]`
   强制把二者打进单文件 cjs（否则被当 dependencies 外部化 → 运行时 `require` 命中 DSH loader
   「module table miss」崩溃）。注意 tsdown 0.22 读 `deps.alwaysBundle`，旧的顶层 `noExternal`

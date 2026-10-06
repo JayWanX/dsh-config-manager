@@ -24,6 +24,25 @@
 export const ENCRYPTED_CONTAINER_CODE = 'encrypted-container';
 
 /**
+ * 插件自更新（POST /update-apply）的失败码（**唯一声明处**：宿主 core/self-update.ts 与
+ * 客户端关于页弹窗共用同一份字面量）。
+ *
+ * 为什么抽到这里：客户端要据码映射**本地化**文案（绝不直接渲染宿主返回的英文细节）；
+ * 若两侧各写一份联合类型，「宿主加了码而界面回落成英文」不会红。全部落在本文件的
+ * 常量 + 派生类型上，客户端只 import 类型（零运行时依赖）。
+ */
+export const SELF_UPDATE_FAILURE_CODES = [
+  'invalid-version',
+  'profile-unknown',
+  'unsupported-profile',
+  'non-registry-install',
+  'not-newer',
+  'install-failed',
+] as const;
+/** 自更新失败码（联合类型由上面的常量派生） */
+export type SelfUpdateFailureCode = (typeof SELF_UPDATE_FAILURE_CODES)[number];
+
+/**
  * 同步通道清单（**零依赖**：宿主与 client 半都可运行时 import）。
  *
  * 为什么放在这里（而不是 `src/sync/sync-config.ts`）：sync-config.ts import 了

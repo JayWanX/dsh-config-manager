@@ -2317,6 +2317,33 @@
   border-top: 1px solid var(--dsw-alias-border-l1);
 }
 
+/* —— 插件自更新弹窗（「新版本 → 立即更新」，2026-10）——
+   版本行 + 更新说明（正文排版由共享原语 ReleaseBody 提供）+ 状态横幅；
+   成功态在此提示「请重启 DSH 生效」。 */
+.updateVersionRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.updateVersionArrow {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.updateVersionTarget {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.updateNotesLoading {
+  display: flex;
+  justify-content: center;
+  padding: 24px 0;
+}
+
 /* —— 全局通知（右下角堆叠） ——
    定位：absolute 贴合 .section（非 fixed/Portal），确保落在宿主弹窗层叠上下文内；
    容器不吃指针事件，避免遮挡右下角的页面点击（状态栏/列表），仅卡片自身可交互。 */

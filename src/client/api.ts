@@ -37,7 +37,7 @@ import type { ConsultReport } from '../core/migration-consult.ts';
 import type { Manifest, SectionId } from '../schema/types.ts';
 import type { BackupScheduleStatus, BackupRunResult, BackupScheduleDraft } from '../ui/backup-schedule.ts';
 import type { BackupFileMeta } from '../sync/backup-files.ts';
-import type { DiskUsageCleanupResult, PluginUpdateCheckResult } from '../ui/types.ts';
+import type { DiskUsageCleanupResult, PluginUpdateApplyResult, PluginUpdateCheckResult } from '../ui/types.ts';
 import type { SessionExportProbe } from './session-export/session-export-view.ts';
 import type { ForeignSkip } from '../foreign/types.ts';
 import type { ForeignSourcesResponse as ForeignSourcesViewInput } from '../ui/foreign-view.ts';
@@ -286,6 +286,9 @@ export { ConfigManagerApiError } from './common/http.ts';
 
 /** 长操作请求选项（5 分钟；超时文案走默认键 `error.requestTimeout`，导出族另有专属键）。 */
 const LONG_OPTS: RequestOptions = { timeoutMs: LONG_REQUEST_TIMEOUT_MS };
+
+/** 插件自更新请求的超时：宿主侧安装上限 15 分钟，客户端留出余量（16 分钟）避免误报「请求超时」。 */
+const SELF_UPDATE_OPTS: RequestOptions = { timeoutMs: 16 * 60 * 1000 };
 
 /** query-string 辅助（跳过 undefined/空串，与 dsh-ssh 一致） */
 function query(params: Record<string, string | number | undefined>): string {
@@ -815,6 +818,16 @@ export class ConfigManagerApi {
   async checkUpdate(force = false): Promise<PluginUpdateCheckResult> {
     const url = force ? `${CONFIG_MANAGER_API.updateCheck}?force=1` : CONFIG_MANAGER_API.updateCheck;
     return getJson<PluginUpdateCheckResult>(url, this.t);
+  }
+
+  /**
+   * 执行插件自更新（POST /update-apply）—— **只在用户显式点「立即更新」后**调用。
+   *
+   * 宿主经官方 dsh plugin 通道安装钉住的精确版本（见 core/self-update.ts）；成功后必须
+   * 重启 DSH 才生效。安装可能较慢（慢网络下分钟级），故用独立的长超时档位。
+   */
+  async applyUpdate(version: string): Promise<PluginUpdateApplyResult> {
+    return postJson<PluginUpdateApplyResult>(CONFIG_MANAGER_API.updateApply, { version }, this.t, SELF_UPDATE_OPTS);
   }
 
   // ------------------------------------------------- Phase 7 迁移前咨询

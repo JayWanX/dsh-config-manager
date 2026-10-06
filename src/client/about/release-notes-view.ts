@@ -308,3 +308,37 @@ export function parseMarkdownBlocks(text: string): MarkdownBlock[] {
 
   return blocks;
 }
+
+/* ---------------- 版本匹配（「新版本」弹窗用） ---------------- */
+
+/**
+ * 版本 / tag 归一化：去掉空白与前导 v/V。
+ *
+ * 为什么需要：npm 版本是 `0.1.70`，而 GitHub release tag 是 `v0.1.70`（本仓打 tag 即触发发布），
+ * 两边直接比较永远不相等。
+ */
+export function normalizeReleaseVersion(value: string): string {
+  return value.trim().replace(/^[vV]/, '');
+}
+
+/** 目标版本 → release 的匹配结果：exact=false 表示回退到了最新一条（tag 没对上）。 */
+export interface ReleaseMatch {
+  release: FormattedRelease | null;
+  exact: boolean;
+}
+
+/**
+ * 找目标版本对应的 release：先按归一化 tag 精确匹配；匹配不到时**回退到第一条**并标记
+ * exact=false —— npm 已发布但 GitHub release 尚未生成时界面仍要显示一段说明，同时如实标注
+ * 这是「最新一条发布内容」，绝不假装它就是目标版本。
+ */
+export function findReleaseForVersion(releases: readonly FormattedRelease[], version: string): ReleaseMatch {
+  const want = normalizeReleaseVersion(version);
+  const first = releases.length > 0 ? releases[0] : undefined;
+  const fallback = first === undefined ? null : first;
+  if (want === '') return { release: fallback, exact: false };
+  for (const release of releases) {
+    if (normalizeReleaseVersion(release.tag) === want) return { release, exact: true };
+  }
+  return { release: fallback, exact: false };
+}

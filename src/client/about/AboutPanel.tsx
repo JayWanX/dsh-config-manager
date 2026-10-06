@@ -26,6 +26,7 @@ import { InfoHint } from '../common/InfoHint.tsx'
 import { ABOUT_CLI, ABOUT_LINKS, ABOUT_META, aboutStatusRows, aboutUpdateView, buildFeedbackSnippet } from './about-view.ts'
 import type { AboutStatusRows, AboutUpdateView } from './about-view.ts'
 import { ReleaseNotesDialog } from './ReleaseNotesDialog.tsx'
+import { PluginUpdateDialog } from './PluginUpdateDialog.tsx'
 import { redact } from '../../security/redaction.ts'
 import css from '../config-manager.module.css'
 
@@ -51,6 +52,11 @@ export function AboutPanel({ api, t }: AboutPanelProps) {
   /** 版本更新检查（只读探测 npm；低频动作，状态自持，与 status 同策略） */
   const [updateChecking, setUpdateChecking] = useState(false)
   const [updateView, setUpdateView] = useState<AboutUpdateView | null>(null)
+  /** 「立即更新」弹窗开关（检测到新版本时自动打开） */
+  const [updateDialogOpen, setUpdateDialogOpen] = useState(false)
+  /** 本会话已安装完成、等待重启的版本（不重复弹窗，且卡片改显成功态） */
+  const [appliedVersion, setAppliedVersion] = useState<string | null>(null)
+  const appliedVersionRef = useRef<string | null>(null)
   const mountedRef = useRef(true)
   useEffect(() => () => { mountedRef.current = false }, [])
 
@@ -74,7 +80,14 @@ export function AboutPanel({ api, t }: AboutPanelProps) {
     api.checkUpdate(force).then(
       (result) => {
         if (!mountedRef.current) return
-        setUpdateView(aboutUpdateView(result, { profile: state.rows?.diagnostics?.profile }))
+        const view = aboutUpdateView(result, { profile: state.rows?.diagnostics?.profile })
+        setUpdateView(view)
+        // 有新版本 → 自动弹出「更新到 vX」弹窗（GitHub 发布说明 + 一键更新）。
+        // 两个前提下不弹：① command 为 null（desktop / 未知档案，注定装不了，走卡片提示）；
+        // ② 本会话已经更新过同一版本（等待重启）——避免每次重新检查都打断用户。
+        if (view.kind === 'available' && view.command !== null && view.latest !== appliedVersionRef.current) {
+          setUpdateDialogOpen(true)
+        }
         setUpdateChecking(false)
       },
       (err) => {
@@ -161,7 +174,10 @@ export function AboutPanel({ api, t }: AboutPanelProps) {
             <Badge kind="info">{t('about.update.current', { version: state.rows.version })}</Badge>
           )}
           {updateView?.kind === 'upToDate' && <Badge kind="ok">{t('about.update.upToDate')}</Badge>}
-          {updateView?.kind === 'available' && (
+          {updateView?.kind === 'available' && updateView.latest === appliedVersion && (
+            <Badge kind="ok">{t('about.update.applied', { version: appliedVersion ?? '' })}</Badge>
+          )}
+          {updateView?.kind === 'available' && updateView.latest !== appliedVersion && (
             <Badge kind="warn">
               {t('about.update.available', { latest: updateView.latest, current: updateView.current })}
             </Badge>
@@ -170,6 +186,12 @@ export function AboutPanel({ api, t }: AboutPanelProps) {
             <Badge kind="error">{t('about.update.failed', { error: updateView.error })}</Badge>
           )}
         </div>
+
+        {updateView?.kind === 'available' && updateView.command !== null && updateView.latest !== appliedVersion && (
+          <div className={css.actionRow}>
+            <Button variant="primary" onClick={() => setUpdateDialogOpen(true)}>{t('about.update.apply')}</Button>
+          </div>
+        )}
 
         {updateView?.kind === 'available' && (
           updateView.command !== null ? (
@@ -255,6 +277,23 @@ export function AboutPanel({ api, t }: AboutPanelProps) {
         }}
         t={t}
       />
+
+      {/* 新版本弹窗：「检查更新 → 有新版本」自动打开；GitHub 发布说明 + 一键更新（装完提示重启）。
+          只在 command 可用（非 desktop / 已识别档案）时挂载 —— 否则卡片给「插件页更新」提示。 */}
+      {updateView?.kind === 'available' && updateView.command !== null && (
+        <PluginUpdateDialog
+          open={updateDialogOpen}
+          current={updateView.current}
+          latest={updateView.latest}
+          api={api}
+          t={t}
+          onClose={() => setUpdateDialogOpen(false)}
+          onUpdated={(version) => {
+            appliedVersionRef.current = version
+            setAppliedVersion(version)
+          }}
+        />
+      )}
     </div>
   )
 }

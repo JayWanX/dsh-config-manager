@@ -1,6 +1,7 @@
 /**
  * 路由组：插件自身信息（Star 引导 / 版本更新内容弹窗状态；复用 ui-prefs.json）
- * 与**版本更新检查**（只读探测 npm registry；见 `core/update-check.ts` 的四条硬边界）。
+ * 与**版本更新检查 / 自更新**（检查只读探测 npm registry，见 `core/update-check.ts` 的四条硬边界；
+ * 自更新 = 用户显式点「立即更新」后的 `POST /update-apply`，见 `core/self-update.ts` 的六条硬边界）。
  *
  * W1（host-entry#F-02/#F-03）：路由只在这里声明一次 —— endpoint({ path, methods }, handler) 的
  * path/methods 就是唯一声明处；围栏、方法判定与顶层异常处理由 src/routes/kit.ts 在注册点统一提供。
@@ -16,6 +17,8 @@ import { UpdateChecker, wantsForcedUpdateCheck } from '../core/update-check.ts'
 export function prefsRoutes(env: RoutesEnv): WebRoute[] {
   const {
     syncDir,
+    selfUpdate,
+    withMutationGate,
   } = env
   // 版本更新检查器：每进程一个（进程内缓存 10 分钟；用户点「重新检查」走 ?force=1）。
   // 网络失败/超时/响应畸形一律结构化回传（ok:false + 原因），绝不「失败当最新」。
@@ -130,5 +133,16 @@ export function prefsRoutes(env: RoutesEnv): WebRoute[] {
         writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
       }
     }),
+    // ------------------------------------------------------ update-apply
+    // 用户显式点「立即更新」后的**唯一写动作**：经官方 `dsh plugin` 通道把本插件升级到
+    // 钉住的精确版本（校验与执行语义见 core/self-update.ts 的六条硬边界）。检查更新本身仍只读。
+    // 过 withMutationGate（SAFE MODE + 环境锁；**不 journal** —— 插件安装失败是普通用户错误，
+    // 不该因此记成 NEEDS_ATTENTION 事故）。预期失败以 HTTP 200 + ok:false 回传（与 update-check 同口径）。
+    endpoint({ path: '/api/dsh-config-manager/update-apply', methods: ['POST'] }, withMutationGate('plugin-update', async (req, res) => {
+      const body = await requireJsonObject(req)
+      const version = typeof body['version'] === 'string' ? body['version'] : ''
+      const result = await selfUpdate(version)
+      writeJson(res, 200, result)
+    }, { journaled: false })),
   ]
 }

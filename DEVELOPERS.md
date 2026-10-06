@@ -171,6 +171,26 @@ install → typecheck（src）→ typecheck:tests（tests/**）→ npm test（�
 - 测试：`src/core/update-check.test.ts`（注入 `fetchImpl` + 注入时钟，**绝不真连 registry**）+ `src/client/about/about-view.test.ts`
   （`aboutUpdateView` / `aboutUpgradeCommand` 的 upToDate / available / desktop / failed 四档）。
 
+### 自更新（「立即更新」按钮，2026-10）
+
+入口：`POST /api/dsh-config-manager/update-apply`（同一组文件 `src/routes/prefs.ts`，**写操作**）。
+实现：`src/core/self-update.ts`（`planSelfUpdate` 纯校验 + `runSelfUpdate` 注入式执行器）、`src/ui/types.ts` 的 `PluginUpdateApplyResult`、
+宿主接线 `src/index.ts` 的 `makeRouteEnv().selfUpdate`。
+
+- **只在用户显式点按钮后执行**：检查更新本身仍只读；没有定时器 / 自动升级路径（硬边界 —— 不要把写动作并进 `update-check`）。
+- **钉住精确版本**：`dsh plugin --profile <档案> add dsh-config-manager@<latest>`（复用 `runDshPlugin` + `installErrorFor`），
+  与界面给出的命令逐字同源；避免 pnpm `minimumReleaseAge` 把 `@latest` 解析回旧版。
+- **拒绝矩阵**（全部结构化 `{ ok:false, code, error }`，HTTP 200；码 → 客户端文案键由 `src/client/about/plugin-update-view.ts` **穷尽映射**）：
+  `invalid-version`（非 semver）/ `not-newer`（不高于当前）/ `profile-unknown` / `unsupported-profile`（desktop）/
+  `non-registry-install`（当前依赖 spec 是 `link:` / `file:` / `git:` 等 —— 隔离测试 home 与开发安装都会命中）/ `install-failed`。
+- **过 mutation gate、不 journal**（`withMutationGate('plugin-update', …, { journaled: false })`）：要 SAFE MODE 与环境锁，
+  但插件安装失败是普通用户错误，不该记成 NEEDS_ATTENTION 事故。
+- **成功 ≠ 生效**：回 `needsRestart: true`；弹窗保持打开并提示重启，**绝不自动重启**用户的 DSH。
+- 界面：`GET /update-check` 得到 `available` 且 `command !== null` 时自动弹 `PluginUpdateDialog`（拉 GitHub Releases 该版本正文，
+  由共享原语 `src/client/about/ReleaseBody.tsx` 安全渲染），底部「立即更新」；卡片同时给「立即更新」按钮，成功后改显「已更新到 vX，重启后生效」。
+- 测试：`src/core/self-update.test.ts`（纯计划 + 注入 runner，不真起子进程）+ `src/client/about/plugin-update-view.test.ts`
+  + `release-notes-view.test.ts` 的版本匹配用例（`findReleaseForVersion` / `normalizeReleaseVersion`）。
+
 ## 🧭 兼容性评分与结构化原因（2026-09）
 
 - **单一事实源**：`src/core/validator.ts` 的 `compatibilityReasons(input)` 产出原因数组，`computeCompatibility(input)` **由它派生**评分：

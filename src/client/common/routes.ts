@@ -58,6 +58,8 @@ export const CONFIG_MANAGER_API = {
   starPrompt: `${API_BASE}/star-prompt`,
   releaseNotesPrompt: `${API_BASE}/release-notes-prompt`,
   updateCheck: `${API_BASE}/update-check`,
+  /** 用户显式点「立即更新」后的写动作（官方 dsh plugin 通道，钉住精确版本；见 routes/prefs.ts）。 */
+  updateApply: `${API_BASE}/update-apply`,
   /**
    * 外部 agent 来源发现（**只读**：只 stat、不回传绝对路径）。
    * 见 src/routes/foreign.ts。

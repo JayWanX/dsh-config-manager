@@ -12,6 +12,8 @@ import {
   parseMarkdownBlocks,
   parseReleaseItem,
   parseReleasesResponse,
+  findReleaseForVersion,
+  normalizeReleaseVersion,
 } from './release-notes-view.ts';
 
 test('parseGitHubRepo: 正确解析 GitHub 仓库 URL', () => {
@@ -171,4 +173,35 @@ test('parseMarkdownBlocks: 解析标题、列表、引用、代码块与段落',
   assert.equal(blocks[8]!.type, 'code-block');
   assert.equal((blocks[8] as { code: string }).code, 'const a = 1;');
   assert.equal(blocks[9]!.type, 'paragraph');
+});
+
+test('normalizeReleaseVersion: 去空白与前导 v/V', () => {
+  assert.equal(normalizeReleaseVersion('v0.1.70'), '0.1.70');
+  assert.equal(normalizeReleaseVersion('V0.1.70'), '0.1.70');
+  assert.equal(normalizeReleaseVersion(' 0.1.70 '), '0.1.70');
+  assert.equal(normalizeReleaseVersion(''), '');
+});
+
+test('findReleaseForVersion: 按归一化 tag 精确匹配（v 前缀 / 大小写 / 空格）', () => {
+  const releases = [
+    parseReleaseItem({ id: 2, tag_name: 'v0.1.70', body: 'new' })!,
+    parseReleaseItem({ id: 1, tag_name: 'v0.1.69', body: 'old' })!,
+  ];
+  assert.equal(findReleaseForVersion(releases, '0.1.70').release?.tag, 'v0.1.70');
+  assert.equal(findReleaseForVersion(releases, '0.1.70').exact, true);
+  assert.equal(findReleaseForVersion(releases, 'V0.1.69').release?.tag, 'v0.1.69');
+  assert.equal(findReleaseForVersion(releases, ' 0.1.70 ').exact, true);
+});
+
+test('findReleaseForVersion: 匹配不到时回退第一条并标记 exact=false（不假装是目标版本）', () => {
+  const releases = [parseReleaseItem({ id: 2, tag_name: 'v0.2.0', body: 'newest' })!];
+  const miss = findReleaseForVersion(releases, '0.3.0');
+  assert.equal(miss.release?.tag, 'v0.2.0');
+  assert.equal(miss.exact, false);
+});
+
+test('findReleaseForVersion: 空列表 / 空版本不抛错', () => {
+  assert.deepEqual(findReleaseForVersion([], '0.1.70'), { release: null, exact: false });
+  const releases = [parseReleaseItem({ id: 1, tag_name: 'v0.1.70', body: '' })!];
+  assert.equal(findReleaseForVersion(releases, '').exact, false);
 });

@@ -18,6 +18,7 @@ import type {
   ImportAnalysis, ImportDecisions, ImportPlan, ImportResult,
   ItemResolution, PathIssue, PlanItem, Portability, SessionFormatDisposition,
 } from '../core/types.ts';
+import type { SelfUpdateFailureCode } from '../utils/shared-constants.ts';
 
 /* ---------------- 导出（规范 §1 / §21） ---------------- */
 
@@ -237,6 +238,18 @@ export type PluginUpdateCheckResult =
       /** 失败原因（网络 / 超时 / 响应畸形；可读、可重试、无敏感信息） */
       error: string;
     };
+
+/**
+ * POST /update-apply 的结果（关于页「立即更新」）。
+ *
+ * 语义：用户**显式点击**后，宿主经官方 `dsh plugin` 通道把本插件安装为**钉住的精确版本**；
+ * 成功只表示文件已换新，必须重启 DSH 才生效（needsRestart）。
+ * 失败码与宿主共用同一份字面量（utils/shared-constants.ts），界面据码映射本地化文案，
+ * 只有未知码才回落到宿主返回的原始错误文本。
+ */
+export type PluginUpdateApplyResult =
+  | { ok: true; version: string; command: string; needsRestart: true }
+  | { ok: false; code: SelfUpdateFailureCode; error: string };
 
 /* ---------------- 磁盘占用（快照 tab 的只读体检 + 手动清理） ---------------- */
 

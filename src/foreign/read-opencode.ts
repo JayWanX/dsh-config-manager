@@ -262,7 +262,8 @@ const SESSION_TIME_KEYS = ['time_created', 'created_at', 'createdAt', 'time', 't
 
 const MESSAGE_SESSION_KEYS = ['session_id', 'sessionId', 'sessionID', 'session'];
 const MESSAGE_ID_KEYS = ['id', 'message_id', 'messageId', 'messageID'];
-const MESSAGE_DATA_KEYS = ['data', 'json', 'content', 'message', 'payload'];
+/** 消息 JSON 列候选（**导出**：逐源剔除谓词要读消息行里的源侧字段，如 mimocode 的 data.agent） */
+export const MESSAGE_DATA_KEYS = ['data', 'json', 'content', 'message', 'payload'];
 const MESSAGE_ROLE_KEYS = ['role', 'sender'];
 const MESSAGE_TIME_KEYS = ['time_created', 'created_at', 'createdAt', 'time', 'time_updated', 'updated_at', 'updatedAt'];
 const MESSAGE_MODEL_KEYS = ['model', 'model_id', 'modelId'];
@@ -319,10 +320,7 @@ function payloadModel(payload: Record<string, unknown>): string | undefined {
   return undefined;
 }
 
-/**
- * 会话级模型（opencode 的 `session.model` 是 JSON 字符串 `{id, providerID, variant}`；
- * fork 可能是对象或纯字符串）。非 JSON 的脏值不猜 —— 回退链继续走消息级（竞品同口径）。
- */
+/** 会话级模型（opencode 的 `session.model` 是 JSON 串 `{id, providerID, variant}`；fork 可能是对象/纯串；脏值不猜） */
 function sessionModelOf(row: SqliteRow): string | undefined {
   for (const key of SESSION_MODEL_KEYS) {
     const raw = row[key];
@@ -350,10 +348,7 @@ function sessionModelOf(row: SqliteRow): string | undefined {
   return undefined;
 }
 
-/**
- * `data.tokens`（opencode：`{input, output, reasoning, cache:{read, write}}`）→ IR usage 的键名
- * （对齐 `irUsageOf`，非安全整数/缺字段归 0）。`cache.write` 在 `IrUsage` 里没有对应字段，不映射。
- */
+/** `data.tokens`（`{input,output,reasoning,cache:{read,write}}`）→ IR usage 键名（对齐 `irUsageOf`；`cache.write` 不映射） */
 function usageOf(tokens: unknown): unknown {
   if (!isRecord(tokens)) return undefined;
   const cache = isRecord(tokens['cache']) ? tokens['cache'] : undefined;
@@ -784,8 +779,7 @@ function v2RecordsOf(
         if (body !== '') push('user', [irTextBlock(body)], { id, time });
         else irBump(acc.ignored, 'message:compaction-' + (status === '' ? 'unknown' : status));
       } else {
-        // completed 是模型可见的边界：正文由 DSH 原生压缩检查点承载 —— 本地 IR 没有该通道
-        //（session-ir.ts：「补头/注入/压缩属于待办能力」），正文进不了对话；绝不静默：逐条计数。
+        // completed 是模型可见的边界：正文由 DSH 原生压缩检查点承载，本地 IR 无该通道（见 session-ir.ts 的「待办能力」）
         irBump(acc.ignored, 'message:compaction');
       }
       continue;

@@ -139,3 +139,40 @@ test('mimocode：存在但不是本来源的库 → 一条 source-unreadable(sha
   assert.deepEqual(read.files, []);
   assert.equal(read.readFindings?.[0]?.detail, 'shape-mismatch');
 });
+/* ---------------- 后台任务会话剔除（标题前缀 + message.agent 双信号） ---------------- */
+
+const BG_SCHEMA: readonly (readonly [string, readonly unknown[]])[] = [
+  ['CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, title TEXT, time_created INTEGER)', []],
+  ['CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT)', []],
+  ['CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT)', []],
+  ['INSERT INTO session VALUES (?, ?, ?, ?)', ['s-main', '/work/main', 'normal chat', 1791201600000]],
+  ['INSERT INTO session VALUES (?, ?, ?, ?)', ['s-writer', '/work/bg', 'checkpoint-writer: memory', 1791201601000]],
+  // 标题不带前缀，只有消息级 agent 命中（双信号里的弱信号 → 也必须剔除）
+  ['INSERT INTO session VALUES (?, ?, ?, ?)', ['s-dream', '/work/bg', 'Assistant helper', 1791201602000]],
+  ['INSERT INTO session VALUES (?, ?, ?, ?)', ['s-distill', '/work/bg', 'Auto Distill', 1791201603000]],
+  ['INSERT INTO message VALUES (?, ?, ?, ?)', ['m-main', 's-main', 1791201600000, JSON.stringify({ role: 'user' })]],
+  ['INSERT INTO part VALUES (?, ?, ?, ?, ?)', ['p-main', 'm-main', 's-main', 1791201600000, JSON.stringify({ type: 'text', text: 'hi' })]],
+  ['INSERT INTO message VALUES (?, ?, ?, ?)', ['m-writer', 's-writer', 1791201601000, JSON.stringify({ role: 'user', agent: 'checkpoint-writer' })]],
+  ['INSERT INTO part VALUES (?, ?, ?, ?, ?)', ['p-writer', 'm-writer', 's-writer', 1791201601000, JSON.stringify({ type: 'text', text: 'bg' })]],
+  ['INSERT INTO message VALUES (?, ?, ?, ?)', ['m-dream', 's-dream', 1791201602000, JSON.stringify({ role: 'user', agent: 'dream' })]],
+  ['INSERT INTO part VALUES (?, ?, ?, ?, ?)', ['p-dream', 'm-dream', 's-dream', 1791201602000, JSON.stringify({ type: 'text', text: 'dream' })]],
+  ['INSERT INTO message VALUES (?, ?, ?, ?)', ['m-distill', 's-distill', 1791201603000, JSON.stringify({ role: 'user' })]],
+  ['INSERT INTO part VALUES (?, ?, ?, ?, ?)', ['p-distill', 'm-distill', 's-distill', 1791201603000, JSON.stringify({ type: 'text', text: 'distill' })]],
+];
+
+test('mimocode：后台任务会话按标题前缀 + message.agent 双信号剔除（剔除数可见）', async (t) => {
+  const home = await tempHome('dcm-mimocode-bg-');
+  const dbFile = mimocodeDbPath({ homeDir: home, platform: 'linux' });
+  if (!(await createDb(dbFile, BG_SCHEMA))) {
+    t.skip('宿主无 node:sqlite');
+    return;
+  }
+  const read = await readMimocode({ homeDir: home, platform: 'linux' });
+  assert.deepEqual(
+    read.files.map((f) => f.id),
+    ['s-main'],
+    'checkpoint-writer（标题）/ Auto Distill（标题）/ agent=dream（消息级）都必须剔除',
+  );
+  assert.equal(read.extraCounts?.['mimocode.sessions.dropped'], 3, '剔除绝不静默：计数如实回传');
+});
+

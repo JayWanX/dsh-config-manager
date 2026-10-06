@@ -139,3 +139,48 @@ test('kilocode：存在但不是本来源的库 → 一条 source-unreadable(sha
   assert.deepEqual(read.files, []);
   assert.equal(read.readFindings?.[0]?.detail, 'shape-mismatch');
 });
+/* ---------------- 只导主会话：跳过子会话（parent_id 非空）与已归档会话（time_archived 非空） ---------------- */
+
+const AUX_SCHEMA: readonly (readonly [string, readonly unknown[]])[] = [
+  ['CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, title TEXT, time_created INTEGER, parent_id TEXT, time_archived INTEGER)', []],
+  ['CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT)', []],
+  ['CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT)', []],
+  ['INSERT INTO session VALUES (?, ?, ?, ?, ?, ?)', ['s-main', '/work/kilo', 'main', 1791201600000, null, null]],
+  // '' 是「没有父会话」的哨兵值（与竞品摘要查询的 parent_id IS NULL OR parent_id = '' 同口径）→ 保留
+  ['INSERT INTO session VALUES (?, ?, ?, ?, ?, ?)', ['s-empty', '/work/kilo', 'empty parent', 1791201600500, '', null]],
+  ['INSERT INTO session VALUES (?, ?, ?, ?, ?, ?)', ['s-child', '/work/kilo', 'child', 1791201601000, 's-main', null]],
+  ['INSERT INTO session VALUES (?, ?, ?, ?, ?, ?)', ['s-archived', '/work/kilo', 'archived', 1791201602000, null, 1791201603000]],
+  ['INSERT INTO message VALUES (?, ?, ?, ?)', ['m-1', 's-main', 1791201600000, JSON.stringify({ role: 'user' })]],
+  ['INSERT INTO part VALUES (?, ?, ?, ?, ?)', ['p-1', 'm-1', 's-main', 1791201600000, JSON.stringify({ type: 'text', text: 'main' })]],
+  ['INSERT INTO message VALUES (?, ?, ?, ?)', ['m-2', 's-empty', 1791201600500, JSON.stringify({ role: 'user' })]],
+  ['INSERT INTO part VALUES (?, ?, ?, ?, ?)', ['p-2', 'm-2', 's-empty', 1791201600500, JSON.stringify({ type: 'text', text: 'empty parent' })]],
+  ['INSERT INTO message VALUES (?, ?, ?, ?)', ['m-3', 's-child', 1791201601000, JSON.stringify({ role: 'user' })]],
+  ['INSERT INTO part VALUES (?, ?, ?, ?, ?)', ['p-3', 'm-3', 's-child', 1791201601000, JSON.stringify({ type: 'text', text: 'child' })]],
+  ['INSERT INTO message VALUES (?, ?, ?, ?)', ['m-4', 's-archived', 1791201602000, JSON.stringify({ role: 'user' })]],
+  ['INSERT INTO part VALUES (?, ?, ?, ?, ?)', ['p-4', 'm-4', 's-archived', 1791201602000, JSON.stringify({ type: 'text', text: 'archived' })]],
+];
+
+test('kilocode：跳过子会话与已归档会话（空串 parent_id 视为主会话）；剔除数可见', async (t) => {
+  const home = await tempHome('dcm-kilocode-aux-');
+  const dbFile = kilocodeDbPath({ homeDir: home, platform: 'linux' });
+  if (!(await createDb(dbFile, AUX_SCHEMA))) {
+    t.skip('宿主无 node:sqlite');
+    return;
+  }
+  const read = await readKilocode({ homeDir: home, platform: 'linux' });
+  assert.deepEqual(read.files.map((f) => f.id), ['s-main', 's-empty'], 'parent_id 非空 / time_archived 非空的会话不进结果集');
+  assert.equal(read.extraCounts?.['kilocode.sessions.dropped'], 2);
+  // 缺列（旧库/降级形态）时不误伤：列存在性判定，不靠猜
+  const legacyHome = await tempHome('dcm-kilocode-legacy-');
+  const legacyDb = kilocodeDbPath({ homeDir: legacyHome, platform: 'linux' });
+  const legacyOk = await createDb(legacyDb, [
+    ['CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, title TEXT, time_created INTEGER)', []],
+    ['CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT)', []],
+    ['INSERT INTO session VALUES (?, ?, ?, ?)', ['s-legacy', '/work/kilo', 'legacy', 1791201600000]],
+    ['INSERT INTO message VALUES (?, ?, ?, ?)', ['m-legacy', 's-legacy', 1791201600000, JSON.stringify({ role: 'user', content: 'legacy' })]],
+  ]);
+  assert.equal(legacyOk, true);
+  const legacyRead = await readKilocode({ homeDir: legacyHome, platform: 'linux' });
+  assert.deepEqual(legacyRead.files.map((f) => f.id), ['s-legacy'], '缺 parent_id / time_archived 列的旧库不误伤');
+});
+

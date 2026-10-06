@@ -159,3 +159,66 @@ test('zcode：极简/降级形态（只有 session 表、无 message 表）不�
   assert.deepEqual(built.sections, [], '没有可迁移的消息 → 不产出会话分区');
   assert.ok(built.skipped.some((s) => s.code === 'session-empty'), '必须逐条报 session-empty');
 });
+/* ---------------- 只导主会话（parent_id IS NULL OR parent_id = ''） ---------------- */
+
+const CHILD_SCHEMA: readonly (readonly [string, readonly unknown[]])[] = [
+  ['CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, title TEXT, time_created INTEGER, parent_id TEXT)', []],
+  ['CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT)', []],
+  ['CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT)', []],
+  ['INSERT INTO session VALUES (?, ?, ?, ?, ?)', ['s-main', '/work/z', 'main', 1791201600000, null]],
+  ['INSERT INTO session VALUES (?, ?, ?, ?, ?)', ['s-child', '/work/z', 'child', 1791201601000, 's-main']],
+  ['INSERT INTO session VALUES (?, ?, ?, ?, ?)', ['s-empty', '/work/z', 'empty parent', 1791201602000, '']],
+  ['INSERT INTO message VALUES (?, ?, ?, ?)', ['m-main', 's-main', 1791201600000, JSON.stringify({ role: 'user' })]],
+  ['INSERT INTO part VALUES (?, ?, ?, ?, ?)', ['p-main', 'm-main', 's-main', 1791201600000, JSON.stringify({ type: 'text', text: 'main' })]],
+  ['INSERT INTO message VALUES (?, ?, ?, ?)', ['m-child', 's-child', 1791201601000, JSON.stringify({ role: 'user' })]],
+  ['INSERT INTO part VALUES (?, ?, ?, ?, ?)', ['p-child', 'm-child', 's-child', 1791201601000, JSON.stringify({ type: 'text', text: 'child' })]],
+  ['INSERT INTO message VALUES (?, ?, ?, ?)', ['m-empty', 's-empty', 1791201602000, JSON.stringify({ role: 'user' })]],
+  ['INSERT INTO part VALUES (?, ?, ?, ?, ?)', ['p-empty', 'm-empty', 's-empty', 1791201602000, JSON.stringify({ type: 'text', text: 'empty parent' })]],
+];
+
+test('zcode：过滤子会话（parent_id 非空）；空串与 NULL 同等视为主会话', async (t) => {
+  const home = await tempHome('dcm-zcode-child-');
+  const dbFile = zcodeDbPath({ homeDir: home, platform: 'linux' });
+  if (!(await createDb(dbFile, CHILD_SCHEMA))) {
+    t.skip('宿主无 node:sqlite');
+    return;
+  }
+  const read = await readZcode({ homeDir: home, platform: 'linux' });
+  assert.deepEqual(read.files.map((f) => f.id), ['s-main', 's-empty'], '子会话（subagent/分叉产物）不进结果集');
+  assert.equal(read.extraCounts?.['zcode.sessions.dropped'], 1);
+});
+
+/* ---------------- 压缩摘要（compaction part 的 summary.body / 消息级 data.summary.body） ---------------- */
+
+const SUMMARY_SCHEMA: readonly (readonly [string, readonly unknown[]])[] = [
+  ['CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, title TEXT, time_created INTEGER)', []],
+  ['CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT)', []],
+  ['CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT)', []],
+  ['INSERT INTO session VALUES (?, ?, ?, ?)', ['s-comp', '/work/z', 'compacted', 1791201600000]],
+  ['INSERT INTO message VALUES (?, ?, ?, ?)', ['m-user', 's-comp', 1791201600000, JSON.stringify({ role: 'user' })]],
+  ['INSERT INTO part VALUES (?, ?, ?, ?, ?)', ['p-user', 'm-user', 's-comp', 1791201600000, JSON.stringify({ type: 'text', text: 'hi' })]],
+  // 消息级摘要（data.summary.body）：源侧压缩标记，正文由**会话级摘要**承载
+  ['INSERT INTO message VALUES (?, ?, ?, ?)', ['m-sum', 's-comp', 1791201601000, JSON.stringify({ role: 'assistant', summary: { body: 'compacted history' } })]],
+  // part 级压缩（type=compaction 的 summary.body）：同一条压缩记录
+  ['INSERT INTO part VALUES (?, ?, ?, ?, ?)', ['p-comp', 'm-sum', 's-comp', 1791201601000, JSON.stringify({ type: 'compaction', summary: { body: 'compacted history' }, compactBoundary: { keptMessageCount: 1 } })]],
+];
+
+test('zcode：压缩摘要（part.summary.body / data.summary.body）被识别并计数，绝不静默丢', async (t) => {
+  const home = await tempHome('dcm-zcode-summary-');
+  const dbFile = zcodeDbPath({ homeDir: home, platform: 'linux' });
+  if (!(await createDb(dbFile, SUMMARY_SCHEMA))) {
+    t.skip('宿主无 node:sqlite');
+    return;
+  }
+  const read = await readZcode({ homeDir: home, platform: 'linux' });
+  const file = read.files[0];
+  assert.ok(file !== undefined);
+  // 本地 IR 没有「会话级摘要 / 压缩检查点」通道（session-ir.ts 记的待办能力）→ 摘要正文承载不了，
+  // 但它**必须可见**：part 级与消息级各计一类，绝不静默丢弃（详见汇报里的共享层缺口）。
+  assert.equal(file.parsed.ignored['part:compaction'], 1);
+  assert.equal(file.parsed.ignored['message:summary'], 1);
+  // 不伪装成正文：摘要文本不进对话
+  const texts = file.parsed.records.flatMap((r) => r.blocks.filter((b) => b.type === 'text').map((b) => (b as { text: string }).text));
+  assert.deepEqual(texts, ['hi']);
+});
+

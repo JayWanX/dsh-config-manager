@@ -255,3 +255,122 @@ test('SQLite 批：8 个来源逐个注入「缺 node:sqlite」→ 0 文件 + �
     );
   }
 });
+/* ---------------- V2（session_v2 / session_message）：按行 type 分派 + 世代优先 ---------------- */
+
+const V2_SCHEMA: readonly (readonly [string, readonly unknown[]])[] = [
+  // 同一个库里 V1 三表**仍在且有过期数据**（迁移来源）：世代判据必须先取 session_v2，
+  // 否则新会话（v2 表）会漏掉、老会话（v1 表）被当成有效数据重复导入。
+  ['CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, title TEXT, time_created INTEGER)', []],
+  ['INSERT INTO session VALUES (?, ?, ?, ?)', ['stale-1', '/work/stale', 'stale v1', 1791200000000]],
+  ['CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT, title TEXT, time_created INTEGER, model TEXT)', []],
+  ['CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, data TEXT)', []],
+  ['INSERT INTO session_v2 VALUES (?, ?, ?, ?, ?)', ['v2-1', '/work/v2', 'V2 session', 1791300000000, JSON.stringify({ id: 'model-session', providerID: 'p' })]],
+  // 行序刻意乱插：读器必须按 seq 重建顺序（无 ORDER BY 时 SQLite 行序是实现定义的）
+  ['INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?)', ['t-5', 'v2-1', 'assistant', 5, 1791300005000, JSON.stringify({ content: [{ type: 'text', text: 'second answer' }] })]],
+  ['INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?)', ['t-1', 'v2-1', 'user', 1, 1791300001000, JSON.stringify({ text: 'question', files: [{ name: 'shot.png', mime: 'image/png' }] })]],
+  // completed 的 compaction 是「模型可见的边界」：正文由 DSH 压缩检查点承载（本地 IR 尚无该通道 → 计数可见）
+  ['INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?)', ['t-2', 'v2-1', 'compaction', 2, 1791300002000, JSON.stringify({ status: 'completed', summary: 'summarized', recent: 'recent ctx' })]],
+  // running/failed 不是边界：正文按普通内容保留
+  ['INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?)', ['t-4', 'v2-1', 'compaction', 4, 1791300004000, JSON.stringify({ status: 'running', summary: 'partial summary' })]],
+  // assistant：model.id / tokens / content[]（text + reasoning + tool，tool 无 output）
+  ['INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?)', ['t-3', 'v2-1', 'assistant', 3, 1791300003000, JSON.stringify({ model: { id: 'model-msg' }, tokens: { input: 12, output: 34, reasoning: 5, cache: { read: 7, write: 9 } }, content: [{ type: 'text', text: 'first answer' }, { type: 'reasoning', text: 'thinking' }, { type: 'tool', id: 'call-9', name: 'read', state: { status: 'completed', input: { path: 'x' } } }] })]],
+  ['INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?)', ['t-6', 'v2-1', 'idle', 6, 1791300006000, JSON.stringify({})]],
+];
+
+test('opencode：V2 库按 session_message.type 分派；世代判据优先 session_v2（V1 过期表不进结果）', async (t) => {
+  const home = await tempHome('dcm-opencode-v2-');
+  const dbFile = opencodeDbPath({ homeDir: home, platform: 'linux' });
+  if (!(await createDb(dbFile, V2_SCHEMA))) {
+    t.skip('宿主无 node:sqlite');
+    return;
+  }
+  const read = await readOpencode({ homeDir: home, platform: 'linux' });
+  assert.deepEqual(read.files.map((f) => f.id), ['v2-1'], '先取 session_v2：V1 三表只是迁移来源，绝不进结果集');
+  const file = read.files[0];
+  assert.ok(file !== undefined);
+  assert.equal(file.parsed.cwd, '/work/v2');
+  assert.equal(file.parsed.title, 'V2 session');
+  // role 在**行的 type 列**上（data 里没有 role）：旧实现会把每条记成 message-no-role → 整会话 session-empty
+  assert.deepEqual(file.parsed.records.map((r) => r.role), ['user', 'assistant', 'user', 'user', 'assistant']);
+  assert.equal(file.parsed.records[0]?.time, 1791300001000, '按 seq 重建顺序（乱序插入也必须还原）');
+  // user 文本 + 附件占位（本地 IR 无 image 块 → 不伪装成正文，用占位并计数）
+  assert.deepEqual(file.parsed.records[0]?.blocks.map((b) => b.type), ['text', 'text']);
+  assert.equal((file.parsed.records[0]?.blocks[1] as { text: string }).text, '[attachment: shot.png]');
+  assert.equal(file.parsed.ignored['message:attachment'], 1);
+  assert.equal(file.parsed.ignored['message:compaction'], 1, 'completed 压缩边界：正文无处承载 → 计数可见');
+  assert.equal(file.parsed.ignored['part:reasoning'], 1);
+  assert.equal(file.parsed.ignored['message:idle'], 1, '结构性标记不进对话但绝不静默');
+  // running compaction 正文按普通内容保留
+  assert.deepEqual(file.parsed.records[3]?.blocks, [{ type: 'text', text: 'partial summary' }]);
+  // 模型回退链：消息级 data.model.id → 会话级 session_v2.model(JSON)
+  assert.equal(file.parsed.records[1]?.model, 'model-msg');
+  assert.equal(file.parsed.records[4]?.model, 'model-session');
+  // tokens → usage（cache.write 在 IrUsage 里没有对应字段，不映射）
+  assert.deepEqual(file.parsed.records[1]?.usage, { inputTokens: 12, outputTokens: 34, reasoningTokens: 5, cacheReadTokens: 7 });
+  // output 缺失也发 tool_result（有 call 无 result = 断链）
+  assert.deepEqual(file.parsed.records[2]?.blocks.map((b) => b.type), ['tool_result']);
+  assert.equal((file.parsed.records[2]?.blocks[0] as { text: string }).text, '');
+  assert.equal(read.extraCounts?.['opencode.messages'], 6);
+  assert.equal(read.extraCounts?.['opencode.sessions'], 1);
+});
+
+/* ---------------- V1 增强：file / patch / subtask、tool 恒成对、模型回退链、usage、ORDER BY、parts 计数 ---------------- */
+
+const V1_EXTRA_SCHEMA: readonly (readonly [string, readonly unknown[]])[] = [
+  ['CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, title TEXT, time_created INTEGER, model TEXT)', []],
+  ['CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT)', []],
+  ['CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT)', []],
+  // 会话级模型 = JSON 字符串（opencode 的 session.model 形态）
+  ['INSERT INTO session VALUES (?, ?, ?, ?, ?)', ['v1-a', '/work/v1a', 'A', 1791400000000, JSON.stringify({ id: 'model-session-a', providerID: 'p' })]],
+  // 行序刻意乱插（先插晚的）：读器必须按 (time_created, id) 重建
+  ['INSERT INTO message VALUES (?, ?, ?, ?)', ['m-5', 'v1-a', 1791400005000, JSON.stringify({ role: 'assistant' })]],
+  ['INSERT INTO message VALUES (?, ?, ?, ?)', ['m-3', 'v1-a', 1791400003000, JSON.stringify({ role: 'user' })]],
+  ['INSERT INTO message VALUES (?, ?, ?, ?)', ['m-1', 'v1-a', 1791400001000, JSON.stringify({ role: 'user' })]],
+  ['INSERT INTO message VALUES (?, ?, ?, ?)', ['m-2', 'v1-a', 1791400002000, JSON.stringify({ role: 'assistant', modelID: 'model-msg-a', tokens: { input: 3, output: 4, reasoning: 1, cache: { read: 2, write: 8 } } })]],
+  ['INSERT INTO message VALUES (?, ?, ?, ?)', ['m-4', 'v1-a', 1791400004000, JSON.stringify({ role: 'assistant', model: { modelID: 'model-nested' } })]],
+  ['INSERT INTO part VALUES (?, ?, ?, ?, ?)', ['p-1', 'm-1', 'v1-a', 1791400001000, JSON.stringify({ type: 'text', text: 'hello' })]],
+  ['INSERT INTO part VALUES (?, ?, ?, ?, ?)', ['p-2', 'm-1', 'v1-a', 1791400001100, JSON.stringify({ type: 'file', filename: 'diagram.png', mime: 'image/png' })]],
+  ['INSERT INTO part VALUES (?, ?, ?, ?, ?)', ['p-3', 'm-2', 'v1-a', 1791400002000, JSON.stringify({ type: 'patch', files: ['a.ts', 'b.ts'] })]],
+  ['INSERT INTO part VALUES (?, ?, ?, ?, ?)', ['p-4', 'm-2', 'v1-a', 1791400002100, JSON.stringify({ type: 'subtask', command: 'run', description: 'do it' })]],
+  // output 缺失的 tool part：必须仍产出 tool_result（空文本），否则留下「有 call 无 result」的断链
+  ['INSERT INTO part VALUES (?, ?, ?, ?, ?)', ['p-5', 'm-2', 'v1-a', 1791400002200, JSON.stringify({ type: 'tool', callID: 'call-x', tool: 'bash', state: { status: 'running', input: { cmd: 'ls' } } })]],
+  ['INSERT INTO part VALUES (?, ?, ?, ?, ?)', ['p-6', 'm-3', 'v1-a', 1791400003000, JSON.stringify({ type: 'text', text: 'bye' })]],
+  ['INSERT INTO part VALUES (?, ?, ?, ?, ?)', ['p-7', 'm-4', 'v1-a', 1791400004000, JSON.stringify({ type: 'text', text: 'nested model' })]],
+  ['INSERT INTO part VALUES (?, ?, ?, ?, ?)', ['p-8', 'm-5', 'v1-a', 1791400005000, JSON.stringify({ type: 'text', text: 'session model' })]],
+];
+
+test('opencode：V1 的 file/patch/subtask 落文本、tool 恒成对、模型回退链与 usage、ORDER BY 与 parts 计数', async (t) => {
+  const home = await tempHome('dcm-opencode-v1extra-');
+  const dbFile = opencodeDbPath({ homeDir: home, platform: 'linux' });
+  if (!(await createDb(dbFile, V1_EXTRA_SCHEMA))) {
+    t.skip('宿主无 node:sqlite');
+    return;
+  }
+  const read = await readOpencode({ homeDir: home, platform: 'linux' });
+  const file = read.files[0];
+  assert.ok(file !== undefined);
+  assert.deepEqual(file.parsed.records.map((r) => r.role), ['user', 'assistant', 'user', 'user', 'assistant', 'assistant']);
+  assert.equal(file.parsed.records[0]?.id, 'm-1', '按 time_created 重建（插入序是 m-5, m-3, m-1, m-2, m-4）');
+  // file part → [image: name] 文本占位（本地 IR 无 image 块，不伪装成正文）+ 计数
+  assert.deepEqual(file.parsed.records[0]?.blocks.map((b) => (b.type === 'text' ? b.text : b.type)), ['hello', '[image: diagram.png]']);
+  assert.equal(file.parsed.ignored['part:file'], 1);
+  // patch / subtask → 文本占位
+  const assistantTexts = (file.parsed.records[1]?.blocks ?? []).filter((b) => b.type === 'text').map((b) => (b as { text: string }).text);
+  assert.deepEqual(assistantTexts, ['[patch: 2 files]', '[subtask: run — do it]']);
+  // output 缺失的 tool part：call 与空文本 result 成对（result 拆到用户侧记录）
+  const calls = (file.parsed.records[1]?.blocks ?? []).filter((b) => b.type === 'tool_call');
+  assert.equal(calls.length, 1);
+  assert.equal((calls[0] as { id: string }).id, 'call-x');
+  assert.deepEqual(file.parsed.records[2]?.blocks.map((b) => b.type), ['tool_result']);
+  assert.equal((file.parsed.records[2]?.blocks[0] as { text: string }).text, '');
+  // 模型回退链：data.modelID → data.model.modelID → 会话级 session.model(JSON)
+  assert.equal(file.parsed.records[1]?.model, 'model-msg-a');
+  assert.equal(file.parsed.records[4]?.model, 'model-nested');
+  assert.equal(file.parsed.records[5]?.model, 'model-session-a');
+  // usage：data.tokens → IR 口径
+  assert.deepEqual(file.parsed.records[1]?.usage, { inputTokens: 3, outputTokens: 4, reasoningTokens: 1, cacheReadTokens: 2 });
+  // counts['parts'] = part **行数**（8），不是去重后的消息键数
+  assert.equal(read.extraCounts?.['opencode.parts'], 8);
+  assert.equal(read.extraCounts?.['opencode.messages'], 5);
+});
+

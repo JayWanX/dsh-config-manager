@@ -173,9 +173,16 @@ function roleOfItem(item: Record<string, unknown>, ignored: Record<string, numbe
   const lower = type.toLowerCase();
   if (lower === 'say' || lower === 'ask') {
     const sub = (str(item['say']) ?? str(item['ask']) ?? '').toLowerCase();
+    // say=user_feedback 是用户输入；**ask 是用户提问**（参考：ui_messages 的 ask.text 属用户侧，
+    // 旧实现把 ask 归成 assistant）。ui_messages 本身已不再当转写，这里只保留形态正确性。
     if (lower === 'say' && sub === 'user_feedback') return 'user';
+    if (lower === 'ask') {
+      if (sub === '' || sub === 'text' || sub === 'followup') return 'user';
+      irBump(ignored, 'cline:' + sub);
+      return undefined;
+    }
     if (sub !== '' && sub !== 'text') {
-      // 非文本的 say/ask（api_req_started / checkpoint_created / command / completion_result …）
+      // 非文本的 say（api_req_started / checkpoint_created / command / completion_result …）
       irBump(ignored, 'cline:' + sub);
       return undefined;
     }

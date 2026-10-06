@@ -140,7 +140,7 @@ test('cline t2 cwd 只认显式权威字段（manifest / legacy 索引），绝�
   assert.equal(clineCwdOf({ cwd: 'relative/nope' }, 'linux'), undefined);
 });
 
-test('cline t3 解析 + 端到端：modern（messages.json）与 legacy（ui_messages）都产出会话', async () => {
+test('cline t3 解析 + 端到端：modern（messages.json）与 legacy（api_conversation_history + 索引）都产出会话', async () => {
   const root = await tmpRoot('cline');
   try {
     const modernDir = path.join('.cline', 'data', 'sessions', 'sess-1');

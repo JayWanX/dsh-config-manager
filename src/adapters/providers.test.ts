@@ -124,3 +124,19 @@ test('providers: 多 route 共享 secrets 引用不触发强化 scanner 循环�
   assert.equal(sanitizedProviders['openai']?.['apiKeyEnv'], 'OPENAI_API_KEY', '引用字段 apiKeyEnv 保留');
   assert.equal(sanitizedProviders['openai']?.['baseURL'], 'https://api.openai.com', '非敏感字段保留');
 });
+
+/* ---------------- issue #73：与 settings 同型的空值判定回归 ---------------- */
+
+test('providers: 两端 namespace 值皆空（{}）→ Skip（此前恒判 Create，写入是空写入）', async () => {
+  const adapter = new ProvidersAdapter();
+  const src = makeContext('win32', 'C:\\Users\\alice');
+  src.settings.ns.set('llm-pi-ai', { value: {}, revision: 0, secrets: [] });
+  const exported = await adapter.export(src, { includeSecrets: false });
+  const sections = new Map([['providers', exported.data]]);
+
+  const dst = makeContext('linux', '/home/bob');
+  dst.settings.ns.set('llm-pi-ai', { value: {}, revision: 0, secrets: [] });
+  const items = await adapter.analyzeImport(exported.data, makeImportContext(dst, sections));
+  assert.equal(items.length, 1);
+  assert.equal(items[0]?.kind, 'Skip', '两端皆 {} → Skip');
+});

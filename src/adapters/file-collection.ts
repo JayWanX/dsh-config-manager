@@ -327,6 +327,21 @@ export abstract class FileCollectionAdapter implements ConfigAdapter<FilesSectio
     return unitsFromFiles(this.id, section.data.files, (rel) => this.unitIdOf(rel));
   }
 
+  /**
+   * 幂等比对用的内容（相对 baseDir 路径 + 盘上/包内字节 → 参与哈希比对的字节）。
+   *
+   * 缺省 = **原字节**：对文件类分区来说「相对路径 + 内容哈希」就是身份语义，不得改动。
+   * 覆写者只应用于剔除**不属于「配置身份」的易变字段**（见 SelfAdapter 的两个调度配置：
+   * 运行态每轮都被改写，整文件哈希会恒判 Conflict —— issue #73）。两条契约：
+   *   1. **必须收敛**：applyItem 写盘后再分析一次必须判 Skip，否则同步永不收敛；
+   *   2. **未改写时返回同一引用** —— 调用方据此复用导入侧已算好的 contentHash，
+   *      不给 sessions 这类大分区白算一遍哈希。
+   * 判不出可比形态（解析失败等）时必须**原样返回**：绝不把「判不出来」当成「相同」或「不同」。
+   */
+  protected comparableContent(_relativePath: string, data: Uint8Array): Uint8Array {
+    return data;
+  }
+
   async analyzeImport(data: FilesSection, ctx: ImportContext): Promise<PlanItem[]> {
     const msg = ctx.msg;
     const items: PlanItem[] = [];
@@ -357,14 +372,20 @@ export abstract class FileCollectionAdapter implements ConfigAdapter<FilesSectio
           description: msg('adapter.fileCreate', { type: this.displayName, path: file.relativePath }), severity: 'info',
           target: { adapter: this.id, ref: file.relativePath },
         });
-      } else if (sha256Hex(current) === file.contentHash) {
-        items.push({ id, unitId, kind: 'Skip', adapter: this.id, description: msg('adapter.fileSame', { path: file.relativePath }), severity: 'info' });
       } else {
-        items.push({
-          id, unitId, kind: 'Conflict', adapter: this.id,
-          description: msg('adapter.fileDiff', { path: file.relativePath }), severity: 'warning',
-          target: { adapter: this.id, ref: file.relativePath },
-        });
+        // 幂等判定统一走 comparableContent（缺省 = 原字节）；包内文件未被改写时复用已算好的
+        // contentHash，不给 sessions 这类大分区白算一遍哈希（盘上文件本来就要现算）。
+        const importedComparable = this.comparableContent(file.relativePath, file.data);
+        const importedHash = importedComparable === file.data ? file.contentHash : sha256Hex(importedComparable);
+        if (sha256Hex(this.comparableContent(file.relativePath, current)) === importedHash) {
+          items.push({ id, unitId, kind: 'Skip', adapter: this.id, description: msg('adapter.fileSame', { path: file.relativePath }), severity: 'info' });
+        } else {
+          items.push({
+            id, unitId, kind: 'Conflict', adapter: this.id,
+            description: msg('adapter.fileDiff', { path: file.relativePath }), severity: 'warning',
+            target: { adapter: this.id, ref: file.relativePath },
+          });
+        }
       }
     }
     return items;

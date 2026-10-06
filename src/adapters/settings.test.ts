@@ -98,6 +98,34 @@ test('settings: validate 拒绝非法结构', async () => {
   const noNs = await adapter.validate({ version: 1, namespaces: null as never });
   assert.equal(noNs.valid, false);
 });
+
+/* ---------------- issue #73：两端皆空必须 Skip，否则同步永不收敛 ---------------- */
+
+test('settings: 两端皆空（{}）→ Skip；目标非空 + 导入为 {} → 仍 Conflict', async () => {
+  const adapter = new SettingsAdapter(NS);
+  // 远端/包内值本身就是 {}：DSH 对「已注册但从未配置」的 namespace 返回 {}，导出侧如实记下。
+  const src = makeContext('win32', 'C:\\Users\\alice');
+  src.settings.ns.set('general', { value: {}, revision: 0, secrets: [] });
+  const exported = await adapter.export(src, { includeSecrets: false });
+  assert.deepEqual(exported.data.namespaces['general']?.value, {}, '导出侧值确实是空对象');
+
+  // 目标机同名 namespace 已注册且值同为 {}。反序（空判定在前）会判 Create，而 applyItem 的
+  // replace(ref, {}) 是空写入，下一轮 describe 仍返回 {} → 每次同步都重现同一项（issue #73）。
+  const dst = makeContext('linux', '/home/bob');
+  dst.settings.ns.set('general', { value: {}, revision: 0, secrets: [] });
+  const sections = new Map([['settings', exported.data]]);
+  let items = await adapter.analyzeImport(exported.data, makeImportContext(dst, sections));
+  assert.equal(items.length, 1);
+  assert.equal(items[0]?.kind, 'Skip', '两端皆 {} → Skip');
+  // 收敛：再分析一次仍是 Skip（等价于「应用之后不会再冒出来」）
+  items = await adapter.analyzeImport(exported.data, makeImportContext(dst, sections));
+  assert.equal(items[0]?.kind, 'Skip');
+
+  // 边界：目标非空 + 导入为 {} → Conflict（不得借「跳过空值」把本机配置静默清空）
+  dst.settings.ns.set('general', { value: { theme: 'dark' }, revision: 7, secrets: [] });
+  items = await adapter.analyzeImport(exported.data, makeImportContext(dst, sections));
+  assert.equal(items[0]?.kind, 'Conflict');
+});
 /* ---------------- 快路径：宿主实现 describeAll 时只读一趟，且结果与逐名路径逐字相同 ---------------- */
 
 /** 给 MemSettings 挂一个批量读（真实宿主即如此：多一个全量 describe，其余不变） */

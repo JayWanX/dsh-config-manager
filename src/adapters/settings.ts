@@ -90,9 +90,13 @@ export function isEmptyValue(v: unknown): boolean {
   return false;
 }
 
-/** 对比导入记录与目标当前值：不存在 → Create；一致 → Skip；不同 → Conflict；
+/** 对比导入记录与目标当前值：一致（含两端皆空）→ Skip；目标为空且导入非空 → Create；其余不同 → Conflict；
  * 目标端 describe 抛错（命名空间未注册：提供它的插件在目标未激活/未安装）→ MissingDependency（§15 依赖检测），
- * 此时 Create/Update 必然失败，标记为“需注意”让导入继续，而不是整体失败。纯计算，零写入。 */
+ * 此时 Create/Update 必然失败，标记为“需注意”让导入继续，而不是整体失败。纯计算，零写入。
+ *
+ * **判定顺序不得回退**（issue #73）：一致判定必须排在「目标为空」之前 —— isEmptyValue({}) 为真，
+ * 反序会把「{} 覆盖 {}」判成 Create，而写入 {} 是空写入 no-op，下一轮 describe 仍返回 {}，
+ * 于是每次同步都重现同一项，永不收敛。 */
 export async function planNamespaceItems(
   data: Record<string, NamespaceRecord>,
   adapter: 'settings' | 'ui',
@@ -117,14 +121,15 @@ export async function planNamespaceItems(
         description: msg('adapter.settingsUnregistered', { ns: name }),
         severity: 'warning', target: { adapter, ref: name },
       });
+    } else if (current !== null && isDeepStrictEqual(current.value, rec.value)) {
+      // 值相等优先于「目标为空」：两端皆空（如注册后从未配置的 {}）必须 Skip（issue #73）。
+      items.push({ id, kind: 'Skip', adapter, description: msg('adapter.settingsSame', { name }), severity: 'info' });
     } else if (current === null || isEmptyValue(current.value)) {
-      // 目标已注册但从未配置（空值）→ 初始化（Create）
+      // 目标已注册但从未配置（空值）**且导入值非空** → 初始化（Create）
       items.push({
         id, kind: 'Create', adapter, description: msg('adapter.settingsCreate', { name }), severity: 'info',
         target: { adapter, ref: name },
       });
-    } else if (isDeepStrictEqual(current.value, rec.value)) {
-      items.push({ id, kind: 'Skip', adapter, description: msg('adapter.settingsSame', { name }), severity: 'info' });
     } else {
       items.push({
         id, kind: 'Conflict', adapter, description: msg('adapter.settingsDiff', { name }),

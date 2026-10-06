@@ -110,15 +110,16 @@ export class ProvidersAdapter implements ConfigAdapter<ProviderExportSection> {
           description: msg('adapter.providerUnregistered', { route, ns: entry.namespace }),
           severity: 'warning', target: { adapter: 'providers', ref: entry.namespace },
         });
+      } else if (current !== null && isDeepStrictEqual(current.value, entry.raw ?? stripEntry(entry))) {
+        // 值相等优先于「目标为空」——与 settings.planNamespaceItems 同一口径与顺序（issue #73）
+        items.push({ id, kind: 'Skip', adapter: 'providers', description: msg('adapter.providerSame', { route }), severity: 'info' });
       } else if (current === null || isEmptyValue(current.value)) {
-        // 目标已注册但为空 → 初始化（Create）
+        // 目标已注册但为空**且导入值非空** → 初始化（Create）
         items.push({
           id, kind: 'Create', adapter: 'providers',
           description: msg('adapter.providerCreate', { route, ns: entry.namespace }), severity: 'info',
           target: { adapter: 'providers', ref: entry.namespace },
         });
-      } else if (isDeepStrictEqual(current.value, entry.raw ?? stripEntry(entry))) {
-        items.push({ id, kind: 'Skip', adapter: 'providers', description: msg('adapter.providerSame', { route }), severity: 'info' });
       } else {
         items.push({
           id, kind: 'Conflict', adapter: 'providers',

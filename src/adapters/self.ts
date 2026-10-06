@@ -14,6 +14,10 @@
  * 快照/回滚路径一致）；**清单来自覆写的 listRelPaths()（白名单），export() 与 preview() 都经
  * 基类 collect()**（self 目录内存在大量非配置子目录，不能像 skills/sessions 那样整体递归）。
  *
+ * **例外：两个调度配置的比对口径见覆写的 comparableContent()** —— sync-autosync.json /
+ * backup-schedule.json 内含每次执行收尾都被改写的运行态字段，整文件哈希会恒判 Conflict
+ * （每轮同步都重现，用户点「应用」还会把远端陈旧运行态倒灌回本机；issue #73）。
+ *
  * 为什么必须靠 listRelPaths() 而不是覆写 export() 来收窄（2026-10 真机报告）：
  * `preview()` / `listRelPaths()` 是后来才加进基类的。本类此前只覆写 export()，于是只读预览
  * 落到基类的目录递归 —— 把整个 $DSH_HOME/dsh-config-manager（快照、config-snapshots、
@@ -46,6 +50,56 @@ export const SELF_CONFIG_FILES: readonly string[] = [
   // 换机器后备份列表仍能看到手动导出时填写的备注
   'exports/.backup-notes.json',
 ];
+
+/**
+ * 调度配置里的**运行态字段**：每次执行收尾都会被调度器改写，不属于「配置身份」。
+ * 仅比对时剔除（见 comparableContent）；写盘仍写完整文件。
+ */
+const VOLATILE_RUN_STATE_KEYS: ReadonlySet<string> = new Set([
+  'lastRunAt', 'lastRunStatus', 'lastRunMessage', 'lastRunHistoryId', 'consecutiveFailures',
+]);
+
+/** 含运行态字段的调度配置（相对 baseDir）。 */
+const SCHEDULER_CONFIG_RELS: ReadonlySet<string> = new Set([
+  'sync/sync-autosync.json',
+  'sync/backup-schedule.json',
+]);
+
+/** 递归剔除运行态键（sync-autosync v2 的 channels.git / channels.webdav 是嵌套对象）。 */
+function stripRunState(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(stripRunState);
+  if (node === null || typeof node !== 'object') return node;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    if (VOLATILE_RUN_STATE_KEYS.has(key)) continue;
+    out[key] = stripRunState(value);
+  }
+  return out;
+}
+
+/** 键排序的稳定序列化：两边键序不同（手改过的文件）时不应凭空判 Conflict。 */
+function stableStringify(node: unknown): string {
+  if (Array.isArray(node)) return '[' + node.map(stableStringify).join(',') + ']';
+  if (node === null || typeof node !== 'object') return JSON.stringify(node) ?? 'null';
+  const entries = Object.entries(node as Record<string, unknown>)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return '{' + entries.map(([k, v]) => JSON.stringify(k) + ':' + stableStringify(v)).join(',') + '}';
+}
+
+/**
+ * 剔除运行态后的规范化 JSON 字节；解析不出 JSON（或顶层不是对象）→ null。
+ * **null = 「判不出可比形态」**，调用方回落原字节按整文件哈希处理 —— 不猜。
+ */
+function canonicalizeWithoutRunState(raw: Uint8Array): Uint8Array | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(raw));
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== 'object') return null;
+  return new TextEncoder().encode(stableStringify(stripRunState(parsed)));
+}
 
 export class SelfAdapter extends FileCollectionAdapter {
   readonly id = 'self' as const;
@@ -99,5 +153,26 @@ export class SelfAdapter extends FileCollectionAdapter {
       }
     }
     return { ...empty, paths: found };
+  }
+
+  /**
+   * 幂等比对口径：两个调度配置剔除**运行态字段**后比对，其余白名单文件保持整文件哈希。
+   *
+   * 为什么必要（issue #73）：sync-autosync.json 由调度器在每次执行收尾改写
+   * lastRunAt / lastRunStatus / lastRunMessage / lastRunHistoryId / consecutiveFailures
+   * （src/sync/autosync-scheduler.ts），backup-schedule.json 同理（backup-scheduler）。
+   * 整文件 SHA-256 因此永远与远端不同 → 每轮同步都重现一条 self 分区的 Conflict，
+   * 且用户点「应用」会把远端的陈旧运行态倒灌回本机。
+   * 剔除后：**仅运行态不同 → Skip**（什么都不写，本机运行态保留）；
+   * 配置本体（enabled / interval / startupMinIntervalMs / customSchedule / retention …）不同 → 仍是 Conflict。
+   *
+   * 其余白名单文件（sync-config / sync-selection / ui-prefs / market-config / .backup-notes）
+   * 已核实不含易变字段，保持内容寻址的整文件哈希。
+   * 解析不出 JSON 时原样返回 —— 「判不出来」按整文件哈希处理，绝不猜。
+   */
+  protected override comparableContent(relativePath: string, data: Uint8Array): Uint8Array {
+    if (!SCHEDULER_CONFIG_RELS.has(relativePath)) return data;
+    // 回落原引用（解析失败 / 非对象）：走整文件哈希，且不额外重算包内哈希
+    return canonicalizeWithoutRunState(data) ?? data;
   }
 }

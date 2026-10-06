@@ -139,3 +139,80 @@ test('self: 宿主未实现 statSize（旧版门面）时，白名单判定仍�
   assert.deepEqual(previewed.items.map((u) => u.id), ['self:sync/sync-config.json']);
   assert.equal(previewed.sizeBytes, 2, '退回 readFile 时体积 = 文件字节数');
 });
+
+/* ---------------- issue #73：调度配置不得因运行态漂移而每轮重现 ---------------- */
+
+const AUTOSYNC_REL = 'dsh-config-manager/sync/sync-autosync.json';
+const BACKUP_SCHEDULE_REL = 'dsh-config-manager/sync/backup-schedule.json';
+
+test('self: 调度配置仅运行态不同 → Skip（键序不同亦然）；配置本体不同 → Conflict', async () => {
+  const adapter = new SelfAdapter();
+  const remote = JSON.stringify({
+    schemaVersion: 2,
+    channels: {
+      git: { enabled: true, interval: '30m', startupMinIntervalMs: 300000, consecutiveFailures: 0, lastRunAt: '2026-10-01T00:00:00.000Z', lastRunStatus: 'success' },
+      webdav: { enabled: false, interval: '30m', startupMinIntervalMs: 300000, consecutiveFailures: 0 },
+    },
+  }, null, 2);
+  const src = makeContext('win32', 'C:\\Users\\alice');
+  await src.fs.writeFile(AUTOSYNC_REL, Buffer.from(remote, 'utf8'));
+  const out = await adapter.export(src, { includeSecrets: false });
+  const sections = new Map([['self', out.data]]);
+
+  // 本机：配置本体一致，但运行态已被本机调度器改写（每轮同步收尾都会发生），且键序不同
+  const dst = makeContext('linux', '/home/bob');
+  await dst.fs.writeFile(AUTOSYNC_REL, Buffer.from(JSON.stringify({
+    schemaVersion: 2,
+    channels: {
+      webdav: { consecutiveFailures: 0, startupMinIntervalMs: 300000, interval: '30m', enabled: false },
+      git: { lastRunAt: '2026-10-06T09:00:00.000Z', lastRunStatus: 'failed', lastRunMessage: '网络不可达', lastRunHistoryId: 'h-1', consecutiveFailures: 3, startupMinIntervalMs: 300000, interval: '30m', enabled: true },
+    },
+  }, null, 2), 'utf8'));
+  let items = await adapter.analyzeImport(out.data, makeImportContext(dst, sections));
+  assert.equal(items.length, 1);
+  assert.equal(items[0]?.kind, 'Skip', '仅运行态字段不同（且键序不同）→ Skip，否则每轮同步都重现同一条 Conflict');
+
+  // 配置本体（enabled）不同 → 仍是 Conflict（剔除运行态不得把配置差异一起吞掉）
+  await dst.fs.writeFile(AUTOSYNC_REL, Buffer.from(JSON.stringify({
+    schemaVersion: 2,
+    channels: { git: { enabled: false, interval: '30m', startupMinIntervalMs: 300000, consecutiveFailures: 0 } },
+  }, null, 2), 'utf8'));
+  items = await adapter.analyzeImport(out.data, makeImportContext(dst, sections));
+  assert.equal(items[0]?.kind, 'Conflict');
+});
+
+test('self: backup-schedule.json 同口径 + 坏 JSON 回落整文件哈希', async () => {
+  const adapter = new SelfAdapter();
+  const src = makeContext('win32', 'C:\\Users\\alice');
+  await src.fs.writeFile(BACKUP_SCHEDULE_REL, Buffer.from(JSON.stringify({
+    schemaVersion: 1, enabled: true, interval: '24h', startupMinIntervalMs: 3600000,
+    consecutiveFailures: 0, lastRunAt: '2026-10-01T00:00:00.000Z', lastRunStatus: 'success',
+  }, null, 2), 'utf8'));
+  const out = await adapter.export(src, { includeSecrets: false });
+  const sections = new Map([['self', out.data]]);
+  const dst = makeContext('linux', '/home/bob');
+
+  await dst.fs.writeFile(BACKUP_SCHEDULE_REL, Buffer.from(JSON.stringify({
+    schemaVersion: 1, enabled: true, interval: '24h', startupMinIntervalMs: 3600000,
+    consecutiveFailures: 2, lastRunAt: '2026-10-06T09:00:00.000Z', lastRunStatus: 'failed',
+  }, null, 2), 'utf8'));
+  let items = await adapter.analyzeImport(out.data, makeImportContext(dst, sections));
+  assert.equal(items[0]?.kind, 'Skip');
+
+  // 坏 JSON：判不出可比形态 → 回落整文件哈希（「判不出来」绝不等于「相同」）
+  await dst.fs.writeFile(BACKUP_SCHEDULE_REL, Buffer.from('{broken', 'utf8'));
+  items = await adapter.analyzeImport(out.data, makeImportContext(dst, sections));
+  assert.equal(items[0]?.kind, 'Conflict', '包内合法 JSON vs 本机坏 JSON → Conflict（不能因解析失败就放行）');
+});
+
+test('self: 其余白名单文件的比对口径不外溢（仍是整文件哈希）', async () => {
+  const adapter = new SelfAdapter();
+  const src = makeContext('win32', 'C:\\Users\\alice');
+  await src.fs.writeFile('dsh-config-manager/sync/sync-config.json', Buffer.from('{"transport":"git","git":{"repoUrl":"https://x"},"webdav":{}}', 'utf8'));
+  const out = await adapter.export(src, { includeSecrets: false });
+  const sections = new Map([['self', out.data]]);
+  const dst = makeContext('linux', '/home/bob');
+  await dst.fs.writeFile('dsh-config-manager/sync/sync-config.json', Buffer.from('{ "webdav": {}, "git": { "repoUrl": "https://x" }, "transport": "git" }', 'utf8'));
+  const items = await adapter.analyzeImport(out.data, makeImportContext(dst, sections));
+  assert.equal(items[0]?.kind, 'Conflict', '键序不同但语义相同 —— sync-config 不是调度配置，仍按字节判');
+});

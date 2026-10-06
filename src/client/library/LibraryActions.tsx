@@ -101,8 +101,6 @@ export function LibraryActions({ api, syncApi, t, target, onDone, onChanged, onO
    * `mode` 只影响标题与进度文案 —— 两条路的差别在成功之后（进导入向导 / 交浏览器下载）。
    */
   const [pull, setPull] = useState<PullState | null>(null)
-  /** 恢复计划弹窗内的咨询（与上面那个互不相干：那个是 ⋯ 菜单单独看报告） */
-  const [planConsult, setPlanConsult] = useState<{ loading: boolean; report: ConsultReport | null }>({ loading: false, report: null })
   const [running, setRunning] = useState(false)
   const [report, setReport] = useState<RestoreReport | null>(null)
   const [confirmRestore, setConfirmRestore] = useState(false)
@@ -123,12 +121,9 @@ export function LibraryActions({ api, syncApi, t, target, onDone, onChanged, onO
     switch (capability) {
       case 'restore': {
         setPlan({ snapshotId: row.ref.snapshotId ?? '', loading: true, plan: null, changeSummary: undefined, error: null })
-        // 恢复计划里的咨询是**计划的一部分**（迁移前咨询是恢复决策的输入），
-        // 与 ⋯ 菜单的「只想看看报告」是两件事 —— 各持一份状态，互不干扰。
-        setPlanConsult({ loading: true, report: null })
-        api.consult({ type: 'local-snapshot', id: row.ref.snapshotId ?? '', snapshotId: row.ref.snapshotId })
-          .then((rep) => { if (mounted.current && gen === generation.current) setPlanConsult({ loading: false, report: rep }) })
-          .catch(() => { if (mounted.current && gen === generation.current) setPlanConsult({ loading: false, report: null }) })
+        // v3（用户要求）：恢复计划弹窗**不再内嵌「迁移前咨询」卡** —— 那个弹窗的职责是
+        // 「这次恢复会改什么 + 确认执行」；咨询报告有自己的入口（产物库行 ⋯ 菜单 →「迁移前咨询」），
+        // 想看报告的人可以单独打开。顺带省掉一次重量级请求（consult 要读快照内容做评分）。
         api.restoreSnapshot(row.ref.snapshotId ?? '', true).then(
           (res) => {
             if (!mounted.current || gen !== generation.current) return
@@ -405,7 +400,7 @@ export function LibraryActions({ api, syncApi, t, target, onDone, onChanged, onO
         </Modal.Footer>
       </Modal>
 
-      {/* 恢复计划预览：dry-run 结果 + 迁移前咨询（只读） */}
+      {/* 恢复计划预览：dry-run 结果（只读）。v3：不再内嵌迁移前咨询卡（用户要求）。 */}
       <Modal
         open={plan !== null}
         onClose={() => { if (!running) setPlan(null) }}
@@ -420,10 +415,6 @@ export function LibraryActions({ api, syncApi, t, target, onDone, onChanged, onO
           closeDisabled={running}
         />
         <Modal.Body scroll>
-          {/* 迁移前咨询：与计划预览并列（只读、零写入；失败就只是没有这张卡）。 */}
-          {planConsult.loading && <Spinner label={api.t('consult.loading')} />}
-          {planConsult.report !== null && <ConsultCard report={planConsult.report} t={api.t} />}
-          {planConsult.report !== null && <div className={css.sectionDivider} role="separator" />}
           <div className={css.hint}>{t('snapshots.selectHint')}</div>
           {plan?.loading === true && <Spinner label={t('common.loading')} />}
           {plan?.error !== null && plan?.error !== undefined && <Banner kind="error">{plan.error}</Banner>}

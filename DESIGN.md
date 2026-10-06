@@ -704,15 +704,16 @@ flex-direction:column }` 让内部 input 拉满。市场筛选用 `.marketFilter
   - **分组头严格一行**（`.restorePlanGroupHead`）：`.groupLabel` 是卡内小节头（`display:block` +
     `margin-bottom:8px`），直接塞进 `.statRow` 会被下外边距顶得与徽章/行数不在同一视觉行，
     故分组头用独立类并复位 `.groupLabel` 的 `display`/外边距。
-  - **咨询与预览之间的分割线**（`.sectionDivider`，1px `--dsw-alias-border-l1`）：迁移前咨询卡排在
-    「选择快照以预览恢复计划…」提示行之前，两部分之间画线；无咨询报告时不画（避免开头一条孤立横线）。
+  - **弹窗不再内嵌「迁移前咨询」卡**（v3，用户要求）：恢复计划弹窗的职责是「这次恢复会改什么 +
+    确认执行」，报告改由**独立入口**打开（产物库行 ⋯ 菜单 →「迁移前咨询」，走自己的弹窗）。
+    原先的分割线类 `.sectionDivider` 随之删除（只剩这一处引用 = 死样式）。
   - 无法逐行对照时按原因给一句话（二进制 / 过大 / 不可读 / 快照缺内容 / 路径越界），
     两侧一致时显示「无逐行差异」——三种状态都占位，不出现空白面板。
   - 数据来源：宿主 `POST /restore`（dryRun）附带 `changeSummary`（轻量统计，带读取上限），
     单文件 hunks 由 `POST /snapshots/file-diff` 在点开时懒加载 —— 会话类快照几百个文件也不拖死弹窗。
   - 分层：分组/统计在 `src/ui/restore-plan-view.ts`、双栏对齐在 `src/ui/diff-view.ts`（纯函数 + node 单测）；
     行级 diff 内核 `src/utils/line-diff.ts`（零依赖 Myers，超预算降级为整块替换）；
-    组件 `src/client/snapshots/RestorePlanView.tsx` 只装配。
+    组件 `src/client/library/RestorePlanView.tsx` 只装配（v3 随产物库归位搬移）。
 - **冲突解决**（ConflictList）：选边卡片模式——每项一张卡（kindTag 适配器 + 等宽描述），
   两个并排 `.choiceCard` 选边（radio 语义，选中高亮），**可见文案取字典**
   `import.conflicts.keepCurrent` / `useImported`（zh「保留当前 / 使用备份」、en「Keep current / Use backup」）；

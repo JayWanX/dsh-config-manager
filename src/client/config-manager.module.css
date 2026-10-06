@@ -4302,13 +4302,6 @@
   color: var(--cm-error);
 }
 
-/* 同一容器内两个区块之间的水平分割线（迁移前咨询 ↔ 计划预览） */
-.sectionDivider {
-  height: 1px;
-  margin: 10px 0;
-  background: var(--dsw-alias-border-l1);
-}
-
 .diffPane {
   /* 双栏表自带行号列，左侧不再留额外缩进（原先 6px 缩进 + 行号列显得左边空一块） */
   margin: 2px 0 8px;

@@ -31,7 +31,7 @@
  *    user/message 缺 data.id、assistant/message 缺 message.id、tool/call.callId 空、内容块 id 空、
  *    **同一步重复通告同一 advertised tool call** → 被**已安装 Session 的 seed/restore 闸门**拒读。
  *    以上一律 **unloadable**。
- *    真机原始输出（v4 日志 + `validation:'current'`）：
+ *    真机原始输出（v4 日志 + `validation:'current'` = 安装版 Session 的校验层，即上面的 ②③④）：
  *      `finish: seed user/message at index 9 lacks an identified message`
  *      `finish: tool call id requires a nonempty string`
  *      `finish: assistant/message repeats advertised tool call call_00_rCbEBWsfXGrfOhog9cud3396`
@@ -39,19 +39,23 @@
  *    迁移并被迁移器拒绝 → unloadable。
  *  - 版本读不出：按较轻的 nextRequestFails 报，detail 记 codec-uncalibrated（不谎称已验证）。
  *
- * **两种校验收口必须分清**（官方源码 `@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js`）：
- *  · transformed（**容忍**）：`parseHeaderRecord` 只用它解析**首帧 header**；当前代际的真实读盘是
- *    `readDecodedJsonlSource` → `format.createRestore(header, { recovery:'recoverable',
- *    validation:'transformed' })`，并在**同一条读取路径**上再调
- *    `Session.fromRestore(generation.meta.id, generation.events, generation.meta,
- *    generation.inheritedEventCount, 'detached', currentSessionMessageProjections)` +
- *    `assertCurrentAssistantStreams(generation.events)`；
- *    历史代际（version <= 3）走 `historicalSessionFormatCatalog.createRestore(header,
- *    { recovery:'recoverable', validation:'current' })`。
- *  · current / Session.fromRestore（**拒绝**）：上面那个 seed/restore 闸门就在 v4 的读盘路径上，
- *    是用户真实会撞到的拒读 —— v4 日志里缺 user/assistant message.id、空 tool-call id、重复通告同一
- *    advertised tool call，transformed 口径能过、这条闸门过不去。因此本模块按**闸门**定严重级
- *    （unloadable）；transformed 的容忍只作为口径差异记录在此，不再用于降级。
+ * **前台管线的分层必须写准**（官方源码 `@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js`），
+ * 否则容易误读成「transformed 容忍 ⇒ 也许还能打开」。官方当前代际（v4）读盘是**四层串行**的：
+ *  ① `parseHeaderRecord` 的 `sessionFormatCatalog.createRestore(parsed, { recovery:'strict',
+ *     validation:'transformed' })`：**既解首帧 header，也被 `readZstdPrefix` / `SessionLogScanner`
+ *     用来逐行 `decodeRow`** —— 也就是说 strict+transformed 同样是 v4 前台的**行解码器**，
+ *     而不是一次性的首帧校验；
+ *  ② `assertV4RowAdmission` / `assertReleasedV4Relationships`：行准入与关系（引用/工具生命周期）校验；
+ *  ③ `adoptSessionEvent`（内部如 `assertMessageEventShape`）：收编成事件时的形状校验；
+ *  ④ `Session.fromRestore(generation.meta.id, generation.events, generation.meta,
+ *     generation.inheritedEventCount, 'detached', currentSessionMessageProjections)` +
+ *     `assertCurrentAssistantStreams(generation.events)`。
+ *  **只有 ① 的 `decodeRow` / `finish` 那一层**会对「user/assistant 缺 message.id」「空 tool-call id」
+ *  放行；②③④ 任何一层都会拒整份日志 —— 用户真实撞到的是后者（上面的原始输出即来自完整前台管线）。
+ *  历史代际（version <= 3）走 `historicalSessionFormatCatalog.createRestore(header,
+ *  { recovery:'recoverable', validation:'current' })` 加同一套 v0→v1 / v3→v4 迁移器。
+ *  结论不变：本模块按**完整前台管线**定严重级（unloadable）；① 那一层的容忍不得用于降级，
+ *  也不得据此推测「也许能打开」。
  */
 import fs from 'node:fs/promises';
 import { join } from 'node:path';

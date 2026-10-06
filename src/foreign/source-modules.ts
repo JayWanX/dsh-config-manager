@@ -38,8 +38,8 @@ export interface ForeignSourceModuleShape {
 export const FOREIGN_SOURCE_MODULE_SHAPES: readonly ForeignSourceModuleShape[] = [
   { id: 'claude-code', modules: ['read-claude-code.ts', 'claude-code.ts'], sessions: true },
   { id: 'hermes', modules: ['read-hermes.ts', 'hermes.ts'], sessions: true },
-  { id: 'cursor', modules: ['read-cursor.ts', 'cursor.ts'], sessions: false },
-  { id: 'codex', modules: ['read-codex.ts', 'codex.ts'], sessions: false },
+  { id: 'cursor', modules: ['read-cursor.ts', 'cursor.ts'], sessions: true },
+  { id: 'codex', modules: ['read-codex.ts', 'codex.ts'], sessions: true },
   { id: 'copilot', modules: ['read-copilot.ts', 'copilot.ts'], sessions: false },
   { id: 'antigravity', modules: ['read-antigravity.ts', 'antigravity.ts'], sessions: true },
   /* ---- 会话类 24 个（档 B，2026-10-05）---- */

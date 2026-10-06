@@ -545,6 +545,8 @@ export function builtinForeignSources(): readonly ForeignSource[] {
           { rel: '.cursor/rules', dir: true },
           { rel: '.cursor/skills', dir: true },
           { rel: '.cursorrules' },
+          // 会话根（只有会话、没有 mcp.json 的机器也要能命中）
+          { rel: '.cursor/projects', dir: true },
         ]);
         const paths: string[] = [...userProbed.paths];
         const skipped: ForeignSkip[] = [...userProbed.skipped];
@@ -568,6 +570,10 @@ export function builtinForeignSources(): readonly ForeignSource[] {
           ...(ctx.projectDir !== undefined ? { projectDir: ctx.projectDir } : {}),
           ...(ctx.limits !== undefined ? { limits: ctx.limits } : {}),
         });
+        // 会话转码版本必须由宿主解析后传入（绝不猜）；缺省 = 一条都不转并整批报码
+        if (ctx.targetSessionFormatVersion !== undefined) {
+          read.input.targetSessionFormatVersion = ctx.targetSessionFormatVersion;
+        }
         return convertCursor(read.input);
       },
     },
@@ -587,6 +593,9 @@ export function builtinForeignSources(): readonly ForeignSource[] {
           { rel: 'config.toml' },
           { rel: 'AGENTS.override.md' },
           { rel: 'AGENTS.md' },
+          // 会话双根（只有会话、没有 config.toml 的机器也要能命中）
+          { rel: 'sessions', dir: true },
+          { rel: 'archived_sessions', dir: true },
         ]);
         // 技能是**跨来源共用**的 ~/.agents/skills（相对用户 home，不是 CODEX_HOME）
         const skillsProbed = await probeTree(ctx.homeDir, [{ rel: '.agents/skills', dir: true }]);
@@ -598,6 +607,10 @@ export function builtinForeignSources(): readonly ForeignSource[] {
       },
       async build(ctx) {
         const read = await readCodex({ homeDir: ctx.homeDir, env: ctx.env, ...(ctx.limits !== undefined ? { limits: ctx.limits } : {}) });
+        // 会话转码版本必须由宿主解析后传入（绝不猜）；缺省 = 一条都不转并整批报码
+        if (ctx.targetSessionFormatVersion !== undefined) {
+          read.input.targetSessionFormatVersion = ctx.targetSessionFormatVersion;
+        }
         return convertCodex(read.input);
       },
     },

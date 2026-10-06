@@ -153,17 +153,21 @@ export const FOREIGN_TRUTH_TABLES: readonly ForeignTruthTableEntry[] = [
   },
   {
     id: 'cursor',
-    defaults: all3('<home>/.cursor/mcp.json', '<home>/.cursor/rules', '<home>/.cursor/skills', '<home>/.cursorrules'),
+    defaults: all3(
+      '<home>/.cursor/mcp.json', '<home>/.cursor/rules', '<home>/.cursor/skills', '<home>/.cursorrules',
+      '<home>/.cursor/projects',
+    ),
     envKeys: [],
     autoRoots: true,
     evidence: 'fixture',
-    refs: 'chat-import discovery.mjs:111（~/.cursor/projects）；cursor.com/help/customization/{mcp,rules}.md',
-    dynamic: '会话在 ~/.cursor/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl（真机无 ~/.cursor，本版不实现会话：见 §8.2 降级说明）',
+    refs: 'chat-import discovery.mjs:111（~/.cursor/projects）；cursor.com/help/customization/{mcp,rules}.md；会话层对照 convert/cursor.mjs + cwd-map.mjs（**真机无 ~/.cursor，未经真机验证**）',
+    dynamic: '会话在 ~/.cursor/projects/<slug>/agent-transcripts/<composer-uuid>/<composer-uuid>.jsonl（逐行 {role, message:{content:[…]}}；首问包在 <user_query>/<timestamp> 里）；cwd 由 <slug> 的**存在性贪心解码**还原（解不出即 session-missing-cwd，绝不伪造；posix slug 未取证故不解码）；转录不含 tool_result → 只发 tool/call',
   },
   {
     id: 'codex',
     defaults: all3(
       '<home>/.codex/config.toml', '<home>/.codex/AGENTS.override.md', '<home>/.codex/AGENTS.md', '<home>/.agents/skills',
+      '<home>/.codex/sessions', '<home>/.codex/archived_sessions',
     ),
     envKeys: [{ key: 'CODEX_HOME', mode: 'replace' }],
     autoRoots: true,
@@ -219,7 +223,7 @@ export const FOREIGN_TRUTH_TABLES: readonly ForeignTruthTableEntry[] = [
     autoRoots: true,
     evidence: 'fixture',
     refs: 'chat-import discovery.mjs:99,122-124（桌面端根仅在 $APPDATA 存在时加入）',
-    dynamic: '<stem>.jsonl + 伴生 <stem>.meta.json（workspace/summary）',
+    dynamic: '<stem>.jsonl + 伴生 sidecar（新版 <stem>.jsonl.meta 的 topic_title/workspace_root/scope；旧版 <stem>.meta.json）与 WAL <stem>.events.jsonl（合并进会话）；桌面布局 projects/<slug>/sessions/** + .titles.json；sidecar 缺席时按 stem 内嵌时间兜底 createdAt；subagent-sub-* 剔除',
   },
   {
     id: 'opencode',
@@ -253,7 +257,7 @@ export const FOREIGN_TRUTH_TABLES: readonly ForeignTruthTableEntry[] = [
     autoRoots: true,
     evidence: 'fixture',
     refs: 'chat-import discovery.mjs:101-103,132（**双根** sessions + archived_sessions）',
-    dynamic: '<encodeURIComponent(cwd)>/<sessionId>/{summary.json, chat_history.jsonl}',
+    dynamic: '以「含 summary.json 的目录」递归识别（不再固定两层）；summary.json 取 info.id/info.cwd 与 generated_title|session_summary；chat_history.jsonl 按 {type,…} 解析并把顶层 tool_calls 与 type:"tool_result" 按 callId 配对；synthetic_reason 注入行不进正文',
   },
   {
     id: 'openclaw',

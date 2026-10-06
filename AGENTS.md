@@ -17,8 +17,11 @@ src/routes/   路由 kit(单入口 endpoint()：loopback 围栏 + 方法白名�
               + 顶层 try/catch) 与按域拆分的组文件(import/snapshots/profiles/backup/consult/sync/prefs/market/me/
               history/recovery)；新增一条 API = 在所属组文件加一条 endpoint({ path, methods }, handler)
 src/core/     引擎(exporter/importer/restore/rollback/run-registry/plugin-cli)，与DSH解耦(ConfigAdapter/HostContext+内存mock)
-src/foreign/  外部 agent 配置→bundle v1 的**转换层**（与 adapters/sync/market 同级；Claude Code v1：
-              mcp/skills/agentInstructions/**sessions 转码**；纯翻译 + 读盘 + bundle 产出，凭据值绝不进包，
+src/foreign/  外部 agent 配置→bundle v1 的**转换层**（与 adapters/sync/market 同级；30 个来源 =
+              6 个配置类 + 24 个会话类，**会话转码一律经 IR 与 kernel.collectSessionSections**；
+              2026-10-06 起配置类里的 claude-code / hermes / antigravity / cursor / codex 也会读会话
+              （copilot 只有位置、无格式取证 → 未实现，见 docs/spec/known-gaps.md §6）；
+              纯翻译 + 读盘 + bundle 产出，凭据值绝不进包，
               见 docs/design/2026-10-04-foreign-import-v1.md）
 src/schema/   类型/Manifest/版本(CURRENT_SCHEMA_VERSION=1)
 src/security/  secret-scanner/redaction/zip-security/integrity/encryption(scrypt+AES-256-GCM)

@@ -224,15 +224,18 @@ copilot）只能文档取证，其验收必须显式标注「文档取证、未�
 | cursor | ~/.cursor/rules/*.mdc（用户规则） | %USERPROFILE%\.cursor\rules\*.mdc | ~/.cursor/rules/*.mdc | ~/.cursor/rules/*.mdc | **文档未列出**（官方称用户规则随账号同步）；本机不可复核 → 存在即读、不存在即跳过，**不得据此产出空分区** |
 | cursor | ~/.cursor/skills/**/SKILL.md | %USERPROFILE%\.cursor\skills\ | ~/.cursor/skills/ | ~/.cursor/skills/ | **文档未取证**（同上处理） |
 | cursor | .cursorrules（旧式，项目根） | 同左 | 同左 | 同左 | 文档取证 → 报 legacy-rules-file |
+| cursor | 会话：~/.cursor/projects/&lt;slug&gt;/agent-transcripts/&lt;composer-uuid&gt;/&lt;composer-uuid&gt;.jsonl | %USERPROFILE%\.cursor\projects\ | 同左 | 同左 | **fixture 取证**（本机无 ~/.cursor，未经真机验证）→ **2026-10-06 起迁移**：逐行 {role, message:{content:[…]}}；首问剥 <user_query>/<timestamp>、[REDACTED] 过滤、tool_use 缺 id 铸兜底；**转录不含 tool_result** → 只发 tool/call；cwd 由 slug 的**存在性贪心解码**还原（解不出即 session-missing-cwd，posix slug 未取证故不解码） |
 | codex | ~/.codex/config.toml（用户级）、&lt;项目&gt;/.codex/config.toml（项目级，仅 trust 项目加载） | %USERPROFILE%\.codex\config.toml | ~/.codex/config.toml | ~/.codex/config.toml | 文档取证（developers.openai.com/codex/config-basic）；**本机无 ~/.codex** |
 | codex | [mcp_servers.&lt;id&gt;] 的 command / args / env | 同左 | 同左 | 同左 | 文档取证（config-reference） |
 | codex | AGENTS.override.md **优先于** AGENTS.md（全局层只取第一个非空文件） | ~/.codex/AGENTS(.override).md | 同左 | 同左 | 文档取证（learn.chatgpt.com/docs/agent-configuration/agents-md） |
 | codex | 位置可被 CODEX_HOME 整体替换 | %CODEX_HOME% | $CODEX_HOME | $CODEX_HOME | 文档取证 |
 | codex | ~/.agents/skills/**/SKILL.md | %USERPROFILE%\.agents\skills | ~/.agents/skills | ~/.agents/skills | **实测取证**（目录存在、本机为空）+ 文档取证待补（t20 补链接，否则标注「文档未取证」） |
+| codex | 会话：&lt;CODEX_HOME&gt;/sessions/YYYY/MM/DD/rollout-*.jsonl 与 &lt;CODEX_HOME&gt;/archived_sessions/** | %USERPROFILE%\.codex\sessions\ | 同左 | 同左 | **fixture 取证**（本机无 ~/.codex，未经真机验证）→ **2026-10-06 起迁移**：逐行 {timestamp,type,payload}；session_meta 取 id/cwd、response_item.message 归一、function_call(_output) 按 call_id 配对；**子代理 rollout（thread_source=subagent / source.subagent）跳过**、fork 保留；reasoning/compacted 只计数（IR 无承载位）；分页 rollout 不归并 |
 | copilot | ~/.copilot/（config.json / mcp-config.json / permissions-config.json / agents/ / skills/ / hooks/ / logs/ / session-state/ / session-store.db / installed-plugins/ / ide/） | %USERPROFILE%\.copilot | ~/.copilot | ~/.copilot | 文档取证（docs.github.com「GitHub Copilot CLI configuration directory」）；**本机无 ~/.copilot** |
 | copilot | mcp-config.json（用户级 MCP）、skills/&lt;名&gt;/SKILL.md（个人技能，一层） | 同上 | 同上 | 同上 | 文档取证 |
 | copilot | 位置可被 COPILOT_HOME 替换；命令行 --config-dir 优先级更高 | %COPILOT_HOME% | $COPILOT_HOME | $COPILOT_HOME | 文档取证 → 命中报 source-location-overridden |
 | copilot | copilot-instructions.md / instructions/*.instructions.md | — | — | — | **文档未列出**（CLI 配置目录表里没有；那是 VS Code / 项目级约定）→ 存在即读、不存在不报错，**不得凭空造分区** |
+| copilot | 会话（**未实现**）：配置目录表列有 session-state/ 与 session-store.db | — | — | — | **只有位置、没有格式取证**：官方文档未给出会话文件/表结构，参考实现 dsh-chat-import 的 FORMATS 清单里也没有 copilot → 本版**不实现会话导入**（登记为已知缺口，见 known-gaps）。有 2 个以上真实样本（或官方格式说明）后再实现，**绝不按猜的 schema 读库** |
 | antigravity | ~/.gemini/config/mcp_config.json（**全局** MCP） | %USERPROFILE%\.gemini\config\mcp_config.json | ~/.gemini/config/mcp_config.json | ~/.gemini/config/mcp_config.json | **实测取证**（存在；本机 **0 字节**）+ 文档取证（antigravity.google/docs/mcp） |
 | antigravity | ~/.gemini/antigravity/mcp_config.json（IDE 侧同形位置） | %USERPROFILE%\.gemini\antigravity\mcp_config.json | 同左 | 同左 | **实测取证**（存在；0 字节）；文档未列出 → 兼容位置，两者都探测，空文件报 source-empty-file |
 | antigravity | &lt;项目&gt;/.agents/mcp_config.json（workspace 级；remote 用 **serverUrl**，url/httpUrl 已不支持） | 同左 | 同左 | 同左 | 文档取证 |

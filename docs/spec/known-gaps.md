@@ -576,3 +576,23 @@
 | `source.platform` 取值是否被严格校验为枚举 | 源码只校验 `typeof === 'string'`（规格 §11 已登记） |
 | `sessions` 分区（`includeSessions: true`）内未知字段的行为 | 结构上不可能承载未知字段，未单独跑一次实测（规格 §11 已登记） |
 | 离线 CLI `backup` 在真机（`$DSH_HOME/skills` 不存在、技能全在插件注册表）上的技能覆盖范围 | CLI 只扫 `$DSH_HOME/skills`（§4 已列该边界）；「注册表技能在 GUI 导出侧确实被收编」有单测与真机导出取证，但 CLI 侧的空分区行为只有源码级推理，**未跑真机 CLI 验收** |
+
+---
+
+## 6. 外部 Agent 会话导入的能力缺口（2026-10-06 全量审计）
+
+> 本节记录 2026-10-06「所有外部 Agent 会话导入」全量排查（8 个只读/实施审计，对照 dsh-chat-import `main`）后**仍然存在**的缺口。
+> 每条都已做到「**逐类计数可见、绝不静默丢弃**」，但正文/语义没有真正迁移。状态口径：⚠️ = 能力缺口（非本轮范围内可闭环）。
+
+| 缺口 | 说明 | 当前状态 |
+|---|---|---|
+| F-01 | **IR 无 reasoning 承载块**：外部来源的 thinking / reasoning 正文（qwen `thinking`、continue `thinking`/`reasoning`、workbuddy `reasoning`、grokbuild/reasonix `reasoning_content`、kimi `ThinkPart`/`content.part(think)`、goose/crush/zed `thinking`、pi/openclaw `thinking`、opencode `reasoning`）只能落 `unsupported-session-record` 计数 | ⚠️ 需共享层：`session-ir.ts` 的 `IrBlock` 增 reasoning 变体 + `synthesizeDshRows` 支持（并确认 DSH codec 接受该块） |
+| F-02 | **无会话级摘要 / 压缩检查点通道**：zcode `part.summary.body`、opencode compaction、grokbuild `compaction_meta`、crush `is_summary_message`、zed `Compaction`、kimi `context.apply_compaction`、mimocode 后台任务等只计数 | ⚠️ 需共享层：合成器原生压缩检查点（`session-ir.ts` 自述「压缩属于待办能力」） |
+| F-03 | **无 image / 附件块**：opencode `file` part、vibe `images`、kimi 媒体、codex `input_image`/data URL 等只落文本占位（`[image: …]`）或计数 | ⚠️ 需共享层：IR 增 image 块 + 宿主附件落盘 |
+| F-04 | **Copilot CLI 会话未实现**：配置目录表列有 `session-state/` 与 `session-store.db`，但**官方未给格式**、参考实现 dsh-chat-import 的 FORMATS 里也没有 copilot | ⚠️ **只有位置、没有格式取证** → 不按猜的 schema 读库；拿到真实样本/官方格式说明后再实现 |
+| F-05 | **Cursor 会话的 posix slug 不解码**：`<slug>` 有损编码，仅对 Windows 盘符形态做「逐段存在性贪心解码」；macOS/Linux 未取证 → 该平台 cursor 会话全部按 `session-missing-cwd` 诚实跳过 | ⚠️ 拿到真机 posix slug 后再扩展 |
+| F-06 | **Codex 分页 rollout 不归并**：同一 thread 的多页（文件名 `_<pageId>` 后缀）各自成会话；同 `payload.id` 时报 `session-id-conflict`（可见） | ⚠️ 需 `groupCodexThreads` 级实现 |
+| F-07 | **Cursor / Codex 会话层只到 fixture 取证**：本机无 `~/.cursor` / `~/.codex`，truth-table 的 evidence 保持 fixture/documented，**未经真机验证** | ⚠️ 真机取样后才能升级 |
+| F-08 | **reasonix-lineage（恢复分支折叠）未实现**：祖先/分支文件被当独立会话导入 | ⚠️ 参考 `lib/convert/reasonix-lineage.mjs` 全未搬 |
+| F-09 | **`dsh` / `dsh4` 跨代次不做重编码**：保持**逐字节直通**，且要求 `header.version` 严格等于目标机版本；v0–v2 与 V3↔V4 迁移会整批 `session-format-unsupported` | ⚠️ 有意设计（字节直通优先），跨代重编码是独立特性 |
+| F-10 | **`$TELEAGENT_HOME` 只认绝对路径**（参考直接采信该值，本仓走 `absoluteEnvPath`） | ⚠️ 口径差异（更保守），对齐需同时改 `read-teleagent.ts` / `teleagent.test.ts` / 真值表 |

@@ -8,9 +8,22 @@
  *   ② 写入门（**在 DSH 运行时也只能这么保守**）：目录内有 session.lock 不动；
  *      文件最近 SESSION_REPAIR_QUIESCENT_MS 内被写过 → 视为活跃使用，拒绝；
  *      预览时给出「大小 + mtime」指纹，应用时必须一致（TOCTOU：预览后被改过就拒绝）；
- *   ③ 修复台账（<dataDir>/session-repairs.json）：记录每次修复的备份名与修复后指纹，
- *      **回滚只认台账里的 repairId**（客户端永远不能传路径）；
- *   ④ 回滚：先确认目标仍是我们修完时的那一份（指纹一致），再把备份原子换回去。
+ *   ③ 修复台账（<dataDir>/session-repairs.json）：记录每次修复的备份名、备份 sha256、修复后目标 sha256
+ *      与真 codec 复验结论，**回滚只认台账里的 repairId**（客户端永远不能传路径）；
+ *   ④ **写后真 codec 复验门**（utils/session-verify.ts）：执行器里的 sessionLogSelfCheck 只证明「结构自洽」，
+ *      本层再加一道「本机 DSH 的官方 codec 真能读到底吗」；
+ *   ⑤ 回滚：先确认目标仍是我们修完时的那一份（sha256 一致；旧记录退回 size+mtime 指纹）、
+ *      备份内容与台账 sha256 一致，再把备份原子换回去。
+ *
+ * 复验门的三种结论（语义固定；文案映射由界面做）：
+ *   · verified:true → 保持成功语义，结果与台账都带上 verify。
+ *   · 确定性失败（invalid-header / decode-failed / finish-failed）→ **不发布**：用本次时间戳备份走既有
+ *     rollbackSessionLogFile 自动还原（rolledBack 如实回传），返回 ok:false + reason='verify-failed'，
+ *     **不写台账**（这次修复没有留下来）。
+ *   · unavailable（拿不到可信 codec：没有 catalog / 代际对不上 / 缺子会话事实）→ **不回滚**：
+ *     字节已写、结构自检已过，但我们**证明不了** DSH 能加载它；返回 ok:true + verify:{verified:false,...}
+ *     并照常写台账（台账是「可回滚凭据」而不是成功声明 —— 不写反而会让这次已生效的写入失去回滚入口）。
+ *     「不宣称成功」由 verify 字段保证：调用方必须据它区分「已验证可加载」与「未验证」。
  *
  * 「绝不猜」：任何一步证明不了就拒绝，绝不「修得更狠」；台账里的绝对路径不回传浏览器
  * （回传的是 sessionId / 日志文件名 / 备份文件名这些标识，不含目录）。
@@ -28,6 +41,14 @@ import {
   type SessionRepairAction,
   type SessionRepairFailure,
 } from './session-log-repair.ts';
+import { sha256Hex } from './hashing.ts';
+import {
+  defaultDshPackageJsonCandidates,
+  isSessionVerifyReason,
+  verifySessionLogBytes,
+  type SessionVerifyOptions,
+  type SessionVerifyResult,
+} from './session-verify.ts';
 
 /** 服务层失败原因 = 执行器原因 ∪ 编排原因（机器可读；文案由界面映射）。 */
 export type SessionRepairReason =
@@ -45,7 +66,11 @@ export type SessionRepairReason =
   /** 台账里没有这个 repairId */
   | 'repair-not-found'
   /** 这次修复已经回滚过 */
-  | 'already-rolled-back';
+  | 'already-rolled-back'
+  /** 写后真 codec 复验**确定性失败**：已用本次备份自动还原（rolledBack 如实回传），这次修复没有留下来 */
+  | 'verify-failed'
+  /** 回滚前置：目标当前 sha256 与台账记录不一致（字节被改过 —— 绝不覆盖别人的内容） */
+  | 'target-changed';
 
 /** 写入门：日志最近多久被写过就视为「仍在活跃使用」（毫秒）。 */
 export const SESSION_REPAIR_QUIESCENT_MS = 30_000;
@@ -78,6 +103,15 @@ export interface SessionRepairRecord {
   rolledBackAt?: number;
   /** 这次修复含**有损**动作（截断）—— 审计用；缺省 = 零损失 */
   lossy?: boolean;
+  /**
+   * 备份文件的 sha256（回滚前置校验用）。
+   * **可选**：旧台账记录没有它 —— 读旧记录必须兼容缺失字段（否则本机历史修复会整条被丢弃、再也回滚不了）。
+   */
+  backupSha256?: string;
+  /** 修复后目标文件的 sha256（回滚前置：目标被改过就拒绝覆盖）。可选，同上。 */
+  targetSha256After?: string;
+  /** 写后真 codec 复验结论（可选，旧记录缺失 = 未记录过复验）。 */
+  verify?: SessionVerifyResult;
 }
 
 /** 目标解析结果。 */
@@ -116,6 +150,10 @@ export interface SessionRepairPlanResult {
   lossy?: boolean;
   /** 保留的行数 */
   keptRows?: number;
+  /** 写后真 codec 复验结论（应用期才有）—— **调用方必须据它区分「已验证可加载」与「未验证」** */
+  verify?: SessionVerifyResult;
+  /** 确定性失败时：是否已用本次备份自动还原（false = 目标仍是修复后字节，属危险态，必须可见） */
+  rolledBack?: boolean;
 }
 
 /** 回滚结果。 */
@@ -216,6 +254,35 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+
+/** 台账里的 sha256 必须是 64 位小写十六进制；形状不对一律当「没有」（退回旧口径，绝不拿可疑值当判据）。 */
+function isSha256Hex(value: unknown): value is string {
+  return typeof value === 'string' && SHA256_HEX_RE.test(value);
+}
+
+/** 台账里的复验结论；形状不对一律当「没有记录过」（绝不猜）。 */
+function toVerifyRecord(value: unknown): SessionVerifyResult | undefined {
+  if (!isRecord(value)) return undefined;
+  const verified = value['verified'];
+  if (verified === true) {
+    const events = value['events'];
+    if (typeof events !== 'number' || !Number.isFinite(events) || events < 0) return undefined;
+    const strong = value['strong'] === true;
+    const strongDetail = value['strongDetail'];
+    return typeof strongDetail === 'string' && strongDetail !== ''
+      ? { verified: true, events, strong, strongDetail }
+      : { verified: true, events, strong };
+  }
+  if (verified !== false) return undefined;
+  const reason = value['reason'];
+  if (!isSessionVerifyReason(reason)) return undefined;
+  const detail = value['detail'];
+  return typeof detail === 'string' && detail !== ''
+    ? { verified: false, reason, detail }
+    : { verified: false, reason };
+}
+
 function toRepairRecord(value: unknown): SessionRepairRecord | undefined {
   if (!isRecord(value)) return undefined;
   const repairId = value['repairId'];
@@ -249,6 +316,14 @@ function toRepairRecord(value: unknown): SessionRepairRecord | undefined {
     repairedMtimeMs: num('repairedMtimeMs'),
   };
   if (value['lossy'] === true) record.lossy = true;
+  // 新字段**全部可选**：旧台账记录（T8 前的修复、或从更早版本升级上来的）必须照样能读出来，
+  // 否则 toRepairRecord 会整条丢弃 → 那些历史修复就再也回滚不了了。
+  const backupSha256 = value['backupSha256'];
+  if (isSha256Hex(backupSha256)) record.backupSha256 = backupSha256;
+  const targetSha256After = value['targetSha256After'];
+  if (isSha256Hex(targetSha256After)) record.targetSha256After = targetSha256After;
+  const verify = toVerifyRecord(value['verify']);
+  if (verify !== undefined) record.verify = verify;
   const rolledBackAt = value['rolledBackAt'];
   if (typeof rolledBackAt === 'number' && Number.isFinite(rolledBackAt)) record.rolledBackAt = rolledBackAt;
   return record;
@@ -367,9 +442,29 @@ export interface SessionRepairApplyOptions extends SessionRepairCallOptions {
   expect?: { size: number; mtimeMs: number };
   /** 显式放行**有损**动作（截断）；缺省 false = 有损计划一律拒绝（reason='lossy-required'） */
   allowLossy?: boolean;
+  /** 真 codec 复验门的注入点（候选 / children / catalog）；缺省按本次 homeDir 走 install anchor 解析。 */
+  verify?: SessionVerifyOptions;
 }
 
-/** 应用（**写**）：重跑全部前置判定 → 执行器完整安全序列 → 记台账。 */
+/**
+ * 跑写后复验门；**绝不 throw**（门自身也不 throw），读不到字节一律按 unavailable 如实回传。
+ *
+ * 候选缺省 = defaultDshPackageJsonCandidates(homeDir)（与 src/index.ts 的 candidate 口径同源，
+ * 只是这里拿不到 profileContext.installAnchor，改用进程内运行时锚点 + 本机 profile 树）。
+ */
+async function runVerifyGate(bytes: Buffer | undefined, options: SessionRepairApplyOptions): Promise<SessionVerifyResult> {
+  if (bytes === undefined) return { verified: false, reason: 'unavailable', detail: 'unreadable-after-write' };
+  const injected = options.verify;
+  const candidates = injected?.dshPackageJsonCandidates ?? defaultDshPackageJsonCandidates(options.homeDir);
+  try {
+    return await verifySessionLogBytes(bytes, { ...injected, dshPackageJsonCandidates: candidates });
+  } catch {
+    // 兜底：门承诺绝不 throw，这里再兜一层，任何意外都只能得到「未验证」而绝不能变成「成功」
+    return { verified: false, reason: 'unavailable', detail: 'verify-threw' };
+  }
+}
+
+/** 应用（**写**）：重跑全部前置判定 → 执行器完整安全序列 → **真 codec 复验门** → 记台账。 */
 export async function applySessionRepair(options: SessionRepairApplyOptions): Promise<SessionRepairPlanResult> {
   const nowMs = (options.now ?? (() => new Date()))().getTime();
   const sessionsDir = join(options.homeDir, 'sessions');
@@ -389,9 +484,28 @@ export async function applySessionRepair(options: SessionRepairApplyOptions): Pr
     ...(options.now !== undefined ? { now: options.now } : {}),
   });
   if (!outcome.ok) return { ok: false, reason: outcome.reason ?? 'verification-refused', ...base };
+  const repairedBytes = await fs.readFile(target.file).catch(() => undefined);
   const repaired = await fs.stat(target.file).catch(() => undefined);
-  const repairId = 'repair-' + Date.now().toString(36) + '-' + Math.random().toString(16).slice(2, 10);
   const backupName = outcome.backupPath !== undefined ? basename(outcome.backupPath) : undefined;
+  // ④ 写后**真 codec 复验门**：执行器里的 sessionLogSelfCheck 只证明「结构自洽」，这一步才证明「本机 DSH 真能加载」。
+  const verify = await runVerifyGate(repairedBytes, options);
+  if (!verify.verified && verify.reason !== 'unavailable') {
+    // 确定性失败 → **不发布**：用本次时间戳备份走既有 rollbackSessionLogFile 自动还原；
+    // 台账不写（这次修复一点都没留下来），ok:false + rolledBack 如实回传。
+    const rolledBack = outcome.backupPath !== undefined
+      ? (await rollbackSessionLogFile(target.file, outcome.backupPath)).ok
+      : false;
+    return {
+      ok: false,
+      reason: 'verify-failed',
+      ...base,
+      droppedRows: outcome.droppedRows ?? 0,
+      verify,
+      rolledBack,
+      ...(backupName !== undefined ? { backupName } : {}),
+    };
+  }
+  const repairId = 'repair-' + Date.now().toString(36) + '-' + Math.random().toString(16).slice(2, 10);
   const record: SessionRepairRecord = {
     repairId,
     unitId: target.unitId,
@@ -403,10 +517,19 @@ export async function applySessionRepair(options: SessionRepairApplyOptions): Pr
     droppedRows: outcome.droppedRows ?? 0,
     bytesBefore: outcome.bytesBefore ?? 0,
     bytesAfter: outcome.bytesAfter ?? 0,
-    repairedSize: repaired?.size ?? outcome.bytesAfter ?? 0,
+    // size 必须与上面算 sha256 的**同一份字节**一致（避免 stat 与 read 之间被换过时台账自相矛盾）
+    repairedSize: repairedBytes?.length ?? repaired?.size ?? outcome.bytesAfter ?? 0,
     repairedMtimeMs: repaired?.mtimeMs ?? 0,
+    verify,
   };
   if (outcome.lossy === true) record.lossy = true;
+  if (repairedBytes !== undefined) record.targetSha256After = sha256Hex(repairedBytes);
+  if (outcome.backupPath !== undefined) {
+    const backupBytes = await fs.readFile(outcome.backupPath).catch(() => undefined);
+    // 备份的职责是**保真**而不是合法：这里只算 sha256（它可能是一份修复前的坏日志，
+    // **绝不**拿真 codec 门去要求备份通过 —— 那会把「能回滚」和「能加载」两件事绑在一起）
+    if (backupBytes !== undefined) record.backupSha256 = sha256Hex(backupBytes);
+  }
   const recorded = backupName !== undefined && parseSessionRepairBackupName(backupName) !== undefined
     ? await recordRepair(options.dataDir, record)
     : false;
@@ -422,6 +545,7 @@ export async function applySessionRepair(options: SessionRepairApplyOptions): Pr
     repairId,
     ...(backupName !== undefined ? { backupName } : {}),
     ledgerRecorded: recorded,
+    verify,
   };
 }
 
@@ -431,7 +555,16 @@ export interface SessionRepairRollbackOptions {
   repairId: string;
 }
 
-/** 回滚：**只接受台账里的 repairId**（客户端不能传路径）；目标指纹不一致就拒绝。 */
+/**
+ * 回滚：**只接受台账里的 repairId**（客户端不能传路径）。
+ *
+ * 回滚是一条「用旧内容覆盖新内容」的路径，所以前置校验按 sha256 从严（台账里没有 sha256 的**旧记录**
+ * 退回原来的 size+mtime 指纹，保证历史修复仍可回滚）：
+ *  ① 备份文件 sha256 必须与台账一致 → 不一致 / 读不到 = reason 'backup-invalid'（备份已被换过就绝不用它覆盖任何东西）；
+ *  ② 目标当前 sha256 必须与 targetSha256After 一致 → 不一致 = reason 'target-changed'（目标又被改过，绝不覆盖别人的内容）。
+ * 注意①**只做 sha256 + 执行器里的结构层 sessionLogSelfCheck**：备份的职责是保真而不是合法，
+ * 它可能本来就是一份修不好的日志 —— 绝不拿真 codec 门去卡它。
+ */
 export async function rollbackSessionRepair(options: SessionRepairRollbackOptions): Promise<SessionRepairRollbackResult> {
   const ledger = await readSessionRepairLedger(options.dataDir);
   if (ledger.error !== undefined) return { ok: false, reason: 'repair-not-found', repairId: options.repairId };
@@ -444,10 +577,24 @@ export async function rollbackSessionRepair(options: SessionRepairRollbackOption
   }
   const st = await fs.stat(target.file).catch(() => undefined);
   if (st === undefined) return { ok: false, reason: 'not-found', repairId: options.repairId, unitId: record.unitId, sessionId: record.sessionId };
-  if (st.size !== record.repairedSize || Math.abs(st.mtimeMs - record.repairedMtimeMs) > 1) {
+  const backupPath = join(target.unitDir, record.backupName);
+  // ① 备份前置：sha256 必须与台账一致（旧记录没有 sha256 → 退回执行器的结构自检，不额外卡）
+  if (record.backupSha256 !== undefined) {
+    const backupBytes = await fs.readFile(backupPath).catch(() => undefined);
+    if (backupBytes === undefined || sha256Hex(backupBytes) !== record.backupSha256) {
+      return { ok: false, reason: 'backup-invalid', repairId: options.repairId, unitId: record.unitId, sessionId: record.sessionId };
+    }
+  }
+  // ② 目标前置：sha256 必须与台账一致（旧记录 → 退回 size+mtime 指纹）
+  if (record.targetSha256After !== undefined) {
+    const current = await fs.readFile(target.file).catch(() => undefined);
+    if (current === undefined || sha256Hex(current) !== record.targetSha256After) {
+      return { ok: false, reason: 'target-changed', repairId: options.repairId, unitId: record.unitId, sessionId: record.sessionId };
+    }
+  } else if (st.size !== record.repairedSize || Math.abs(st.mtimeMs - record.repairedMtimeMs) > 1) {
     return { ok: false, reason: 'changed', repairId: options.repairId, unitId: record.unitId, sessionId: record.sessionId };
   }
-  const outcome: SessionLogRepairOutcome = await rollbackSessionLogFile(target.file, join(target.unitDir, record.backupName));
+  const outcome: SessionLogRepairOutcome = await rollbackSessionLogFile(target.file, backupPath);
   if (!outcome.ok) {
     return { ok: false, reason: outcome.reason ?? 'write-failed', repairId: options.repairId, unitId: record.unitId, sessionId: record.sessionId };
   }

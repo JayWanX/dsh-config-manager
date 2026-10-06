@@ -11,6 +11,37 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 
 ## [Unreleased]
 
+> **本轮收尾：平台矩阵三端全绿 + 链接跟随不再按平台丢内容**：三个 PR 合入后补掉的都是
+> 「报成功但结果不对」这一类问题 —— 备份在部分平台静默缺内容、CI 在部分平台假红。
+>
+> - **递归遍历的 realpath 口径混用（issue #69）**：链接目标用 `realpath` 的长形式，而 `homeDir`
+>   一直是调用方给的原样字符串 —— 两侧拼写不一致时，「home 内部的链接」会被判成 `outside-home` 并
+>   **静默跳过**（macOS 的 `/var` → `/private/var`、Windows 的 `C:\Users\IUUUUU~1\…` 短名都是触发
+>   条件），备份照报成功却缺内容（与 issue #37 同一症状）。现在边界比较两侧统一到 realpath 口径，
+>   并复用同一次结果做防环去重。
+> - **CRLF 检出下 5 条源码字面量守卫假红（issue #70）**：仓库根新增 `.gitattributes`
+>   （`* text=auto eol=lf`）把 EOL 钉死，ubuntu / windows / macOS 三端检出同一份字节；三处守卫在
+>   **读取入口**折 LF（与仓库既有 11 处先例同法），已有的 CRLF 工作区不重新检出也不再假红。
+> - **POSIX 宿主上的预览体积用例**：新增用例把 mock home 固定成 win32 形状，而路径解析走宿主的
+>   `path.resolve` —— linux / macOS 上它被解析到 `cwd` 之下，体积断言恒为 0；改为按宿主平台选 home 形状。
+>
+> **Wrap-up: the platform matrix is green, and linked content is no longer dropped by platform**: every
+> defect closed after this batch reported success while being wrong.
+>
+> - **Directory traversal mixed two path spellings (issue #69)**: link targets were compared as
+>   `realpath` long forms while `homeDir` kept the caller's spelling, so in-home links were judged
+>   `outside-home` and **silently skipped** (macOS `/var` → `/private/var`; Windows 8.3 short names such
+>   as `C:\Users\IUUUUU~1\…`) — backups reported success while missing content, the same symptom as
+>   issue #37. Both sides of the boundary check now compare in realpath form, reusing that result for
+>   cycle detection.
+> - **Five source-literal guards failed on CRLF checkouts (issue #70)**: a new `.gitattributes`
+>   (`* text=auto eol=lf`) pins EOL so ubuntu, windows and macOS check out the same bytes; three guards
+>   normalise to LF at the read boundary, so an existing CRLF worktree no longer goes red without a
+>   re-checkout.
+> - **A preview-size test assumed Windows path semantics**: the test pinned its mock home to a win32
+>   shape while path resolution uses the host's `path.resolve`, so on linux / macOS it resolved under
+>   `cwd` and the size assertion was always 0; the home shape now follows the host platform.
+
 > **同步通道新增「选择已有仓库 / 新建仓库」**：git 通道的仓库地址此前只能手填 —— 得先去 GitHub 建好仓库、
 > 复制 clone URL、再贴回来，还容易漏掉「必须私有」这条前提。现在配置弹窗可以直接从当前 token 可见的
 > **私有**仓库里选（按最近更新排序，带更新时间与 fork 徽章），或就地新建一个私有仓库并自动选中。

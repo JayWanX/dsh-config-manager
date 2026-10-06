@@ -140,11 +140,114 @@ test('t5 .env 只报告：值不读、不进结果、不进包', () => {
   assert.deepEqual(result.sections, []);
 });
 
-test('t6 会话不迁移：只报码，绝不产出 sessions 分区', () => {
-  const result = convertHermes({ config: {}, sessionStore: { present: true, detail: 'state.db' }, soul: 'x' });
-  assert.ok(result.skipped.some((s) => s.code === 'sessions-not-migrated' && s.origin === 'state.db'));
-  assert.ok(!result.sections.some((s) => s.sectionId === 'sessions'), 'Hermes 的对话在 SQLite 里，本版不迁移');
-  assert.ok(!result.sections.some((s) => s.sectionId === 'workspaces'));
+test('t6 会话：读得出就迁移；读不出（能力缺失 / 打不开 / 表不符）才如实报码', () => {
+  // ① 库在、却一条都没读出来（例如宿主缺 node:sqlite）→ 必须报码且不产出空分区
+  const none = convertHermes({ config: {}, sessionStore: { present: true, detail: 'state.db' }, soul: 'x' });
+  assert.ok(none.skipped.some((s) => s.code === 'sessions-not-migrated' && s.origin === 'state.db'));
+  assert.ok(!none.sections.some((s) => s.sectionId === 'sessions'));
+  assert.ok(!none.sections.some((s) => s.sectionId === 'workspaces'));
+
+  // ② 读出来了（哪怕只有部分）→ 绝不再报 sessions-not-migrated
+  const parsed = {
+    records: [{ role: 'user' as const, blocks: [{ type: 'text' as const, text: '你好' }], time: 1700000001000 }],
+    cwd: 'D:/proj',
+    createdAt: 1700000001000,
+    title: '标题',
+    raw: 1,
+    bad: 0,
+    ignored: {},
+  };
+  const some = convertHermes({
+    config: {},
+    sessionStore: { present: true, detail: 'state.db' },
+    sessions: [{ id: 's1', parsed }],
+    targetSessionFormatVersion: 3,
+  });
+  assert.ok(some.sections.some((s) => s.sectionId === 'sessions'), '读出的会话必须产出 sessions 分区');
+  assert.ok(some.sections.some((s) => s.sectionId === 'workspaces'), '会话必须连工作区一起产出');
+  assert.ok(!some.skipped.some((s) => s.code === 'sessions-not-migrated'), '读出来了就不该再报不迁移');
+  assert.equal(some.counts['sessions.files'], 1);
+});
+
+/** node:sqlite 能力探测（宿主没有就 skip；降级路径由 t6 覆盖） */
+type DbCtor = new (p: string, o?: { readOnly?: boolean }) => {
+  exec(sql: string): void;
+  close(): void;
+};
+async function sqliteCtor(): Promise<DbCtor | null> {
+  try {
+    const mod = (await import('node:sqlite')) as { DatabaseSync?: DbCtor };
+    return typeof mod.DatabaseSync === 'function' ? mod.DatabaseSync : null;
+  } catch {
+    return null;
+  }
+}
+
+test('t6b state.db 读盘：sessions + messages 两表 → 归一记录、工具结果带正文、cwd/标题取库里的', async () => {
+  const Ctor = await sqliteCtor();
+  if (Ctor === null) return; // 无 node:sqlite：能力缺失下的降级由 t6 覆盖
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-hermes-db-'));
+  const db = new Ctor(path.join(home, 'state.db'));
+  try {
+    db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, cwd TEXT, started_at REAL)');
+    db.exec('CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, tool_calls TEXT, tool_call_id TEXT, tool_name TEXT, timestamp REAL)');
+    db.exec("INSERT INTO sessions VALUES ('s1','会话标题','D:/proj', 1700000000.5)");
+    db.exec("INSERT INTO messages (session_id,role,content,timestamp) VALUES ('s1','user','你好',1700000001)");
+    db.exec(
+      "INSERT INTO messages (session_id,role,content,tool_calls,timestamp) VALUES ('s1','assistant',''," +
+      "'[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"terminal\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}]'," +
+      '1700000002)',
+    );
+    db.exec("INSERT INTO messages (session_id,role,content,tool_call_id,tool_name,timestamp) VALUES ('s1','tool','{\"output\":\"file.txt\"}','c1','terminal',1700000003)");
+    // 第二会话：只有 session_meta 行 + 没有 cwd → 必须如实报 session-missing-cwd（绝不猜）
+    db.exec("INSERT INTO sessions VALUES ('s2',NULL,NULL,1700000004)");
+    db.exec("INSERT INTO messages (session_id,role,content,timestamp) VALUES ('s2','session_meta','{}',1700000005)");
+  } finally {
+    db.close();
+  }
+
+  const read = await readHermes({ homeDir: 'C:/u', env: { HERMES_HOME: home }, platform: 'win32' });
+  assert.equal(read.found, true);
+  assert.equal(read.input.sessions?.length, 2, '两个会话都要读出来（能不能迁移由转码期判定）');
+  const s1 = (read.input.sessions ?? []).find((s) => s.id === 's1');
+  assert.ok(s1 !== undefined);
+  assert.equal(s1.parsed.cwd, 'D:/proj');
+  assert.equal(s1.parsed.title, '会话标题');
+  assert.equal(s1.parsed.records.length, 3, 'user + assistant(工具调用) + tool(结果) 三条都要归一');
+  const assistant = s1.parsed.records[1];
+  assert.ok(assistant?.blocks.some((b) => b.type === 'tool_call' && b.name === 'terminal'));
+  const toolResult = s1.parsed.records[2];
+  assert.ok(
+    toolResult?.blocks.some((b) => b.type === 'tool_result' && b.id === 'c1' && b.text.includes('file.txt')),
+    '工具结果必须带正文且按 callId 配对（异构 JSON 信封不能变空串）',
+  );
+  assert.deepEqual(s1.parsed.ignored, {}, '不认识的记录类型必须逐类计数，这里应为空');
+
+  read.input.targetSessionFormatVersion = 3;
+  const result = convertHermes(read.input);
+  assert.equal(result.counts['sessions.files'], 1, 's1 转码成功');
+  assert.ok(result.skipped.some((s) => s.code === 'session-missing-cwd' && s.origin === 's2'), 's2 缺 cwd 必须如实报码');
+  const sessionSection = result.sections.find((s) => s.sectionId === 'sessions');
+  assert.ok(sessionSection?.files !== undefined && sessionSection.files.length === 1);
+  // 会话日志是压缩编码的，**不断言字面正文**；只断言真的产出了非空字节与合法相对路径
+  assert.ok((sessionSection.files[0]?.data.length ?? 0) > 0, '会话必须真的产出字节');
+  assert.match(sessionSection.files[0]?.relativePath ?? '', /^--D-proj--\/s1\/session\.v3\.jsonl\.zstd$/);
+});
+
+test('t6c 回退：state.db 读不出来时不静默 —— 走 sessions/*.jsonl 且只认 .jsonl', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-hermes-fb-'));
+  await fs.mkdir(path.join(home, 'sessions'), { recursive: true });
+  // 真机同目录的 request_dump_*.json 是请求转储，绝不能被当会话读
+  await fs.writeFile(path.join(home, 'sessions', 'request_dump_20260101_000000_aaaa.json'), JSON.stringify({ messages: [{ role: 'user', content: 'DUMP_SENTINEL_DO_NOT_SHIP' }] }));
+  await fs.writeFile(
+    path.join(home, 'sessions', 'legacy.jsonl'),
+    JSON.stringify({ role: 'user', content: '回退会话' }) + NL,
+  );
+  const read = await readHermes({ homeDir: 'C:/u', env: { HERMES_HOME: home }, platform: 'win32' });
+  assert.equal(read.input.sessions?.length, 1, '只认 .jsonl');
+  assert.equal(read.input.sessions?.[0]?.id, 'legacy');
+  const raw = JSON.stringify(read.input);
+  assert.ok(!raw.includes('DUMP_SENTINEL_DO_NOT_SHIP'), 'request_dump 的内容绝不进输入结构');
 });
 
 /* ---------------- ③ 读盘 + 端到端 ---------------- */
@@ -380,10 +483,20 @@ test('t8 真机取样：读得动本机 Hermes 数据目录（只断言键名与
   // 结构性断言（不读任何配置值）：记忆正文根本没有承载字段
   assert.deepEqual(Object.keys(read.input).filter((k) => /memory/i.test(k)), ['memoryFiles']);
 
+  // 真机只做结构性断言：会话要么迁移成功（sessions + workspaces 同源产出），要么逐条报码解释
+  read.input.targetSessionFormatVersion = 3;
   const result = convertHermes(read.input);
   assert.ok(result.sections.length > 0, '真机产物必须至少有一个分区');
-  assert.ok(!result.sections.some((s) => s.sectionId === 'sessions'), 'Hermes 会话不迁移');
-  assert.ok(result.skipped.some((s) => s.code === 'sessions-not-migrated'), '会话不迁移必须可见');
+  const sessionCount = (result.sections.find((s) => s.sectionId === 'sessions')?.files ?? []).length;
+  if (sessionCount > 0) {
+    assert.ok(result.sections.some((s) => s.sectionId === 'workspaces'), '有会话就必须有工作区');
+    assert.ok(!result.skipped.some((s) => s.code === 'sessions-not-migrated'), '读出来了就不该再报不迁移');
+  } else {
+    assert.ok(
+      result.skipped.some((s) => s.code === 'sessions-not-migrated' || s.code.split('-')[0] === 'session'),
+      '一条都没迁移时必须能解释（能力缺失 / 缺 cwd / 空库）',
+    );
+  }
 });
 
 

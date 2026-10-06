@@ -10,14 +10,17 @@
  *  - SOUL.md = 主身份 → agentInstructions（用户决策：**导入**）
  *  - memories/{MEMORY.md,USER.md} → 只报告不导入（用户决策；正文根本不在输入结构里）
  *  - .env → 只报告（值绝不读、绝不进包）
- *  - 对话在 SQLite（state.db）里 → 本版**不迁移**，只报告，绝不产出 sessions 分区
+ *  - 对话在 SQLite（state.db）里 → **读盘层读出归一记录后在这里装配成 sessions + workspaces**
+ *    （2026-10-06 起；公共出口 = kernel.collectSessionSections，与 Claude Code 同一份实现）。
+ *    state.db 打不开 / 宿主缺 node:sqlite 时才回落到 sessions-not-migrated 这条如实报码。
  *
  * 公共口径（MCP 映射与凭据剥离、SKILL.md frontmatter 校验、路径/名字安全、技能装配）全部走
  * 共享内核 kernel.ts —— 与 Claude Code 同一份实现，口径不可能分叉。
  */
-import { collectSkills, instructionsSection, mcpSectionFromEntries, serverEntriesOf } from './kernel.ts';
+import { collectSessionSections, collectSkills, instructionsSection, mcpSectionFromEntries, serverEntriesOf } from './kernel.ts';
+import { draftFromTranscript, transcodeSessionDraft } from './session-source.ts';
 import { isRecord } from '../utils/guards.ts';
-import type { ForeignImportResult, ForeignSectionOut, ForeignSkip, HermesInput } from './types.ts';
+import type { ForeignImportResult, ForeignSectionOut, ForeignSkip, HermesInput, HermesSessionInput } from './types.ts';
 
 export function convertHermes(input: HermesInput): ForeignImportResult {
   // 读盘层的发现（0 字节 / 位置被 HERMES_HOME 覆盖 / 读不到）排在前面：它们解释「为什么读到的少了」
@@ -60,8 +63,22 @@ export function convertHermes(input: HermesInput): ForeignImportResult {
     skipped.push({ code: 'credentials-not-migrated', origin: '.env', count: 1 });
   }
 
-  // 对话：Hermes 存在 SQLite（state.db）；本版不迁移，**并且绝不产出 sessions 分区**。
-  if (input.sessionStore?.present === true) {
+  // 对话：state.db（SQLite）读出的**归一记录** → DSH 会话 + 工作区。
+  // 必须走 kernel.collectSessionSections（唯一出口）：冲突语义（同 id 只允许一条）与
+  // 「只给会话不给工作区 = 目标机一条对话都看不见」这两条硬不变量只有那一处实现。
+  const formatVersion = input.targetSessionFormatVersion ?? -1;
+  collectSessionSections<HermesSessionInput>({
+    files: input.sessions ?? [],
+    targetFormatVersion: input.targetSessionFormatVersion,
+    transcode: (file) => transcodeSessionDraft(draftFromTranscript(file.id, file.parsed, 'hermes'), { formatVersion }),
+    workspaceIdPrefix: 'hermes',
+    sections,
+    skipped,
+    counts,
+  });
+  // 库确实在、却**一条都没读出来**（宿主缺 node:sqlite / 打不开 / 表结构不符）→ 如实报。
+  // 读出来了（哪怕只有一部分）就绝不再报这条 —— 逐条失败已由 session-* 码单独可见。
+  if (input.sessionStore?.present === true && (input.sessions?.length ?? 0) === 0) {
     skipped.push({ code: 'sessions-not-migrated', origin: input.sessionStore.detail ?? 'state.db', count: 1 });
   }
 

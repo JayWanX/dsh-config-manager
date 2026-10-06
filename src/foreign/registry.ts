@@ -512,6 +512,8 @@ export function builtinForeignSources(): readonly ForeignSource[] {
           { rel: 'memories', dir: true },
           { rel: '.env' },
           { rel: 'state.db' },
+          // 会话回退布局（state.db 缺失时的 sessions/*.jsonl）：存在即算命中
+          { rel: 'sessions', dir: true },
         ]);
         return {
           found: probed.paths.length > 0,
@@ -521,6 +523,10 @@ export function builtinForeignSources(): readonly ForeignSource[] {
       },
       async build(ctx) {
         const read = await readHermes({ homeDir: ctx.homeDir, env: ctx.env, ...(ctx.limits !== undefined ? { limits: ctx.limits } : {}) });
+        // 会话转码版本必须由宿主解析后传入（绝不猜）；缺省 = 一条都不转并整批报码
+        if (ctx.targetSessionFormatVersion !== undefined) {
+          read.input.targetSessionFormatVersion = ctx.targetSessionFormatVersion;
+        }
         return convertHermes(read.input);
       },
     },
@@ -639,12 +645,23 @@ export function builtinForeignSources(): readonly ForeignSource[] {
           { rel: '.gemini/antigravity/mcp_config.json' },
           // 凭据文件：只 stat（可能 0 字节），值绝不读
           { rel: '.gemini/antigravity/mcp_oauth_tokens.json' },
+          // 会话根（三根并列）：mcp_config.json 是 0 字节时，这里才是「本机确实装过」的证据
+          { rel: '.gemini/antigravity/brain', dir: true },
+          { rel: '.gemini/antigravity-cli/brain', dir: true },
+          { rel: '.gemini/antigravity-ide/brain', dir: true },
         ]);
         return { found: probed.paths.length > 0, paths: probed.paths, skipped: probed.skipped };
       },
       async build(ctx) {
         const geminiDir = resolveGeminiHome({ homeDir: ctx.homeDir }).dir;
-        const read = await readAntigravity({ geminiDir });
+        const read = await readAntigravity({
+          geminiDir,
+          ...(ctx.limits !== undefined ? { limits: ctx.limits } : {}),
+        });
+        // 会话转码版本必须由宿主解析后传入（绝不猜）；缺省 = 一条都不转并整批报码
+        if (ctx.targetSessionFormatVersion !== undefined) {
+          read.input.targetSessionFormatVersion = ctx.targetSessionFormatVersion;
+        }
         return convertAntigravity(read.input);
       },
     },

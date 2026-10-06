@@ -393,8 +393,8 @@ function contentOf(rec: Record<string, unknown>, shape: TranscriptShape): unknow
   return undefined;
 }
 
-/** 角色归一：命中 userValues → user，命中 assistantValues → assistant，其余 undefined（调用方计数） */
-function roleOf(rec: Record<string, unknown>, shape: TranscriptShape): string | undefined {
+/** 在**一个**记录里按 roleKeys 找角色（找不到返回 undefined） */
+function roleIn(rec: Record<string, unknown>, shape: TranscriptShape): string | undefined {
   for (const key of shape.roleKeys) {
     const raw = rec[key];
     if (typeof raw !== 'string' || raw === '') continue;
@@ -403,6 +403,21 @@ function roleOf(rec: Record<string, unknown>, shape: TranscriptShape): string | 
     if (shape.assistantValues.includes(lower)) return 'assistant';
     return 'unsupported:' + lower;
   }
+  return undefined;
+}
+
+/**
+ * 角色归一：命中 userValues → user，命中 assistantValues → assistant，其余 undefined（调用方计数）。
+ *
+ * **一层包装的回退**（2026-10-06）：事件流形态的源把角色放在 `{type:'message', message:{role,…}}` 的
+ * 内层对象里（Pi / OpenClaw 等）。顶层**完全取不到**角色时才下钻一层 —— 顶层能取到就照旧，
+ * 既有 24 个来源的判定因此逐字不变（回归由各自单测钉住）。
+ */
+function roleOf(rec: Record<string, unknown>, shape: TranscriptShape): string | undefined {
+  const direct = roleIn(rec, shape);
+  if (direct !== undefined) return direct;
+  const inner = rec['message'];
+  if (isRecord(inner)) return roleIn(inner, shape);
   return undefined;
 }
 

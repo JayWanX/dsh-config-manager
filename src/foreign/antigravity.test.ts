@@ -181,17 +181,65 @@ test('t5 端到端：fixture → 标准 bundle v1（既有 Importer 能分析）
 
 /* ---------------- 范围与真机取样 ---------------- */
 
-test('t6 范围：antigravity-cli / 会话与插件目录都不在本期范围，绝不产出 sessions/workspaces 分区', async () => {
-  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ag-scope-'));
+test('t6 会话：brain/<id>/.system_generated/logs 的转录进 sessions+workspaces；conversations/*.pb 绝不读', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ag-sess-'));
+  const NL = String.fromCharCode(10);
+  const id = '11111111-2222-4333-8444-555555555555';
   try {
-    await writeAt(tmp, '.gemini/antigravity-cli/settings.json', '{"x":1}');
-    await writeAt(tmp, '.gemini/antigravity-cli/conversations/1.json', '{}');
-    await writeAt(tmp, '.gemini/antigravity-cli/plugins/p/plugin.json', '{"name":"p"}');
-    await writeAt(tmp, '.gemini/config/mcp_config.json', JSON.stringify({ mcpServers: { only: { command: 'node' } } }));
-    const read = await readAntigravity({ geminiDir: path.join(tmp, '.gemini') });
+    const logs = '.gemini/antigravity-cli/brain/' + id + '/.system_generated/logs';
+    const lines: unknown[] = [
+      { step_index: 0, type: 'USER_INPUT', status: 'DONE', created_at: '2026-01-02T03:04:05Z', content: '<USER_REQUEST>' + NL + '帮我看下构建' + NL + '</USER_REQUEST>' + NL + '<ADDITIONAL_METADATA>' + NL + 'noise' + NL + '</ADDITIONAL_METADATA>' },
+      { step_index: 1, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-01-02T03:04:06Z', content: '我看一下', tool_calls: [{ name: 'run_command', args: { CommandLine: '"npm test"', Cwd: '"D:\\\\Projects\\\\demo"' } }] },
+      { step_index: 2, type: 'GENERIC', status: 'DONE', created_at: '2026-01-02T03:04:09Z', content: 'npm test' + NL + NL + 'The command exited with code 0.' + NL + 'Output:' + NL + 'all good' },
+      { step_index: 3, type: 'SYSTEM_MESSAGE', status: 'DONE', created_at: '2026-01-02T03:04:10Z', content: 'framework noise' },
+      { step_index: 4, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-01-02T03:04:11Z', content: '完成', tool_calls: [] },
+    ];
+    await writeAt(tmp, logs + '/transcript.jsonl', lines.map((o) => JSON.stringify(o) + NL).join(''));
+    await writeAt(tmp, '.gemini/antigravity-cli/annotations/' + id + '.pbtxt', 'title:"构建排错"' + NL);
+    await writeAt(tmp, '.gemini/antigravity-cli/conversations/' + id + '.pb', 'PROTO_SENTINEL_DO_NOT_SHIP');
+
+    const read = await readAntigravity({ geminiDir: path.join(tmp, '.gemini'), limits: { maxSessionFiles: 10 } });
+    assert.equal(read.input.sessions?.length, 1, 'brain 下的转录必须被读成一个会话');
+    const parsed = read.input.sessions?.[0]?.parsed;
+    assert.equal(parsed?.cwd, 'D:\\Projects\\demo', 'cwd 取 tool_calls 的 Cwd（带引号值要还原）');
+    assert.equal(parsed?.title, '构建排错', '标题取 annotations/*.pbtxt');
+    assert.ok(!JSON.stringify(read.input).includes('PROTO_SENTINEL_DO_NOT_SHIP'), 'conversations/*.pb 绝不读');
+
+    const first = parsed?.records[0];
+    assert.ok(first?.blocks.some((b) => b.type === 'text' && b.text === '帮我看下构建'), '<USER_REQUEST> 必须剥壳');
+    const call = parsed?.records.flatMap((r) => r.blocks).find((b) => b.type === 'tool_call');
+    assert.ok(call !== undefined && call.type === 'tool_call');
+    const results = parsed?.records.flatMap((r) => r.blocks).filter((b) => b.type === 'tool_result') ?? [];
+    assert.equal(results.length, 1, '未决调用必须恰好配上一个结果');
+    assert.equal(results[0]?.id, call?.id, '结果必须按「最早未决调用」配对');
+    assert.ok(results[0]?.text.includes('all good'));
+
+    read.input.targetSessionFormatVersion = 3;
     const result = convertAntigravity(read.input);
-    assert.deepEqual(result.sections.map((s) => s.sectionId), ['mcp'], '只搬冻结的两个 mcp_config.json');
-    assert.deepEqual(read.paths.sort(), ['.gemini/config/mcp_config.json']);
+    assert.ok(result.sections.some((s) => s.sectionId === 'sessions'), '会话必须产出 sessions 分区');
+    assert.ok(result.sections.some((s) => s.sectionId === 'workspaces'), '会话必须连工作区一起产出');
+    assert.ok(
+      result.skipped.some((s) => s.code === 'unsupported-session-record' && s.detail === 'SYSTEM_MESSAGE'),
+      'SYSTEM_MESSAGE 必须逐类计数而不是静默丢',
+    );
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('t6b 缺 cwd 或只有 0 字节 mcp 配置时：0 字节配置报码，会话缺失 cwd 也如实报码（绝不猜）', async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-ag-nocwd-'));
+  const NL = String.fromCharCode(10);
+  const id = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  try {
+    await writeAt(tmp, '.gemini/config/mcp_config.json', '');
+    await writeAt(tmp, '.gemini/antigravity/brain/' + id + '/.system_generated/logs/overview.txt', JSON.stringify({ step_index: 0, type: 'USER_INPUT', status: 'DONE', content: '没有工具调用的一段话' }) + NL);
+    const read = await readAntigravity({ geminiDir: path.join(tmp, '.gemini') });
+    assert.equal(read.input.sessions?.length, 1, 'overview.txt 也是同一记录形态');
+    read.input.targetSessionFormatVersion = 3;
+    const result = convertAntigravity(read.input);
+    assert.ok(result.skipped.some((s) => s.code === 'source-empty-file'), '0 字节配置报码');
+    assert.ok(result.skipped.some((s) => s.code === 'session-missing-cwd' && s.origin === id), '缺 cwd 如实报码');
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }
@@ -206,9 +254,12 @@ test(
   async () => {
     const read = await readAntigravity({ geminiDir: resolveGeminiHome({ homeDir: os.homedir() }).dir });
     assert.equal(read.found, true);
+    read.input.targetSessionFormatVersion = 3;
     const result = convertAntigravity(read.input);
-    assert.ok(!result.sections.some((s) => s.sectionId === 'sessions'), '会话不在本期范围');
-    assert.ok(!result.sections.some((s) => s.sectionId === 'workspaces'));
+    const sessionCount = (result.sections.find((s) => s.sectionId === 'sessions')?.files ?? []).length;
+    if (sessionCount > 0) {
+      assert.ok(result.sections.some((s) => s.sectionId === 'workspaces'), '有会话就必须有工作区');
+    }
     // 本机实测两个文件都是 0 字节 → 必须报码而不是产出空分区；若将来用户填了真实配置，这里仍必须合法
     for (const s of read.input.readFindings ?? []) {
       assert.equal(typeof s.code, 'string');

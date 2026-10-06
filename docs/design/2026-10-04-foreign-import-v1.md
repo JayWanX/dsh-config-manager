@@ -217,7 +217,7 @@ copilot）只能文档取证，其验收必须显式标注「文档取证、未�
 | hermes | memories/MEMORY.md、memories/USER.md（**只报告不导入**） | …\Hermes\memories\ | ~/.hermes/memories/ | ~/.hermes/memories/ | **实测取证** |
 | hermes | skills/&lt;分类&gt;/&lt;技能&gt;/SKILL.md（**两层分类**） | …\Hermes\skills\ | ~/.hermes/skills/ | ~/.hermes/skills/ | **实测取证**（如 software-development/dogfood/；也有 se-team-design/SKILL.md 直接躺在分类目录下） |
 | hermes | .env、auth.json（**凭据，永不进包**） | …\Hermes\.env | ~/.hermes/.env | ~/.hermes/.env | **实测取证** |
-| hermes | 对话存储：state.db（SQLite，实测 84 MB）+ sessions/ | …\Hermes\state.db | ~/.hermes/state.db | ~/.hermes/state.db | **实测取证** → **本版不迁移**，报 sessions-not-migrated |
+| hermes | 对话存储：state.db（SQLite，实测 84 MB / 88 会话 / 12324 条消息）；回退 sessions/\*.jsonl | …\Hermes\state.db | ~/.hermes/state.db | ~/.hermes/state.db | **实测取证** → **2026-10-06 起迁移**：只读 SQLite 读 sessions+messages 两表（列名变体自适应）→ sessions + workspaces 分区；库打不开/宿主缺 node:sqlite 才报 sessions-not-migrated。sessions/ 里真机只有 request_dump_*.json（请求转储）→ 回退**只认 .jsonl** |
 | hermes | plugins/ cron/ hooks/ kanban.db projects.db | 同左 | 同左 | 同左 | **实测取证**（本期不搬） |
 | cursor | ~/.cursor/mcp.json（全局）、&lt;项目&gt;/.cursor/mcp.json（项目级；同名 server 项目级优先） | %USERPROFILE%\.cursor\mcp.json | ~/.cursor/mcp.json | ~/.cursor/mcp.json | 文档取证（cursor.com/help/customization/mcp.md）；**本机无 ~/.cursor** |
 | cursor | &lt;项目&gt;/.cursor/rules/*.mdc（四种激活：Always / Intelligently / Specific Files / Manually） | 同左 | 同左 | 同左 | 文档取证（cursor.com/help/customization/rules.md） |
@@ -238,6 +238,7 @@ copilot）只能文档取证，其验收必须显式标注「文档取证、未�
 | antigravity | &lt;项目&gt;/.agents/mcp_config.json（workspace 级；remote 用 **serverUrl**，url/httpUrl 已不支持） | 同左 | 同左 | 同左 | 文档取证 |
 | antigravity | ~/.gemini/antigravity-cli/plugins/&lt;插件&gt;/{plugin.json,mcp_config.json,hooks.json,skills/,agents/,rules/} + import_manifest.json | %USERPROFILE%\.gemini\antigravity-cli\ | 同左 | 同左 | **实测取证**（antigravity-cli/ 存在：settings.json、conversations/、knowledge/、brain/ …）+ 文档取证（antigravity.google/docs/cli/features） |
 | antigravity | ~/.gemini/antigravity/mcp_oauth_tokens.json（**凭据，永不进包**） | 同上 | 同上 | 同上 | 文档取证 |
+| antigravity | 会话：三根并列 brain/&lt;convId&gt;/.system_generated/logs/{transcript.jsonl,overview.txt} | %USERPROFILE%\.gemini\{antigravity,antigravity-cli,antigravity-ide}\ | 同左 | 同左 | **实测取证**（本机 antigravity-cli 25 个 + antigravity 2 个会话目录）→ **2026-10-06 起迁移**：逐行 JSON 转录按 USER_INPUT / PLANNER_RESPONSE / GENERIC(DONE) / ERROR_MESSAGE 归一，工具结果按「最早未决调用」配对；标题取 annotations/&lt;id&gt;.pbtxt，cwd 取 tool_calls 的 Cwd 众数；conversations/*.pb\|.db 是 protobuf **不读** |
 | antigravity | ~/.antigravity/{argv.json,extensions/} | **实测取证**（非配置导入目标） | — | — | **实测取证** |
 
 **表格的两个直接实现结论**：
@@ -365,8 +366,10 @@ FOREIGN_CONFLICT_POLICY = 'skip-no-overwrite'（ForeignConflictPolicy 是**单�
    userinfo —— 过**导出侧同一个** defaultSecretScanner，只留字段名 + 引用名。
 2. **Hermes 的用户决策**：SOUL.md → agentInstructions（进包）；memories/MEMORY.md 与
    memories/USER.md **只报告不导入**（memory-report-only，正文绝不进包，对整份 ZIP 字节断言）。
-3. **Hermes 对话不迁移**：state.db / sessions/ 只报告（sessions-not-migrated），产物中
-   **不得出现 sessions 分区**。
+3. **Hermes / Antigravity 对话已迁移**（2026-10-06 用户要求，撤销 v1 的"只报告"决策）：
+   两来源都会产出 sessions + workspaces；只有**读不出来**时才报 sessions-not-migrated
+   （Hermes：state.db 打不开 / 宿主缺 node:sqlite；Antigravity：三根都没有可读转录）。
+   逐条失败的会话按 session-missing-cwd / session-empty / unsupported-session-record 如实可见。
 4. **Agent 指令至多一个文件**：agentInstructions 每次导入至多产出 AGENTS.md 一个文件
    （DSH 只读一个全局指令文件）；多来源指令需合并时在转换期合并并报 instructions-merged；
    命中更高优先级文件（Codex 的 AGENTS.override.md）报 instructions-override-selected。

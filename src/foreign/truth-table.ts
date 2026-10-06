@@ -132,20 +132,24 @@ export const FOREIGN_TRUTH_TABLES: readonly ForeignTruthTableEntry[] = [
       [
         '<xdgdata>/Hermes/config.yaml', '<xdgdata>/Hermes/SOUL.md', '<xdgdata>/Hermes/skills',
         '<xdgdata>/Hermes/memories', '<xdgdata>/Hermes/.env', '<xdgdata>/Hermes/state.db',
+        '<xdgdata>/Hermes/sessions',
       ],
       [
         '<home>/.hermes/config.yaml', '<home>/.hermes/SOUL.md', '<home>/.hermes/skills',
         '<home>/.hermes/memories', '<home>/.hermes/.env', '<home>/.hermes/state.db',
+        '<home>/.hermes/sessions',
       ],
       [
         '<home>/.hermes/config.yaml', '<home>/.hermes/SOUL.md', '<home>/.hermes/skills',
         '<home>/.hermes/memories', '<home>/.hermes/.env', '<home>/.hermes/state.db',
+        '<home>/.hermes/sessions',
       ],
     ),
     envKeys: [{ key: 'HERMES_HOME', mode: 'replace', note: '整体替换数据目录' }],
     autoRoots: true,
     evidence: 'measured',
-    refs: '本仓本机实测 %LOCALAPPDATA%/Hermes；chat-import discovery.mjs:135 只给 ~/.hermes（差异见文件头 ①）',
+    refs: '本仓本机实测 %LOCALAPPDATA%/Hermes（state.db 84 MiB / 88 会话 / 12324 条消息）；chat-import discovery.mjs:135 只给 ~/.hermes（差异见文件头 ①）',
+    dynamic: '会话在 state.db 的 sessions + messages 两表（只读 SQLite，列名变体自适应）；回退 sessions/*.jsonl（**只认 .jsonl**：真机同目录的 request_dump_*.json 是请求转储，不是会话）',
   },
   {
     id: 'cursor',
@@ -184,11 +188,15 @@ export const FOREIGN_TRUTH_TABLES: readonly ForeignTruthTableEntry[] = [
       '<home>/.gemini/config/mcp_config.json',
       '<home>/.gemini/antigravity/mcp_config.json',
       '<home>/.gemini/antigravity/mcp_oauth_tokens.json',
+      '<home>/.gemini/antigravity',
+      '<home>/.gemini/antigravity-cli',
+      '<home>/.gemini/antigravity-ide',
     ),
     envKeys: [],
     autoRoots: true,
     evidence: 'measured',
-    refs: 'chat-import discovery.mjs:113-121（三根并列 antigravity/-cli/-ide）；本仓本机实测 ~/.gemini/**',
+    refs: 'chat-import discovery.mjs:113-121（三根并列 antigravity/-cli/-ide）；本仓本机实测 ~/.gemini/**（两个 mcp_config.json 都是 0 字节；会话在三根的 brain/<id>/.system_generated/logs/）',
+    dynamic: '会话在三根各自的 brain/<convId>/.system_generated/logs/{transcript.jsonl,overview.txt}（逐行 JSON 转录）；标题取 annotations/<id>.pbtxt；conversations/*.pb|.db 是 protobuf，**不读**',
   },
   /* =================== 会话类：JSONL / 目录源（档 B 补齐） =================== */
   {

@@ -16,6 +16,7 @@
  *  ③ **不产生用户可见字符串**：findings 只给机器码，文案由 UI 字典映射（i18n 铁律）。
  */
 import type { SectionId } from '../schema/types.ts';
+import type { ParsedTranscript } from './session-source.ts';
 
 /**
  * 外部来源 id（**契约冻结**，§8.1/§8.2，2026-10-04；档 B 全量补齐 2026-10-05）。
@@ -229,12 +230,27 @@ export interface HermesSkillInput {
 }
 
 /**
+ * 一个已读成**归一记录**的 Hermes 会话（读盘层产出；翻译层只负责装配）。
+ *
+ * 与 Claude 的 `ClaudeSessionInput`（原文进、翻译层再解析）刻意不同：Hermes 的会话在
+ * SQLite（state.db）里，解析**必须**发生在宿主侧的读盘层 —— 那是 `node:sqlite` 动态 import
+ * 的唯一边界（见 read-opencode.ts 文件头纪律 ①）。因此在读盘层就已经归一成型，
+ * 翻译层保持纯函数、零 fs、零 sqlite。
+ */
+export interface HermesSessionInput {
+  /** 会话 id（state.db 的 sessions.id；同时作为 DSH 侧会话 id） */
+  id: string;
+  /** 归一记录（读盘层已解析；parsed.raw = 消息行原始条数） */
+  parsed: ParsedTranscript;
+}
+
+/**
  * Hermes 用户目录的已读形态（纯数据；翻译层不做任何 fs 访问）。
  *
  * 三条**结构性**保证（不是靠翻译层自觉）：
  *  - memories/MEMORY.md、USER.md 的**正文根本不在本结构里**（只有文件名）→ 无从进包；
  *  - .env 只有「存在与否」一个布尔 → 值无从进包；
- *  - 会话存储只有「痕迹 + 说明」→ 本版不迁移（用户决策）。
+ *  - 会话只以**已归一记录**进本结构（原始 SQLite 行与库文件都留在宿主侧）。
  */
 export interface HermesInput {
   /** config.yaml（已解析；缺失 / 解析失败 / 0 字节 = undefined） */
@@ -247,8 +263,15 @@ export interface HermesInput {
   memoryFiles?: string[];
   /** .env 是否存在（**只报告**；值绝不读） */
   dotEnvPresent?: boolean;
-  /** 会话存储痕迹（state.db / sessions/）：本版不迁移，只报告 */
+  /** 会话存储痕迹（state.db / sessions/）：**读不出来**时在这里如实报，绝不静默 */
   sessionStore?: { present: boolean; detail?: string };
+  /** state.db（SQLite）里读出的会话（已归一记录；库读不到时回退 sessions/*.jsonl） */
+  sessions?: HermesSessionInput[];
+  /**
+   * 目标机 DSH 的 SESSION_FORMAT_VERSION（**必须由宿主解析后传入**，见 utils/session-format.ts）。
+   * 缺省 = 不转码任何会话并逐条报 session-format-version-unknown，绝不猜版本。
+   */
+  targetSessionFormatVersion?: number;
   /** 读盘层发现的问题（0 字节 / 位置被覆盖 / 读不到）——由翻译层原样带出，调用方无需二次合并 */
   readFindings?: ForeignSkip[];
 }

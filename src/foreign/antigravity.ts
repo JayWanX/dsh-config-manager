@@ -10,15 +10,29 @@
  *  - 全局与兼容位置同时命中 → **合并**两个文件的条目（合并必须可见：报 instructions-merged）
  *  - remote 形态用 **serverUrl**（Antigravity 已不支持 url/httpUrl）→ 单独识别并归一化为 url
  *  - ~/.gemini/antigravity/mcp_oauth_tokens.json 是**凭据文件**：只报告，绝不读、绝不进包
- *  - ~/.gemini/antigravity-cli/**：**不在本期范围**（契约未冻结其中哪些是配置），不读不报，
- *    绝不产出 sessions/workspaces 分区
+ *  - **会话（2026-10-06 起）**：三根并列（antigravity / antigravity-cli / antigravity-ide）各自的
+ *    brain/<convId>/.system_generated/logs/{transcript.jsonl,overview.txt} 由读盘层解析成归一记录，
+ *    在本层装配成 sessions + workspaces（唯一出口 = kernel.collectSessionSections）。
+ *    conversations/*.pb|.db 是 protobuf（要 schema 才能解）→ **不读**。
+ *    两个 mcp_config.json 都是 0 字节时，会话就是「本机确实装过」的唯一证据 —— 这正是
+ *    「导入失败：nothing to import」的根因修复。
  *
- * 公共口径（MCP 映射与凭据剥离、路径/名字安全）全部走共享内核 kernel.ts —— 与其它来源同一份实现。
+ * 公共口径（MCP 映射与凭据剥离、路径/名字安全、会话→DSH 字节）全部走共享内核 —— 与其它来源同一份实现。
  */
 import { isRecord } from '../utils/guards.ts';
-import { mcpEntryOf, redactMcpSection } from './kernel.ts';
+import { collectSessionSections, mcpEntryOf, redactMcpSection } from './kernel.ts';
+import { draftFromTranscript, transcodeSessionDraft } from './session-source.ts';
+import type { ParsedTranscript } from './session-source.ts';
 import type { McpSection, McpServerEntry } from '../schema/types.ts';
 import type { ForeignImportResult, ForeignSectionOut, ForeignSkip } from './types.ts';
+
+/** 一个已解析成**归一记录**的 Antigravity 会话（读盘层产出；翻译层只负责装配） */
+export interface AntigravitySessionInput {
+  /** conversationId（brain/ 下的目录名；同时作为 DSH 侧会话 id） */
+  id: string;
+  /** 归一记录（parsed.raw = 转录行原始条数） */
+  parsed: ParsedTranscript;
+}
 
 /** Antigravity 配置的已读形态（纯数据；翻译层不做任何 fs 访问） */
 export interface AntigravityInput {
@@ -28,6 +42,13 @@ export interface AntigravityInput {
   ideMcp?: unknown;
   /** ~/.gemini/antigravity/mcp_oauth_tokens.json 存在与否（**只报告**；正文绝不读） */
   oauthTokensPresent?: boolean;
+  /** 三根 brain/<convId>/.system_generated/logs/ 下解析出的会话 */
+  sessions?: AntigravitySessionInput[];
+  /**
+   * 目标机 DSH 的 SESSION_FORMAT_VERSION（**必须由宿主解析后传入**，见 utils/session-format.ts）。
+   * 缺省 = 不转码任何会话并逐条报 session-format-version-unknown，绝不猜版本。
+   */
+  targetSessionFormatVersion?: number;
   /** 读盘层发现（0 字节 / 读不到）——原样带出，调用方无需二次合并 */
   readFindings?: ForeignSkip[];
 }
@@ -145,6 +166,18 @@ export function convertAntigravity(input: AntigravityInput): ForeignImportResult
     sections.push({ sectionId: 'mcp', data: section });
     counts['mcp.servers'] = servers.length;
   }
+
+  /* 会话：读盘层已解析成归一记录 → sessions + workspaces（必须同源产出，见 kernel.collectSessionSections） */
+  const formatVersion = input.targetSessionFormatVersion ?? -1;
+  collectSessionSections<AntigravitySessionInput>({
+    files: input.sessions ?? [],
+    targetFormatVersion: input.targetSessionFormatVersion,
+    transcode: (file) => transcodeSessionDraft(draftFromTranscript(file.id, file.parsed, 'antigravity'), { formatVersion }),
+    workspaceIdPrefix: 'antigravity',
+    sections,
+    skipped,
+    counts,
+  });
 
   /* 凭据文件：只报告（值连内存都不进）。导入后由用户在 DSH 里自行补录。 */
   if (input.oauthTokensPresent === true) {

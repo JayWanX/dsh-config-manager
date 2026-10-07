@@ -29,7 +29,7 @@ import { atomicWriteFileSync } from '../utils/atomic-write.ts'
 import { isRecord } from '../utils/guards.ts'
 import { resolveProfileDir, validateProfileName } from '../core/plugin-cli.ts'
 import { readTextSafe } from './dsh-profile-io.ts'
-import { readSessionFormatVersionAt } from '../utils/session-format.ts'
+import { readSessionFormatVersionInTree } from '../utils/session-format.ts'
 import {
   DSH_PROFILE_TEMPLATES, PROFILE_COPY_MARKER_FILENAME, checkProfileName, classifyShape, isManagedProfileName,
   type DshProfileCopyMarker, type DshProfileCopyWarning, type DshProfileDetail, type DshProfileErrorCode,
@@ -576,13 +576,16 @@ export class DshProfileManager {
     }
     // 版本信息 best-effort：读不到就是 null（桌面端档案的运行时在 app.asar 内，磁盘上没有它）。
     const modulesDir = join(dir, NODE_MODULES_DIR)
+    // 档案自己的 dsh 版本同时用于在 pnpm store 的多个 dsh-session 之间挑同版本者（issue #74）；
+    // 版本读不出来且多于一个候选 → 放弃（不猜，宁可显示 null）。
+    const dshVersion = this.readProfileDshVersion(modulesDir)
     return {
       name,
       dir,
       bundles,
       dependencies,
-      dshVersion: this.readProfileDshVersion(modulesDir),
-      sessionFormatVersion: readSessionFormatVersionAt(modulesDir) ?? null,
+      dshVersion,
+      sessionFormatVersion: readSessionFormatVersionInTree(modulesDir, dshVersion ?? undefined) ?? null,
       shape: classifyShape(bundles),
       patchReload,
       hasNodeModules: existsSync(join(dir, 'node_modules')),

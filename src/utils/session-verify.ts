@@ -105,7 +105,7 @@ import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { extractAsarPackages, extractedEntryPath, readAsarTextEntry } from './asar-read.ts';
-import { parseSessionFormatVersion, readSessionFormatVersionAt } from './session-format.ts';
+import { parseSessionFormatVersion, readPackageVersionAt, readSessionFormatVersionAt, sessionFormatRoots } from './session-format.ts';
 import { decodeZstdFrame, scanZstdFrames, zstdAvailable } from './zstd-frame.ts';
 
 /** 复验结论里的失败原因（机器可读；文案由调用方输出层决定）。 */
@@ -191,15 +191,16 @@ const DSH_INSTALL_ENV = 'DSH_CM_DSH_INSTALL';
 /**
  * 候选 @deepseek-ai/dsh/package.json → 待探测的 node_modules 根。
  *
- * 与 utils/session-format.ts 的 resolveSessionFormatVersion **逐字同款**（每处试 hoisted 与 pnpm 嵌套两种布局）：
- * 那里解的是同树 @deepseek-ai/dsh-session 的常量，这里解的是同树 dsh-session-format-catalog。
+ * 与 utils/session-format.ts 的 `sessionFormatRoots` **同一份实现**（单一事实源）：hoisted 同级 →
+ * dsh/node_modules 嵌套 → pnpm 隔离 store（issue #74）。这里解的是同树 dsh-session-format-catalog，
+ * 那里解的是同树 dsh-session 的格式常量 —— 布局推导只能有一处，否则同一个坑会换个入口复发。
  */
 export function nodeModulesRootsFor(dshPackageJsonCandidates: readonly string[]): string[] {
   const roots: string[] = [];
   const seen = new Set<string>();
   for (const candidate of dshPackageJsonCandidates) {
     const nodeModulesDir = join(dirname(candidate), '..', '..');
-    for (const root of [nodeModulesDir, join(nodeModulesDir, DSH_PKG_REL, 'node_modules')]) {
+    for (const root of sessionFormatRoots(nodeModulesDir, readPackageVersionAt(candidate))) {
       if (seen.has(root)) continue;
       seen.add(root);
       roots.push(root);

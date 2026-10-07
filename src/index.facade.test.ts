@@ -10,11 +10,11 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { DshPluginsFacade, DshSessionStoreFacade, ensureActivationRow, normalizeListedSession, resolveDshVersion, sessionPersistenceShapeOf } from './index.ts';
+import { DshPatchFileFacade, DshPluginsFacade, DshSessionStoreFacade, ensureActivationRow, normalizeListedSession, resolveDshVersion, sessionPersistenceShapeOf } from './index.ts';
 import { zhMsg } from './core/messages.ts';
 import { createLogger, type Logger } from './utils/logger.ts';
 import { resolveProfileDir } from './core/plugin-cli.ts';
@@ -443,3 +443,92 @@ test('F-1 reindexSessionHeader：legacy 形状下仍能命中，并把**原样 h
   assert.equal(indexed[0], rawHeader, '必须回传原样 header 对象，不得自造（注册表要拿它校验 cwd）')
   assert.equal(await facade.reindexSessionHeader('missing'), false, '确实没有该会话 → false')
 });
+
+/* --------------------- issue #75：cordis.patch.yml 方言（!!js）读写与覆盖护栏 --------------------- */
+
+/**
+ * 真实 patch 门面（不是 MemPatchFile）：issue #75 的 bug 就在这一层 —— 默认 schema 的
+ * yaml.load 遇到 DSH 的 !!js 表达式会抛错，旧实现 catch 成空数组，于是「整层 patch 行消失」；
+ * 写回路径更会把读不出来的原文件整体重写（只剩本次导入的行）。
+ */
+function patchHome(): { home: string; cleanup: () => void } {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-cm-patch-'))
+  return { home, cleanup: () => rmSync(home, { recursive: true, force: true }) }
+}
+
+/** 真机形态：顶层行 + 行内 JS 表达式（`!!js (function(){…})()`）+ 普通行。 */
+const JS_ROW_YAML = [
+  '- id: llm-pi-ai',
+  '  name: "@deepseek-ai/dsh-llm-pi-ai"',
+  '  disabled: !!js (function(){ return true })()',
+  '- id: plain-plugin',
+  '  disabled: true',
+  '',
+].join('\n')
+
+test('#75 readPatchLines：带 !!js 的层必须读出全部行（不得整层丢失）', async () => {
+  const { home, cleanup } = patchHome()
+  try {
+    writeFileSync(join(home, USER_PATCH_FILE), JS_ROW_YAML, 'utf8')
+    const facade = new DshPatchFileFacade(home, 'web', zhMsg)
+    const lines = await facade.readPatchLines(USER_PATCH_FILE)
+    assert.deepEqual(lines.map((l) => l.lineId), ['llm-pi-ai', 'plain-plugin'])
+    assert.deepEqual((lines[0]?.raw as Record<string, unknown>)['disabled'], { __jsExpr: '(function(){ return true })()' })
+  } finally {
+    cleanup()
+  }
+})
+
+test('#75 applyPatchChanges：!!js 与其它行都保真写回（再次读出来等价）', async () => {
+  const { home, cleanup } = patchHome()
+  try {
+    writeFileSync(join(home, USER_PATCH_FILE), JS_ROW_YAML, 'utf8')
+    const facade = new DshPatchFileFacade(home, 'web', zhMsg)
+    await facade.applyPatchChanges(USER_PATCH_FILE, [
+      { lineId: 'added', raw: { id: 'added', disabled: false }, action: 'insert' },
+    ])
+    const text = readFileSync(join(home, USER_PATCH_FILE), 'utf8')
+    assert.ok(text.includes('!!js (function(){ return true })()'), '!!js 必须原样写回: ' + text)
+    const lines = await facade.readPatchLines(USER_PATCH_FILE)
+    assert.deepEqual(lines.map((l) => l.lineId), ['llm-pi-ai', 'plain-plugin', 'added'])
+    assert.deepEqual((lines[0]?.raw as Record<string, unknown>)['disabled'], { __jsExpr: '(function(){ return true })()' })
+  } finally {
+    cleanup()
+  }
+})
+
+test('#75 覆盖护栏：原文件解析不了时拒绝改写（不得把读不出来的行删掉）', async () => {
+  const { home, cleanup } = patchHome()
+  try {
+    const broken = '- id: a\n  x: [1,\n'
+    writeFileSync(join(home, USER_PATCH_FILE), broken, 'utf8')
+    const facade = new DshPatchFileFacade(home, 'web', zhMsg)
+
+    const readErr = await facade.readPatchLines(USER_PATCH_FILE).then(() => null, (err: unknown) => err as Error)
+    assert.ok(readErr !== null, '解析失败必须抛错（旧实现返回 [] → 整层从导出/同步里消失）')
+    assert.match(String(readErr.message), /读不出来/)
+    assert.equal(String(readErr.message).includes('[1,'), false, '不得回传源码片段（可能内联密钥）')
+
+    await assert.rejects(
+      () => facade.applyPatchChanges(USER_PATCH_FILE, [{ lineId: 'x', raw: { id: 'x' }, action: 'insert' }]),
+      /已拒绝覆盖写入/,
+    )
+    assert.equal(readFileSync(join(home, USER_PATCH_FILE), 'utf8'), broken, '文件必须逐字节保持原样')
+  } finally {
+    cleanup()
+  }
+})
+
+test('#75 不存在的层仍按「本来就没有」处理（ENOENT 不是错误）', async () => {
+  const { home, cleanup } = patchHome()
+  try {
+    const facade = new DshPatchFileFacade(home, 'web', zhMsg)
+    assert.deepEqual(await facade.readPatchLines(USER_PATCH_FILE), [], '文件不存在 → 空层')
+    await facade.applyPatchChanges(USER_PATCH_FILE, [
+      { lineId: 'first', raw: { id: 'first', disabled: true }, action: 'insert' },
+    ])
+    assert.deepEqual((await facade.readPatchLines(USER_PATCH_FILE)).map((l) => l.lineId), ['first'])
+  } finally {
+    cleanup()
+  }
+})

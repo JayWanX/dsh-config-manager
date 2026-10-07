@@ -16,8 +16,9 @@ import path from 'node:path';
 
 import { encodeZstdFrame } from './zstd-frame.ts';
 import {
-  MAX_PROBED_SESSION_LOGS, parseSessionFormatVersion, probeSessionFormats,
-  readSessionFormatVersionAt, resolveSessionFormatVersion,
+  MAX_PROBED_SESSION_LOGS, findPnpmStore, parseSessionFormatVersion, pnpmSessionEntryVersion,
+  probeSessionFormats, readSessionFormatVersionAt, readSessionFormatVersionInTree,
+  resolveSessionFormatVersion, sessionFormatRoots,
 } from './session-format.ts';
 
 async function withTmp<T>(fn: (dir: string) => Promise<T>): Promise<T> {
@@ -105,3 +106,113 @@ test('probeSessionFormats：超过抽样上限的会话计入 skipped', () => {
   assert.equal(probe.sampled, MAX_PROBED_SESSION_LOGS);
   assert.equal(probe.skipped, 2, '没检查的必须报出来，不能假装全检过');
 });
+
+/* --------------------------------- issue #74：pnpm 隔离安装布局 --------------------------------- */
+
+/**
+ * 造一份 pnpm 隔离安装的目录骨架（真机 #74 的形状）——
+ *   <root>/node_modules/.pnpm/@deepseek-ai+dsh@<v>_hash/node_modules/@deepseek-ai/dsh/package.json
+ *   <root>/node_modules/.pnpm/@deepseek-ai+dsh-session@<v>_hash/node_modules/@deepseek-ai/dsh-session/lib/index.js
+ * 返回 installAnchor（= dsh/package.json 的绝对路径）。dshVersion 传 null = 它的 package.json 里没有 version。
+ */
+async function writePnpmLayout(
+  root: string,
+  dshVersion: string | null,
+  sessions: Record<string, number>,
+): Promise<string> {
+  const store = path.join(root, 'node_modules', '.pnpm');
+  const dshPkgDir = path.join(
+    store,
+    '@deepseek-ai+dsh@' + (dshVersion ?? '0.2.1-alpha.1') + '_hash',
+    'node_modules', '@deepseek-ai', 'dsh',
+  );
+  await fs.mkdir(dshPkgDir, { recursive: true });
+  const pkg: Record<string, unknown> = { name: '@deepseek-ai/dsh' };
+  if (dshVersion !== null) pkg['version'] = dshVersion;
+  await fs.writeFile(path.join(dshPkgDir, 'package.json'), JSON.stringify(pkg), 'utf8');
+  for (const [version, format] of Object.entries(sessions)) {
+    await writeDshSessionPackage(
+      path.join(store, '@deepseek-ai+dsh-session@' + version + '_hash', 'node_modules'),
+      'const SESSION_FORMAT_VERSION = ' + String(format) + ';\n',
+    );
+  }
+  return path.join(dshPkgDir, 'package.json');
+}
+
+test('#74 pnpm 隔离布局：锚点在 store 段内、dsh-session 在同 store 的另一个段 → 必须解析成功', async () => {
+  await withTmp(async (dir) => {
+    const anchor = await writePnpmLayout(path.join(dir, 'proj'), '0.2.1-alpha.1', { '0.2.1-alpha.1': 4 });
+    // 同级 @deepseek-ai 下没有 dsh-session、dsh/node_modules 也不存在 —— 只有 store 扫描能找到
+    assert.equal(resolveSessionFormatVersion([anchor]), 4);
+  });
+});
+
+test('#74 pnpm 隔离布局：多版本共存时取与本机 dsh 同版本者', async () => {
+  await withTmp(async (dir) => {
+    const anchor = await writePnpmLayout(path.join(dir, 'proj'), '0.2.1-alpha.1', {
+      '0.1.5-rc.1': 3,
+      '0.2.1-alpha.1': 4,
+    });
+    assert.equal(resolveSessionFormatVersion([anchor]), 4, '不得取到旧副本的 3');
+  });
+});
+
+test('#74 pnpm 隔离布局：版本对不上且不止一个候选 → 不猜（undefined）', async () => {
+  await withTmp(async (dir) => {
+    const anchor = await writePnpmLayout(path.join(dir, 'proj'), '0.3.0', {
+      '0.1.5-rc.1': 3,
+      '0.2.1-alpha.1': 4,
+    });
+    assert.equal(resolveSessionFormatVersion([anchor]), undefined, '宁可体检跳过，也不谎报格式');
+  });
+});
+
+test('#74 pnpm 隔离布局：dsh 版本读不出来但只有一个候选 → 仍用它', async () => {
+  await withTmp(async (dir) => {
+    const anchor = await writePnpmLayout(path.join(dir, 'proj'), null, { '0.2.1-alpha.1': 4 });
+    assert.equal(resolveSessionFormatVersion([anchor]), 4);
+  });
+});
+
+test('#74 resolveSessionFormatVersion 的 tried 收集：解析失败时把尝试过的路径全部给出', async () => {
+  await withTmp(async (dir) => {
+    const anchor = path.join(dir, '@deepseek-ai', 'dsh', 'package.json');  // 不存在的候选
+    const tried: string[] = [];
+    assert.equal(resolveSessionFormatVersion([anchor], tried), undefined);
+    // 候选 → node_modules 根 = dirname/../.. ；没有 .pnpm 时就是 hoisted + dsh 嵌套两处
+    assert.deepEqual(tried, [dir, path.join(dir, '@deepseek-ai', 'dsh', 'node_modules')]);
+  });
+});
+
+test('pnpmSessionEntryVersion：只认 dsh-session 段，peer 后缀要剥掉', () => {
+  assert.equal(pnpmSessionEntryVersion('@deepseek-ai+dsh-session@0.2.1-alpha.1'), '0.2.1-alpha.1');
+  assert.equal(pnpmSessionEntryVersion('@deepseek-ai+dsh-session@0.2.1-alpha.1_react@18.2.0'), '0.2.1-alpha.1');
+  assert.equal(pnpmSessionEntryVersion('@deepseek-ai+dsh-session-projection@0.2.1'), undefined, '同类前缀不得误命中');
+  assert.equal(pnpmSessionEntryVersion('@deepseek-ai+dsh@0.2.1'), undefined);
+  assert.equal(pnpmSessionEntryVersion('@deepseek-ai+dsh-session@'), undefined);
+});
+
+test('findPnpmStore：从 store 段内向上找到存储根；没有 → undefined', async () => {
+  await withTmp(async (dir) => {
+    const anchor = await writePnpmLayout(path.join(dir, 'proj'), '0.2.1-alpha.1', {});
+    const store = path.join(dir, 'proj', 'node_modules', '.pnpm');
+    assert.equal(findPnpmStore(path.dirname(path.dirname(anchor))), store, '从 store 段内也能向上找到');
+    assert.equal(findPnpmStore(path.join(dir, 'nothing')), undefined, '整条链上没有 .pnpm → undefined');
+  });
+});
+
+test('sessionFormatRoots：hoisted → dsh 嵌套 → pnpm store（顺序即真伪顺序）', async () => {
+  await withTmp(async (dir) => {
+    const root = path.join(dir, 'proj');
+    const anchor = await writePnpmLayout(root, '0.2.1-alpha.1', { '0.2.1-alpha.1': 4 });
+    const nm = path.join(root, 'node_modules');
+    assert.deepEqual(sessionFormatRoots(nm, '0.2.1-alpha.1'), [
+      nm,
+      path.join(nm, '@deepseek-ai', 'dsh', 'node_modules'),
+      path.join(nm, '.pnpm', '@deepseek-ai+dsh-session@0.2.1-alpha.1_hash', 'node_modules'),
+    ]);
+    assert.equal(readSessionFormatVersionInTree(nm, '0.2.1-alpha.1'), 4, '树内读取与展开同源');
+    assert.equal(anchor.length > 0, true);
+  });
+});
+

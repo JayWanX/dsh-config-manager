@@ -93,6 +93,7 @@ import { applySessionMeta, applySessionMetaToPlanItems, applySessionParentLinks,
 import { projectKeyOf, sessionIdKey } from './core/session-select.ts'
 import { PROJECT_KEY_RE, readLogCwdFromBytes, rewriteSessionLogDir } from './utils/session-log.ts'
 import { probeSessionFormats, resolveSessionFormatVersion } from './utils/session-format.ts'
+import { describePatchYamlError, dumpPatchDocument, loadPatchDocument } from './utils/patch-yaml.ts'
 import { atomicCopyFile, atomicWriteFile } from './utils/atomic-write.ts'
 import { isENOENT } from './utils/guards.ts'
 import { EnvironmentLockManager, runWithMutationLock, EnvironmentLockUnavailableError, type MutationLockContext } from './utils/env-lock.ts'
@@ -165,7 +166,7 @@ export const name = 'config-manager'
 export const inject = ['settings', 'credentials']
 
 /** Plugin version, kept in sync with package.json ("version"). */
-export const PLUGIN_VERSION = '0.1.69'
+export const PLUGIN_VERSION = '0.1.70'
 
 /** Plugin own package name — excluded from its own exported plugins list. */
 const PLUGIN_NAME = 'dsh-config-manager'
@@ -1075,8 +1076,11 @@ export class DshSessionStoreFacade implements SessionStoreFacade {
  * 改造前这里是「拿文件名字符串当枚举」的两个分支，而两个分支比较的是同一个字面量
  * `'cordis.patch.yml'` —— profile 分支永远不可达，于是 profile 层的 MCP / prompts 行
  * 在备份里凭空消失（用户报告的「备份不到外壳 mcp」）。现在按路径解析，两层都能读写。
+ *
+ * YAML 侧一律走 `utils/patch-yaml.ts` 的 **DSH 方言**（issue #75）：`!!js` 必须能读写往返，
+ * 且原文件解析不了时**拒绝覆盖**（读不出来 ≠ 空文档）。
  */
-class DshPatchFileFacade implements PatchFileFacade {
+export class DshPatchFileFacade implements PatchFileFacade {
   private readonly homeDir: string
   private readonly profile: string
   private readonly msg: MsgFunc
@@ -1120,14 +1124,21 @@ class DshPatchFileFacade implements PatchFileFacade {
     let text: string
     try {
       text = await fs.readFile(p, 'utf8')
-    } catch {
-      return []
+    } catch (err) {
+      // 真不存在 = 「按需创建、本来就没有」→ 空层（既有语义）。
+      // 其余 errno（EACCES / EBUSY / …）**必须上抛**：读不到 ≠ 没有；静默返回空会让这一层的
+      // patch 行在导出/同步里无声消失（t23 口径；readEffectivePatchLines 的 failures 通道会转成
+      // 可见告警，三个适配器都会展示）。
+      if (isENOENT(err)) return []
+      throw new Error(this.msg('host.patchUnreadable', { file, reason: describePatchYamlError(err) }), { cause: err })
     }
     let doc: unknown
     try {
-      doc = yaml.load(text)
-    } catch {
-      return []
+      doc = loadPatchDocument(text)
+    } catch (err) {
+      // 解析失败同样上抛（issue #75）：`!!js` 这类 DSH 方言一旦读不出来，返回 [] 就等于把用户
+      // 手写的整层配置从导出/同步里抹掉（比「报错」糟得多）。
+      throw new Error(this.msg('host.patchUnreadable', { file, reason: describePatchYamlError(err) }), { cause: err })
     }
     if (!Array.isArray(doc)) return []
     const lines: { lineId: string; raw: unknown }[] = []
@@ -1156,13 +1167,29 @@ class DshPatchFileFacade implements PatchFileFacade {
     const p = this.patchPath(file)
 
     // 1. Load the current document into an ordered lineId → raw table.
+    //
+    // 读不出来的既有内容**绝不能当作空文档**（issue #75 的数据丢失点）：重建后的文件只包含
+    // 本次写入的行，等于把用户手写的其余行整段删掉。三种情况分开处理：
+    //   - 真不存在（ENOENT）→ 空文档（首次创建，既有语义）；
+    //   - 存在但读不到（EACCES/EBUSY/…）→ 抛错，不改写；
+    //   - 存在但解析不了（含未知方言 / YAML 本身有错）→ 抛错，不改写。
     const rows = new Map<string, unknown>()
     const order: string[] = []
-    let doc: unknown
+    let existing: string | null = null
     try {
-      doc = yaml.load(await fs.readFile(p, 'utf8'))
-    } catch {
-      doc = undefined
+      existing = await fs.readFile(p, 'utf8')
+    } catch (err) {
+      if (!isENOENT(err)) {
+        throw new Error(this.msg('host.patchRefuseClobber', { file, reason: describePatchYamlError(err) }), { cause: err })
+      }
+    }
+    let doc: unknown
+    if (existing !== null && existing.trim() !== '') {
+      try {
+        doc = loadPatchDocument(existing)
+      } catch (err) {
+        throw new Error(this.msg('host.patchRefuseClobber', { file, reason: describePatchYamlError(err) }), { cause: err })
+      }
     }
     if (Array.isArray(doc)) {
       for (const item of doc) {
@@ -1210,7 +1237,7 @@ class DshPatchFileFacade implements PatchFileFacade {
       if (raw !== undefined) out.push(raw)
     }
     const text = '# rewritten by dsh-config-manager import (original comments not preserved)\n'
-      + yaml.dump(out)
+      + dumpPatchDocument(out)
     await atomicWriteFile(p, text)
   }
 }
@@ -1506,7 +1533,11 @@ export class ConfigManagerHostContext implements HostContext {
     const installAnchor = installAnchorFromProfileContext(readService<unknown>(ctx, 'profileContext'))
     this.dshVersion = resolveDshVersion(homeDir, profile, installAnchor)
     // 会话格式版本与 DSH 版本同源同候选（桌面端的运行时在 app.asar 内）。
-    this.sessionFormatVersion = resolveSessionFormatVersion(dshPackageJsonCandidates(homeDir, profile, installAnchor))
+    // tried 收集**所有尝试过的路径**：解析失败时写进日志 —— 「解析不到」这句话本身对排查没有价值
+    // （issue #74 的直接诉求），真机要的是「都试了哪几处」。
+    const sessionFormatTried: string[] = []
+    this.sessionFormatVersion = resolveSessionFormatVersion(
+      dshPackageJsonCandidates(homeDir, profile, installAnchor), sessionFormatTried)
     this.profile = profile
     this.profileDir = resolveProfileDir(homeDir, profile)
     this.language = resolveAppLanguage(ctx)
@@ -1516,8 +1547,13 @@ export class ConfigManagerHostContext implements HostContext {
     // 排查时 DSH_CONFIG_MANAGER_LOG_LEVEL=info|debug 恢复逐条输出。
     this.log = createLogger({ level: parseLogLevel(process.env.DSH_CONFIG_MANAGER_LOG_LEVEL) })
     if (this.sessionFormatVersion === undefined) {
-      // 绝不静默：解析不到就明说体检不可用（用户仍能导出/导入，只是拿不到格式告警）。
-      this.log.warn('无法解析本机 DSH 的会话格式版本：导入/同步不做「会话格式是否可读」体检')
+      // 绝不静默：解析不到就明说体检不可用（用户仍能导出/导入，只是拿不到格式告警），
+      // 并把已尝试的路径一并给出。
+      const triedText = sessionFormatTried.length > 6
+        ? sessionFormatTried.slice(0, 6).join('、') + ' 等'
+        : sessionFormatTried.join('、')
+      this.log.warn('无法解析本机 DSH 的会话格式版本：导入/同步不做「会话格式是否可读」体检'
+        + `（已尝试 ${sessionFormatTried.length} 处：${triedText}）`)
     }
     this.settings = new DshSettingsFacade(ctx)
     this.credentials = new DshCredentialsFacade(ctx)

@@ -363,3 +363,44 @@ d`。
 
 **已导入的坏会话需要重导**：旧产物在磁盘上仍是旧字节，导入计划会按 `session-id-conflict` 跳过；重导前先删掉那批会话目录。
 - **救援冲突的时间尺度**：`reconcileBundles` 约 **1.5 s** 内就把插件加回（文档正文表述为「秒级」）。
+
+---
+
+## `cordis.patch.yml` 的 `!!js` 方言 与 pnpm 隔离安装的布局解析（2026-10-07，issue #75 / #74）
+
+### 1) issue #75：导出 / 同步 / 预览丢掉 `!!js`（**整层** patch 行消失）
+
+**症状**：`cordis.patch.yml` 里带 `!!js` 表达式时（真机形态：`- id: llm-pi-ai` / `disabled: !!js (function(){ … })()`），备份 / 导出 / 同步里这一层的 patch 行全部丢失。
+
+**根因**：这份文件是 DSH 的**专用 YAML 方言**。`@deepseek-ai/dsh-app-boot` 用
+`const entryListSchema = yaml.JSON_SCHEMA.extend(JsExpr)`，其中
+`JsExpr = new yaml.Type('tag:yaml.org,2002:js', { kind: 'scalar', construct: (data) => ({ __jsExpr: data }), predicate: isJsExpr, represent: (data) => data['__jsExpr'] })`。
+本插件此前用缺省 schema 的 `yaml.load` —— 遇到该标签直接抛 `unknown scalar tag !<tag:yaml.org,2002:js>`（js-yaml 5 实测），旧实现把它 `catch` 成空数组。
+
+**影响面比「丢一条配置」大**：解析针对**整份文档** → 只要该层有任何一处 `!!js`，这一层**全部** patch 行都从导出 / 同步 / `/export-preview` 消失（plugins / mcp / prompts 三处 adapter 都读 `readEffectivePatchLines`）。本地快照里的 `cordis.patch.yml` 是**整文件字节备份**，不受这条影响。
+
+**第二段数据丢失（同一根因）**：`applyPatchChanges` 同样建不出 rows/order → 重建后的文件**只包含本次导入的行**，用户手写的其余行被整段删掉。
+
+**修法**：新增 `src/utils/patch-yaml.ts` 作为方言**单一事实源**（`JSON_SCHEMA.withTags(defineScalarTag('tag:yaml.org,2002:js', …))`；载入 `!!js <源码>` → `{__jsExpr: <源码>}`，写回反向），`DshPatchFileFacade` 的读取与写回都走它。两道护栏：① `applyPatchChanges` 遇到「存在但解析不了 / 读不到」的原文件**拒绝覆盖**（`host.patchRefuseClobber`）；② `readPatchLines` 解析失败**上抛**（`host.patchUnreadable`），经既有 `failures` 通道变成三处 adapter 的可见告警。**ENOENT 仍是「按需创建、本来就没有」→ 空层**（边界不放宽）。
+
+**三条必须记住的口径**：
+- `plugins.patch[].raw` 里的 `{__jsExpr: "<源码>"}` **是对外契约**（`docs/spec/bundle-format-v1.md` §3.4）：它是普通 JSON（可安全过 `JSON.stringify` 与分区 JSON），写回时必须还原成 `!!js`。
+- 载入用 `JSON_SCHEMA` 而非缺省 schema **不是随手选的**：`~` 在缺省（Core）下是 `null`、在 JSON_SCHEMA 下是字符串 `"~"`，而 DSH 用后者 —— 用错 schema 会让导出的 `raw` 与 DSH 读到的值不一致（`patch-yaml.test.ts` 钉住这条差异）。
+- js-yaml 的 `Error.message` **会附带出错处的源码片段**，而 patch 文件里可能内联字面量密钥（就写在 `!!js` 表达式旁）。所有外流摘要一律走 `describePatchYamlError()`（只取首行）。
+
+**护栏**：`src/utils/patch-yaml.test.ts`（方言往返 / JSON 往返 / schema 口径 / 摘要截断）；`src/index.facade.test.ts` 的 4 条 #75 用例（整层读得出来 / 写回保真 / 解析不了拒绝覆盖且文件逐字节不变 / ENOENT 仍为空层）。
+
+### 2) issue #74：pnpm 隔离安装下解析不到会话格式版本
+
+**症状**：pnpm 全局安装 DSH 时，每次启动打 warn「无法解析本机 DSH 的会话格式版本」→ 导入 / 同步的「格式超前」体检整体跳过（本机读不了的会话被静默导入）。
+
+**根因**：`resolveSessionFormatVersion` 把 node_modules 根反推为 `dirname(candidate)/../..`，只试「hoisted 同级」与「`dsh/node_modules` 嵌套」两种布局。隔离安装下唯一存在的候选是 installAnchor
+`…\node_modules\.pnpm\@deepseek-ai+dsh@0.2.1-alpha.1_<hash>\node_modules\@deepseek-ai\dsh\package.json` —— 它的同级 `@deepseek-ai` 下只有 `dsh-session-projection` / `dsh-session-reference`（`dsh` 的 83 个 dependencies 里**没有** `@deepseek-ai/dsh-session`），`dsh/node_modules` 也不存在 → 两处都 miss。真实位置在**同一 store 的另一个段**：
+`…\node_modules\.pnpm\@deepseek-ai+dsh-session@0.2.1-alpha.1_<hash>\node_modules\@deepseek-ai\dsh-session\lib\index.js`。与有没有会话、会话新旧无关。
+
+**修法**：`src/utils/session-format.ts` 新增第三种布局 —— `findPnpmStore()` 从 node_modules 根向上找最近的 `.pnpm`（上限 8 层），`pnpmSessionFormatRoots()` 按段名前缀 `@deepseek-ai+dsh-session@` 扫段（前缀末尾的 `@` 必须有，否则 `-projection` 会被误命中）。多版本共存时取**与本机 dsh 同版本**者（`pnpmSessionEntryVersion()` 剥掉 `_<peerHash>`，semver 标识符不含 `_`）；**版本读不出来或对不上、且不止一个候选 → 返回空（不猜）**。`resolveSessionFormatVersion(candidates, tried?)` 顺带收集**所有尝试过的路径**，启动 warn 直接给出（issue 的直接诉求：原实现只说「解析不到」，没有线索）。
+
+**同源要求（不改会复发）**：`session-verify.ts` 的 `nodeModulesRootsFor`（复验门用的「权威已装版本」）与 `dsh-profile-manager` 的档案列表都改走同一份 `sessionFormatRoots` —— 布局推导**只能有一处实现**，否则同一个坑会换个入口复发。
+
+**护栏**：`src/utils/session-format.test.ts` 新增 8 条（合成 pnpm 段骨架：真机形状必须解析成功 / 多版本取同版本 / 版本对不上不猜 / dsh 版本缺失但单候选可用 / `tried` 收集 / 段名解析 / `findPnpmStore` / `sessionFormatRoots` 顺序）。
+

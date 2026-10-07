@@ -9,6 +9,16 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 > **Release workflow**: on tag push, CI extracts the current version's section as the release notes highlights;
 > the build fails fast if the section is missing, so you cannot forget to update it.
 
+## [0.1.70] - 2026-10-07
+
+> **导出/同步不再丢 `!!js`，pnpm 隔离安装也能识别会话格式版本（issue #75 / #74）**
+> - **`cordis.patch.yml` 的 `!!js` 方言（issue #75，数据丢失级）**：`!!js` 是 DSH 的专用 YAML 标签（`JSON_SCHEMA` + `tag:yaml.org,2002:js`），而插件此前用缺省 schema 读它 —— 遇到 `!!js` 直接抛 unknown tag，被吞成空数组。后果不止「丢一条配置」：解析针对整份文档，**只要该层有一处 `!!js`，这一层全部 patch 行都会从导出 / 同步 / 预览里消失**；导入写回时更会把整份文件重写成「只剩本次导入的行」。现在读写统一走新的方言单一事实源（`raw` 的内存形态是 `{__jsExpr: <源码>}`，普通 JSON、写回还原成 `!!js`），并补两道护栏：**原文件存在却解析不了 / 读不到时拒绝覆盖**、解析失败上抛成可见告警（不再静默）；文件不存在仍按「本来就没有」处理。
+> - **pnpm 隔离安装的会话格式版本解析（issue #74）**：pnpm 全局安装 DSH 时 `installAnchor` 落在 `.pnpm` 存储段内，同级没有 `dsh-session`（`dsh` 的依赖里也没有它），旧的「同级 / 嵌套两种布局」必然落空 → 每次启动报 warn、导入与同步的「格式超前」体检整体跳过。现在会向上定位最近的 `.pnpm` 并按 `@deepseek-ai+dsh-session@*` 扫段（多版本取与本机 dsh 同版本者，判不准则不猜），失败时把**已尝试的路径**写进日志；同一份布局推导已收敛为单一实现（复验门与档案列表共用）。
+>
+> **No more lost `!!js` on export/sync; pnpm-isolated installs resolve the session format version (issues #75 / #74)**
+> - **The `!!js` dialect of `cordis.patch.yml` (issue #75, data loss)**: `!!js` is DSH's own YAML tag (`JSON_SCHEMA` + `tag:yaml.org,2002:js`), but the plugin read the file with the default schema — hitting `!!js` threw an unknown-tag error that was swallowed into an empty array. The damage was bigger than one missing config: parsing covers the whole document, so **a single `!!js` anywhere made every patch row of that layer disappear from export / sync / preview**, and importing rewrote the file down to just the imported rows. Read and write now share one dialect source of truth (`raw` keeps the JSON-safe `{__jsExpr: <source>}` shape and is written back as `!!js`), plus two guard rails: **an existing file that cannot be parsed or read is never overwritten**, and parse failures surface as visible warnings instead of silence; a missing file still means "nothing there yet".
+> - **Session format version under a pnpm-isolated install (issue #74)**: with a global pnpm install the `installAnchor` sits inside a `.pnpm` store segment whose siblings have no `dsh-session` (and `dsh` does not depend on it), so the old two-layout lookup always missed → a startup warning on every boot and the import/sync "format ahead" check skipped entirely. The resolver now walks up to the nearest `.pnpm` and scans `@deepseek-ai+dsh-session@*` segments (preferring the version matching the local dsh; never guessing when ambiguous), and logs the paths it tried on failure. The same layout derivation is now a single implementation shared with the verify gate and the profile list.
+
 ## [Unreleased]
 
 > **M1 会话修复引擎加固：拆掉一个会毁数据的陷阱 + 装上真 codec 复验门与只读检测**

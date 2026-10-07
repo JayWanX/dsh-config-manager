@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 
 import {
   SESSION_REPAIR_REASON_KEYS,
+  SESSION_REPAIR_VERIFY_KEYS,
   SESSION_SEVERITY_KEYS,
   sessionIssueRepairable,
   formatSessionBytes,
@@ -18,10 +19,13 @@ import {
   sessionRepairCommands,
   sessionRepairEntries,
   sessionRepairReasonKey,
+  sessionRepairVerifyKey,
   sessionSeverityBadgeKind,
 } from './session-inventory-view.ts';
-import type { SessionHealthResponse, SessionHealthRowView } from './session-inventory-view.ts';
+import type { SessionHealthResponse, SessionHealthRowView, SessionVerifyView } from './session-inventory-view.ts';
 import type { SessionHealthSeverity } from '../core/session-health.ts';
+// 字典侧守卫用（反向依赖是刻意的：钉住「纯函数返回的键在 zh/en 里逐字存在」）。
+import { en as recoveryEn, zh as recoveryZh } from '../client/recovery/recovery-locales.ts';
 
 function row(overrides: Partial<SessionHealthRowView> = {}): SessionHealthRowView {
   return {
@@ -244,4 +248,59 @@ test('T8：台账 → 展示行（跳过坏记录、最近在前、回滚态可�
   assert.equal(entries[1]?.backupName, null, '缺字段不填假值');
   assert.deepEqual(sessionRepairEntries(null), []);
   assert.deepEqual(sessionRepairEntries(response([])), [], '没有 repairs 字段 → 空列表（不是假数据）');
+});
+
+test('M2-⑥：verify-failed / target-changed 有专属文案键，未知原因仍回落 unknown（绝不渲染裸枚举）', () => {
+  assert.equal(sessionRepairReasonKey('verify-failed'), 'sessions.repair.reason.verifyFailed');
+  assert.equal(sessionRepairReasonKey('target-changed'), 'sessions.repair.reason.targetChanged');
+  assert.match(sessionRepairReasonKey('verify-failed'), /^sessions\.repair\.reason\./);
+  assert.match(sessionRepairReasonKey('target-changed'), /^sessions\.repair\.reason\./);
+  // 新增两个键**不得**放宽兜底：未来原因 / 空串 / undefined 一律 unknown
+  assert.equal(sessionRepairReasonKey('some-future-reason'), 'sessions.repair.reason.unknown');
+  assert.equal(sessionRepairReasonKey(''), 'sessions.repair.reason.unknown');
+  assert.equal(sessionRepairReasonKey(undefined), 'sessions.repair.reason.unknown');
+});
+
+test('M2-⑥：复验三态 + 危险态 → 文案键（五个分支逐个钉住）', () => {
+  const current: SessionVerifyView = { verified: true, events: 42, strong: true, equivalentToReadPath: true };
+  const migrated: SessionVerifyView = { verified: true, events: 7, strong: false, strongDetail: 'installed-build', equivalentToReadPath: false };
+  const unverified: SessionVerifyView = { verified: false, reason: 'unavailable', detail: 'profiles-tree:generation-mismatch', equivalentToReadPath: false };
+
+  // ① 现役读盘可读
+  assert.equal(sessionRepairVerifyKey(current), 'sessions.repair.verify.current');
+  // ② 迁移链可还原（**不等于**现役读盘可读）
+  assert.equal(sessionRepairVerifyKey(migrated), 'sessions.repair.verify.migrated');
+  // ③ 未验证（**不等于**已验证）
+  assert.equal(sessionRepairVerifyKey(unverified), 'sessions.repair.verify.unverified');
+  // ④ 没有复验结论（预览路径）→ null：绝不臆造「已验证」
+  assert.equal(sessionRepairVerifyKey(undefined), null);
+  assert.equal(sessionRepairVerifyKey(undefined, undefined), null);
+  // ⑤ rolledBack === false（复验确定性失败且自动回滚没成功）→ 危险态，**优先于其它一切态**
+  assert.equal(sessionRepairVerifyKey(unverified, false), 'sessions.repair.verify.rollbackFailed');
+  assert.equal(sessionRepairVerifyKey(current, false), 'sessions.repair.verify.rollbackFailed');
+  assert.equal(sessionRepairVerifyKey(undefined, false), 'sessions.repair.verify.rollbackFailed');
+  // rolledBack === true（已自动回滚）/ 缺省（服务层没回传）都不得抢占三态
+  assert.equal(sessionRepairVerifyKey(unverified, true), 'sessions.repair.verify.unverified');
+  assert.equal(sessionRepairVerifyKey(undefined, true), null);
+  for (const key of Object.values(SESSION_REPAIR_VERIFY_KEYS)) assert.match(key, /^sessions\.repair\.verify\./);
+});
+
+test('M2-⑥：两个新原因 + 复验四键在 recovery 字典 zh / en 中逐字存在（键名漂移即红）', () => {
+  const keys: string[] = [
+    'sessions.repair.reason.verifyFailed',
+    'sessions.repair.reason.targetChanged',
+    ...Object.values(SESSION_REPAIR_VERIFY_KEYS),
+  ];
+  assert.equal(new Set(keys).size, 6, '应当是 2 个原因键 + 4 个复验键');
+  // 与 SESSION_REPAIR_REASON_KEYS 里登记的两个新原因逐字对应（不是手抄的另一份字符串）
+  assert.equal(SESSION_REPAIR_REASON_KEYS['verify-failed'], 'sessions.repair.reason.verifyFailed');
+  assert.equal(SESSION_REPAIR_REASON_KEYS['target-changed'], 'sessions.repair.reason.targetChanged');
+  for (const key of keys) {
+    const zhValue: string = recoveryZh[key as keyof typeof recoveryZh];
+    const enValue: string = recoveryEn[key as keyof typeof recoveryEn];
+    assert.equal(typeof zhValue, 'string', 'zh 缺键：' + key);
+    assert.equal(typeof enValue, 'string', 'en 缺键：' + key);
+    assert.ok(zhValue !== '' && enValue !== '', '文案不得为空：' + key);
+    assert.notEqual(zhValue, enValue, 'en 必须是镜像而不是复制：' + key);
+  }
 });

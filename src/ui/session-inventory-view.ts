@@ -76,6 +76,34 @@ export interface SessionRepairActionView {
   rows: number
 }
 
+/**
+ * 写后**真 codec 复验结论**的展示视图（src/ui 内部定义的结构化类型）。
+ *
+ * 为什么不直接 import utils/session-verify.ts 的 SessionVerifyResult：src/ui 会被打进 **client bundle**
+ * （浏览器半），而那个模块经 utils/zstd-frame.ts 间接依赖 `node:zlib` —— bundle 里一旦出现对 node: 内建模块的
+ * 引用，DSH loader 会报 missed the module table，**整个插件不加载**（本项目实测过）。
+ * 所以这里只**逐字段镜像**宿主回传的形状（结构化鸭子类型），判定逻辑落在本模块的纯函数里。
+ *
+ * 语义（与 utils/session-verify.ts 的 SessionVerifyResult 逐字同源，**不许曲解**）：
+ *  · verified && equivalentToReadPath   → 「现役读盘可读」（header 版本 = 本机现役代际）；
+ *  · verified && !equivalentToReadPath  → 「迁移链可还原」（pre-v4 日志），**不等于**现役读盘可读；
+ *  · !verified                          → 「**未验证**」（本机跑不了真 codec 门），**不等于**已验证。
+ */
+export interface SessionVerifyView {
+  verified: boolean
+  /** verified 时解出的事件数 */
+  events?: number
+  /** !verified 时的机器可读原因（unavailable / invalid-header / decode-failed / finish-failed） */
+  reason?: string
+  /** !verified 时的补充详情（机器可读码 + 候选标签，**不含路径**） */
+  detail?: string
+  /** 额外的「已安装 build 语义校验」结论（不参与判定） */
+  strong?: boolean
+  strongDetail?: string
+  /** 是否等价于 DSH 现役读盘路径（未验证时恒 false = 「没有任何可声称的现役等价」） */
+  equivalentToReadPath: boolean
+}
+
 /** 修复预览 / 应用结果（POST /recovery/sessions/repair）。 */
 export interface SessionRepairResult {
   ok: boolean
@@ -101,6 +129,16 @@ export interface SessionRepairResult {
   lossy?: boolean
   /** 保留的行数 */
   keptRows?: number
+  /**
+   * 写后真 codec 复验结论（**应用期才有**）。调用方必须据它区分三态；
+   * 缺省 = 没回传复验结论（预览路径）—— **绝不**当成「已验证」。
+   */
+  verify?: SessionVerifyView
+  /**
+   * 确定性失败（reason=`verify-failed`）时：自动回滚是否成功。
+   * false = 目标当前仍是「修复后字节」（危险态，必须可见）；缺省 = 服务层没回传（不猜）。
+   */
+  rolledBack?: boolean
 }
 
 /** 回滚结果（POST /recovery/sessions/rollback）。 */
@@ -314,6 +352,9 @@ export const SESSION_REPAIR_REASON_KEYS = {
   'write-failed': 'sessions.repair.reason.writeFailed',
   'postcheck-failed': 'sessions.repair.reason.postcheckFailed',
   'backup-invalid': 'sessions.repair.reason.backupInvalid',
+  // M2 缺口⑥：写后真 codec 复验未通过（已按安全序列处置）与回滚时目标又被改过 —— 过去只落到通用「未知原因」文案
+  'verify-failed': 'sessions.repair.reason.verifyFailed',
+  'target-changed': 'sessions.repair.reason.targetChanged',
   unknown: 'sessions.repair.reason.unknown',
 } as const
 
@@ -325,6 +366,35 @@ export function sessionRepairReasonKey(reason: string | undefined): SessionRepai
     return SESSION_REPAIR_REASON_KEYS[reason as keyof typeof SESSION_REPAIR_REASON_KEYS]
   }
   return SESSION_REPAIR_REASON_KEYS.unknown
+}
+
+/** 写后复验三态（+ 一个危险态）→ 文案键（config-manager-recovery 命名空间）。 */
+export const SESSION_REPAIR_VERIFY_KEYS = {
+  current: 'sessions.repair.verify.current',
+  migrated: 'sessions.repair.verify.migrated',
+  unverified: 'sessions.repair.verify.unverified',
+  rollbackFailed: 'sessions.repair.verify.rollbackFailed',
+} as const
+
+export type SessionRepairVerifyKey = (typeof SESSION_REPAIR_VERIFY_KEYS)[keyof typeof SESSION_REPAIR_VERIFY_KEYS]
+
+/**
+ * 写后真 codec 复验结论 → 文案键（**三态 + 一个危险态**；undefined → null，绝不臆造「已验证」）。
+ *
+ *  · rolledBack === false  → rollbackFailed（**最高优先**）：复验确定性失败、且自动回滚**没成功**
+ *    ⇒ 目标当前仍是「修复后字节」，这是危险态，必须压过其它一切叙述；
+ *  · verified && equivalentToReadPath  → current（现役读盘可读）；
+ *  · verified && !equivalentToReadPath → migrated（迁移链可还原，**不等于**现役读盘可读）；
+ *  · !verified → unverified（**未验证 ≠ 已验证**）；
+ *  · verify === undefined → null（没回传复验结论就不添油加醋；预览路径就是这一态）。
+ *
+ * 判定全部落在这个纯函数里：组件只拿返回值去查字典，不在 JSX 里写三态判断。
+ */
+export function sessionRepairVerifyKey(verify: SessionVerifyView | undefined, rolledBack?: boolean): SessionRepairVerifyKey | null {
+  if (rolledBack === false) return SESSION_REPAIR_VERIFY_KEYS.rollbackFailed
+  if (verify === undefined) return null
+  if (!verify.verified) return SESSION_REPAIR_VERIFY_KEYS.unverified
+  return verify.equivalentToReadPath ? SESSION_REPAIR_VERIFY_KEYS.current : SESSION_REPAIR_VERIFY_KEYS.migrated
 }
 
 /** 台账记录 → 展示行（跳过没有 repairId 的坏记录；最近在前）。 */

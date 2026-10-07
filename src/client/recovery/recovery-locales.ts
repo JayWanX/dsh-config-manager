@@ -262,6 +262,15 @@ export const zh = {
   'sessions.repair.reason.postcheckFailed': '写后复验未通过，已用备份还原。',
   'sessions.repair.reason.backupInvalid': '备份不可用或不可信，已拒绝回滚。',
   'sessions.repair.reason.unknown': '修复未成功（原因未知），原文件保持原样。',
+  // M2 缺口⑥：两个新原因（此前只落到通用「未知原因」文案）+ 真 codec 复验三态
+  'sessions.repair.reason.verifyFailed': '写后真 codec 复验未通过：这次修复没有被接受（是否已自动回滚见下方复验结论）。',
+  'sessions.repair.reason.targetChanged': '回滚前发现目标又被改过（指纹不一致），已拒绝覆盖 —— 绝不覆盖别人的内容。',
+  // 复验三态 + 危险态（sessionRepairVerifyKey 的返回键，键名逐字一致）：
+  // 「未验证 ≠ 已验证」、「迁移链可还原 ≠ 现役读盘可读」。
+  'sessions.repair.verify.current': '复验通过：DSH 现役读盘路径此刻就能直接读这条会话。',
+  'sessions.repair.verify.migrated': '复验通过：只有迁移链能还原它（不是 DSH 的现役读盘路径）——「迁移链可还原」不等于「现役读盘可读」。',
+  'sessions.repair.verify.unverified': '未验证：本机跑不了真 codec 复验，所以 DSH 现在能否读它并没有被证明 —— 未验证不等于已验证（写入是否生效另说）。',
+  'sessions.repair.verify.rollbackFailed': '危险态：复验失败后自动回滚没有成功，目标当前仍是修复后的字节，需要人工处理。',
   'sessions.repair.rejectedNext': '原文件没有被改动。可以再点一次「开始体检」看最新状态；如果原因与「文件被改过/正在被写入」有关，等这条会话安静下来再试。',
   // C-1 Q4 检查点（t7）：界面按 routes/recovery.ts 回传的 body.code / warn / guidance code 出文案，
   // 不靠 HTTP 状态码猜原因（code 组不自行拼接用户可见文本，全部经本字典）。
@@ -576,6 +585,15 @@ export const en: Record<keyof typeof zh, string> = {
   'sessions.repair.reason.postcheckFailed': 'The post-write re-check failed, so the backup was restored.',
   'sessions.repair.reason.backupInvalid': 'The backup is unavailable or untrusted, so the rollback was refused.',
   'sessions.repair.reason.unknown': 'The repair did not succeed (unknown reason); the original file is unchanged.',
+  // M2 gap 6: two new reasons (previously fell back to the generic "unknown reason" text) + real-codec re-check states
+  'sessions.repair.reason.verifyFailed': 'The post-write real-codec re-check failed, so this repair was not accepted (whether it was rolled back is shown in the verification result below).',
+  'sessions.repair.reason.targetChanged': 'The target had changed again before the rollback (fingerprint mismatch), so overwriting was refused -- newer content is never overwritten.',
+  // Re-check states + dangerous state (sessionRepairVerifyKey's return keys, names verbatim):
+  // "unverified is not verified", "restorable through migration is not readable by the live read path".
+  'sessions.repair.verify.current': 'Re-check passed: the DSH read path can load this session right now.',
+  'sessions.repair.verify.migrated': 'Re-check passed: only the MIGRATION CHAIN can restore it (this is not the DSH live read path) -- "restorable through migration" is not "readable by the live read path".',
+  'sessions.repair.verify.unverified': 'Unverified: this machine cannot run the real-codec re-check, so DSH being able to read it right now is NOT proven -- unverified is not the same as verified (that says nothing about whether the write landed).',
+  'sessions.repair.verify.rollbackFailed': 'Dangerous state: after the re-check failed, the automatic rollback did NOT succeed; the target still holds the repaired bytes and needs manual handling.',
   'sessions.repair.rejectedNext': 'The original file was not modified. Run the health check again for the latest state; if the reason mentions a changed file or active writing, retry once that session is quiet.',
   // C-1 Q4 checkpoints (t7): the UI renders the body.code / warn / guidance codes returned by
   // routes/recovery.ts instead of guessing a reason from the HTTP status.

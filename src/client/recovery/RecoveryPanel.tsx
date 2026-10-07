@@ -39,9 +39,11 @@ import {
   sessionRepairCommands,
   sessionRepairEntries,
   sessionRepairReasonKey,
+  sessionRepairVerifyKey,
   type SessionHealthResponse,
   type SessionRepairEntryView,
   type SessionRepairResult,
+  type SessionVerifyView,
 } from '../../ui/session-inventory-view.ts'
 import {
   sessionExportEntryState,
@@ -337,6 +339,8 @@ interface BatchRepairResult {
   lossy?: boolean
   /** 成功时丢弃的行数 */
   droppedRows?: number
+  /** 写后真 codec 复验结论（成功项才有）—— 一键修复也必须如实分三态，绝不只给「已修复」 */
+  verify?: SessionVerifyView
   /** 传输层失败（HTTP/网络）时的原文（已由 ErrorBanner/http 层脱敏） */
   transportError?: string
 }
@@ -406,6 +410,19 @@ function SessionHealthDialog(props: SessionHealthDialogProps) {
   }
   /** 预览得到的修复计划（应用前必须显式确认；ok=false 时也在这里显示拒绝原因） */
   const [plan, setPlan] = useState<{ unitId: string; result: SessionRepairResult } | null>(null)
+  /**
+   * 应用成功后的结果（含写后真 codec 复验结论）。
+   *
+   * 为什么必须有：修复「写完了」与「DSH 现在能读它」是两件事 —— 没有复验结论时（如 unavailable）
+   * 把这次修复当成普通成功呈现，正是本轮要消灭的谎报。行已从列表移出，所以结果留在这里。
+   */
+  const [applied, setApplied] = useState<{ unitId: string; result: SessionRepairResult } | null>(null)
+  /**
+   * 复验三态 / 危险态的字典键（**判定全部在 ui 纯函数层**，组件只装配 —— 见 sessionRepairVerifyKey）。
+   * null = 没有复验结论（预览路径）⇒ 不渲染这一行，绝不臆造「已验证」。
+   */
+  const planVerifyKey = plan !== null ? sessionRepairVerifyKey(plan.result.verify, plan.result.rolledBack) : null
+  const appliedVerifyKey = applied !== null ? sessionRepairVerifyKey(applied.result.verify, applied.result.rolledBack) : null
   /** 待确认的回滚目标（ConfirmDialog，danger） */
   const [rollbackTarget, setRollbackTarget] = useState<SessionRepairEntryView | null>(null)
   /**
@@ -420,6 +437,7 @@ function SessionHealthDialog(props: SessionHealthDialogProps) {
   const startRepair = (unitId: string): void => {
     setBusy(unitId)
     setPlan(null)
+    setApplied(null)
     recoveryApi.repairSession(unitId, false)
       .then((result) => { setPlan({ unitId, result }); setBusy(null) })
       .catch((err) => { toast.error(redactErrorText(err)); setBusy(null) })
@@ -460,7 +478,13 @@ function SessionHealthDialog(props: SessionHealthDialogProps) {
         if (applied.ok) {
           ok += 1
           done.push(unitId)
-          results.push({ unitId, sessionId: applied.sessionId ?? unitId, ok: true, droppedRows: applied.droppedRows ?? 0 })
+          results.push({
+            unitId,
+            sessionId: applied.sessionId ?? unitId,
+            ok: true,
+            droppedRows: applied.droppedRows ?? 0,
+            ...(applied.verify !== undefined ? { verify: applied.verify } : {}),
+          })
         } else {
           failed += 1
           results.push({ unitId, sessionId: applied.sessionId ?? unitId, ok: false, reason: applied.reason })
@@ -488,6 +512,8 @@ function SessionHealthDialog(props: SessionHealthDialogProps) {
         if (next.ok) {
           toast.ok(t('sessions.repair.applied', { rows: String(next.droppedRows ?? 0) }))
           setPlan(null)
+          // 结果（含复验三态）留在面板上：绝不把「写完了」说成「已可加载」
+          setApplied({ unitId, result: next })
           setRepairedUnits((prev) => new Set([...prev, unitId]))
         } else {
           // 应用期被拒（指纹变化 / 校验不过 / 写失败）：**就地给出真实原因**，不假装成功
@@ -596,25 +622,30 @@ function SessionHealthDialog(props: SessionHealthDialogProps) {
                           {t('sessions.repair.allDone', { ok: String(batch.ok), failed: String(batch.failed) })}
                         </span>
                         {/* 逐条留痕：修好了几条、剩下几条为什么没修成 —— 绝不只给一个计数 */}
-                        {batch.results.map((item) => (
-                          <div key={item.unitId} className={css.snapshotRowMeta}>
-                            <span className={css.snapshotRowBadges}>
-                              <Badge kind={item.ok ? 'ok' : 'warn'}>
-                                {item.ok ? t('sessions.repair.batch.ok') : t('sessions.repair.batch.failed')}
-                              </Badge>
-                            </span>
-                            <span className={css.snapshotRowIssues} title={item.unitId}>{item.sessionId}</span>
-                            <span className={css.snapshotRowFacts}>
-                              {item.ok
-                                ? t('sessions.repair.batch.dropped', { rows: String(item.droppedRows ?? 0) })
-                                : item.transportError !== undefined
-                                  ? t('sessions.repair.batch.transportError', { message: item.transportError })
-                                  : item.lossy === true
-                                    ? t('sessions.repair.reason.lossyRequired')
-                                    : t(sessionRepairReasonKey(item.reason))}
-                            </span>
-                          </div>
-                        ))}
+                        {batch.results.map((item) => {
+                          // 一键修复的成功项同样要说出复验结论（三态判定在 ui 纯函数层，组件只查字典）
+                          const verifyKey = sessionRepairVerifyKey(item.verify)
+                          return (
+                            <div key={item.unitId} className={css.snapshotRowMeta}>
+                              <span className={css.snapshotRowBadges}>
+                                <Badge kind={item.ok ? 'ok' : 'warn'}>
+                                  {item.ok ? t('sessions.repair.batch.ok') : t('sessions.repair.batch.failed')}
+                                </Badge>
+                              </span>
+                              <span className={css.snapshotRowIssues} title={item.unitId}>{item.sessionId}</span>
+                              <span className={css.snapshotRowFacts}>
+                                {item.ok
+                                  ? t('sessions.repair.batch.dropped', { rows: String(item.droppedRows ?? 0) })
+                                  : item.transportError !== undefined
+                                    ? t('sessions.repair.batch.transportError', { message: item.transportError })
+                                    : item.lossy === true
+                                      ? t('sessions.repair.reason.lossyRequired')
+                                      : t(sessionRepairReasonKey(item.reason))}
+                                {verifyKey !== null && <> · {t(verifyKey)}</>}
+                              </span>
+                            </div>
+                          )
+                        })}
                       </div>
                     </div>
                   )}
@@ -716,6 +747,9 @@ function SessionHealthDialog(props: SessionHealthDialogProps) {
                           <div className={css.hint}>{t('sessions.repair.rejectedNext')}</div>
                         </>
                       )}
+                      {/* 写后真 codec 复验结论（现役读盘可读 / 迁移链可还原 / 未验证 / 回滚失败）——
+                          key 由 ui 纯函数判定，组件不写三态逻辑 */}
+                      {planVerifyKey !== null && <div className={css.hint}>{t(planVerifyKey)}</div>}
                       <div className={css.actionRow}>
                         {plan.result.ok && (
                           <Button variant="primary" loading={busy !== null} onClick={applyRepair}>
@@ -724,6 +758,23 @@ function SessionHealthDialog(props: SessionHealthDialogProps) {
                         )}
                         <Button variant="ghost" disabled={busy !== null} onClick={() => { setPlan(null) }}>
                           {t('common.cancel')}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                  {/* 应用成功后的结果（含真 codec 复验结论）：绝不把「写完了」说成「已可加载」 */}
+                  {applied !== null && (
+                    <div className={css.snapshotRow}>
+                      <div className={css.snapshotRowMain}>
+                        <span title={applied.unitId}>{applied.result.sessionId ?? applied.unitId}</span>
+                      </div>
+                      <div className={css.hint}>
+                        {t('sessions.repair.applied', { rows: String(applied.result.droppedRows ?? 0) })}
+                      </div>
+                      {appliedVerifyKey !== null && <div className={css.hint}>{t(appliedVerifyKey)}</div>}
+                      <div className={css.actionRow}>
+                        <Button variant="ghost" onClick={() => { setApplied(null) }}>
+                          {t('common.close')}
                         </Button>
                       </div>
                     </div>

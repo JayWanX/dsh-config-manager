@@ -452,15 +452,19 @@ export interface SessionRepairApplyOptions extends SessionRepairCallOptions {
 /**
  * 跑写后复验门；**绝不 throw**（门自身也不 throw），读不到字节一律按 unavailable 如实回传。
  *
- * 候选缺省 = defaultDshPackageJsonCandidates(homeDir)（与 src/index.ts 的 candidate 口径同源，
- * 只是这里拿不到 profileContext.installAnchor，改用进程内运行时锚点 + 本机 profile 树）。
+ * 候选缺省**不由本文件给定**：不传 `verify.dshPackageJsonCandidates` 时，门内部按 `anchorPlans()`
+ * （session-verify.ts 里**唯一一份锚点计划表**）逐条解析，顺序即真伪顺序 ——
+ * 显式 candidates（标签 `anchor`）→ install-anchor（profileContext.installAnchor）→ env-anchor
+ * （`DSH_CM_DSH_INSTALL`）→ runtime-anchor（`process.resourcesPath` 下的 `<resources>/app.asar|app`）
+ * → profiles-tree（`<home>/profiles/**`）。这里只给 `homeDir`（服务层拿不到 profileContext.installAnchor）。
+ * `defaultDshPackageJsonCandidates` 是同一份来源的**对外视图**，**不是**门内部缺省（该函数生产零调用点）。
  */
 async function runVerifyGate(bytes: Buffer | undefined, options: SessionRepairApplyOptions): Promise<SessionVerifyResult> {
   if (bytes === undefined) return { verified: false, reason: 'unavailable', detail: 'unreadable-after-write', equivalentToReadPath: false };
   const injected = options.verify;
   try {
-    // 候选缺省由门自己按 homeDir 走 install anchor 口径（裸模块 → 运行时锚点 → profile 树）；
-    // 显式给了 dshPackageJsonCandidates 就用给的（顺序即真伪顺序）。
+    // 候选缺省由门内部按 anchorPlans() 锚点链解析（install-anchor → env-anchor → runtime-anchor → profiles-tree）；
+    // 显式给了 dshPackageJsonCandidates 就用给的（标签 anchor，顺序即真伪顺序）。
     return await verifySessionLogBytes(bytes, { ...injected, homeDir: injected?.homeDir ?? options.homeDir });
   } catch {
     // 兜底：门承诺绝不 throw，这里再兜一层，任何意外都只能得到「未验证」而绝不能变成「成功」

@@ -25,6 +25,24 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 >
 > **Theme**: {{one-line English theme}}
 
+## [0.1.71] - 2026-10-08
+
+> **本版主题：修「从其它 agent 导入」在 v4 桌面端整批丢会话** —— 外部来源的会话转码器此前只认 DSH 会话格式 v3，
+> 而桌面端（0.2.0-rc.2）声明的是 v4，于是每一条历史对话都被 `session-format-unsupported` 跳过、产出的包里
+> 根本没有 `sessions` 分区（用户看到的正是「历史对话不见了」）。现在**按目标机格式版本写出**：v3 目标写 v3、
+> v4 目标写 v4（反向不可读，所以绝不一律写最高版本），并修掉会让 v3 产物被 v3→v4 迁移整份拒收的
+> `session/title` 形状。两代产物均已用 DSH 自己的真 codec 逐条复验（`verified` / `strong` /
+> `equivalentToReadPath` 全 true）。
+>
+> **Theme**: fix "import from other agents" dropping every session on a v4 Desktop build — the foreign-session
+> transcoder only knew DSH session format v3 while the Desktop app (0.2.0-rc.2) declares v4, so every historical
+> conversation was skipped as `session-format-unsupported` and the produced bundle carried no `sessions` section
+> at all (the user-visible symptom was "my history is gone"). It now writes **the target's own format version**
+> (v3 target → v3, v4 target → v4; reverse reads are unsupported, so it never blindly writes the highest), and fixes
+> the `session/title` shape that made a v3-labelled artifact rejected wholesale by the v3→v4 migration. Both
+> generations were verified row-by-row with DSH's own real codec (`verified` / `strong` /
+> `equivalentToReadPath` all true).
+
 ### 🐛 修复 · Fixed
 
 > **外部来源的历史会话导入在 v4 目标的 DSH 上整批消失（桌面端 0.2.0-rc.2 实测）**：DSH 桌面端声明的会话格式是

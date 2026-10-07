@@ -430,6 +430,8 @@ d`。
 
 **(c) 批量修复的失败分支丢 `verify`/`rolledBack`**：一键修复在「某条失败」分支里丢掉了逐条 `verify` 与 `rolledBack`，于是 **`rolledBack:false`（可能处于中间态）在面板上与成功无异**，而承诺文案（「已回滚」）与实际状态分叉。修法：三态（现役可读 / 迁移链可还原 / 未验证）与回滚结果**逐条回传**，各自有文案键，「未执行 / 已回滚」**绝不显示为成功**，回滚失败单独显红。
 
+**(d) 条件渲染的功能入口会被读成「功能不存在」（2026-10-07 用户实测）**：布局归位入口原本只在「有候选行」时渲染，而真机 1218 个单元全是 `already-placed` ⇒ 用户打开会话体检只看到「没有要修的东西」，**根本不知道有这个入口**（构建产物里明明有它）。修法：可见性判定收进 `src/ui/session-layout-view.ts` 的 `sessionLayoutSectionState`（`hidden` = 还没扫过；`empty` = 扫过但本机无此档；`ready` = 有候选或有计划/结果），**扫过之后始终渲染**并显示空态说明（`sessions.layout.noCandidates`，zh/en 双键 —— 注意这个键此前**从不存在**，是补上的）；有计划/结果时更不得消失（否则刚做完的逐条结果被吞掉）。教训与 (b) 同源：**断言覆盖不到用户体验** 比代码错更难发现 —— 单测只钉了「有候选时渲染」，没有钉「没候选时用户是否还看得见」。
+
 **同源缺陷（复验门）**：catalog 解析曾只按 `plan.root` 缓存、等价性也只按 root 判 ⇒ **同进程内同一输入结论翻转**，本机 v4 被误判 `decode-failed` 并触发回滚。修法：任何依赖日志 header 的判定**按该日志的 `headerVersion` 重跑**，等价性用 `equivalentToReadPath`（`createRestore(strict+transformed)` 只在 `header.version ===` 当前代际可达；pre-v4 走迁移链 ⇒ 可 `verified` 但**不等价于 DSH 读盘路径**）。护栏：`src/utils/session-verify.test.ts` 的等价性翻转用例 + 真机探针（`scanned=1225 / lossyRequired=0 / OK`）。
 
 ### 4) 真 codec 复验门的锚点链与 asar 抽取（2026-10-07，known-gaps G-24 ⑤）

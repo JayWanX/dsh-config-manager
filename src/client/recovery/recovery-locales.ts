@@ -161,7 +161,11 @@ export const zh = {
   'recovery.rescue.stale': '救援标记已失效（换机或重建 home）',
   'sessions.title': '会话体检',
   'sessions.readOnly': '扫描只读',
-  'sessions.desc': '扫描本机存量会话，找出「读不出来 / 下次请求会失败 / 看不见」的对话。扫描本身只读；对「重放重复行」这一类可零损失修复的问题，本页可直接修复（先预览、自动备份、可回滚）。其余损坏类别仍只能走离线 CLI。',
+  // A1c：口径来自 captain 的逐句核证 —— ① 补齐四档严重级（旧文案漏了最严重的「会让 DSH 起不来」）；
+  // ② 应用内可修是**两类**（零损失 / 有损需逐条确认），不只「重放重复行」；③「其余类别」必须分类：
+  // 布局归位 / 重复 id 隔离 → 离线 dcm sessions repair --fix 真会执行；容器/首帧读不出来、格式超前、
+  // 未登记工作区、子代理缺父 → **本工具不修**（离线 CLI 也修不了）。旧句「仍只能走离线 CLI」已删。
+  'sessions.desc': '扫描本机存量会话，按四档严重级逐条给出结论：会让 DSH 起不来 / 会话读不出来（无法加载）/ 下次请求会失败 / 看不见。扫描本身只读，不改动任何字节。应用内可修的只有两类：零损失 —— 重放重复行、可证明的合成收尾块（丢弃即恢复）；有损 —— 序列空洞、不可解析行（会截断，必须逐条显式确认，绝不批量）。两类都先预览、自动备份、可回滚。其余类别的真实出路有三条：① 会话布局归位（会话目录与首帧 cwd 不一致时搬回正确位置）；② 重复 id 隔离（保留哪一份由你指定，其余移入隔离目录）—— 这两类只有离线 dcm sessions repair --fix 才会真正执行；③ 容器或首帧读不出来、格式超前、未登记工作区、子代理缺父 —— 本工具不修（离线 CLI 也修不了），需人工处置或 DSH 侧动作。',
   'common.infoHint': '查看说明',
   'sessions.scanning': '体检中…',
   'sessions.scan': '开始体检',
@@ -484,7 +488,9 @@ export const en: Record<keyof typeof zh, string> = {
   'recovery.rescue.stale': 'Rescue flag stale (moved machine or rebuilt home)',
   'sessions.title': 'Session health check',
   'sessions.readOnly': 'Scan is read-only',
-  'sessions.desc': 'Scans the sessions already on this machine and finds conversations that cannot be read, will break the next model request, or are invisible. The scan itself is read-only; for replay-duplicate rows (losslessly repairable) this page can repair directly with a preview, an automatic backup and rollback. Other corruption classes still need the offline CLI.',
+  // A1c: same wording boundary as the zh source (four severity levels; lossless vs lossy in-app repairs;
+  // layout relocation / duplicate-id quarantine -> offline `dcm sessions repair --fix`; everything else is NOT repaired here).
+  'sessions.desc': 'Scans the sessions already on this machine and reports each on one of four severity levels: would block DSH startup / cannot load / next request fails / invisible. The scan itself is read-only and writes nothing. Only two classes can be repaired in-app: lossless -- replayed duplicate rows and provable synthetic closer blocks (dropping them restores the log); lossy -- seq gaps and unparsable rows (truncation; each item must be confirmed explicitly, never batched). Both go through a preview, an automatic backup and rollback. Everything else has three real destinations: (1) session layout relocation (move the unit back where its header cwd says it belongs); (2) duplicate-id quarantine (you choose which copy to keep, the rest go to a quarantine directory) -- those two only take effect with the offline dcm sessions repair --fix; (3) containers or first frames that cannot be read, future formats, unregistered workspaces, and subagents without a parent -- this tool does NOT repair them (the offline CLI cannot either); they need manual handling or a DSH-side action.',
   'common.infoHint': 'Show description',
   'sessions.scanning': 'Checking…',
   'sessions.scan': 'Run check',

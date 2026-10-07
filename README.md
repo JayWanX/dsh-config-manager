@@ -19,6 +19,7 @@ Backup, restore, export, import, migrate and sync your complete DeepSeek Harness
 - 🔐 Encrypted backups with optional credentials
 - ☁️ **Git / WebDAV** configuration sync
 - 🛒 **Configuration market** — browse & one-click install shared configs
+- 🧳 **Import from other AI agents** — Claude Code, Cursor, Codex, Hermes, Antigravity … config **and chat history**
 - ↩️ Automatic snapshot and rollback before restore
 
 [English](README.md) · [简体中文](README.zh-CN.md)
@@ -68,6 +69,10 @@ Turn on scheduled backups (6h / 12h / 24h / 7d — or a **custom weekly weekday 
 
 Browse the built-in official market for ready-made configurations (model providers, plugins, MCP servers, skills, agent presets…), preview what would be imported (dry-run), and install with one click — supply-chain warnings are always shown and every section must be explicitly approved before anything is written.
 
+### Import from another AI agent (Claude Code, Cursor, Codex, …)
+
+Your setup — and your chat history — already live in another AI coding agent on this machine? Pick the source and DSH Config Manager **translates it into a standard bundle** (MCP servers, skills, global instructions, conversations and the workspaces they belong to) and hands it to the same review-first import flow: preview → per-item conflict decisions → automatic snapshot → apply → rollback. 30 sources are recognized and 29 of them can migrate **chat history** too. Secret **values** are never read — only the key names, so the import plan can ask you to re-enter them.
+
 ---
 
 ## 🆚 How it differs from the other DSH backup / sync plugins
@@ -102,10 +107,13 @@ Several DSH plugins live in this space and they solve different problems — pic
 | 🛒 | **Config Marketplace** | Browse & one-click install community configs — supply-chain warnings + per-item content selection (change summary + in-place high-risk flags) |
 | 🗂️ | **Profiles (DSH profiles)** | Manage `$DSH_HOME/profiles/<name>` directly: list / create from a shipped template / rename / hard delete / **launch this profile (independent instance)** / **stop the instance** (the row button flips between Launch and Stop with the running state) |
 | 🌐 | **Bilingual UI** | Interface, reports and error details follow the DSH app language (中文 / English) |
+| 🧩 | **Local plugin migration** | `link:` / `file:` development plugins are packed into the backup, so switching machines does not lose them |
+| 🗄️ | **Configurable retention (GFS tiers)** | "keep the last N + one per month + one per year" — the defaults are equivalent to the previous behaviour |
 | 🤖 | **Agent tools** | Backup / snapshot / restore / sync right from an agent session |
 | 💾 | **Disk usage report** | The backups page shows how much space the plugin's own artifacts take (backups / snapshots / sync copies / caches / staging) with a three-tier cleanup policy; **one-click cleanup only touches regenerable caches and expired backups** — snapshots and sync data are never removed there |
 | ⬆️ | **Update check** | The About page reads the latest version from npm and, when there is a newer one, hands you a copyable upgrade command (never auto-installs); offline failures are reported honestly and affect nothing else |
 | 🧭 | **Compatibility explained** | Before importing you see "source DSH version / platform → local" plus **structured reasons** for the score (cross-platform / missing sections / newer source …) instead of a bare "partial" |
+| 🧳 | **Import from other AI agents** | Read Claude Code / Cursor / Codex / Hermes / Antigravity … configuration **and chat history** on this machine, translate it into a standard bundle, then import through the usual preview / conflict / rollback flow |
 
 ---
 
@@ -306,6 +314,17 @@ When the target already has a same-named item, you choose:
 1. Detects the dead absolute paths automatically
 2. Lets you pick new paths
 3. Supports **batch prefix mapping** (`C:\Users\alice\` → `/Users/bob/` in one shot)
+
+### 🧳 Import from other AI agents (config + chat history)
+
+You do not have to rebuild another agent's setup by hand.
+
+- **30 sources recognized** — Claude Code, Hermes, Cursor, Codex, Antigravity, Gemini, OpenCode, Mimocode, ZCode, Grok Build, OpenClaw, Pi, Kimi, Kilocode, Qoder, ChatGPT, WorkBuddy, Qwen, Continue, Cline, Goose, Zed, Crush, TeleAgent, Trae, Vibe, Reasonix, Copilot, and DSH itself (importing from another DSH home). Sources **not** installed on this machine are still listed (greyed out, not selectable), so "this machine has no such tool" is never mistaken for "the feature is missing".
+- **Translation, not a second import path** — the source is converted into a standard bundle v1 ZIP and handed to the **existing** import wizard: same preview, same per-item conflict decisions, same pre-import snapshot and rollback, same dry-run.
+- **What travels** — MCP servers, skills, global instructions (as `AGENTS.md`), and **chat history together with the workspaces those conversations belong to** (29 sources; conversations are re-encoded into DSH's session-log format and placed by their recorded `cwd`).
+- **What does not** — secret **values** are never read: only the key names are recorded so the plan can ask you to re-enter them. Structures DSH has no equivalent for (Claude Code hooks, slash commands, …) are reported as explicit codes rather than silently dropped.
+- **Honest skips** — a conversation with no recorded `cwd` cannot be placed and is reported as skipped (never guessed into some other project); known lossy items are listed **before** the import runs.
+- **Entry points** — Settings → "Backup & Migration" → Import → **"Import from another agent"**, the ⌘K command, or the CLI: `dcm import --from <source> [--dry-run] [--out <path>]`.
 
 ### 🔒 Secrets
 
@@ -665,9 +684,11 @@ Yes. The import wizard asks for the export-time encryption password and verifies
 1. **Installing / updating plugins or MCP takes effect after restarting DSH**
 2. **Some UI state is not migrated** (e.g. task board data, panel widths — they live in the browser, not in DSH's config files)
 3. **keybindings / workflow configs / commands** — DSH has no such concepts, so nothing is exported for them. Global agent rules are covered by **Agent Instructions** (`~/.dsh/AGENTS.md`, injected into every session); per-project `AGENTS.md`/`CLAUDE.md` belong to each project's repo and are not migrated
-4. **History/session migration is off by default** (v1 copies files only)
+4. **History/session migration is opt-in** — DSH's own sessions are only exported/synced when you explicitly select the `sessions` section (the sync channel additionally needs both sides to allow it); **another agent's chat history is migrated when you pick that source** in the foreign import. Conversation state that DSH's session format has no room for (model reasoning traces, images, compaction checkpoints) is counted and reported, never fabricated
 5. **Encrypted backups**: a lost password means the `secrets.enc` can't be decrypted (by design — keep your password safe)
 6. **Snapshot restore is offline and honest**: entries the offline engine can't restore (settings namespaces / patch lines when the snapshot has no whole-file backup, workspace records stored in DSH storages) are reported as skipped with a pointer to online rollback; credential **values** are never auto-written (manual re-entry hint only); old snapshots without a plugin baseline only get a hint to remove added plugins manually
+7. **Foreign-agent import has two known blanks**: **Copilot has no chat-history import** (its session format could not be verified on this machine, so only its configuration is imported), and Cursor's per-project history is located through Cursor's own folder-slug scheme, which may not resolve for every project. Conversations already imported with an older build should be deleted and re-imported (they are listed as conflicts otherwise)
+8. **Local source plugins (`link:` / `file:`) are packed into the backup**: the export runs `npm pack` on plugins you are developing locally and stores the tarball in the backup; the import unpacks it under `$DSH_HOME/dsh-config-manager/local-plugins/` and installs it as `file:`. Three consequences: ① backup size grows with those plugins (a single plugin over 100 MB is skipped with a warning — publish it to a registry / git first); ② plugin **source code** enters the backup (this does not conflict with "no secrets in backups" — secrets stay excluded, what travels is code); ③ packing needs a working `npm` on this machine; without it the plugin falls back to the previous behaviour (the original spec is kept, and a new machine still needs a manual install)
 
 ## 💬 Feedback
 

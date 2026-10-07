@@ -599,7 +599,14 @@ function repairBody(plan: RepairOutcome | null, actionToken: string): string {
  *
  * 能力边界（不得放宽）：应用内/页面侧只做「字节相同 + seq 相同的重放重复行」这一零损失类；
  * 合成 closer / seq 空洞 / 不可解析行 / 容器非法 / header 不可读 / 子代理缺父 一律只报告，
- * 出路是离线 `sessions repair`（或保留原样）。这条界线来自设计稿 §10.3/§10.4，页面必须照实呈现。
+ * 出路是本页的就地修复入口（可零损失修项会给出按钮）或**保留原样**。这条界线来自设计稿 §10.3/§10.4，
+ * 页面必须照实呈现。
+ *
+ * 说法纪律（C1b，与 src/cli/actions.ts 的 C1 修复同源）：`sessions repair [--fix]` **不改写会话字节**
+ * （只做会话布局归位与重复 id 隔离），因此本段**绝不**能把它写成「重放去重」的等价命令 —— 那是把两件
+ * 不同的事说成一条通道，用户会以为「修不了重放重复行是因为命令没敲对」。反过来，
+ * 「修复一：会话布局归位」卡里的等价命令是**成立**的（本页与 CLI 走同一实现），**刻意保留**，
+ * 别在收尾时一刀切删掉。
  */
 function inlineRepairBody(view: InlineRepairView | null, gate: GateView | null, actionToken: string): string {
   if (view === null) {
@@ -608,13 +615,17 @@ function inlineRepairBody(view: InlineRepairView | null, gate: GateView | null, 
   const head = '<p class="muted">探测了 <strong>' + String(view.probed) + '</strong> 条存在深档问题的会话：'
     + '其中 <strong>' + String(view.fixable.length) + '</strong> 条存在<strong>零损失</strong>可修项'
     + '（重放重复行 —— 字节相同且 seq 相同的副本，丢弃即恢复）。</p>'
+  // 本段的出口只指向**本救急台自己**的就地修复入口：sessions repair 不改写会话字节，不能当等价通道。
+  const boundary = '<p class="muted">职责边界：<code>sessions repair [--fix]</code> 只做会话'
+    + '<strong>布局归位</strong>与<strong>重复 id 隔离</strong>，<strong>不改写会话字节</strong>，'
+    + '所以修不了重放重复行；离线<strong>字节级</strong>通道就是本救急台（<code>dcm web</code> 打开的这一页）：'
+    + '发现可零损失修项时，本段会列出清单并给出「修复选中的会话（零损失）」按钮，无需任何命令行动作。</p>'
   if (view.fixable.length === 0) {
     const why = view.blocked.length === 0 ? ''
       : '<p class="muted">其余不可修的原因分布：'
         + view.blocked.map((b) => '<code>' + esc(b.reason) + '</code> × ' + String(b.count)).join('、')
         + '。这些类别按设计**只报告**，不解压改写会话字节。</p>'
-    return head + '<p class="muted">本次没有发现可零损失修复的会话。</p>' + why
-      + '<p class="muted">等价命令：<code>dsh-config-manager sessions repair --apply</code></p>'
+    return head + '<p class="muted">本次没有发现可零损失修复的会话。</p>' + why + boundary
   }
   const gateNote = gate !== null && !gate.ok
     ? '<p class="muted">注意：写入门当前是关闭状态（见上方「写入门状态」），提交会被如实拒绝。</p>'
@@ -640,6 +651,7 @@ function inlineRepairBody(view: InlineRepairView | null, gate: GateView | null, 
       })),
       note: '前置条件：SAFE MODE 未激活、无残留锁、DSH 已停止、会话目录无 session.lock、日志不在最近 30s 内被写过。',
     })
+    + boundary
     + gateNote
 }
 

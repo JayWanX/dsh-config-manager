@@ -197,6 +197,22 @@ async function getPage(handle: ConsoleServerHandle, cookie: string, path: string
   return await res.text()
 }
 
+/**
+ * 抠出某一节卡片的 HTML（`<h2>标题…</h2><section class="card">…</section>`）。
+ *
+ * 为什么必须按卡片切：页脚（renderFooter）**每一页**都印着
+ * `dsh-config-manager sessions repair --apply — 会话布局归位（本页按同一实现执行）`，
+ * 所以整页级断言分不清「修复二段把 sessions repair 说成等价通道」与「页脚那条成立的布局归位命令」
+ * —— 旧断言正是在这一点上是**假阴性**（C1b 实测）。
+ */
+function cardOf(html: string, titlePrefix: string): string {
+  const start = html.indexOf('<h2>' + titlePrefix)
+  assert.notEqual(start, -1, '页面上找不到卡片：' + titlePrefix)
+  const end = html.indexOf('</section>', start)
+  assert.notEqual(end, -1, '卡片未闭合：' + titlePrefix)
+  return html.slice(start, end)
+}
+
 async function postForm(
   handle: ConsoleServerHandle,
   cookie: string,
@@ -778,7 +794,44 @@ test('R1-02 就地修复入口：能力边界如实呈现（只做重放重复�
     // 分母必须给出来（「没发现」不能是拍胸脯）
     assert.match(html, /探测了 <strong>0<\/strong> 条/)
     assert.match(html, /本次没有发现可零损失修复的会话/)
-    assert.match(html, /dsh-config-manager sessions repair --apply/)
+  })
+})
+
+/**
+ * C1b：救急台「修复二」段不得再把 `sessions repair --apply` 说成等价通道（它不碰字节），
+ * 同时「修复一：会话布局归位」卡里**成立**的等价命令**必须还在** —— 防以后一刀切删掉那一处。
+ */
+test('R1-02b 「修复二」段不把 sessions repair 说成等价通道；「修复一」布局归位卡的等价命令仍在', async () => {
+  await withConsole(async (handle, paths) => {
+    const { cookie } = await bootstrap(handle)
+
+    // ① 空盘（没有可零损失修项）：这一段最容易把「布局归位」说成「重放去重」的等价通道
+    const empty = await getPage(handle, cookie!, '/sessions')
+    const emptyInline = cardOf(empty, '修复二：重放重复行')
+    assert.doesNotMatch(emptyInline, /等价命令/, '修复二段不得再出现「等价命令」表述')
+    assert.doesNotMatch(emptyInline, /sessions repair --apply/, '修复二段不得把 sessions repair --apply 当成出口')
+    // 新表述：指向本救急台自己的就地操作 + 写明 sessions repair 的职责边界
+    assert.match(emptyInline, /职责边界/)
+    assert.match(emptyInline, /sessions repair \[--fix\]/)
+    assert.match(emptyInline, /不改写会话字节/)
+    assert.match(emptyInline, /dcm web/)
+    assert.match(emptyInline, /修复选中的会话（零损失）/) 
+
+    // ② 造一条错位会话 → 出现可执行的布局归位表单：那里的等价命令是**成立**的，必须保留
+    const { encodeZstdFrame } = await import('../../utils/zstd-frame.ts')
+    const dir = path.join(paths.homeDir, 'sessions', '--D-Ghost-proj--', 'session-layout')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, 'session.v3.jsonl.zstd'), Buffer.concat([
+      encodeZstdFrame(Buffer.from(JSON.stringify({ version: 3, id: 'session-layout', cwd: 'D:/Real/proj' }) + '\n', 'utf8')),
+      encodeZstdFrame(Buffer.from('{"seq":1}\n', 'utf8')),
+    ]))
+
+    const page = await getPage(handle, cookie!, '/sessions')
+    const layout = cardOf(page, '修复一：会话布局归位')
+    assert.match(layout, /等价命令：dsh-config-manager sessions repair --apply/, '布局归位卡的等价命令是成立的，不得被一刀切删掉')
+    const inline = cardOf(page, '修复二：重放重复行')
+    assert.doesNotMatch(inline, /等价命令/, '修复二段（有可修项时）同样不得出现等价命令表述')
+    assert.match(inline, /职责边界/)
   })
 })
 

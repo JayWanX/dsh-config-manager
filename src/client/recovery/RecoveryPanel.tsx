@@ -462,18 +462,18 @@ function SessionLayoutSection({ recoveryApi, t, response, onScan }: SessionLayou
   if (sectionState === 'hidden') return null
 
   return (
-    <div className={css.snapshotRow}>
-      <div className={css.snapshotRowMain}>{t('sessions.layout.title')}</div>
+    <div className={css.card}>
+      <div className={css.groupLabel}>{t('sessions.layout.title')}</div>
       <div className={css.hint}>{t('sessions.layout.desc')}</div>
       {/* 口径：本入口跑在 DSH 运行时 —— 与离线 CLI 的「须先停 DSH」不同，必须让用户看见 */}
       <div className={css.hint}>{t('sessions.layout.runtimeNote')}</div>
       <div className={css.hint}>{t('sessions.layout.quarantineNote')}</div>
       {sectionState === 'empty' && <div className={css.hint}>{t('sessions.layout.noCandidates')}</div>}
       {candidates.length > 0 && (
-        <div className={css.snapshotList}>
+        <div className={css.snapshotList + ' ' + css.reportScroll}>
           {candidates.map((candidate) => (
-            <div key={candidate.unitId} className={css.snapshotRowMeta}>
-              <span className={css.snapshotRowIssues} title={candidate.unitId}>{candidate.sessionId}</span>
+            <div key={candidate.unitId} className={css.snapshotRow}>
+              <span className={css.snapshotRowMain} title={candidate.unitId}>{candidate.sessionId}</span>
               <span className={css.snapshotRowFacts}>
                 {candidate.issueCodes.join(' · ')} · {candidate.projectKey}
               </span>
@@ -489,7 +489,7 @@ function SessionLayoutSection({ recoveryApi, t, response, onScan }: SessionLayou
       {failure !== null && <Banner kind="error">{failure}</Banner>}
       {applied === null && plan !== null && (
         <>
-          <div className={css.snapshotRowMain}>{t('sessions.layout.planTitle')}</div>
+          <div className={css.groupLabel}>{t('sessions.layout.planTitle')}</div>
           {/* 计划只读：确认前零写入 */}
           <div className={css.hint}>{t('sessions.layout.planReadOnly')}</div>
           {planReasonKey !== null && <Banner kind="warn">{t(planReasonKey)}</Banner>}
@@ -497,8 +497,10 @@ function SessionLayoutSection({ recoveryApi, t, response, onScan }: SessionLayou
             {t('sessions.layout.summary', { move: String(plan.summary.move), quarantine: String(plan.summary.quarantine) })}
           </div>
           {planRows.length === 0 && <div className={css.hint}>{t('sessions.layout.planEmpty')}</div>}
-          {planRows.map((row) => (
-            <div key={row.unitId} className={css.snapshotRowMeta}>
+          {planRows.length > 0 && (
+            <div className={css.snapshotList + ' ' + css.reportScroll}>
+              {planRows.map((row) => (
+                <div key={row.unitId} className={css.snapshotRow}>
               <span className={css.snapshotRowBadges}>
                 <Badge kind="info">{t(row.kindKey)}</Badge>
                 {row.kind === 'skip' && <Badge kind="warn">{t('sessions.layout.onlyReported')}</Badge>}
@@ -510,14 +512,16 @@ function SessionLayoutSection({ recoveryApi, t, response, onScan }: SessionLayou
                 {t(row.reasonKey)}
               </span>
             </div>
-          ))}
+              ))}
+            </div>
+          )}
           {skippedCount > 0 && (
             <div className={css.hint}>{t('sessions.layout.planSkipped', { count: String(skippedCount) })}</div>
           )}
           {/* 重复 id：必须选定保留哪一份才可提交（判定在 ui 纯函数层） */}
           {plan.needsKeep.length > 0 && (
             <>
-              <div className={css.snapshotRowMain}>{t('sessions.layout.keepTitle')}</div>
+              <div className={css.groupLabel}>{t('sessions.layout.keepTitle')}</div>
               <div className={css.hint}>{t('sessions.layout.keepHint')}</div>
               {plan.needsKeep.map((sessionId) => (
                 <div key={sessionId} className={css.conflictChoices} role="radiogroup" aria-label={sessionId}>
@@ -552,7 +556,7 @@ function SessionLayoutSection({ recoveryApi, t, response, onScan }: SessionLayou
       )}
       {applied !== null && (
         <>
-          <div className={css.snapshotRowMain}>{t('sessions.layout.resultTitle')}</div>
+          <div className={css.groupLabel}>{t('sessions.layout.resultTitle')}</div>
           {/* 整体未执行（如 reindex-unavailable）**不是**成功：单独说明，且下面不会有任何成功条目 */}
           {appliedReasonKey !== null && <Banner kind="warn">{t(appliedReasonKey)}</Banner>}
           {appliedItems.length > 0 && (
@@ -565,8 +569,10 @@ function SessionLayoutSection({ recoveryApi, t, response, onScan }: SessionLayou
               })}
             </div>
           )}
-          {appliedItems.map((item, index) => (
-            <div key={item.unitId + '#' + String(index)} className={css.snapshotRowMeta}>
+          {appliedItems.length > 0 && (
+            <div className={css.snapshotList + ' ' + css.reportScroll}>
+              {appliedItems.map((item, index) => (
+                <div key={item.unitId + '#' + String(index)} className={css.snapshotRow}>
               <span className={css.snapshotRowBadges}>
                 <Badge kind={item.badgeKind}>{t(item.statusKey)}</Badge>
               </span>
@@ -577,7 +583,9 @@ function SessionLayoutSection({ recoveryApi, t, response, onScan }: SessionLayou
                 {item.quarantineDir !== null ? ' → ' + item.quarantineDir : ''}
               </span>
             </div>
-          ))}
+              ))}
+            </div>
+          )}
           <div className={css.hint}>{t('sessions.layout.refreshHint')}</div>
           <div className={css.actionRow}>
             <Button variant="ghost" onClick={() => { setApplied(null); setPlan(null); setKeep({}) }}>

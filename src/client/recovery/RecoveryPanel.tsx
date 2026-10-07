@@ -36,14 +36,15 @@ import {
   sessionHealthRows,
   sessionHealthSummaryView,
   sessionHealthTruncated,
+  sessionRepairBatchEntry,
   sessionRepairCommands,
   sessionRepairEntries,
   sessionRepairReasonKey,
   sessionRepairVerifyKey,
   type SessionHealthResponse,
+  type SessionRepairBatchEntryView,
   type SessionRepairEntryView,
   type SessionRepairResult,
-  type SessionVerifyView,
 } from '../../ui/session-inventory-view.ts'
 import {
   sessionExportEntryState,
@@ -328,23 +329,6 @@ function SessionHealthCard({ recoveryApi, t, copyT, diskApi }: Pick<RecoveryPane
  * 交互约定：打开即扫（scanVersion 变化重扫）；修复一律先 dry-run 预览（零写入），有损计划必须再点
  * 「截断并修复」才执行；回滚走 ConfirmDialog（danger）。
  */
-/** 批量修复里的一条结果（成功或被拒；原因是机器可读码，界面映射成文案）。 */
-interface BatchRepairResult {
-  unitId: string
-  sessionId: string
-  ok: boolean
-  /** 被拒原因（机器可读；未知一律走 unknown 文案，绝不渲染裸枚举） */
-  reason?: string
-  /** 被拒是「需要逐个确认的有损修复」 */
-  lossy?: boolean
-  /** 成功时丢弃的行数 */
-  droppedRows?: number
-  /** 写后真 codec 复验结论（成功项才有）—— 一键修复也必须如实分三态，绝不只给「已修复」 */
-  verify?: SessionVerifyView
-  /** 传输层失败（HTTP/网络）时的原文（已由 ErrorBanner/http 层脱敏） */
-  transportError?: string
-}
-
 interface SessionHealthDialogProps {
   open: boolean
   onClose: () => void
@@ -432,7 +416,7 @@ function SessionHealthDialog(props: SessionHealthDialogProps) {
    * 「哪几条成了、哪几条为什么没成」，绝不只给一个计数。
    */
   const [batchBusy, setBatchBusy] = useState(false)
-  const [batch, setBatch] = useState<{ ok: number; failed: number; results: BatchRepairResult[] } | null>(null)
+  const [batch, setBatch] = useState<{ ok: number; failed: number; results: SessionRepairBatchEntryView[] } | null>(null)
 
   const startRepair = (unitId: string): void => {
     setBusy(unitId)
@@ -457,7 +441,7 @@ function SessionHealthDialog(props: SessionHealthDialogProps) {
     setBatch(null)
     let ok = 0
     let failed = 0
-    const results: BatchRepairResult[] = []
+    const results: SessionRepairBatchEntryView[] = []
     const done: string[] = []
     for (const unitId of targets) {
       setBusy(unitId)
@@ -465,33 +449,53 @@ function SessionHealthDialog(props: SessionHealthDialogProps) {
         const plan = await recoveryApi.repairSession(unitId, false)
         if (!plan.ok) {
           failed += 1
-          results.push({ unitId, sessionId: plan.sessionId ?? unitId, ok: false, reason: plan.reason })
+          results.push(sessionRepairBatchEntry({
+            unitId,
+            sessionId: plan.sessionId ?? unitId,
+            ok: false,
+            ...(plan.reason !== undefined ? { reason: plan.reason } : {}),
+          }))
           continue
         }
         if (plan.lossy === true) {
           // 有损（截断）绝不批量代做 —— 逐条确认是硬约束，这里如实说明「需要你逐条确认」
           failed += 1
-          results.push({ unitId, sessionId: plan.sessionId ?? unitId, ok: false, reason: 'lossy-required', lossy: true })
+          results.push(sessionRepairBatchEntry({ unitId, sessionId: plan.sessionId ?? unitId, ok: false, reason: 'lossy-required', lossy: true }))
           continue
         }
         const applied = await recoveryApi.repairSession(unitId, true, plan.expect)
         if (applied.ok) {
           ok += 1
           done.push(unitId)
-          results.push({
+          results.push(sessionRepairBatchEntry({
             unitId,
             sessionId: applied.sessionId ?? unitId,
             ok: true,
             droppedRows: applied.droppedRows ?? 0,
             ...(applied.verify !== undefined ? { verify: applied.verify } : {}),
-          })
+            ...(applied.rolledBack !== undefined ? { rolledBack: applied.rolledBack } : {}),
+          }))
         } else {
           failed += 1
-          results.push({ unitId, sessionId: applied.sessionId ?? unitId, ok: false, reason: applied.reason })
+          // A2-F1：失败分支与成功分支**同源**搬运 —— verify-failed 必带 verify，
+          // rolledBack===false（自动回滚未成功）是危险态，必须在批量视图里可见。
+          results.push(sessionRepairBatchEntry({
+            unitId,
+            sessionId: applied.sessionId ?? unitId,
+            ok: false,
+            ...(applied.reason !== undefined ? { reason: applied.reason } : {}),
+            ...(applied.verify !== undefined ? { verify: applied.verify } : {}),
+            ...(applied.rolledBack !== undefined ? { rolledBack: applied.rolledBack } : {}),
+          }))
         }
       } catch (err) {
         failed += 1
-        results.push({ unitId, sessionId: unitId, ok: false, transportError: err instanceof Error ? err.message : String(err) })
+        results.push(sessionRepairBatchEntry({
+          unitId,
+          sessionId: unitId,
+          ok: false,
+          transportError: err instanceof Error ? err.message : String(err),
+        }))
       }
     }
     setBusy(null)
@@ -624,7 +628,8 @@ function SessionHealthDialog(props: SessionHealthDialogProps) {
                         {/* 逐条留痕：修好了几条、剩下几条为什么没修成 —— 绝不只给一个计数 */}
                         {batch.results.map((item) => {
                           // 一键修复的成功项同样要说出复验结论（三态判定在 ui 纯函数层，组件只查字典）
-                          const verifyKey = sessionRepairVerifyKey(item.verify)
+                          // 与单条修复路径同一个纯函数、同一套 locale 键（失败项也必须给出复验结论）
+                          const verifyKey = sessionRepairVerifyKey(item.verify, item.rolledBack)
                           return (
                             <div key={item.unitId} className={css.snapshotRowMeta}>
                               <span className={css.snapshotRowBadges}>

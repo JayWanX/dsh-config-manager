@@ -397,6 +397,58 @@ export function sessionRepairVerifyKey(verify: SessionVerifyView | undefined, ro
   return verify.equivalentToReadPath ? SESSION_REPAIR_VERIFY_KEYS.current : SESSION_REPAIR_VERIFY_KEYS.migrated
 }
 
+/**
+ * 批量「一键修复」里的一条结果（**类型定义在 ui 层**，与 RecoveryPanel 的批量视图条目同构）。
+ *
+ * 为什么放这里：成功与失败**两条分支**必须同源搬运 verify / rolledBack —— A2-F1 正是失败分支漏搬，
+ * 于是「自动回滚未成功」的危险态在批量视图里不可见，而失败文案还说着「见下方复验结论」。
+ * 把搬运收成一个可单测的纯函数后，任何一条分支漏字段都会在单测里红。
+ */
+export interface SessionRepairBatchEntryView {
+  unitId: string
+  sessionId: string
+  ok: boolean
+  /** 被拒原因（机器可读；未知一律走 unknown 文案，绝不渲染裸枚举） */
+  reason?: string
+  /** 被拒是「需要逐个确认的有损修复」 */
+  lossy?: boolean
+  /** 成功时丢弃的行数 */
+  droppedRows?: number
+  /** 传输层失败（HTTP/网络）时的原文 */
+  transportError?: string
+  /** 写后真 codec 复验结论（成功项与 verify-failed 失败项都有） */
+  verify?: SessionVerifyView
+  /** 确定性失败时自动回滚是否成功（false = 目标仍是修复后字节，危险态必须可见） */
+  rolledBack?: boolean
+}
+
+/**
+ * 一次 `repairSession` 调用的结果 → 批量条目（成功 / 失败**两条分支的唯一搬运**）。
+ *
+ * 只搬真实存在的字段（缺字段不填假值）：verify 缺席 = 没做/没回传复验，
+ * 界面据此**不渲染**任何复验结论，也绝不臆造「已验证」。
+ */
+export function sessionRepairBatchEntry(input: {
+  unitId: string
+  sessionId: string
+  ok: boolean
+  reason?: string
+  lossy?: boolean
+  droppedRows?: number
+  transportError?: string
+  verify?: SessionVerifyView
+  rolledBack?: boolean
+}): SessionRepairBatchEntryView {
+  const entry: SessionRepairBatchEntryView = { unitId: input.unitId, sessionId: input.sessionId, ok: input.ok }
+  if (input.reason !== undefined) entry.reason = input.reason
+  if (input.lossy === true) entry.lossy = true
+  if (input.droppedRows !== undefined) entry.droppedRows = input.droppedRows
+  if (input.transportError !== undefined) entry.transportError = input.transportError
+  if (input.verify !== undefined) entry.verify = input.verify
+  if (input.rolledBack !== undefined) entry.rolledBack = input.rolledBack
+  return entry
+}
+
 /** 台账记录 → 展示行（跳过没有 repairId 的坏记录；最近在前）。 */
 export interface SessionRepairEntryView {
   repairId: string

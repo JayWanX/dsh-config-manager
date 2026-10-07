@@ -16,6 +16,7 @@ import {
   sessionHealthRows,
   sessionHealthSummaryView,
   sessionHealthTruncated,
+  sessionRepairBatchEntry,
   sessionRepairCommands,
   sessionRepairEntries,
   sessionRepairReasonKey,
@@ -303,4 +304,46 @@ test('M2-⑥：两个新原因 + 复验四键在 recovery 字典 zh / en 中逐�
     assert.ok(zhValue !== '' && enValue !== '', '文案不得为空：' + key);
     assert.notEqual(zhValue, enValue, 'en 必须是镜像而不是复制：' + key);
   }
+});
+
+test('A2-F1：批量条目构建 —— 成功/失败两条分支同源搬运 verify/rolledBack（危险态在批量视图可见）', () => {
+  const unavailable: SessionVerifyView = { verified: false, reason: 'unavailable', detail: 'profiles-tree:generation-mismatch', equivalentToReadPath: false };
+
+  // 成功但「未验证」（如 unavailable）→ 不得呈现成「已验证」
+  const okEntry = sessionRepairBatchEntry({ unitId: '--p--/a', sessionId: 'a', ok: true, droppedRows: 3, verify: unavailable });
+  assert.equal(sessionRepairVerifyKey(okEntry.verify, okEntry.rolledBack), 'sessions.repair.verify.unverified');
+  assert.equal(okEntry.rolledBack, undefined, '成功分支没有回滚事实就不填假值');
+
+  // verify-failed 且自动回滚**没成功** → 危险态必须搬到批量条目（A2-F1 回归点）
+  const danger = sessionRepairBatchEntry({
+    unitId: '--p--/b', sessionId: 'b', ok: false, reason: 'verify-failed', verify: unavailable, rolledBack: false,
+  });
+  assert.equal(danger.ok, false);
+  assert.equal(danger.rolledBack, false, 'rolledBack===false 必须搬到批量条目（否则危险态在批量视图不可见）');
+  assert.equal(sessionRepairVerifyKey(danger.verify, danger.rolledBack), 'sessions.repair.verify.rollbackFailed');
+  assert.notEqual(sessionRepairVerifyKey(danger.verify, danger.rolledBack), null, '失败文案引用的「复验结论」必须由同一行给出');
+  assert.equal(sessionRepairReasonKey(danger.reason), 'sessions.repair.reason.verifyFailed');
+
+  // 已自动回滚（rolledBack:true）→ 未验证；不得误报成危险态
+  const rolled = sessionRepairBatchEntry({ unitId: '--p--/c', sessionId: 'c', ok: false, reason: 'verify-failed', verify: unavailable, rolledBack: true });
+  assert.equal(sessionRepairVerifyKey(rolled.verify, rolled.rolledBack), 'sessions.repair.verify.unverified');
+
+  // 与单条路径同一个纯函数：迁移链可还原 / 现役读盘可读
+  const migrated = sessionRepairBatchEntry({ unitId: '--p--/d', sessionId: 'd', ok: true, droppedRows: 1, verify: { verified: true, events: 2, strong: false, equivalentToReadPath: false } });
+  assert.equal(sessionRepairVerifyKey(migrated.verify, migrated.rolledBack), 'sessions.repair.verify.migrated');
+  const current = sessionRepairBatchEntry({ unitId: '--p--/e', sessionId: 'e', ok: true, droppedRows: 1, verify: { verified: true, events: 2, strong: true, equivalentToReadPath: true } });
+  assert.equal(sessionRepairVerifyKey(current.verify, current.rolledBack), 'sessions.repair.verify.current');
+
+  // 预览被拒 / 有损跳过 / 传输层失败：没有复验结论就不臆造（那一行不渲染）
+  const refused = sessionRepairBatchEntry({ unitId: '--p--/f', sessionId: 'f', ok: false, reason: 'changed' });
+  assert.equal(sessionRepairVerifyKey(refused.verify, refused.rolledBack), null);
+  assert.equal('verify' in refused, false, '缺字段不填假值');
+  assert.equal('rolledBack' in refused, false, '缺字段不填假值');
+  assert.equal('lossy' in refused, false, '缺字段不填假值');
+  const lossy = sessionRepairBatchEntry({ unitId: '--p--/g', sessionId: 'g', ok: false, reason: 'lossy-required', lossy: true });
+  assert.equal(lossy.lossy, true);
+  assert.equal(sessionRepairVerifyKey(lossy.verify, lossy.rolledBack), null);
+  const boom = sessionRepairBatchEntry({ unitId: '--p--/h', sessionId: 'h', ok: false, transportError: 'boom' });
+  assert.equal(boom.transportError, 'boom');
+  assert.equal(sessionRepairReasonKey(boom.reason), 'sessions.repair.reason.unknown', '传输层失败不渲染裸枚举（组件走 transportError 文案分支）');
 });

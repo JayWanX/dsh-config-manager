@@ -1059,8 +1059,10 @@ export function renderExportPage(
     description: '该分区的文件类内容（凭据类文件永不进备份）',
     checked: true,
   }))
+  // C1d：banner 的 text 走 esc() —— 写 markup 会被转义成字面标签、写 ** 会渲染成字面星号，
+  // 所以这两种强调标记都不能用，只能去标记（与 :544 / :685 / :918 同一口径）。
   const body = banner('info', '只导出离线能读到的分区',
-    'DSH 没在跑时，settings / providers / mcp 等结构化分区的**值**必须经 DSH 服务读取，因此不在归档里。'
+    'DSH 没在跑时，settings / providers / mcp 等结构化分区的值必须经 DSH 服务读取，因此不在归档里。'
     + '宁可如实少导，也不给一个「声称含设置、实际为空」的假备份。')
     + '<p class="muted">离线不可收集：' + unavailable.map((id) => '<code>' + esc(id) + '</code>').join('、') + '</p>'
     + renderConfirmForm({

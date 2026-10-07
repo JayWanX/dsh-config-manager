@@ -21,12 +21,17 @@ import { fileURLToPath } from 'node:url'
 import { startConsoleServer, CONSOLE_SESSION_COOKIE, type ConsoleServerHandle } from './server.ts'
 import {
   renderDiskPage,
+  renderExportPage,
   renderHomePage,
   renderLockPage,
+  renderMessagePage,
+  renderProfilesPage,
   renderReinstallPage,
   renderRestorePage,
+  renderResultPage,
   renderSessionsPage,
   renderUnlockPage,
+  renderVerifyPage,
   type InlineRepairView,
 } from './page.ts'
 import type { LockReport, RescuePaths, RescueStatus, RestorePlanView } from '../actions.ts'
@@ -946,10 +951,12 @@ function bodyOf(html: string): string {
  *  ① 字面 `**`（强调符号被当正文输出，用户看到星号）；
  *  ② 空泛的「本页不提供」（captain 裁决：要么指向**本页内真实存在**的入口，要么**点名到页**）。
  *
- * 断言全部落在**正文切片**上（页脚不计入，避免 C1b 遇到过的假阴性），
- * 并且每条「不存在」之前都先证明**该分支确实渲染了**（空态会把断言变成假阴性）。
+ * **覆盖口径**：枚举来源 = `page.ts` 导出的全部 `render*Page(`（= 整页渲染入口），并用集合相等断言钉住 ——
+ * 新增一个页面而不登记进 `pages` 会直接红（此前只渲染 7 页却宣称「各页正文」，t11 抓到）。
+ * 断言落在**正文切片**上（页脚不计入，避免 C1b 遇到过的假阴性）；每页先跑一条**非空证明**，
+ * 证明该分支确实渲染了，否则「不存在」类断言会退化成空态假阴性。
  */
-test('C1d 各页正文无字面 ** 且无空泛「本页不提供」', () => {
+test('C1d 各页正文无字面 ** 且无空泛「本页不提供」（枚举 = page.ts 全部 render*Page）', () => {
   const paths: RescuePaths = {
     homeDir: 'D:/home',
     dataDir: 'D:/home/dsh-config-manager',
@@ -1038,33 +1045,82 @@ test('C1d 各页正文无字面 ** 且无空泛「本页不提供」', () => {
     version, paths, 'tok',
   )
 
-  const pages: Array<[string, string]> = [
-    ['首页', home],
-    ['会话', sessions],
-    ['恢复', restore],
-    ['磁盘', disk],
-    ['残留锁', lockPage],
-    ['解锁', unlock],
-    ['重装', reinstall],
+  // 导出页（本轮纳入 sweep 的那一页；banner 正文曾出现字面 **）
+  const exportPage = renderExportPage(['settings', 'providers'], ['mcp'], version, paths, 'tok')
+  const verify = renderVerifyPage({
+    file: 'D:/home/dsh-config-manager/exports/dsh-config.zip', verdict: 'OK',
+    sizeBytes: 2048, entryCount: 3, sections: ['settings'], errors: [], warnings: [],
+  }, version, paths)
+  const result = renderResultPage('就地修复完成（零损失）', ['✔ --D--/a：已丢弃 2 行重放重复事件'], version, paths, 'ok', '/sessions')
+  const profiles = renderProfilesPage({
+    ok: true, profilesDir: 'D:/home/profiles', errors: [],
+    rows: [{
+      name: 'web', shape: 'web', bundles: 3, dependencies: 12, hasNodeModules: true,
+      patchEntryCount: 2, updatedAtMs: 1_700_000_000_000, dshVersion: '0.2.0', sessionFormatVersion: 4,
+      launchable: true, owned: false, running: false, port: null, url: null, pid: null,
+    }],
+  }, version, paths, 'tok', '', '')
+  const message = renderMessagePage('403 需要访问链接', '请回到终端，用打印出来的带 token 链接打开本页。', '链接用过即废。')
+
+  // 枚举来源：page.ts 里**全部** `export function render*Page(`（每个 = 一个整页渲染入口；
+  // `renderLayout` 是外壳、`renderConfirmForm` 是片段，不在此列）。
+  // 下面这条集合相等断言保证「新增页面不登记进 sweep」会红 —— 本轮之前 C1d 只渲染 7 页却宣称「各页正文」，
+  // 正是缺这条（t11 抓到）。
+  const declared = [...readFileSync(new URL('./page.ts', import.meta.url), 'utf8')
+    .matchAll(/export function (render\w*Page)\s*\(/g)].map((m) => m[1] ?? '').sort()
+
+  const pages: Array<{ fn: string; name: string; html: string; slice?: (html: string) => string }> = [
+    { fn: 'renderHomePage', name: '首页', html: home },
+    { fn: 'renderSessionsPage', name: '会话', html: sessions },
+    { fn: 'renderRestorePage', name: '恢复', html: restore },
+    { fn: 'renderDiskPage', name: '磁盘', html: disk },
+    { fn: 'renderLockPage', name: '残留锁', html: lockPage },
+    { fn: 'renderUnlockPage', name: '解锁', html: unlock },
+    { fn: 'renderReinstallPage', name: '重装', html: reinstall },
+    { fn: 'renderVerifyPage', name: '备份自检', html: verify },
+    { fn: 'renderExportPage', name: '导出', html: exportPage },
+    { fn: 'renderProfilesPage', name: '档案', html: profiles },
+    { fn: 'renderResultPage', name: '写动作结果', html: result },
+    // 403/404 极简页**没有 <footer>**（刻意不依赖任何目录事实），所以不走 bodyOf 的切片，取 <body> 起的整段。
+    { fn: 'renderMessagePage', name: '错误极简页', html: message, slice: (h) => h.slice(h.indexOf('<body>')) },
   ]
-  for (const [name, html] of pages) {
-    const body = bodyOf(html)
-    assert.doesNotMatch(body, /\*\*/, name + '：正文不得出现字面 **（强调符号被当正文输出）')
-    assert.doesNotMatch(body, /本页不提供/, name + '：正文不得出现空泛的「本页不提供」（要么指向本页入口，要么点名到页）')
+  assert.deepEqual(
+    pages.map((p) => p.fn).sort(),
+    declared,
+    'sweep 必须穷尽 page.ts 的全部 render*Page（枚举来源 = 该模块的 export function render*Page）',
+  )
+
+  // 非空证明表（每页一条）：先证明「该段确实渲染了」，否则上面的「不得出现 **」会退化成空态假阴性
+  const proofs: Record<string, RegExp> = {
+    renderHomePage: /需要终端里打印的 6 位确认码/,
+    renderSessionsPage: /需要处理的会话/,
+    renderRestorePage: /恢复计划（/,
+    renderDiskPage: /导出产物只在勾选时、且只按保留期回收/,
+    renderLockPage: /不会自动回收/,
+    renderUnlockPage: /会在内存中解出明文 ZIP/,
+    renderReinstallPage: /只在终端里打印的 6 位确认码/,
+    renderExportPage: /settings \/ providers \/ mcp 等结构化分区的值必须经 DSH 服务读取/,
+    renderVerifyPage: /自检通过/,
+    renderProfilesPage: /档案 = DSH 的 profile/,
+    renderResultPage: /逐条结果/,
+    renderMessagePage: /403/,
+  }
+  for (const page of pages) {
+    const body = page.slice !== undefined ? page.slice(page.html) : bodyOf(page.html)
+    const proof = proofs[page.fn]
+    assert.ok(proof !== undefined, page.name + '：sweep 里每页都必须有非空证明（否则可能空态假阴性）')
+    assert.match(body, proof, page.name + '：该段确实渲染（非空证明，避免空态假阴性）')
+    assert.doesNotMatch(body, /\*\*/, page.name + '：正文不得出现字面 **（强调符号被当正文输出）')
+    assert.doesNotMatch(body, /本页不提供/, page.name + '：正文不得出现空泛的「本页不提供」（要么指向本页入口，要么点名到页）')
   }
 
-  // 非空证明：上面那些「不存在」的断言确实覆盖到本轮改的那几段（否则是假阴性）
+  // 交叉证明（原有用例，保留）：被点名的页 / 入口确实存在
   const homeBody = bodyOf(home)
-  assert.match(homeBody, /需要终端里打印的 6 位确认码/, '首页能力矩阵确实渲染（含本轮去掉标记的那几行）')
   assert.match(homeBody, /请在「恢复」页执行/, '首页快照卡必须点名到「恢复」页')
   assert.match(homeBody, /本页（首页）不提供/, '「本页」必须限定为首页，不留空泛说法')
   const diskBody = bodyOf(disk)
   assert.match(diskBody, /清理是写动作，就在本页下方「清理磁盘（写动作）」卡里执行/, '磁盘保留期说明必须指向本页的清理入口')
-  assert.match(diskBody, /导出产物只在勾选时、且只按保留期回收/, '磁盘清理 consequence 确实渲染（本条曾输出字面 **）')
   assert.match(diskBody, /action="\/disk\/cleanup"/, '被指向的入口在本页真实存在（裁决 (a) 成立）')
-  assert.match(bodyOf(lockPage), /不会自动回收/, '残留锁页的非 stale 分支确实渲染（本条曾输出字面 **）')
-  assert.match(bodyOf(unlock), /会在内存中解出明文 ZIP/, '解锁卡确实渲染（本条曾输出字面 **）')
-  assert.match(bodyOf(reinstall), /只在终端里打印的 6 位确认码/, '重装横幅确实渲染（本条曾输出字面 **）')
   assert.match(bodyOf(restore), /action="\/restore\/run"/, '点名到的「恢复」页确实提供该写动作（裁决 (b) 成立）')
 })
 

@@ -684,12 +684,19 @@ export async function scanSessionHealth(options: SessionHealthScanOptions): Prom
   const inputs: SessionHealthInput[] = [];
   const duplicates = new Set<string>();
   /**
-   * **采集器自证**用的已知会话 id 集合：本次遍历到的**全部单元**（不限于被深查/被限额截断的那些）。
+   * **采集器自证**用的已知会话 id 集合（调用方不提供 `knownSessionIds` 时用它）。
    *
    * 为什么需要：调用方（CLI / 救急台）不提供 `knownSessionIds` 时，旧实现用 `?? new Set()`
    * 把「未知」伪造成「确知为空集」，于是「父对话存在性」判据对**每一条**子代理会话都成立 ——
    * 真机实测 1199 条里 800 条被误报 `subagent-without-parent`（bySeverity.invisible=800）。
-   * 集合取「遍历到的全部单元 id」是**保守**方向：宁可少报「缺父」，也不谎报。
+   *
+   * **真实覆盖（两个来源，边界不同，别读成「一律含全部单元」）**：
+   *  · **目录名**（第一趟，`sessionIdKey(sessionId)`）：覆盖本机**全部**单元目录，不受 `maxUnits` 约束 ——
+   *    这是集合的主干，DSH 的目录名就是会话 id（`session-<uuid>` 与裸 `<uuid>` 由 `sessionIdKey` 归一）；
+   *  · **首帧 header.id**：只在**被扫到**的单元上补（`scanned < maxUnits` 的循环里）—— 它只多给出
+   *    「目录名被手工改过、header id 才是真身份」这种窄情况，**不覆盖**超出限额而未扫的单元。
+   * 两个来源都只**加**不进「未知」：集合越全 ⇒ 越少报「缺父」，所以这个窄边界只会让**超限那批单元**
+   * 的父对话在极端情形下被多报一次（保守方向），绝不会把「确知为空集」重新伪造成未知。
    */
   const knownIdsFromTraversal = new Set<string>();
   // 第一趟：只数「同一会话 id 出现在几个 projectKey 目录」（重复 id 是启动级故障）
@@ -755,7 +762,8 @@ export async function scanSessionHealth(options: SessionHealthScanOptions): Prom
     if (withRows) deepUsed += 1;
     const { input, unreadable, headerSessionId } = await scanUnit(sessionsDir, unit.projectKey, unit.sessionId, withRows);
     result.unreadableEntries += unreadable;
-    // 首帧 header 的 id 与目录名可能不同形态（session-<uuid> / 裸 <uuid>）：都按 sessionIdKey 归一后并进已知集合
+    // 补一个 header.id 的归一键（只覆盖**被扫到**的单元，见 knownIdsFromTraversal 的覆盖说明）：
+    // 目录名被手工改过时，header id 才是这条会话的真身份；取不到 header 就不补，绝不用目录名冒充。
     if (headerSessionId !== undefined) knownIdsFromTraversal.add(sessionIdKey(headerSessionId));
     inputs.push(input);
   }

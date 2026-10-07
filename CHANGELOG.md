@@ -123,6 +123,24 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 > not even carry `private`, because the host always creates private repos (a public sync repo would publish
 > your configuration). The URL field stays: ssh remotes, local paths and unlisted repos are still typeable.
 
+> **面板里就能做「布局归位 / 重复 id 隔离」（只做能从字节证明的事）**
+> - 会话体检里新增写入口：**布局归位**（会话目录与首帧 cwd 不一致时，把目录搬到 `projectKey(首帧 cwd)` 该在的位置）与 **重复 id 隔离**（同一 id 出现在两个 projectKey 是启动级故障；由你点名保留哪一份，其余移入 `.cm-repair-quarantine-*` 隔离目录，可人工找回，**不删除**）。
+> - 宿主走新增的 `POST /recovery/sessions/layout`（前缀 `/recovery` 下的子路由）：`apply!==true` 时**只读计划、零写入**；`apply===true` 时过 SAFE MODE + mutation lock，逐条门前置（无 `session.lock`、不在 30 s 静止期），**每次搬运后必须刷新会话索引，失败则把该条搬回原位并如实报 `rolledBack`**；宿主不提供刷新能力时**一条也不执行**（`reindex-unavailable`）。
+> - 与离线 `dcm sessions repair --fix` 的差异**如实写进文案**：面板是**在 DSH 运行时**执行（CLI 要求先停 DSH），且不暴露路径映射 ⇒ 只搬目录、**不改写首帧**；另加两道 CLI 没有的护栏 —— 未点名 keep 的重复项**拒绝执行**（CLI 只是跳过）、keep 必须指向已扫描副本（CLI 把 `--keep` 指错路径会隔离**所有**副本）。
+>
+> **Layout relocation and duplicate-id quarantine, now from the panel (only what the bytes can prove)**
+> - The session check-up gains a write entry: **layout relocation** (move a unit back to the projectKey its first-frame cwd names) and **duplicate-id quarantine** (you pick which copy to keep; the rest go to a `.cm-repair-quarantine-*` directory that can be recovered by hand — nothing is deleted).
+> - The host side is a new `POST /recovery/sessions/layout` (a sub-route of the existing `/recovery` prefix): `apply!==true` is a **read-only plan with zero writes**; `apply===true` goes through SAFE MODE + the mutation lock, with per-item preconditions (no `session.lock`, not within the 30 s quiescence window) and **a mandatory index refresh after every move — if it fails the item is moved back and reported as `rolledBack`**; if the host cannot refresh the index, **nothing runs** (`reindex-unavailable`).
+> - The differences from the offline `dcm sessions repair --fix` are stated in the UI: the panel runs **while DSH is running** (the CLI asks you to stop it) and does not expose path mappings, so it only moves units and **never rewrites the first frame**. It also adds two guardrails the CLI lacks: a duplicate id without an explicit keep is **refused** (the CLI merely skips it), and keep must name a scanned copy (CLI's `--keep` with a wrong path quarantines **every** copy).
+
+> **复验门（真 codec）在离线场景也能拿到官方 catalog：asar 抽取成为候选锚**
+> - 此前复验门的 catalog 只在「DSH 安装树 + 同级/嵌套 node_modules」两种布局里找；桌面端把 `@deepseek-ai/dsh-session` 放在 `app.asar` 内，于是离线 CLI / 救急台的复验恒 `unavailable`（**不是失败，但也不等于已验证**）。现在把 asar 抽取接成**候选锚**，且版本与 catalog 的候选规划共用同一条锚点链（安装锚 → 环境锚 → 运行时锚 → profiles 树），避免「版本从一个锚、catalog 从另一个锚」的自证。
+> - 读不出来仍然如实报 `unavailable`（`verify.verified=false`，不写成功台账）；抽出的目录是临时物，不改动安装树。
+>
+> **The verify gate (real codec) now reaches the official catalog offline, via an asar extraction anchor**
+> - The gate used to look for the catalog only in the DSH install tree and its sibling/nested `node_modules`; the desktop build keeps `@deepseek-ai/dsh-session` inside `app.asar`, so offline CLI / rescue-console verification was always `unavailable` (not a failure — but not "verified" either). Asar extraction is now a **candidate anchor**, and version resolution and catalog planning share one anchor chain (install anchor → env anchor → runtime anchor → profiles tree) so they cannot certify each other from different anchors.
+> - If it still cannot be read, the result stays an honest `unavailable` (`verify.verified=false`, no success ledger), and the extracted tree is temporary — the installation is never modified.
+
 ### 🔧 变更 · Changed
 
 > **两处「静默」改成可见**：① 快照现在记录导出时的 DSH 版本，版本不匹配时恢复计划里多一条**咨询性提示**
@@ -137,6 +155,14 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 > installed" with "service present but no body". The probe now reads a bounded amount of body, so the three
 > states (available / unavailable / unknown) are distinguishable, and it **does not consume the full response**
 > (there is a cap plus an active abort, pinned by a failable assertion).
+
+> **面板说明文案不再许诺做不到的事（会话体检那行描述）**
+> - old 文案说「其余损坏类别仍只能走离线 CLI」，既漏掉了最严重的「会让 DSH 起不来」档，也不准确：离线 CLI 只做**隔离重复 id**与**归位错位目录**两类，容器/首帧读不出来、格式超前、未登记工作区、子代理缺父**离线也修不了**。现在逐档点名四档严重级（会让 DSH 起不来 / 会话读不出来 / 下次请求会失败 / 看不见），把应用内能力如实分成**两类**（零损失：重放重复行、可证明的合成收尾块；有损：序列空洞、不可解析行，**必须逐条显式确认、绝不批量**），并给出「其余类别」的三条真实出路（面板内已可做的布局归位 / 重复 id 隔离、离线 `dcm sessions repair --fix`、以及**本工具不修**需人工处置）。
+> - 离线救急台的页面正文也曾渲染字面 `\*\*`（导出页走 `esc()`，星号原样显示给用户）；该处去标记并写明原因，同时把「各页正文无字面 `\*\*`」的渲染级断言**扩到全部 12 个页面**（此前用例名说「各页」却只覆盖 7 页 —— 断言宽于覆盖同样是缺陷）。
+>
+> **The panel no longer promises what it cannot do (the session check-up description)**
+> - The old line said "the remaining corruption classes are only reachable through the offline CLI". It missed the most severe level (would block DSH startup) and was also wrong: the offline CLI only quarantines duplicate ids and relocates misplaced directories — unreadable containers/first frames, future formats, unregistered workspaces and subagents without a parent **cannot be repaired offline either**. The text now names all four severity levels, splits the in-app ability honestly into **two classes** (lossless: replayed duplicate rows and provable synthetic closers; lossy: seq gaps and unparsable rows, each requiring explicit confirmation and never batched), and gives the three real destinations for everything else (the in-panel layout relocation / duplicate-id quarantine, the offline `dcm sessions repair --fix`, and **not repaired by this tool**).
+> - The offline rescue console also rendered literal `\*\*` in a page body (the export page banner goes through `esc()`, so the markers showed up verbatim); that site is de-marked with the reason recorded, and the render-level "no literal `\*\*` in any page body" assertion now covers **all 12 pages** (the case name claimed "every page" while only 7 were covered — an invariant asserted wider than its coverage is a defect too).
 
 ### 🐛 修复 · Fixed
 
@@ -356,6 +382,24 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
   `self`「仅运行态不同 → 跳过（键序不同亦然）」「配置本体不同 → 冲突」「坏 JSON 回落整文件哈希」
   「口径不外溢（`sync-config.json` 仍按字节判）」。**Five regression tests** cover the empty-value skip, the
   non-empty-target conflict, run-state-only skip, a real config change, unparsable JSON, and the scope boundary.
+
+> **会话体检不再整片误报「子代理缺父」（真机 798/801 → 0）**
+> 旧实现在调用方没给「已知会话 id」时用 `?? new Set()` 把「未知」当成「确知为空集」，于是「父对话存在性」判据对**每一条**子代理会话都成立 —— 真机 801 条里有 **798 条**被误报 `subagent-without-parent`（`bySeverity.invisible=798`）。现在「未知」与「确知为空」严格分开（`knownSessionIds` 缺省 = 不判、显式空集才判），采集器自己从遍历结果自证集合；复算：默认解析下误报 **0**，显式空集模拟下仍有 801 条（证明不是靠放宽判据换来的）。
+>
+> **The session check-up no longer reports "subagent without parent" en masse (798/801 on a real machine → 0)**
+> The old code turned "unknown" into "known to be empty" with `?? new Set()` whenever the caller supplied no known-session-id set, so the parent-existence predicate held for **every** subagent session — **798 of 801** units on a real machine were flagged `subagent-without-parent`. Unknown and known-empty are now strictly separate (`knownSessionIds` absent = do not judge; an explicit empty set = judge), and the collector derives its own set from the traversal. Re-measured: **0** false positives under the default parse, still 801 under an explicit empty set (proving this was not bought by loosening the predicate).
+
+> **批量修复的失败分支不再丢 `verify` / `rolledBack`（危险态曾对用户不可见）**
+> 一键修复在「某条失败」的分支里丢掉了逐条 `verify` 与 `rolledBack` 字段：界面因此可能把**回滚失败（`rolledBack:false`，会话可能处于中间态）**渲染得与成功无异，同时承诺文案与实际状态分叉。现在三态（现役可读 / 迁移链可还原 / 未验证）与回滚结果一律逐条回传并各自有文案键（「未执行 / 已回滚」**绝不显示为成功**，回滚失败单独显红）。
+>
+> **The batch repair no longer drops `verify` / `rolledBack` on the failure branch (a dangerous state used to be invisible)**
+> The one-click repair dropped the per-item `verify` and `rolledBack` fields on its "one item failed" branch, so the UI could render a **failed rollback (`rolledBack:false`, possibly a half-applied session)** as if nothing had happened, while the promise text diverged from reality. The three verification states and the rollback outcome are now always returned per item, each with its own copy key ("not applied / rolled back" **never renders as success**; a failed rollback is shown in red on its own).
+
+> **复验门不再因缓存键与判等口径不一致而翻转结论（真机 v4 曾被判 `decode-failed` 并回滚）**
+> 复验门的 catalog 解析曾只按 `plan.root` 缓存、等价性也只按 root 判定，于是**同一进程内同一输入**会因前一次调用改变了缓存而给出不同结论（实测等价性翻转 + 本机 v4 被误判 `decode-failed` 并触发回滚）。现在任何依赖日志 header 的判定都**按该日志的 `headerVersion` 重跑**，等价性用 `equivalentToReadPath` 判定：`createRestore(strict+transformed)` 只在 `header.version ===` 当前代际时可达（本机 v4），pre-v4 走迁移链 ⇒ 可以 `verified` 但**不等于 DSH 读盘路径**。
+>
+> **The verify gate no longer flips its verdict because its cache key and its equivalence test disagreed (a real v4 log was judged `decode-failed` and rolled back)**
+> Its catalog resolution cached by `plan.root` alone and judged equivalence the same way, so **the same input could produce different verdicts inside one process** (observed: equivalence flipped, and a v4 log on this machine was misjudged `decode-failed`, triggering a rollback). Every log-header-dependent decision is now re-run per that log's `headerVersion`, and equivalence is decided by `equivalentToReadPath`: `createRestore(strict+transformed)` is only reachable when `header.version` equals the current generation (v4 here), while pre-v4 goes through the migration chain — verifiable, but **not equivalent to the DSH read path**.
 
 ## [0.1.69] - 2026-10-04
 

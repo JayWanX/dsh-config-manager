@@ -406,3 +406,30 @@ d`。
 
 **护栏**：`src/utils/session-format.test.ts` 新增 8 条（合成 pnpm 段骨架：真机形状必须解析成功 / 多版本取同版本 / 版本对不上不猜 / dsh 版本缺失但单候选可用 / `tried` 收集 / 段名解析 / `findPnpmStore` / `sessionFormatRoots` 顺序）。
 
+## 面板侧的「布局归位 / 重复 id 隔离」写路径与「两侧诚实」的三次实证（2026-10-07，M2）
+
+> 与 `AGENTS.md` §📌 常见坑 **同序**：这里是证据、量化数据与复现路径。
+
+### 1) 面板侧写路径：在 DSH 运行时动会话目录，护栏必须逐条现算
+
+**入口与服务**：`POST /recovery/sessions/layout`（`/recovery` 前缀端点下的子路由，声明处 `src/routes/recovery.ts:217`，安全模型注释 `:223-227`）；服务 `src/utils/session-layout-repair-service.ts`（568 行，**禁止 import `src/cli/**`**），规划复用 core 的 `planSessionRepair`，响应只回**相对身份**（`unitId=<fromProjectKey>/<sessionId>`）与 `needsKeep[]`，**不含任何绝对路径**。
+
+**为什么不能照抄 CLI 的安全假设**：CLI 的前置条件是「DSH 已停」，而面板**只能在 DSH 运行时执行** —— 所以这里不靠「没人用」保证安全，靠四条逐条现算的护栏：① `apply!==true` 只读计划（`readOnly:true`），**零写入**；② 逐条门前置 = 目标单元无 `session.lock` + 不在静止期内（复用**同一个常量** `SESSION_REPAIR_QUIESCENT_MS`，`session-layout-repair-service.ts:398`，与字节级门 `session-repair-service.ts:243` 同源）；③ **每次移动/改写后必须 `reindexSessionHeader` 成功，失败必须把该条搬回原位并如实报 `rolledBack`**；④ 宿主没给刷新端口就**一条也不执行**（`reindex-unavailable`）。先例：导入链的 `SessionsAdapter.finalizeApply` 本来就在运行时做「改写首帧 + 归位 + 重新登记」的同类操作。
+
+**与 CLI 的有意差异（必须写进文案，不得当成实现漂移）**：面板不暴露路径映射 ⇒ `rewrite` 恒缺席、**只搬目录不改写首帧**（改写首帧只在离线 `dcm sessions repair --map` 路径可达）；重复 id **未点名 keep 拒绝执行**（CLI 只是跳过该条）；keep 必须指向**已扫描副本**，否则 `keep-not-a-candidate` 拒绝该 id —— CLI 的 `--keep` 指错路径会把**所有**副本都隔离，面板不继承这个脚坑。隔离目录与 CLI 同名同形：`.cm-repair-quarantine-<stamp>/<fromProjectKey>/<sessionId>`。
+
+**复现（独立探针，不复用实现者的测试）**：`node .tmp/m2/e3/probe.mjs` → **PASS=21 / FAIL=0**（exit 0）。夹具 = 真机日志副本（325 B，cwd `D:\Projects\personal\SephiriaReconnect`）+ 临时 home，mtime 回拨 10 分钟绕开静止期门。六组断言：① 计划前后目录树逐字节一致（零写入）、`readOnly:true`、错位项 `applies=true` 且 `toProjectKey` = `projectKeyOf(首帧 cwd)`、`rewrite` 恒缺席、加锁项 `applies=false/reason=locked`、重复 id 进 `needsKeep`、计划 JSON **零绝对路径**；② 无刷新端口 → `reason=reindex-unavailable` + `applied=0` + 盘上未变；③ 真搬：`applied=1`、`movedUnitId` 正确、索引刷新被调用、**首帧 sha256 与源一致**；④ 未点名 keep → 两条均 `missing-keep`、两份都在；⑤ 点名 keep → 非保留副本进 `.cm-repair-quarantine-e3stamp/<fromKey>/<sid>`、保留者不动、响应零绝对路径；⑥ **刷新失败 → `reindex-failed` + `rolledBack:true` + 搬回原位 + 字节与原文一致**。
+
+**护栏**：`tests/route/session-layout-routes.test.ts`（8 条，含 SAFE MODE 423 / 零写入 / 未去 acquire 锁）+ 服务单测 14 条；受保护测试 `tests/route/session-repair-routes.test.ts` 未被触碰（blob `278a54222ff178f1ed5f232bbfc5fc555ed34aae`）。
+
+### 2) 「两侧诚实」的三次实证：文案说得到、代码要做得成
+
+**(a) 会话体检整片误报 `subagent-without-parent`（真机 798/801 → 0）**：调用方不提供 `knownSessionIds` 时，旧实现用 `?? new Set()` 把「未知」伪造成「确知为空集」，于是父对话存在性判据对**每一条**子代理会话都成立 —— 真机 **801 条里 798 条**被误报（`bySeverity.invisible=798`；更早一次口径 1199 条里 800 条）。修法：`knownSessionIds` **可选三态**（缺省 = 不判、显式空集才判），采集器从第一趟遍历的**目录名**自证集合（`sessionIdKey` 归一），`header.id` 只在 `scanned < maxUnits` 的循环里补（窄边界已写进注释：超限未扫单元的父对话在极端情形下会被多报一次，方向是**宁可多报**）。复算：游客（默认解析）误报 **0**；显式空集模拟仍判 **801** —— 证明修的是「未知被当成空」，不是放宽判据。
+
+**(b) 救急台渲染文本里的字面 `\*\*` 与「断言宽于覆盖」**：导出页 banner 走 `esc(text)`，写 `<strong>` 会被转义、写 `\*\*` 会原样显示星号 ⇒ 按「esc 上下文**去标记**」处理（`src/cli/web/page.ts:1063` 附近），并注释写明原因。真正的教训在测试侧：原用例名写「各页正文无字面 `\*\*`」却**只渲染 7 页**，导出页的两变体根本没进集合 —— 修法 = 按 `page.ts` 导出的全部 **12 个** `render*Page`（Message/Home/Disk/Sessions/Result/Lock/Unlock/Restore/Export/Reinstall/Verify/Profiles）做**集合相等**断言 + 每页**非空证明**（导出页的 proof 就是被改的那句），并做变异三连（塞回 `\*\*` → 红；另处塞 → 红；删 sweep 条目 → 集合断言红）。
+
+**(c) 批量修复的失败分支丢 `verify`/`rolledBack`**：一键修复在「某条失败」分支里丢掉了逐条 `verify` 与 `rolledBack`，于是 **`rolledBack:false`（可能处于中间态）在面板上与成功无异**，而承诺文案（「已回滚」）与实际状态分叉。修法：三态（现役可读 / 迁移链可还原 / 未验证）与回滚结果**逐条回传**，各自有文案键，「未执行 / 已回滚」**绝不显示为成功**，回滚失败单独显红。
+
+**同源缺陷（复验门）**：catalog 解析曾只按 `plan.root` 缓存、等价性也只按 root 判 ⇒ **同进程内同一输入结论翻转**，本机 v4 被误判 `decode-failed` 并触发回滚。修法：任何依赖日志 header 的判定**按该日志的 `headerVersion` 重跑**，等价性用 `equivalentToReadPath`（`createRestore(strict+transformed)` 只在 `header.version ===` 当前代际可达；pre-v4 走迁移链 ⇒ 可 `verified` 但**不等价于 DSH 读盘路径**）。护栏：`src/utils/session-verify.test.ts` 的等价性翻转用例 + 真机探针（`scanned=1208 / lossyRequired=0 / OK`）。
+
+

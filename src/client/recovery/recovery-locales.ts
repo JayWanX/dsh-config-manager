@@ -372,7 +372,7 @@ export const zh = {
   'sessions.layout.applying': '执行中…',
   'sessions.layout.resultTitle': '布局归位结果',
   'sessions.layout.done': '归位 {moved} 条、隔离 {quarantined} 条；失败 {failed} 条、只报告 {skipped} 条。',
-  'sessions.layout.refreshHint': '执行后会重新扫描列表；失败项已逐条**尝试**回滚，回滚失败的项会单独标红（绝不显示为已复原），可重试或改用离线 CLI。',
+  'sessions.layout.refreshHint': '执行后会重新扫描列表；失败项已逐条尝试回滚（回滚失败的项会单独标红，绝不显示为已复原），可重试或改用离线 CLI。',
   'sessions.layout.close': '关闭',
   'sessions.layout.kind.ok': '位置已正确',
   'sessions.layout.kind.move': '搬目录归位',

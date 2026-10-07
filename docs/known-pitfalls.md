@@ -293,7 +293,7 @@ d`。
   **三条官方错误文本与出处**：`seed user|assistant/message at index N lacks an identified message` = `@deepseek-ai/dsh-session/lib/index.js` 的 `assertMessageEventShape`（`message.id` 必须非空字符串）；`tool call id requires a nonempty string` = `@deepseek-ai/dsh-session-format-v3-to-v4/lib/index.js` 内的 `text(value, subject)`（调用点 subject = `tool call id`）；`assistant/message repeats advertised tool call <id>` = 同包的 v4 关系校验器与 v0→v1 / v3→v4 迁移器。独立复现脚本：`.tmp/m1/t14/real.mjs`（真机 v4 `03160f18-…` 875 行 + 真机 v0 `66add64c-…` 1160 行，对照样本都 ok）。
   **不得写成**：「缺 id 一律整份拒载」（v4 的 user/assistant 由 ③ 拒，不在 ① 的 `decodeRow` 路径上）；也不得写成「v4 的 user/assistant 缺 id 只是下次请求会失败」（前台管线确实拒读）。真机命中数：五类新码在 **120 个真机静止单元行档全扫 + 实时抽样 100 单元**上 **0 命中**（只有自造 fixture 有正例）—— 本轮是「新增检测能力」，**不是**「发现了一批坏会话」（原始输出见 `.tmp/m1/V3.md` / `.tmp/m1/W3.md`）。
 
-- **复核门 `unavailable` ≠ 成功验证**（与 `AGENTS.md` §📌 常见坑 同序；t3/t17；known-gaps **G-24**）：**操作完成（`ok`）与可加载验证（`verify`）是两件事**。落地口径：`unavailable`（能力拿不到 / catalog 装的是别的代际 / 该代际没有 children 版 API）时结果与台账必须带 `verify.verified=false`、**绝不标记为已验证**；`unavailable` **仍写台账**（否则已经应用了的修复就无法回滚）但**不写成功台账、不触发自动回滚**；**确定性失败**（codec 明确判 `failed`）才用备份自动回滚。CLI 与离线救急台必须把三态（**现役可读 / 迁移链可还原 / 未验证**）写进**用户可见输出**，不得把「写完了」说成「已可加载」。**动机（真机）**：407 份里有 2 份能被真 codec 还原，但那 2 份的正确表述是「**可被迁移链还原**」；官方 `resolveCurrentLog` 对 `sourceVersion < SESSION_FORMAT_VERSION` 直接返回 `undefined`（注释原文 *only a historical generation exists*）⇒ pre-v4 根本没有「当前日志」。
+- **复核门 `unavailable` ≠ 成功验证**（与 `AGENTS.md` §📌 常见坑 同序；t3/t17；known-gaps **G-24**）：**操作完成（`ok`）与可加载验证（`verify`）是两件事**。落地口径：`unavailable`（能力拿不到 / catalog 装的是别的代际 / 该代际没有 children 版 API）时结果与台账必须带 `verify.verified=false`、**绝不标记为已验证**；`unavailable` **仍写台账**（否则已经应用了的修复就无法回滚）但**不写成功台账、不触发自动回滚**；**确定性失败**（codec 明确判 `failed`）才用备份自动回滚。**UI（React 面板）、CLI 与离线救急台两侧**都必须把三态（**现役可读 / 迁移链可还原 / 未验证**）写进**用户可见输出**，不得把「写完了」说成「已可加载」。**动机（真机）**：407 份里有 2 份能被真 codec 还原，但那 2 份的正确表述是「**可被迁移链还原**」；官方 `resolveCurrentLog` 对 `sourceVersion < SESSION_FORMAT_VERSION` 直接返回 `undefined`（注释原文 *only a historical generation exists*）⇒ pre-v4 根本没有「当前日志」。
 
 - **复验门的 catalog 解析不得只按 root 缓存，等价性用 `equivalentToReadPath` 判定**（与 `AGENTS.md` §📌 常见坑 同序；t22 = V2-F1/F2；known-gaps **G-24**）：`createRestore(strict+transformed)` **只在 `header.version === 当前代际`**（本机 v4）时可达；pre-v4 走**迁移链**（并可能触发 `v0→v1` 的拒绝），**不等价于 DSH 读盘路径**（`equivalentToReadPath` 就是这条判定）。两条硬要求：① 缓存**只存与日志无关的候选事实**（例如「哪个 root 下有哪个包」），任何依赖 header 的判定（**代际闸门 / API 闸门 / `equivalentToReadPath`**）都**必须按该日志的 `headerVersion` 重跑**；② 已安装版本优先走 `installAnchor` 同源解析。**踩过的坑**：把 catalog 解析结果按 root 缓存后，同进程内同一输入会给出不同结论 —— 实测出现过等价性翻转、以及 v4 被误判 `decode-failed` 并触发回滚。另：官方 catalog 只在 DSH 安装树（桌面端在 `app.asar` 内），磁盘副本可能是旧代际且没有 children 版 API ⇒ 真 codec 门是**低覆盖护栏**（本机 < v4 占 80.67%，默认解析下 v0 与 v4 多为 `unavailable`）。
 
@@ -430,6 +430,20 @@ d`。
 
 **(c) 批量修复的失败分支丢 `verify`/`rolledBack`**：一键修复在「某条失败」分支里丢掉了逐条 `verify` 与 `rolledBack`，于是 **`rolledBack:false`（可能处于中间态）在面板上与成功无异**，而承诺文案（「已回滚」）与实际状态分叉。修法：三态（现役可读 / 迁移链可还原 / 未验证）与回滚结果**逐条回传**，各自有文案键，「未执行 / 已回滚」**绝不显示为成功**，回滚失败单独显红。
 
-**同源缺陷（复验门）**：catalog 解析曾只按 `plan.root` 缓存、等价性也只按 root 判 ⇒ **同进程内同一输入结论翻转**，本机 v4 被误判 `decode-failed` 并触发回滚。修法：任何依赖日志 header 的判定**按该日志的 `headerVersion` 重跑**，等价性用 `equivalentToReadPath`（`createRestore(strict+transformed)` 只在 `header.version ===` 当前代际可达；pre-v4 走迁移链 ⇒ 可 `verified` 但**不等价于 DSH 读盘路径**）。护栏：`src/utils/session-verify.test.ts` 的等价性翻转用例 + 真机探针（`scanned=1208 / lossyRequired=0 / OK`）。
+**同源缺陷（复验门）**：catalog 解析曾只按 `plan.root` 缓存、等价性也只按 root 判 ⇒ **同进程内同一输入结论翻转**，本机 v4 被误判 `decode-failed` 并触发回滚。修法：任何依赖日志 header 的判定**按该日志的 `headerVersion` 重跑**，等价性用 `equivalentToReadPath`（`createRestore(strict+transformed)` 只在 `header.version ===` 当前代际可达；pre-v4 走迁移链 ⇒ 可 `verified` 但**不等价于 DSH 读盘路径**）。护栏：`src/utils/session-verify.test.ts` 的等价性翻转用例 + 真机探针（`scanned=1225 / lossyRequired=0 / OK`）。
+
+### 4) 真 codec 复验门的锚点链与 asar 抽取（2026-10-07，known-gaps G-24 ⑤）
+
+**为什么要锚点**：catalog 来自官方 `@deepseek-ai/dsh-session`，只存在于 DSH 安装树里；桌面端把它放在 `app.asar` 内，而普通 node 进程的 `fs` 打不开 asar（`ENOENT`），所以复验必须先拿到一个**显式**锚点。锚点链（顺序即真伪顺序）：install-anchor（宿主 `profileContext.installAnchor`）→ env-anchor（`DSH_CM_DSH_INSTALL`，值是**安装根**：含 `resources/app.asar` 的那一层，**不是 asar 本身**）→ runtime-anchor（`process.resourcesPath`）→ profiles 树（`homeDir`/`profile`）。**版本解析与 catalog 候选规划共用同一条链**（否则两者从不同锚点互相自证，实测过这种自证）。
+
+**实测（2026-10-07，本机）**：
+- 设 `process.resourcesPath = 'D:/Apps/DSH/resources'` → 真机 v4 日志 **10/10** 得到 `{verified:true, strong:true, equivalentToReadPath:true, via:'asar-extract'}`（样本含 6,022,151 B / events=3683 的大日志与 334 B 的小日志；响应零绝对路径）；**清掉这个唯一锚点后，同一份日志变 `unavailable(children-required)`** —— 成功确实来自 asar 抽取。
+- 只给 env-anchor（`DSH_CM_DSH_INSTALL` 指安装根）：catalog 能解析（不再全 `unavailable`），但抽样的 80 份**混合代际**日志里只有 1 份 `verified`、79 份 `decode-failed` —— 那批绝大多数是 pre-v4，且缺少宿主同源的 `homeDir`/`profile` 上下文，与宿主侧结论**不可比**。**别用「混合样本 + 单一锚点」的数字判门的好坏**（踩过）。
+- 裸 node（无任何锚）→ 全 `unavailable`。**`unavailable` ≠ 已验证、也 ≠ 失败**。
+
+**覆盖边界（如实）**：`equivalentToReadPath` 只在 `header.version === 当前代际` 时为真（本机 v4）；pre-v4 走迁移链 ⇒ 可 `verified` 但**不等于 DSH 读盘路径**（官方 `resolveCurrentLog` 对 pre-v4 视为「没有当前日志」）。本机最新代际里 v0/v3 占多数 ⇒ 这门是**低覆盖护栏**，不是全库体检。
+
+**护栏**：`src/utils/session-verify.test.ts`（锚点链顺序 / env-anchor / install-anchor / 等价性翻转 / catalog 缓存按 `headerVersion` 重跑）；`src/utils/asar-read.test.ts`（asar 抽取 / 路径拆分 / 缓存根）；对照复核脚本 `.tmp/m2/g1/e2e.mjs`（带锚 vs 不带锚）。
+
 
 

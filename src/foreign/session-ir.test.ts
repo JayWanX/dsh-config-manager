@@ -25,7 +25,7 @@ import {
   irToolResultBlock,
   synthesizeDshRows,
 } from './session-ir.ts';
-import type { DshSessionRow, SynthesisStats } from './session-ir.ts';
+import type { DshSessionRow, IrMessage, SynthesisStats } from './session-ir.ts';
 
 const NOW = 1700000000000;
 
@@ -133,4 +133,57 @@ test('合成行：无主结果不产出空 callId，按 orphan-tool-result 计�
     if (source['kind'] === 'tool') assert.notEqual(source['callId'], '');
   }
   assert.equal(s.ignored['orphan-tool-result'], 1, '无主结果必须计数可见');
+});
+
+/* ---------------- 标题行（DSH 的 assertTitleSources 是硬校验，v3/v4 同款） ---------------- */
+
+/**
+ * 标题行规则的最小语料。
+ *
+ * 为什么单列一组用例（2026-10-08 真机事故）：旧实现把标题停在 seq 0 且恒写 `messageSeqs: []`，
+ * 而 DSH 的规则是「`messageSeqs` 为空 **⟺** `source.kind === 'user'`，非空时每个 seq 必须**早于**
+ * 本条事件且指向 `source.kind === 'user'` 的 `user/message`」。真 codec 的严格档两代都报这条，
+ * 且 **v3→v4 迁移直接拒收整份产物**（`finish-failed: … refuses the transformed artifact`）。
+ */
+function synthTitle(titleSource: unknown, messages: readonly IrMessage[]): DshSessionRow[] {
+  return synthesizeDshRows(
+    { id: 's1', cwd: 'D:/proj', createdAt: NOW, records: messages.length, messages },
+    { title: '标题', titleSource, emptyBlocks: [], provider: 'hermes', reasoningEffort: 'medium', maxTokens: 8192 },
+    stats(),
+    NOW,
+  );
+}
+
+test('标题行：非 user 来源必须引用**更早**的人类 user/message（且 seq 仍连续）', () => {
+  const rows = synthTitle({ kind: 'fallback' }, [
+    irMessage(irFallbackMessageId(0), 'user', [irTextBlock('你好')], { time: NOW }),
+    irMessage(irFallbackMessageId(1), 'assistant', [irTextBlock('在')], { time: NOW + 1 }),
+  ]);
+  const title = rows.find((r) => r.type === 'session/title');
+  assert.ok(title !== undefined, '有标题就必须产标题行');
+  const data = title.data as { messageSeqs: number[]; source: { kind: string } };
+  assert.equal(data.source.kind, 'fallback');
+  assert.deepEqual(data.messageSeqs, [0], '必须引用首条人类 user/message 的 seq');
+  assert.ok(title.seq > data.messageSeqs[0]!, '被引用的 seq 必须**早于**标题行本身');
+  const cited = rows.find((r) => r.seq === data.messageSeqs[0]);
+  assert.equal(cited?.type, 'user/message', '只能引用 user/message（DSH 按位置与类型双重校验）');
+  assert.deepEqual(rows.map((r) => r.seq), rows.map((_, i) => i), 'seq 必须仍从 0 连续递增');
+});
+
+test('标题行：user 来源 → messageSeqs 必须为空（空 ⟺ user），可停在 seq 0', () => {
+  const rows = synthTitle({ kind: 'user' }, [
+    irMessage(irFallbackMessageId(0), 'user', [irTextBlock('你好')], { time: NOW }),
+  ]);
+  const title = rows[0];
+  assert.equal(title?.type, 'session/title');
+  assert.equal(title?.seq, 0);
+  assert.deepEqual((title?.data as { messageSeqs: unknown }).messageSeqs, [], 'user 标题不引用任何 seq');
+});
+
+test('标题行：非 user 来源且整场没有人类 user/message → 不产标题行（不编指不到人的引用）', () => {
+  const rows = synthTitle({ kind: 'fallback' }, [
+    irMessage(irFallbackMessageId(0), 'assistant', [irTextBlock('只有助手')], { time: NOW }),
+  ]);
+  assert.equal(rows.some((r) => r.type === 'session/title'), false);
+  assert.ok(rows.length > 0, '助手消息本身仍要产出（标题只是装饰）');
 });

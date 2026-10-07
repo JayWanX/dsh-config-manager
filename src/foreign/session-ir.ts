@@ -525,16 +525,51 @@ export function synthesizeDshRows(
   }
   closeTurn();
 
-  // 标题行放在最前面（与真实日志一致：会话标题是早期事件）
+  /**
+   * 标题行：位置与 `messageSeqs` 必须满足 DSH 的 `session/title` 硬规则（`assertTitleSources`；
+   * **v3 与 v4 是同一份校验**，真机实测两代在严格档报同一条）：
+   *  ① `messageSeqs` 为空 **⟺** `source.kind === 'user'`（用户消息标题不引用，其它来源必须引用）；
+   *  ② 非空时每个 seq 必须**早于本条事件**、且指向 `source.kind === 'user'` 的 `user/message`，互不重复。
+   *
+   * 所以标题行**不能**停在 seq 0：非 user 来源（本仓两处调用方都给 `{kind:'fallback'}`）在 seq 0
+   * 没有任何「更早的人类消息」可引用，只写 `messageSeqs: []` 会同时违反①。真机日志同形 ——
+   * 实测 `{"type":"session/title","seq":12,"messageSeqs":[7],"source":{"kind":"fallback"}}`（7 是首条人类消息）。
+   * 因此把标题行插在**首条人类 user/message 之后**，再按行序统一重编 seq（仍是连续递增）。
+   *
+   * 来源是 fallback 而整场又没有人类 user/message 时**不产标题行**：标题是装饰性的，
+   * 宁可让这条会话按 `session-empty` 如实跳过，也不编一条指不到人的引用（那是会被拒读的行）。
+   */
+  const titleSource = hints.titleSource;
+  const titleSourceKind = typeof titleSource === 'object' && titleSource !== null
+    ? (titleSource as { kind?: unknown }).kind
+    : undefined;
   if (hints.title !== '') {
-    const titleRow: DshSessionRow = {
-      type: 'session/title',
-      seq: 0,
-      time: session.createdAt,
-      data: { title: hints.title, messageSeqs: [], source: hints.titleSource },
-    };
-    for (const row of rows) row.seq++;
-    rows.unshift(titleRow);
+    if (titleSourceKind === 'user') {
+      rows.unshift({
+        type: 'session/title',
+        seq: 0,
+        time: session.createdAt,
+        data: { title: hints.title, messageSeqs: [], source: hints.titleSource },
+      });
+    } else {
+      const at = rows.findIndex((row) => {
+        if (row.type !== 'user/message') return false;
+        const source = row.data['source'];
+        return typeof source === 'object' && source !== null && (source as { kind?: unknown }).kind === 'user';
+      });
+      if (at >= 0) {
+        rows.splice(at + 1, 0, {
+          type: 'session/title',
+          seq: 0,
+          // at 是「插入前」首条人类消息的 seq（未插入时行序即 seq），引用它必然早于本行
+          data: { title: hints.title, messageSeqs: [at], source: hints.titleSource },
+          time: session.createdAt,
+        });
+      }
+    }
+    rows.forEach((row, index) => {
+      row.seq = index;
+    });
   }
 
   return rows;

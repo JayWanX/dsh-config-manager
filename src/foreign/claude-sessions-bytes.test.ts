@@ -186,14 +186,27 @@ const GOLDEN: Record<string, string> = {
    * assistant 行补 `stream: []` 与 content 里的 `tool-call` 块；tool/result 块改为
    * `tool-result`/`toolCallId`/`isError` 且 callId 非空）后，字节必然变化。
    * 复验：DSH 自己的 `adoptSessionEvent` 逐行校验 hermes 71 会话 / 29687 行 → 0 拒绝。
+   *
+   * 2026-10-08 有意更新（**理由**）：标题行按 DSH 的 `session/title` 硬规则重做（`assertTitleSources`：
+   * `messageSeqs` 为空 **⟺** `source.kind === 'user'`，非空时每个 seq 必须**早于**本条且指向
+   * `source.kind === 'user'` 的 `user/message`）。旧实现把标题停在 seq 0 且恒写 `messageSeqs: []`，
+   * 于非 user 来源同时违反该规则：真 codec 的严格档两代都报 `messageSeqs must be empty exactly for
+   * a user title`，且 **v3→v4 迁移直接拒收**（`finish-failed: … refuses the transformed artifact`）——
+   * 后果是 v3 标记的产物在 v4 主机上整批读不出来。现在标题行插在首条人类 user/message 之后并引用它
+   * （真机日志同形：`{"seq":12,"messageSeqs":[7],"source":{"kind":"fallback"}}`）。
+   * **附带的行为变化**：`title-only-no-events` 从「只有标题行的会话」变成 `skip:session-empty` ——
+   * 整场没有任何人类 user/message 时，非 user 来源的标题**无解**（引用不到任何人），宁可如实跳过，
+   * 也不产出违反①的标题行。
+   * 复验：修后同一批产物对**两代真 codec**逐条 `verifySessionLogBytes` → `verified/strong/equivalentToReadPath` 全 true
+   * （v4 目标档用桌面端 app.asar 内的 catalog；v3 目标档用本机 CLI 档案树）。
    */
-  'basic-with-malformed-line': '891:1b8d8c38f294800815d3d4e9ad338313406ae650ccdaacd113f9a9d1dbfc840d',
-  'frames-crossing-64k': '7506:63663ed1e2d0f3f6c8b177b2a8ad04478ea6f92eebdfe2e0c8cae31f1dafe4a3',
-  'orphan-empty-and-unknown': '338:94f6bfc7a6c8414def1f26db26fc691eeefa90ab27df973c569e15116b20c817',
-  'title-only-no-events': '276:c7c2bb7be4040ecac5c404f88d2074a97986bceae08c4220d2efb5700a4a4159',
-  'no-uuid-fallback-ids': '731:babd8decf0b3b6a2396a12767d6ce1a428df157b6f3567012e606ef5269789aa',
-  'timestamps-numeric-and-unparsable': '723:462361f41500fc0611684c9bcfe46a4b489feb043c2cf343a3442706bba6271b',
-  'unicode-and-max-id': '725:bf06eee24f22d88fbe4764a8be8af62c22e1fcb51ffa65f0ed27d0e16cd2632c',
+  'basic-with-malformed-line': '896:b2fa752b2b5d2a9f470a9c49cb40d6f0dfafe40d1ea3fd6e81afc62ac189759d',
+  'frames-crossing-64k': '7518:d8be900e191b4a2c2c70819790bc0434bc8bffcbfbafbb00016b09bc04edaa8a',
+  'orphan-empty-and-unknown': '339:7492bd869daacad62ee75688ad8816e23af259215a360d01de9917cdffadc727',
+  'title-only-no-events': 'skip:session-empty',
+  'no-uuid-fallback-ids': '743:1c6ea7a8e76016376da2bff5f50e72e824eb7bce9724af4bee40d41d07d0b6df',
+  'timestamps-numeric-and-unparsable': '728:64308bcdea6fc439ed190dd56cad74354e9f53f1274821d97a57bc519f3505ce',
+  'unicode-and-max-id': '729:a8a5abaca4dc7ab15c499b1c38655972283def0bedd3bb73bc87558e22ef51c7',
   'skip-unsupported-version': 'skip:session-format-unsupported',
   'skip-unsafe-id': 'skip:session-unsafe-id',
   'skip-missing-cwd': 'skip:session-missing-cwd',

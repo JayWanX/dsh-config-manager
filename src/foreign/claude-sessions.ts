@@ -59,8 +59,16 @@ import type {
 
 export type { DshSessionHeader, DshSessionRow } from './session-ir.ts';
 
-/** 本模块已实现行式的 DSH 会话格式版本（其它版本一律拒绝，不猜） */
-export const SUPPORTED_DSH_SESSION_FORMAT_VERSIONS: readonly number[] = [3];
+/**
+ * 本模块已实现行式的 DSH 会话格式版本（其它版本一律拒绝，不猜）。
+ *
+ * **v3 与 v4 的行式是同一套**：`synthesizeDshRows` 产出的行在两代 DSH 自己的真 codec 上逐条复验过
+ * （v3 档 = 本机 CLI 档案树的 dsh-session；v4 档 = 桌面端 0.2.0-rc.2，均 `equivalentToReadPath`）。
+ * 所以**按目标机的版本写**：目标是 v3 就写 v3、是 v4 就写 v4。两条反向都不行 —— 一律写最高版本
+ * 会让 v3 主机读不了（反向不可读）；只认 v3 则让 v4 目标整批被跳过（2026-10-08 真机事故：
+ * 桌面端 v4 目标下每一条会话都被 `session-format-unsupported` 拒掉，产出的包里没有 sessions 分区）。
+ */
+export const SUPPORTED_DSH_SESSION_FORMAT_VERSIONS: readonly number[] = [3, 4];
 
 /** 单帧的软上限（字节）：把多条事件行合并进一帧，避免「一行一帧」产生上千个帧 */
 const FRAME_TARGET_BYTES = 64 * 1024;

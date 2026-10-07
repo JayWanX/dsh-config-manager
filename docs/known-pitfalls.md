@@ -366,6 +366,56 @@ d`。
 
 ---
 
+## 外部来源会话的目标格式版本与 `session/title` 形状（2026-10-08 真机事故）
+
+**症状**：在桌面端（DSH Desktop 0.2.0-rc.2）用「从其它 agent 导入」，产出的包里**没有 `sessions` 分区** ——
+界面上看不到任何历史对话，用户的原话是「现在无法正常导入历史会话，之前可以」。
+
+**根因（两层，都在 `src/foreign/`）**：
+
+1. **版本闸门**：`SUPPORTED_DSH_SESSION_FORMAT_VERSIONS` 只写 `[3]`，而桌面端运行时的
+   `SESSION_FORMAT_VERSION = 4`（直接量自 `D:\Apps\DSH\resources\app.asar` 内
+   `@deepseek-ai/dsh-session/lib/index.js`），宿主又如实把 4 透传成 `targetSessionFormatVersion`
+   （`src/routes/foreign.ts`）⇒ **每一条**会话都返回 `session-format-unsupported`（`detail: "4"`），
+   包里只剩 `mcp` / `skills`。真机路由实测：`POST /api/dsh-config-manager/foreign-import {"source":"claude-code"}`
+   → 200 + `sections:["mcp","skills"]`、`counts.sessions.transcoded = 0`；同一份本机 `~/.claude` 数据只改目标版本：
+   target=3 → `["mcp","skills","sessions","workspaces"]`、transcoded=2，target=4 → 无 sessions 分区。
+   本机同时存在两套运行时（G-23 已记）：**桌面端 = v4**、`~/.dsh/profiles/node_modules/@deepseek-ai/dsh-session`
+   （CLI 档案树）= **v3** —— 所以「在 CLI / `dsh web` 那套里能导、在桌面端不行」不是代码漂移，是**目标机代际不同**。
+2. **标题行形状**：`synthesizeDshRows` 把标题行停在 **seq 0** 且恒写 `messageSeqs: []`。DSH 的
+   `assertTitleSources`（`dsh-session` 与 v3/v4 迁移器**同一份校验**）要求 `messageSeqs` 为空 **⟺**
+   `source.kind === 'user'`，非空时每个 seq 必须**早于**本条事件、指向 `source.kind === 'user'` 的
+   `user/message`、且互不重复；两处调用方给的都是 `{kind:'fallback'}` ⇒ 恒违反①。后果不是「读不了」
+   （v4 读盘路径仍接受），而是 **v3→v4 迁移把整份产物拒收**：
+   `finish-failed: Session migration from v3 to v4 refuses the transformed artifact: session/title messageSeqs must be empty exactly for a user title`。
+
+**真 codec 复验（可复现，2026-10-08 本机）**：`src/utils/session-verify.ts` 的 `verifySessionLogBytes` + 显式锚点
+（v3 档 = `~/.dsh/profiles/node_modules/@deepseek-ai/dsh/package.json`；v4 档 = `D:\Apps\DSH\resources\app.asar\dsh\node_modules\@deepseek-ai\dsh\package.json`，走 asar 抽取）：
+
+| 产物 | v3 codec | 桌面端 v4 codec |
+|---|---|---|
+| 修前 · `version=3` | verified，但 strict 报 `messageSeqs` | **finish-failed**（迁移拒收） |
+| 修后 · `version=3` | verified / strong / `equivalentToReadPath=true` | verified / strong / `equivalentToReadPath=false`（走迁移链，**可读**） |
+| 修后 · `version=4` | — | verified / strong / `equivalentToReadPath=true` |
+
+**修法（三条一起才成立）**：① `SUPPORTED_DSH_SESSION_FORMAT_VERSIONS = [3, 4]`，`header.version` 与日志名
+（`session.vN.jsonl.zstd`）**按目标机版本**写 —— 反向不可读（v3 主机读不了 v4 日志），**绝不一律写最高版本**；
+版本读不到时仍旧一条都不转（`session-format-version-unknown`，路由回 400 `nothing-to-import`）；
+② 非 user 来源的标题行**插在首条人类 `user/message` 之后**并把它的 seq 写进 `messageSeqs`（真机日志同形：
+`{"type":"session/title","seq":12,"messageSeqs":[7],"source":{"kind":"fallback"}}`），插入后按行序统一重编 seq；
+③ 整场没有任何人类消息时**不产标题行**（该会话如实 `session-empty`），不编一条指不到人的引用。
+
+**行为变化（已进 CHANGELOG）**：只有标题、没有任何消息的会话（Claude 的 summary/attachment-only）从
+「产出只有标题行的会话」变为 `skip:session-empty`。
+
+**护栏**：`src/routes/foreign.test.ts`（路由层：目标 v4 必须产出 `sessions` 分区且 `sessions.transcoded=1`；
+同一用例并排钉住「读不到版本仍 400 nothing-to-import」，避免被误读成「以后直接硬写 v4」）；
+`src/foreign/claude-sessions.test.ts`（v4 的文件名与 header 同步）；`src/foreign/session-ir.test.ts`（标题行三条规则）；
+`src/foreign/claude-sessions-bytes.test.ts`（字节基线，理由写在 `GOLDEN` 上方）；
+`src/foreign/reasonix.test.ts`（原按「rows[0] 就是标题行」断言，随行序更新）。
+
+---
+
 ## `cordis.patch.yml` 的 `!!js` 方言 与 pnpm 隔离安装的布局解析（2026-10-07，issue #75 / #74）
 
 ### 1) issue #75：导出 / 同步 / 预览丢掉 `!!js`（**整层** patch 行消失）

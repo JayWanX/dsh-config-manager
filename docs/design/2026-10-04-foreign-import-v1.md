@@ -66,13 +66,19 @@ Claude Code 的对话**不能直接搬**，必须转码 —— 两边落盘形�
 
 实现要点（每条都是实测或读码结论，不是推测）：
 
-1. **格式版本必须来自目标机**：`header.version` 必须等于 DSH 的 `SESSION_FORMAT_VERSION`（本机 = 3）。
+1. **格式版本必须来自目标机**：`header.version` 必须等于**目标机** DSH 的 `SESSION_FORMAT_VERSION`。
    非本 build 的版本会被 DSH 拒绝、且列表里**静默跳过** → 调用方必须传 `targetSessionFormatVersion`；
-   本模块只实现 3，其余报 `session-format-unsupported`，**不猜**。
+   本模块实现 **3 与 4**（两代的行式是同一套：同一批产物在两代真 codec 上均 `equivalentToReadPath`），
+   其余版本报 `session-format-unsupported`，**不猜**；版本读不到时一条都不转（`session-format-version-unknown`）。
+   **按目标版本写，不一律写最高版本** —— 反向不可读（v3 主机读不了 v4 日志）。本机对照：桌面端 0.2.0-rc.2 = **v4**、
+   磁盘 CLI 档案 0.1.5-rc.x = **v3**（2026-10-08 真机事故：只认 3 时 v4 目标下整批会话被跳过，包里根本没有 sessions 分区）。
 2. **行的形态按 DSH 自己的 codec 对齐**：`user/message`、`assistant/message`、`tool/result` 必须带
    `surfaceOp: "append"`；`request/header` 的空可选字段（如 `tools: []`）必须**省略**；header 的
-   `isSeeded` / `delegationDepth` 必填。事件序列：`session/title` → `user/message` → `turn/start` →
+   `isSeeded` / `delegationDepth` 必填。事件序列：`user/message` → `session/title` → `turn/start` →
    `request/header` → `step/start` → `assistant/message` → `tool/call` → `tool/result` → `step/end` → `turn/end`。
+   标题行**跟在首条人类消息之后**：DSH 的 `assertTitleSources` 要求 `messageSeqs` 为空 **⟺** `source.kind === 'user'`，
+   非空时每个 seq 必须**早于**本条事件、且指向 `source.kind === 'user'` 的 `user/message`（真机日志同形：
+   `{"type":"session/title","seq":12,"messageSeqs":[7],"source":{"kind":"fallback"}}`）。
 3. **产物用 DSH 自己的 codec 验过**：`releasedV3SessionFormatCodec` 的 `encodeEvent` →
    `assertV3RowAdmission` → `createDecoder/decodeRow/finish` 三条路径全过
    （回归护栏 `claude-sessions.test.ts` 的 `t3`；取证脚本 `outputs/foreign-import-v1/try-dsh-events.mjs`）。

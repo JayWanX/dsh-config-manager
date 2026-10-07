@@ -25,6 +25,51 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 >
 > **Theme**: {{one-line English theme}}
 
+### 🐛 修复 · Fixed
+
+> **外部来源的历史会话导入在 v4 目标的 DSH 上整批消失（桌面端 0.2.0-rc.2 实测）**：DSH 桌面端声明的会话格式是
+> **v4**，而外部来源的会话转码器只实现了 v3，宿主又如实把 v4 透传成 `targetSessionFormatVersion` ⇒ 每一条会话都被
+> `session-format-unsupported` 跳过，产出的包里**根本没有 `sessions` 分区**，用户看到的是「历史对话不见了」
+> （真机实测：`POST /foreign-import {source:"claude-code"}` → `sections:["mcp","skills"]`、`sessions.transcoded: 0`）。
+> 现在支持 `[3, 4]` 并**按目标机版本写出**（v3 目标写 v3、v4 目标写 v4）—— 反向不可读（v3 主机读不了 v4 日志），
+> 所以绝不一律写最高版本；读不到目标版本时仍旧**如实报码、一条都不转**（不猜）。
+> 同时修掉一条**会让 v3 产物在 v4 主机上被迁移链整份拒收**的形状问题：`session/title` 原先停在 seq 0 且恒写
+> `messageSeqs: []`，违反 DSH 的 `assertTitleSources`（空 **⟺** `source.kind === 'user'`；非空时每个 seq 必须
+> **早于**本条事件且指向 `source.kind === 'user'` 的 `user/message`）。现在标题行插在首条人类消息**之后**并引用它
+> （与真机日志同形：`{"seq":12,"messageSeqs":[7],"source":{"kind":"fallback"}}`）；整场没有人类消息时如实按
+> `session-empty` 跳过，而不是编一条指不到人的引用。
+> - **复验口径（2026-10-08 本机真 codec）**：逐条跑 `verifySessionLogBytes`，v3 档用本机 CLI 档案树的
+>   `@deepseek-ai/dsh-session`、v4 档用桌面端 `app.asar` 内抽出的 `dsh-session-format-catalog` ——
+>   两代产物均 `verified` / `strong` / `equivalentToReadPath` 全 true（修前 v4 档 strict 档报
+>   `messageSeqs must be empty exactly for a user title`，且 v3→v4 迁移直接 `finish-failed` 拒收）。
+> - **护栏**：`src/routes/foreign.test.ts`（路由层 v4 产包 + 「读不到版本仍不猜」并排钉住）、
+>   `src/foreign/claude-sessions.test.ts`（v4 文件名/header 同步）、`src/foreign/session-ir.test.ts`（标题行三条规则）、
+>   `src/foreign/claude-sessions-bytes.test.ts`（字节基线，变更理由写在 GOLDEN 上方）。
+> - **行为变化（如实记）**：只有标题、没有任何消息的会话（如 Claude 只有 summary/attachment）从「产出只有标题行的
+>   会话」变为 `skip:session-empty` —— 非 user 来源的标题引用不到任何人类消息，宁可如实跳过。
+>
+> **Foreign-agent session import silently dropped everything on a v4 DSH build (measured on Desktop 0.2.0-rc.2)**:
+> the Desktop app declares session format **v4** while the foreign-session transcoder only implemented v3, and the host
+> honestly forwards v4 as `targetSessionFormatVersion` — so every session was skipped as `session-format-unsupported`
+> and the produced bundle contained **no `sessions` section at all** (measured: `POST /foreign-import {source:"claude-code"}`
+> → `sections:["mcp","skills"]`, `sessions.transcoded: 0`). It now supports `[3, 4]` and writes **the target's own
+> version** (v3 target → v3, v4 target → v4); writing the highest version unconditionally would break v3 hosts
+> (reverse reads are unsupported), and an unknown target version still reports codes without transcoding anything.
+> Also fixed a shape bug that made a v3-labelled artifact **rejected wholesale by the v3→v4 migration**: `session/title`
+> sat at seq 0 with `messageSeqs: []`, violating DSH's `assertTitleSources` (empty **iff** `source.kind === 'user'`;
+> otherwise every seq must be **earlier** than the event and cite a human `user/message`). The title row is now placed
+> after the first human message and cites it (same shape as real logs), and a session with no human message is skipped
+> as `session-empty` instead of fabricating an unresolvable reference.
+> - **Verification (2026-10-08, real codec on this machine)**: every produced log was run through
+>   `verifySessionLogBytes` — v3 against the CLI profile tree's `@deepseek-ai/dsh-session`, v4 against the catalog
+>   extracted from the Desktop `app.asar` — `verified` / `strong` / `equivalentToReadPath` all true for both
+>   (before the fix the v4 strict pass reported `messageSeqs must be empty exactly for a user title` and the v3→v4
+>   migration refused the artifact outright).
+> - **Guards**: `src/routes/foreign.test.ts`, `src/foreign/claude-sessions.test.ts`, `src/foreign/session-ir.test.ts`,
+>   `src/foreign/claude-sessions-bytes.test.ts` (byte baseline with the reason recorded above it).
+> - **Behaviour change (stated honestly)**: a title-only session (e.g. Claude with just a summary/attachment) now
+>   reports `skip:session-empty` instead of producing a title-only conversation.
+
 ## [0.1.70] - 2026-10-07
 
 > **本版主题：把「来源」与「通道」两头同时拓宽** —— 外部 agent 迁移来源一次从 6 个补齐到 30 个（新增统一会话 IR 层），

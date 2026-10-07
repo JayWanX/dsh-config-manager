@@ -25,7 +25,7 @@ import {
  * 全量构造需要一个完整 DSH 宿主。这里只放本组用到的字段 —— 组文件在构建期只解构 env，
  * 其余依赖都在 handler 内，所以桩足够驱动真实行为（与 route-fence 的 stubEnv 同思路）。
  */
-async function stubEnv(): Promise<Record<string, unknown>> {
+async function stubEnv(sessionFormatVersion?: number): Promise<Record<string, unknown>> {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'dcm-foreign-route-'));
   return {
     tmpDir,
@@ -42,7 +42,8 @@ async function stubEnv(): Promise<Record<string, unknown>> {
     host: {
       homeDir: path.join(tmpDir, 'dsh-home-NOT-user-home'),
       dshVersion: 'test',
-      sessionFormatVersion: undefined,
+      // 缺省 = 读不到目标版本（内核据此逐条报 session-format-version-unknown，绝不猜）
+      sessionFormatVersion,
     },
   };
 }
@@ -246,9 +247,9 @@ function importRoute(env: Record<string, unknown>) {
  */
 async function callImport(
   payload: unknown,
-  opts: { userHome?: string } = {},
+  opts: { userHome?: string; sessionFormatVersion?: number } = {},
 ): Promise<{ status: number; body: ForeignImportBody; raw: string }> {
-  const env = await stubEnv()
+  const env = await stubEnv(opts.sessionFormatVersion)
   const prevProfile = process.env['USERPROFILE']
   const prevHome = process.env['HOME']
   if (opts.userHome !== undefined) {
@@ -380,6 +381,63 @@ test('foreign-import：真实 fixture 产包 → 分区非空、路径受控、�
     else process.env['LOCALAPPDATA'] = prev.local
     if (prev.hermes === undefined) delete process.env['HERMES_HOME']
     else process.env['HERMES_HOME'] = prev.hermes
+    await fs.rm(userHome, { recursive: true, force: true })
+  }
+})
+
+/** 在受控 userHome 下造一条最小 Claude Code 会话（cwd 写在记录里，DSH 按它归位目录键）。 */
+async function writeClaudeSession(userHome: string, id: string, cwd: string): Promise<void> {
+  const dir = path.join(userHome, '.claude', 'projects', 'D--proj-app')
+  await fs.mkdir(dir, { recursive: true })
+  const lines = [
+    JSON.stringify({
+      type: 'user',
+      uuid: 'aaaaaaaa-0000-4000-8000-000000000001',
+      timestamp: '2026-10-01T10:00:00.000Z',
+      cwd,
+      message: { role: 'user', content: '帮我看看这个 bug' },
+    }),
+    JSON.stringify({
+      type: 'assistant',
+      uuid: 'aaaaaaaa-0000-4000-8000-000000000002',
+      timestamp: '2026-10-01T10:00:05.000Z',
+      cwd,
+      message: { model: 'claude-sonnet-4', content: [{ type: 'text', text: '修好了' }] },
+    }),
+  ]
+  await fs.writeFile(path.join(dir, id + '.jsonl'), lines.join('\n') + '\n', 'utf8')
+}
+
+test('foreign-import：目标机是 v4 时必须照 v4 产出会话（2026-10-08 桌面端整批被跳过的回归护栏）', async () => {
+  /**
+   * 真机事故：DSH 桌面端（0.2.0-rc.2）的会话格式是 v4，而转码器只认 v3 ⇒ 每一条会话都被
+   * `session-format-unsupported` 跳过、产出的包里**没有 sessions 分区**，用户看到「历史对话不见了」。
+   * 本用例把「宿主给的是 v4 就照 v4 产出」钉在**路由层**（GUI 走的正是这条端点）。
+   */
+  const userHome = await fs.mkdtemp(path.join(os.tmpdir(), 'dcm-foreign-v4-'))
+  try {
+    await writeClaudeSession(userHome, '11111111-1111-4111-8111-111111111111', 'D:/proj/app')
+
+    const v4 = await callImport({ source: 'claude-code' }, { userHome, sessionFormatVersion: 4 })
+    assert.equal(v4.status, 200, 'v4 目标下必须产包：' + v4.raw)
+    assert.ok((v4.body.sections ?? []).includes('sessions'), 'v4 目标必须产出 sessions 分区：' + v4.raw)
+    assert.equal(v4.body.counts?.['sessions.transcoded'], 1)
+    assert.equal(
+      (v4.body.skipped ?? []).some((s) => s.code === 'session-format-unsupported'),
+      false,
+      '不得再整批报 session-format-unsupported',
+    )
+
+    // 读不到目标版本时**不猜**：内核如实报码、一个会话都不转 → 整包没有分区（400 nothing-to-import）。
+    // 这是「绝不猜版本」的既有语义，与上面那条并排钉住，避免修复被误读成「以后可以直接硬写 v4」。
+    const unknown = await callImport({ source: 'claude-code' }, { userHome })
+    assert.equal(unknown.status, 400, unknown.raw)
+    assert.equal(unknown.body.code, 'nothing-to-import')
+    assert.ok(
+      (unknown.body.skipped ?? []).some((s) => s.code === 'session-format-version-unknown'),
+      '读不到版本必须如实报码：' + unknown.raw,
+    )
+  } finally {
     await fs.rm(userHome, { recursive: true, force: true })
   }
 })

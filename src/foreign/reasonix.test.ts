@@ -316,9 +316,11 @@ test('reasonix t9 createdAt 兜底 stem 内嵌时刻（YYYYMMDDHHMM）；usage s
     const session = sessionFilesOf(result)[0];
     assert.ok(session !== undefined);
     const rows = rowsOf(session.data);
-    const header = rows.find((r) => r['type'] === 'session/title');
-    assert.ok(header !== undefined);
-    assert.equal(rows[0]?.['time'], reasonixStemTime(stem), '会话创建时间必须落成记录时间而非导入时刻');
+    // 标题行承载会话创建时间；行序是「首条人类 user/message → session/title」（见 synthesizeDshRows
+    // 的标题行注释：非 user 来源的标题必须引用一条更早的人类消息），所以不能再看 rows[0]。
+    const title = rows.find((r) => r['type'] === 'session/title');
+    assert.ok(title !== undefined);
+    assert.equal(title['time'], reasonixStemTime(stem), '会话创建时间必须落成记录时间而非导入时刻');
     const assistant = rows.find((r) => r['type'] === 'assistant/message');
     assert.ok(assistant !== undefined);
     assert.deepEqual(dataOf(assistant)['usage'], {

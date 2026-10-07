@@ -71,11 +71,22 @@ test('t1 形态：路径 / header / 事件序列', () => {
   assert.equal(header['createdAt'], Date.parse('2026-10-01T10:00:00.000Z'));
 
   const types = shape.rows.map((r) => (r === null ? 'null' : (r as Record<string, unknown>)['type']));
+  // 标题行**跟在首条人类 user/message 之后**（见 synthesizeDshRows 的标题行注释：非 user 来源的标题
+  // 必须引用一条**更早**的人类消息，停在 seq 0 就无解 —— DSH 的 assertTitleSources 会拒读）
   assert.deepEqual(types, [
-    'session/title', 'user/message', 'turn/start', 'request/header', 'step/start',
+    'user/message', 'session/title', 'turn/start', 'request/header', 'step/start',
     'assistant/message', 'tool/call', 'tool/result', 'step/end',
     'step/start', 'assistant/message', 'step/end', 'turn/end',
   ]);
+
+  // 标题行必须满足 DSH 的 assertTitleSources：非 user 来源 → messageSeqs 非空且引用更早的人类消息
+  const titleIndex = shape.rows.findIndex((r) => (r as Record<string, unknown> | null)?.['type'] === 'session/title');
+  assert.equal(titleIndex, 1);
+  const titleRow = shape.rows[titleIndex] as Record<string, unknown>;
+  const titleData = titleRow['data'] as Record<string, unknown>;
+  assert.deepEqual(titleData['messageSeqs'], [0], '必须引用首条人类 user/message 的 seq');
+  assert.deepEqual(titleData['source'], { kind: 'fallback' });
+  assert.ok((titleRow['seq'] as number) > 0, '被引用的 seq 必须早于标题行本身');
 
   // seq 必须从 0 连续递增（DSH 按位置校验引用）
   const seqs = shape.rows.map((r) => (r as Record<string, unknown>)['seq']);
@@ -103,9 +114,23 @@ test('t1 形态：路径 / header / 事件序列', () => {
   assert.equal(s.info.ignored['unparsable'], 1);
 });
 
+test('t1b v4 目标：按目标版本写出（header/文件名同步，不是一律写最高版本）', () => {
+  const result = transcodeClaudeSession({ id: ID, text: sessionText() }, { formatVersion: 4, now: 1_700_000_000_000 });
+  assert.ok(result.session, 'v4 目标必须能转码（2026-10-08 桌面端 v4 整批被跳过的回归护栏）');
+  const s = result.session;
+  assert.equal(s.relativePath, projectKeyOf(CWD) + '/' + ID + '/session.v4.jsonl.zstd');
+  assert.equal(s.relativePath, '--D-proj-app--/' + ID + '/session.v4.jsonl.zstd');
+  const shape = readSessionLogShapeFromBytes(s.data);
+  assert.equal(shape.ok, true, 'v4 产物同样必须是 DSH 可扫的 zstd 帧序列');
+  if (!shape.ok) return;
+  assert.equal((shape.headerValue as Record<string, unknown>)['version'], 4, 'header.version 必须等于目标版本');
+});
+
 test('t2 拒绝面：不认识的格式版本 / 缺 cwd / 非法 id 一律跳过并报码', () => {
   const base = { id: ID, text: sessionText() };
   assert.equal(transcodeClaudeSession(base, { formatVersion: 2 }).skip?.code, 'session-format-unsupported');
+  // 比本模块已实现的最高版本更高（未来格式）同样**如实跳过**，绝不按最高版本硬写
+  assert.equal(transcodeClaudeSession(base, { formatVersion: 5 }).skip?.code, 'session-format-unsupported');
   assert.equal(transcodeClaudeSession({ ...base, id: 'a/b' }, { formatVersion: 3 }).skip?.code, 'session-unsafe-id');
   const noCwd = [line({ type: 'user', uuid: 'aaaaaaaa-0000-4000-8000-000000000001', message: { role: 'user', content: 'hi' } })].join(NL);
   assert.equal(transcodeClaudeSession({ id: ID, text: noCwd }, { formatVersion: 3 }).skip?.code, 'session-missing-cwd');

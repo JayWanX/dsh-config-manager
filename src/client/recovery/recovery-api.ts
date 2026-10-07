@@ -15,6 +15,7 @@
  * POST /api/dsh-config-manager/recovery/:operationId/dismiss → RecoveryDismissResult
  * POST /api/dsh-config-manager/recovery/lock/recover            → RecoveryLockRecoverResult
  * POST /api/dsh-config-manager/recovery/safe-mode/clear         → RecoverySafeModeClearResult
+ * POST /api/dsh-config-manager/recovery/sessions/layout         → SessionLayoutPlanView | SessionLayoutApplyView
  * ```
  *
  * 安全约束（§9.4 / §11）：
@@ -34,6 +35,7 @@ import type {
   SessionRepairResult,
   SessionRepairRollbackResult,
 } from '../../ui/session-inventory-view.ts';
+import type { SessionLayoutResponse } from '../../ui/session-layout-view.ts';
 import { ConfigManagerApiError, getJson, LONG_REQUEST_TIMEOUT_MS, postJson, type RequestOptions } from '../common/http.ts';
 import { zhUiT, type UiT } from '../../ui/i18n.ts';
 import { RECOVERY_API } from '../common/routes.ts';
@@ -48,6 +50,15 @@ const RECOVERY_OPTS: RequestOptions = { timeoutMs: LONG_REQUEST_TIMEOUT_MS, time
 
 /** operationId 严格 UUID 校验（与 Host 侧 isValidOperationId 一致；防路径穿越）。 */
 const OPERATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * E2：`POST /recovery/sessions/layout`（布局归位 / 重复 id 隔离）。
+ *
+ * 路径由 `RECOVERY_API.sessions` **派生**（路由常量是唯一来源，避免第二处字面量；`common/routes.ts`
+ * 不在本次改动范围内）。它与 `/sessions`（GET 只读体检）、`/sessions/repair`（字节级修复）同族，
+ * 都由 recovery prefix 路由内部按 path 分发，不新增围栏面。
+ */
+const SESSIONS_LAYOUT_PATH = RECOVERY_API.sessions + '/layout'
 
 function operationPath(operationId: string, action: string): string {
   if (!OPERATION_ID_RE.test(operationId)) {
@@ -98,6 +109,25 @@ export class RecoveryApi implements RecoveryPort {
   /** POST /recovery/sessions/rollback（T8）：按台账 repairId 回滚（客户端不传路径）。 */
   async rollbackSessionRepair(repairId: string): Promise<SessionRepairRollbackResult> {
     return postJson<SessionRepairRollbackResult>(RECOVERY_API.sessionsRollback, { repairId }, this.t, RECOVERY_OPTS)
+  }
+
+  /**
+   * POST /recovery/sessions/layout（E2）：**布局归位 / 重复 id 隔离**（写入口）。
+   *
+   * apply=false = **只读计划**（宿主不拿锁、不过门、零写入；响应带 needsKeep，界面据此要求用户
+   * 选定保留哪一份）；apply=true = 应用（过 SAFE MODE + mutation lock；keep 必须覆盖全部 needsKeep，
+   * 否则该 id 被显式拒绝而不是静默跳过）。
+   *
+   * 安全口径（**必须与界面文案一致**）：本入口在 **DSH 运行时**执行，与离线 CLI
+   * `dcm sessions repair --fix` 的「须先停 DSH」不同 —— 靠宿主侧逐目标门前置 + 每次移动后
+   * **索引刷新必须成功** + 失败逐条回滚兜底。任何拒绝都以 `ok:false + reason`（或逐条 reason 码）
+   * 表达，**不是** HTTP 错误，界面必须逐条如实说明。
+   */
+  async layoutRepairSessions(apply: boolean, keep?: Record<string, string>): Promise<SessionLayoutResponse> {
+    const body: Record<string, unknown> = { apply }
+    // 空 keep 与「不带 keep」等价（宿主缺省 = 重复 id 一律拒绝执行并说明）
+    if (keep !== undefined && Object.keys(keep).length > 0) body['keep'] = keep
+    return postJson<SessionLayoutResponse>(SESSIONS_LAYOUT_PATH, body, this.t, RECOVERY_OPTS)
   }
 
   /** GET /recovery/:operationId/preview：只读恢复预览（restore plan + verification plan）。 */

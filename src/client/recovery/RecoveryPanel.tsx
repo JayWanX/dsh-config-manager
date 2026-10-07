@@ -47,6 +47,19 @@ import {
   type SessionRepairResult,
 } from '../../ui/session-inventory-view.ts'
 import {
+  sessionLayoutApplyItems,
+  sessionLayoutCandidates,
+  sessionLayoutKeepState,
+  sessionLayoutOverallReasonKey,
+  sessionLayoutPlanDisplayRows,
+  sessionLayoutPlanSkippedCount,
+  sessionLayoutPlanSubmittable,
+  sessionLayoutResultCounts,
+  type SessionLayoutApplyView,
+  type SessionLayoutPlanView,
+  type SessionLayoutPort,
+} from '../../ui/session-layout-view.ts'
+import {
   sessionExportEntryState,
   sessionExportReasonText,
   type SessionExportProbe,
@@ -71,10 +84,20 @@ import css from '../config-manager.module.css'
  */
 const redactErrorText = (err: unknown): string => redact(err instanceof Error ? err.message : String(err))
 
+/**
+ * E2：布局归位端口 = `RecoveryPort` 的**可选**扩展（面板只用 `layoutRepairSessions`）。
+ *
+ * 为什么是 Partial：`src/ui/types.ts` 的 RecoveryPort 契约文件不在本次改动范围内，而注入的实现
+ * （`src/client/recovery/recovery-api.ts` 的 `RecoveryApi`）一定带这个方法。可选形态让所有既有
+ * 调用点（按 RecoveryPort 传值）原样可编译；运行时若真缺失，面板走 `sessions.layout.apiMissing`
+ * 如实提示并且**一条也不执行**，绝不假装有能力。
+ */
+type LayoutRecoveryApi = RecoveryPort & Partial<SessionLayoutPort>
+
 export interface RecoveryPanelProps {
   /** 事故处置（崩溃归因 + 救援模式）API；与 recoveryApi 同属「事故恢复」子 tab */
   incidentApi: IncidentApi
-  recoveryApi: RecoveryPort
+  recoveryApi: LayoutRecoveryApi
   t: TranslateNS<'config-manager-recovery'>
   /**
    * **主字典**（config-manager）翻译器 —— 仅供 CopyButton 这类「共用原语」使用：
@@ -332,7 +355,7 @@ function SessionHealthCard({ recoveryApi, t, copyT, diskApi }: Pick<RecoveryPane
 interface SessionHealthDialogProps {
   open: boolean
   onClose: () => void
-  recoveryApi: RecoveryPort
+  recoveryApi: LayoutRecoveryApi
   t: TranslateNS<'config-manager-recovery'>
   clipboardT: TranslateNS<'config-manager'>
   response: SessionHealthResponse | null
@@ -343,6 +366,225 @@ interface SessionHealthDialogProps {
   zipProbe: SessionExportProbe | null
   /** 供「下载原始日志 (ZIP)」拼下载地址（同一份 api 实例，别新起一个）。 */
   api: import('../api.ts').ConfigManagerApi
+}
+
+/**
+ * E2：面板「会话布局归位 / 重复 id 隔离」写入口（宿主 E1：`POST /recovery/sessions/layout`）。
+ *
+ * 与字节级修复（/repair）的分工：那条改日志**字节**，这条改**位置** —— 把会话目录搬回首帧 cwd
+ * 对应的 projectKey 段，并把重复 id 的其它副本移进隔离目录（可人工找回）。
+ *
+ * 安全口径（键 `sessions.layout.runtimeNote`，必须让用户看见）：本入口在 **DSH 运行时**执行，
+ * 与离线 CLI `dcm sessions repair --fix` 的「须先停 DSH」不同 —— 靠门前置（SAFE MODE / mutation lock /
+ * 逐目标无 session.lock + 不在静止期）+ 索引刷新必须成功 + 失败逐条回滚兜底；宿主没给索引刷新端口时
+ * **一条也不执行**（`reindex-unavailable`，绝不显示成成功）。
+ *
+ * 硬约束：**本组件不做任何业务判断** —— 候选筛选 / keep 完整性 / 可否提交 / 逐条状态与计数全在
+ * `ui/session-layout-view.ts`（含「未执行 / 已回滚不得算成功」的判定），组件只装配与渲染。
+ */
+interface SessionLayoutSectionProps {
+  recoveryApi: LayoutRecoveryApi
+  t: TranslateNS<'config-manager-recovery'>
+  response: SessionHealthResponse | null
+  /** 执行后重扫列表（结果已落盘，列表必须跟着刷新） */
+  onScan: () => void
+}
+
+function SessionLayoutSection({ recoveryApi, t, response, onScan }: SessionLayoutSectionProps) {
+  const [plan, setPlan] = useState<SessionLayoutPlanView | null>(null)
+  const [applied, setApplied] = useState<SessionLayoutApplyView | null>(null)
+  /** sessionId → 用户选定保留的副本 unitId（提交判定在 sessionLayoutKeepState） */
+  const [keep, setKeep] = useState<Record<string, string>>({})
+  const [busy, setBusy] = useState<'preview' | 'apply' | null>(null)
+  /** 客户端/传输层失败（宿主的拒绝走结果里的机器码，不进这里） */
+  const [failure, setFailure] = useState<string | null>(null)
+
+  const candidates = sessionLayoutCandidates(response)
+  const keepState = sessionLayoutKeepState(plan, keep)
+  const submittable = sessionLayoutPlanSubmittable(plan, keepState)
+  const planRows = sessionLayoutPlanDisplayRows(plan)
+  const skippedCount = sessionLayoutPlanSkippedCount(plan)
+  const planReasonKey = sessionLayoutOverallReasonKey(plan?.reason)
+  const appliedReasonKey = sessionLayoutOverallReasonKey(applied?.reason)
+  const appliedItems = sessionLayoutApplyItems(applied)
+  const counts = sessionLayoutResultCounts(appliedItems)
+
+  const preview = (): void => {
+    if (busy !== null) return
+    setBusy('preview')
+    setFailure(null)
+    const request = recoveryApi.layoutRepairSessions?.(false)
+    if (request === undefined) {
+      setFailure(t('sessions.layout.apiMissing'))
+      setBusy(null)
+      return
+    }
+    request
+      .then((next) => {
+        if ('results' in next) { setApplied(next); return }
+        setPlan(next)
+        setKeep({})
+        setApplied(null)
+      })
+      .catch((err) => { setFailure(redactErrorText(err)) })
+      .finally(() => { setBusy(null) })
+  }
+
+  const apply = (): void => {
+    if (busy !== null || !submittable) return
+    setBusy('apply')
+    setFailure(null)
+    const request = recoveryApi.layoutRepairSessions?.(true, keep)
+    if (request === undefined) {
+      setFailure(t('sessions.layout.apiMissing'))
+      setBusy(null)
+      return
+    }
+    request
+      .then((next) => {
+        if ('results' in next) {
+          setApplied(next)
+          // 结果已落盘（含逐条回滚）：重扫列表是唯一权威，结果视图保留到用户关闭
+          onScan()
+          return
+        }
+        setPlan(next)
+        setKeep({})
+        setApplied(null)
+      })
+      .catch((err) => { setFailure(redactErrorText(err)) })
+      .finally(() => { setBusy(null) })
+  }
+
+  // 候选行没了（修完了 / 重扫了）但手上还有计划或结果时**不能**整块消失：否则刚做完的逐条结果被吞掉
+  if (candidates.length === 0 && plan === null && applied === null) return null
+
+  return (
+    <div className={css.snapshotRow}>
+      <div className={css.snapshotRowMain}>{t('sessions.layout.title')}</div>
+      <div className={css.hint}>{t('sessions.layout.desc')}</div>
+      {/* 口径：本入口跑在 DSH 运行时 —— 与离线 CLI 的「须先停 DSH」不同，必须让用户看见 */}
+      <div className={css.hint}>{t('sessions.layout.runtimeNote')}</div>
+      <div className={css.hint}>{t('sessions.layout.quarantineNote')}</div>
+      {candidates.length > 0 && (
+        <div className={css.snapshotList}>
+          {candidates.map((candidate) => (
+            <div key={candidate.unitId} className={css.snapshotRowMeta}>
+              <span className={css.snapshotRowIssues} title={candidate.unitId}>{candidate.sessionId}</span>
+              <span className={css.snapshotRowFacts}>
+                {candidate.issueCodes.join(' · ')} · {candidate.projectKey}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className={css.actionRow}>
+        <Button variant="ghost" loading={busy === 'preview'} disabled={busy !== null} onClick={preview}>
+          {busy === 'preview' ? t('sessions.layout.previewing') : t('sessions.layout.preview')}
+        </Button>
+      </div>
+      {failure !== null && <Banner kind="error">{failure}</Banner>}
+      {applied === null && plan !== null && (
+        <>
+          <div className={css.snapshotRowMain}>{t('sessions.layout.planTitle')}</div>
+          {/* 计划只读：确认前零写入 */}
+          <div className={css.hint}>{t('sessions.layout.planReadOnly')}</div>
+          {planReasonKey !== null && <Banner kind="warn">{t(planReasonKey)}</Banner>}
+          <div className={css.hint}>
+            {t('sessions.layout.summary', { move: String(plan.summary.move), quarantine: String(plan.summary.quarantine) })}
+          </div>
+          {planRows.length === 0 && <div className={css.hint}>{t('sessions.layout.planEmpty')}</div>}
+          {planRows.map((row) => (
+            <div key={row.unitId} className={css.snapshotRowMeta}>
+              <span className={css.snapshotRowBadges}>
+                <Badge kind="info">{t(row.kindKey)}</Badge>
+                {row.kind === 'skip' && <Badge kind="warn">{t('sessions.layout.onlyReported')}</Badge>}
+              </span>
+              <span className={css.snapshotRowIssues} title={row.unitId}>{row.sessionId}</span>
+              <span className={css.snapshotRowFacts}>
+                {row.toProjectKey !== null ? row.fromProjectKey + ' → ' + row.toProjectKey : row.fromProjectKey}
+                {' · '}
+                {t(row.reasonKey)}
+              </span>
+            </div>
+          ))}
+          {skippedCount > 0 && (
+            <div className={css.hint}>{t('sessions.layout.planSkipped', { count: String(skippedCount) })}</div>
+          )}
+          {/* 重复 id：必须选定保留哪一份才可提交（判定在 ui 纯函数层） */}
+          {plan.needsKeep.length > 0 && (
+            <>
+              <div className={css.snapshotRowMain}>{t('sessions.layout.keepTitle')}</div>
+              <div className={css.hint}>{t('sessions.layout.keepHint')}</div>
+              {plan.needsKeep.map((sessionId) => (
+                <div key={sessionId} className={css.conflictChoices} role="radiogroup" aria-label={sessionId}>
+                  {(keepState.candidates[sessionId] ?? []).map((unitId) => {
+                    const selected = keep[sessionId] === unitId
+                    return (
+                      <label key={unitId} className={css.choiceCard} data-selected={selected ? '' : undefined}>
+                        <input
+                          type="radio"
+                          name={'layout-keep-' + sessionId}
+                          checked={selected}
+                          onChange={() => { setKeep((prev) => ({ ...prev, [sessionId]: unitId })) }}
+                        />
+                        <span className={css.choiceTitle}>{unitId}</span>
+                      </label>
+                    )
+                  })}
+                </div>
+              ))}
+              {!keepState.complete && (
+                <div className={css.hint}>{t('sessions.layout.keepMissing', { count: String(keepState.missing.length) })}</div>
+              )}
+            </>
+          )}
+          <div className={css.actionRow}>
+            {/* 未选定 keep / 计划不可用 ⇒ 不可提交（判定在 ui 纯函数层） */}
+            <Button variant="primary" loading={busy === 'apply'} disabled={busy !== null || !submittable} onClick={apply}>
+              {busy === 'apply' ? t('sessions.layout.applying') : t('sessions.layout.apply')}
+            </Button>
+          </div>
+        </>
+      )}
+      {applied !== null && (
+        <>
+          <div className={css.snapshotRowMain}>{t('sessions.layout.resultTitle')}</div>
+          {/* 整体未执行（如 reindex-unavailable）**不是**成功：单独说明，且下面不会有任何成功条目 */}
+          {appliedReasonKey !== null && <Banner kind="warn">{t(appliedReasonKey)}</Banner>}
+          {appliedItems.length > 0 && (
+            <div className={css.hint}>
+              {t('sessions.layout.done', {
+                moved: String(counts.moved),
+                quarantined: String(counts.quarantined),
+                failed: String(counts.failedTotal),
+                skipped: String(counts.skipped),
+              })}
+            </div>
+          )}
+          {appliedItems.map((item, index) => (
+            <div key={item.unitId + '#' + String(index)} className={css.snapshotRowMeta}>
+              <span className={css.snapshotRowBadges}>
+                <Badge kind={item.badgeKind}>{t(item.statusKey)}</Badge>
+              </span>
+              <span className={css.snapshotRowIssues} title={item.unitId}>{item.sessionId}</span>
+              <span className={css.snapshotRowFacts}>
+                {item.reasonKey !== null ? t(item.reasonKey) : ''}
+                {item.movedUnitId !== null ? ' → ' + item.movedUnitId : ''}
+                {item.quarantineDir !== null ? ' → ' + item.quarantineDir : ''}
+              </span>
+            </div>
+          ))}
+          <div className={css.hint}>{t('sessions.layout.refreshHint')}</div>
+          <div className={css.actionRow}>
+            <Button variant="ghost" onClick={() => { setApplied(null); setPlan(null); setKeep({}) }}>
+              {t('sessions.layout.close')}
+            </Button>
+          </div>
+        </>
+      )}
+    </div>
+  )
 }
 
 function SessionHealthDialog(props: SessionHealthDialogProps) {
@@ -598,6 +840,14 @@ function SessionHealthDialog(props: SessionHealthDialogProps) {
                       <Badge kind="info">{t('sessions.targetFormat', { version: String(summary.targetFormatVersion) })}</Badge>
                     )}
                   </div>
+                  {/* E2：本档（blocksStartup 的 location-mismatch / duplicate-id）的**应用内写入口**。
+                      只在有候选行或手上有计划/结果时渲染；判定与键映射全在 ui/session-layout-view.ts。 */}
+                  <SessionLayoutSection
+                    recoveryApi={recoveryApi}
+                    t={t}
+                    response={response}
+                    onScan={onScan}
+                  />
                   <div className={css.hint}>
                     {summary.repairable > 0
                       ? t('sessions.repair.available', { count: String(summary.repairable) })

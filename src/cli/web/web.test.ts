@@ -19,9 +19,21 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { startConsoleServer, CONSOLE_SESSION_COOKIE, type ConsoleServerHandle } from './server.ts'
-import { renderSessionsPage, type InlineRepairView } from './page.ts'
-import type { RescuePaths } from '../actions.ts'
+import {
+  renderDiskPage,
+  renderHomePage,
+  renderLockPage,
+  renderReinstallPage,
+  renderRestorePage,
+  renderSessionsPage,
+  renderUnlockPage,
+  type InlineRepairView,
+} from './page.ts'
+import type { LockReport, RescuePaths, RescueStatus, RestorePlanView } from '../actions.ts'
 import type { SessionHealthScanResult } from '../../utils/session-health-scan.ts'
+import { DISK_USAGE_AREAS, type DiskUsageArea, type DiskUsageAreaReport, type DiskUsageReport } from '../../core/disk-usage.ts'
+import type { SnapshotMeta } from '../../core/restore.ts'
+import type { BackupFileMeta } from '../../sync/backup-files.ts'
 
 const silentIo = { log: () => undefined, error: () => undefined }
 
@@ -914,6 +926,147 @@ test('C1c 会话页写入口表述真实（不说「本页不提供」）+ 修�
 function blockedInlineCard(html: string): string {
   return cardOf(html, '修复二：重放重复行')
 }
+
+/**
+ * 取页面**正文**（`<body>` … `<footer>`）。
+ *
+ * 为什么要切片：页脚（renderFooter）**每一页**都印同一份速查表，整页 match 会把它命中成假阴性
+ * （C1b 实测过），`<head>` 里的样式/脚本也不是用户看到的正文。
+ */
+function bodyOf(html: string): string {
+  const start = html.indexOf('<body>')
+  assert.notEqual(start, -1, '页面没有 <body>')
+  const end = html.indexOf('<footer>', start)
+  assert.notEqual(end, -1, '页面没有 <footer>（速查表页脚是每页都渲染的）')
+  return html.slice(start, end)
+}
+
+/**
+ * C1d：救急台是**多页**的，所以每一页正文里都不许出现
+ *  ① 字面 `**`（强调符号被当正文输出，用户看到星号）；
+ *  ② 空泛的「本页不提供」（captain 裁决：要么指向**本页内真实存在**的入口，要么**点名到页**）。
+ *
+ * 断言全部落在**正文切片**上（页脚不计入，避免 C1b 遇到过的假阴性），
+ * 并且每条「不存在」之前都先证明**该分支确实渲染了**（空态会把断言变成假阴性）。
+ */
+test('C1d 各页正文无字面 ** 且无空泛「本页不提供」', () => {
+  const paths: RescuePaths = {
+    homeDir: 'D:/home',
+    dataDir: 'D:/home/dsh-config-manager',
+    snapshotsDir: 'D:/home/dsh-config-manager/snapshots',
+    exportsDir: 'D:/home/dsh-config-manager/exports',
+    locksDir: 'D:/home/dsh-config-manager/locks',
+    controlRoots: ['D:/home/dsh-config-manager'],
+    profile: 'web',
+  }
+  const version = '0.0.0-test'
+  const snapshot: SnapshotMeta = {
+    id: 'snap-1',
+    createdAt: '2026-10-07T00:00:00.000Z',
+    sourceZip: 'dsh-config.zip',
+    entryCount: 3,
+    hostFileBackupCount: 0,
+    beforePluginCount: 0,
+  }
+  // 选中某快照后的恢复计划：只有带危险动作，页面才会渲染 POST /restore/run 的确认表单
+  const restorePlan: RestorePlanView = {
+    ok: true,
+    code: 'ok',
+    message: '',
+    snapshotId: 'snap-1',
+    pluginBaselineConfirmed: false,
+    actions: [{ kind: 'hostFileRestore', description: '还原 settings', target: 'D:/home/settings.yaml', dangerous: true }],
+    summary: { hostFileRestores: 1 },
+  }
+  const lock: LockReport = { locksDir: paths.locksDir, present: true, state: 'LOCKED' }
+  const homeLock: LockReport = { locksDir: paths.locksDir, present: false, state: 'NONE' }
+  const status: RescueStatus = {
+    generatedAt: '2026-10-07T00:00:00.000Z',
+    paths,
+    safeMode: [],
+    lock: homeLock,
+    instances: [],
+    snapshots: [snapshot],
+    backups: [],
+    errors: [],
+  }
+  const areas = Object.fromEntries(DISK_USAGE_AREAS.map((area) => [area, {
+    sizeBytes: 0,
+    fileCount: 0,
+    policy: 'regenerable' as const,
+    unreadable: false,
+  }])) as Record<DiskUsageArea, DiskUsageAreaReport>
+  const diskReport: DiskUsageReport = {
+    dataDir: paths.dataDir,
+    totalBytes: 0,
+    totalFiles: 0,
+    reclaimableBytes: 0,
+    expiredBytes: 0,
+    areas,
+    backupRetention: { keepLast: 10, latestBackupBytes: 0, latestBackupAt: null },
+  }
+  const encrypted: BackupFileMeta[] = [{
+    name: 'dsh-config-enc.zip',
+    path: 'D:/home/dsh-config-manager/exports/dsh-config-enc.zip',
+    sizeBytes: 2048,
+    mtimeMs: 1_700_000_000_000,
+    source: 'manual',
+  }]
+
+  const home = renderHomePage({ status, version })
+  const sessions = renderSessionsPage(
+    {
+      rows: [{
+        unitId: '--D--/a', sessionId: 'a', projectKey: '--D--', severity: 'nextRequestFails',
+        issues: [{ code: 'seq-gap', severity: 'nextRequestFails' }],
+      }],
+      summary: {
+        total: 1, bySeverity: { blocksStartup: 0, unloadable: 0, nextRequestFails: 1, invisible: 0, ok: 0 },
+        structurallyChecked: 1, deepVerified: 1, deepUnverified: 0,
+      },
+      untested: 0, unreadableEntries: 0, sessionsDir: 'D:/home/sessions', sessionsDirExists: true,
+    },
+    undefined, version, paths, null, 'tok', '', null,
+    { fixable: [], probed: 1, blocked: [{ reason: 'seq-gap', count: 1 }] },
+  )
+  const restore = renderRestorePage([snapshot], restorePlan, version, paths, 'tok')
+  const disk = renderDiskPage(diskReport, version, paths, 'tok', '')
+  const lockPage = renderLockPage(lock, version, paths, 'tok', '')
+  const unlock = renderUnlockPage(encrypted, version, paths, 'tok', '')
+  const reinstall = renderReinstallPage(
+    [{ id: 'plugins', label: '插件', desc: '清空 ~/.dsh 的插件目录', destructive: true, defaultOn: false }],
+    version, paths, 'tok',
+  )
+
+  const pages: Array<[string, string]> = [
+    ['首页', home],
+    ['会话', sessions],
+    ['恢复', restore],
+    ['磁盘', disk],
+    ['残留锁', lockPage],
+    ['解锁', unlock],
+    ['重装', reinstall],
+  ]
+  for (const [name, html] of pages) {
+    const body = bodyOf(html)
+    assert.doesNotMatch(body, /\*\*/, name + '：正文不得出现字面 **（强调符号被当正文输出）')
+    assert.doesNotMatch(body, /本页不提供/, name + '：正文不得出现空泛的「本页不提供」（要么指向本页入口，要么点名到页）')
+  }
+
+  // 非空证明：上面那些「不存在」的断言确实覆盖到本轮改的那几段（否则是假阴性）
+  const homeBody = bodyOf(home)
+  assert.match(homeBody, /需要终端里打印的 6 位确认码/, '首页能力矩阵确实渲染（含本轮去掉标记的那几行）')
+  assert.match(homeBody, /请在「恢复」页执行/, '首页快照卡必须点名到「恢复」页')
+  assert.match(homeBody, /本页（首页）不提供/, '「本页」必须限定为首页，不留空泛说法')
+  const diskBody = bodyOf(disk)
+  assert.match(diskBody, /清理是写动作，就在本页下方「清理磁盘（写动作）」卡里执行/, '磁盘保留期说明必须指向本页的清理入口')
+  assert.match(diskBody, /导出产物只在勾选时、且只按保留期回收/, '磁盘清理 consequence 确实渲染（本条曾输出字面 **）')
+  assert.match(diskBody, /action="\/disk\/cleanup"/, '被指向的入口在本页真实存在（裁决 (a) 成立）')
+  assert.match(bodyOf(lockPage), /不会自动回收/, '残留锁页的非 stale 分支确实渲染（本条曾输出字面 **）')
+  assert.match(bodyOf(unlock), /会在内存中解出明文 ZIP/, '解锁卡确实渲染（本条曾输出字面 **）')
+  assert.match(bodyOf(reinstall), /只在终端里打印的 6 位确认码/, '重装横幅确实渲染（本条曾输出字面 **）')
+  assert.match(bodyOf(restore), /action="\/restore\/run"/, '点名到的「恢复」页确实提供该写动作（裁决 (b) 成立）')
+})
 
 test('R1-03 就地修复写路由：token 一次性；没 token 一律 400（不写任何字节）', async () => {
   await withConsole(async (handle) => {

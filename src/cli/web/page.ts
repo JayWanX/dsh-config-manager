@@ -245,13 +245,20 @@ function section(title: string, body: string): string {
 
 /* ------------------------------------------------------------ 布局 */
 
+/**
+ * 救急台是**多页**的（首页 / 会话 / 恢复 / 磁盘 …），所以「本页」这个词必须能落地：
+ * 要么指向**本页内真实存在**的入口，要么**点名到页**（C1d 口径，captain 裁决）。
+ * 页面名在这里只定义一次，导航与跨页指引共用，免得两处说法漂移。
+ */
+const RESTORE_PAGE_LABEL = '恢复'
+
 function renderHeader(chrome: PageChrome, subtitle: string): string {
   const items: Array<[PageChrome['active'], string, string]> = [
     ['home', '/', '首页'],
     ['disk', '/disk', '磁盘占用'],
     ['sessions', '/sessions', '会话体检'],
     ['profiles', '/profiles', '档案与实例'],
-    ['restore', '/restore', '恢复'],
+    ['restore', '/restore', RESTORE_PAGE_LABEL],
     ['export', '/export', '导出'],
     ['unlock', '/unlock', '解锁'],
     ['reinstall', '/reinstall', '重装'],
@@ -340,6 +347,8 @@ export function renderHomePage(input: HomePageInput): string {
  * 用户找不到某个按钮时会以为是坏了，而不是「这台机器离线做不到」。把边界写在最上面最省事。
  */
 function capabilityBody(): string {
+  // 两段文案都经 rows() 的 esc(note) 渲染（HTML 转义）：这里写 <strong> 会被转义成字面标签、
+  // 写 ** 会显示成字面星号 —— 两种都不行，所以这些说明里不放任何强调标记（C1d）。
   const can: ReadonlyArray<[string, string]> = [
     ['看', '实例心跳 / SAFE MODE / 残留锁 / 快照 / 备份产物 / 磁盘占用 / 会话体检 / 档案'],
     ['自检备份', '每个导出产物一键做结构与完整性校验（与命令行 verify 同一实现）'],
@@ -350,11 +359,11 @@ function capabilityBody(): string {
     ['清磁盘', '可重建缓存与过期导出产物（导入前快照与同步数据永不在候选集内）'],
     ['回收残留锁', '仅当持有进程被确证不存在时（活锁一律拒绝）'],
     ['启停实例', '把某个档案作为独立实例启动，或停止它（含手动启动的外部实例）'],
-    ['重装 DSH', '卸载并重装全局 DSH —— **需要终端里打印的 6 位确认码**，页面里看不到它'],
+    ['重装 DSH', '卸载并重装全局 DSH —— 需要终端里打印的 6 位确认码，页面里看不到它'],
   ]
   const cannot: ReadonlyArray<[string, string]> = [
-    ['导入配置（把包写回本机）', '结构化分区的**值**必须经 DSH 服务门面写入 —— 用 GUI（本页能做导出与恢复，不做导入）'],
-    ['看运行中 DSH 的配置值', '离线读不到 settings / plugins / mcp 等结构化分区的值；但**加密备份解锁后能看到包内文件清单**'],
+    ['导入配置（把包写回本机）', '结构化分区的值必须经 DSH 服务门面写入 —— 用 GUI（本页能做导出与恢复，不做导入）'],
+    ['看运行中 DSH 的配置值', '离线读不到 settings / plugins / mcp 等结构化分区的值；但加密备份解锁后能看到包内文件清单'],
     ['同步通道（git / WebDAV）', '通道密码与令牌存在 DSH credentials 里，离线取不到'],
     ['凭据值', '凭据不可回读，任何时候都不显示'],
   ]
@@ -441,7 +450,10 @@ function snapshotsBody(snapshots: readonly SnapshotMeta[], unreadable = false): 
     String(s.entryCount),
   ])
   return renderTable(['ID', '创建时间', '来源备份', '状态', '条目数'], rows)
-    + '<p class="muted">恢复（restore）是写动作，本页不提供；先用 <code>dsh-config-manager restore --dry-run</code> 看计划。</p>'
+    // C1d 口径：救急台是多页的 ⇒ 这里必须**点名到页**，不能再用空泛的「本页不提供」
+    // 抹掉用户在本工具里已经能做的事（恢复写入口在 「恢复」页，POST /restore/run）。
+    + '<p class="muted">恢复（restore）是写动作，本页（首页）不提供；请在「' + RESTORE_PAGE_LABEL
+    + '」页执行（先看逐项计划，确认后才落盘）。命令行侧可用 <code>dsh-config-manager restore --dry-run</code> 先看计划。</p>'
 }
 
 /**
@@ -485,6 +497,9 @@ function offlineBody(): string {
 
 /* ------------------------------------------------------------ 磁盘占用 */
 
+/** 磁盘清理卡的标题：保留期说明要按名字指向它 —— 同一事实只有一处措辞（C1d）。 */
+const DISK_CLEANUP_SECTION_TITLE = '清理磁盘（写动作）'
+
 export function renderDiskPage(
   report: DiskUsageReport,
   version: string,
@@ -514,16 +529,20 @@ export function renderDiskPage(
         + unreadableAreas.map((area) => '<code>' + esc(area) + '</code>').join('、') + '。</p>')
   const retention = '<p class="muted">定时备份保留最近 ' + String(report.backupRetention.keepLast)
     + ' 个（最新一份 ' + esc(formatBytes(report.backupRetention.latestBackupBytes)) + '，'
-    + esc(formatIso(report.backupRetention.latestBackupAt)) + '）。清理是写动作，本页不提供。</p>'
+    // C1d：清理的写入口**就在本页下一张卡**（/disk/cleanup，见 :DISK_CLEANUP_SECTION_TITLE），
+    // 旧文案「本页不提供」与它自相矛盾。按裁决 (a) 指向本页真实存在的入口。
+    + esc(formatIso(report.backupRetention.latestBackupAt)) + '）。清理是写动作，就在本页下方「'
+    + DISK_CLEANUP_SECTION_TITLE + '」卡里执行（需显式确认）。</p>'
   const parts = [section('磁盘占用（只读体检）', summary + renderTable(
     ['子区', '体积', '文件数', '回收策略', '已超期'], rows) + retention)]
   if (done === 'cleaned') parts.unshift(banner('ok', '清理已完成', '结果见下方逐条明细（本次操作的回执）。'))
   const cleanable = report.reclaimableBytes + report.expiredBytes
-  parts.push(section('清理磁盘（写动作）', renderConfirmForm({
+  parts.push(section(DISK_CLEANUP_SECTION_TITLE, renderConfirmForm({
     action: '/disk/cleanup',
     token: actionToken,
     title: '清理缓存与过期导出产物',
-    consequence: '可重建区（tmp / 市场缓存 / 市场工作副本）按勾选整块清理；导出产物**只在勾选时、且只按保留期**回收。'
+    // 本行经 renderConfirmForm 的 esc()：不能写 markup（会被转义），也不能写 **（会显示字面星号）⇒ 去标记
+    consequence: '可重建区（tmp / 市场缓存 / 市场工作副本）按勾选整块清理；导出产物只在勾选时、且只按保留期回收。'
       + '导入前快照与同步数据永远不在候选集内。当前可回收约 ' + formatBytes(report.reclaimableBytes)
       + '，已超保留期约 ' + formatBytes(report.expiredBytes) + '。',
     submitLabel: '按勾选执行清理',
@@ -896,7 +915,8 @@ export function renderLockPage(
   parts.push(banner(stale ? 'warn' : 'info', '锁状态：' + lock.state,
     stale
       ? '持有进程已被确证不存在（或 ownership 是崩溃残留）：可以显式回收。'
-      : '非残留（活锁或无法判定）：**不会**自动回收。'))
+      // banner() 的 text 走 esc() ⇒ 不放强调标记（写 markup 会被转义、写 ** 会显示星号，C1d）
+      : '非残留（活锁或无法判定）：不会自动回收。'))
   parts.push(section('明细', kv([
     ['锁目录', lock.locksDir],
     ['状态', lock.state],
@@ -946,7 +966,8 @@ export function renderUnlockPage(
       action: '/unlock/run',
       token: actionToken,
       title: '解锁加密备份',
-      consequence: '会在**内存**中解出明文 ZIP 并列出条目清单；不写盘、不回传内容、不自动导入。密码区分大小写，忘记无法找回。',
+      // 本行经 renderConfirmForm 的 esc()：去标记（C1d，理由同上）
+      consequence: '会在内存中解出明文 ZIP 并列出条目清单；不写盘、不回传内容、不自动导入。密码区分大小写，忘记无法找回。',
       submitLabel: '解锁并列出清单',
       danger: false,
       hidden: { id: verifyIdOf(b.name) },
@@ -1071,7 +1092,8 @@ export function renderReinstallPage(
   }))
   const body = banner('bad', '这是本页最危险的动作',
     '它会卸载全局 @deepseek-ai/dsh 再重装（程序步），勾选数据类还会清空 ~/.dsh 的设置 / 插件 / 会话与凭据。'
-    + '执行需要输入**只在终端里打印**的 6 位确认码 —— 页面里看不到它。')
+    // banner() 的 text 走 esc() ⇒ 去标记（C1d）
+    + '执行需要输入只在终端里打印的 6 位确认码 —— 页面里看不到它。')
     + renderConfirmForm({
       action: '/reinstall/plan',
       token: actionToken,

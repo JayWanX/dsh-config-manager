@@ -164,6 +164,12 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 > - The old line said "the remaining corruption classes are only reachable through the offline CLI". It missed the most severe level (would block DSH startup) and was also wrong: the offline CLI only quarantines duplicate ids and relocates misplaced directories — unreadable containers/first frames, future formats, unregistered workspaces and subagents without a parent **cannot be repaired offline either**. The text now names all four severity levels, splits the in-app ability honestly into **two classes** (lossless: replayed duplicate rows and provable synthetic closers; lossy: seq gaps and unparsable rows, each requiring explicit confirmation and never batched), and gives the three real destinations for everything else (the in-panel layout relocation / duplicate-id quarantine, the offline `dcm sessions repair --fix`, and **not repaired by this tool**).
 > - The offline rescue console also rendered literal `\*\*` in a page body (the export page banner goes through `esc()`, so the markers showed up verbatim); that site is de-marked with the reason recorded, and the render-level "no literal `\*\*` in any page body" assertion now covers **all 12 pages** (the case name claimed "every page" while only 7 were covered — an invariant asserted wider than its coverage is a defect too).
 
+> **「布局归位 / 重复 id 隔离」入口不再被藏起来（扫过之后始终可见）**
+> 这个入口原先只在**有候选行**时渲染：本机没有这一档问题（真机 1218 个会话单元全为 `already-placed`）的用户打开会话体检只看到「没有要修的东西」，**根本不知道有这个入口** —— 构建产物里明明有它。现在可见性判定收进 `src/ui/session-layout-view.ts` 的 `sessionLayoutSectionState`（`hidden` = 还没扫过 / `empty` = 扫过但本机无此档 / `ready` = 有候选或有计划结果），**扫过之后始终渲染**并显示空态说明；有计划/结果在手时更不会消失（否则刚做完的逐条结果会被吞掉）。空态文案 `sessions.layout.noCandidates` 的 zh/en 两个键是本次补的（此前并不存在）。
+>
+> **The layout-relocation entry is no longer hidden (always visible once scanned)**
+> It used to render only when there were candidate rows, so a machine with none (all 1218 units on the reporting machine are `already-placed`) showed just "nothing to fix" — users **could not tell the entry existed** even though it was in the build. Visibility now lives in `sessionLayoutSectionState` (`hidden` = not scanned yet, `empty` = scanned but nothing in this class, `ready` = candidates or a plan/result in hand); the section **always renders once a scan has run** and explains itself in the empty state, and it never disappears while a plan/result is on screen (otherwise the just-finished per-item results would be swallowed). Both `sessions.layout.noCandidates` strings are new.
+
 ### 🐛 修复 · Fixed
 
 > **导出/同步不再丢 `!!js`，pnpm 隔离安装也能识别会话格式版本（issue #75 / #74）**
@@ -400,6 +406,18 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 >
 > **The verify gate no longer flips its verdict because its cache key and its equivalence test disagreed (a real v4 log was judged `decode-failed` and rolled back)**
 > Its catalog resolution cached by `plan.root` alone and judged equivalence the same way, so **the same input could produce different verdicts inside one process** (observed: equivalence flipped, and a v4 log on this machine was misjudged `decode-failed`, triggering a rollback). Every log-header-dependent decision is now re-run per that log's `headerVersion`, and equivalence is decided by `equivalentToReadPath`: `createRestore(strict+transformed)` is only reachable when `header.version` equals the current generation (v4 here), while pre-v4 goes through the migration chain — verifiable, but **not equivalent to the DSH read path**.
+
+> **面板三处「你看到的与实际不符」（含两条新护栏）**
+> - **布局归位卡被挤成一行**：整卡外层误用 `.snapshotRow`（横向 flex 行）、小节标题误用 `.snapshotRowMain`（`flex:1` + `nowrap`）⇒ 标题、三行说明、按钮与计划摘要被排进同一行、文字被挤成竖排（用户截图）。改为 `.card` 容器 + `.groupLabel` 小节标题 + `.snapshotList`/`.reportScroll` 纵向列表 + `.actionRow` 按钮行。
+> - **渲染文案里的字面 `\*\*`**：面板是纯文本渲染（无 markdown 解析），`sessions.repair.*` 的四条 zh 文案与布局归位的 `refreshHint` 会把 `\*\*` 原样显示成星号（英文侧用的是大写强调，zh/en 也不对称）。全部去标记。
+> - **把「回滚失败」说成「已复原」**：布局归位的 `refreshHint` 原写「失败项已逐条回滚」，但失败项可能是 `rolledBack:false`（回滚自身失败）。改为「已逐条**尝试**回滚，回滚失败的项会单独标红（绝不显示为已复原）」。
+> - **两条新护栏**：`src/client/recovery/recovery-panel-layout.test.ts`（源码级断言小节外层必须是 `.card`、标题必须是 `.groupLabel`、行列表必须在 `.snapshotList` 里 —— 这类「容器类选错」类型检查/模型单测/bundle 护栏**都抓不到**）；`src/client/recovery/recovery-locales.test.ts` 的类级守卫（zh/en 任何值含 `\*\*` 即红，含变异验证：注入 → 红并点名键、还原 → 绿）。
+>
+> **Three "what you see ≠ what is true" fixes in the panel (plus two new guardrails)**
+> - **The layout-relocation card was squeezed into one row**: the card wrapper wrongly used `.snapshotRow` (a horizontal flex row) and section titles used `.snapshotRowMain` (`flex:1` + `nowrap`), so the title, three hint lines, buttons and plan summary all landed on one line with vertical-wrapped text (user screenshot). Now: `.card` container, `.groupLabel` section headers, `.snapshotList`/`.reportScroll` vertical lists, `.actionRow` button rows.
+> - **Literal `\*\*` in rendered copy**: the panel renders plain text (no markdown), so four zh `sessions.repair.*` strings and the layout `refreshHint` showed asterisks verbatim (the English side used uppercase emphasis instead — also an asymmetry). All markers removed.
+> - **"Rollback failed" was reported as "restored"**: the layout `refreshHint` said failed items "were rolled back individually", but an item can be `rolledBack:false` (the rollback itself failed). It now says rollbacks are **attempted** per item and any failed rollback is flagged separately — never shown as restored.
+> - **Two new guardrails**: `recovery-panel-layout.test.ts` (source-level assertions that the section wrapper is `.card`, headers are `.groupLabel` and row lists are inside `.snapshotList` — a class of defect that typecheck, model unit tests and the bundle guardrail **cannot** catch) and the class-level guard in `recovery-locales.test.ts` (any `\*\*` in zh/en fails the suite; mutation-verified).
 
 ## [0.1.69] - 2026-10-04
 

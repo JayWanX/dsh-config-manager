@@ -607,7 +607,34 @@ function repairBody(plan: RepairOutcome | null, actionToken: string): string {
  * 不同的事说成一条通道，用户会以为「修不了重放重复行是因为命令没敲对」。反过来，
  * 「修复一：会话布局归位」卡里的等价命令是**成立**的（本页与 CLI 走同一实现），**刻意保留**，
  * 别在收尾时一刀切删掉。
+ *
+ * C1c：会话页顶部的 fixHint 此前写着「本页不提供」，与这一段、「修复一」卡（:591「本页按同一实现执行」）
+ * **自相矛盾** —— 同一事实两处说法必然漂移。这里把「本页提供哪些写入口」也收成单一事实源
+ * （PAGE_SESSION_WRITE_ENTRIES），fixHint 只渲染它；同时把本段里当强调用的字面 `**` 改成真 <strong>。
  */
+
+/**
+ * 会话页写入口的**单一事实源**（C1c）。
+ *
+ * 只允许这一处说「本页提供/不提供哪些写动作」；任何页面文案要提这件事，都必须引用本常量。
+ */
+const PAGE_SESSION_WRITE_ENTRIES = '修复是写动作，须先把 DSH 停掉。本页<strong>提供</strong>两个写入口：'
+  + '「修复一：会话布局归位」（布局归位与重复 id 隔离，与本机 CLI 的 <code>sessions repair --apply</code> 同一实现）与'
+  + '「修复二：重放重复行」（字节级零损失就地修复，发现可修项时才给出按钮）；'
+  + '两者都要过与 CLI 同源的写入门（SAFE MODE / 残留锁 / DSH 已停止）。'
+  + '其余类别（合成 closer / seq 空洞 / 子代理缺父 …）本页只报告，原因见「修复二」段的职责边界。'
+
+/**
+ * `sessions repair [--fix]` 的**职责边界**（C1b 立的说法，C1c 抽成常量以便多处引用而只有一处措辞）。
+ *
+ * 渲染逐字不变（R1-02b 断言 /职责边界/、/sessions repair \[--fix\]/、/不改写会话字节/、/dcm web/、
+ * /修复选中的会话（零损失）/）。
+ */
+const SESSIONS_REPAIR_BOUNDARY = '<code>sessions repair [--fix]</code> 只做会话'
+  + '<strong>布局归位</strong>与<strong>重复 id 隔离</strong>，<strong>不改写会话字节</strong>，'
+  + '所以修不了重放重复行；离线<strong>字节级</strong>通道就是本救急台（<code>dcm web</code> 打开的这一页）：'
+  + '发现可零损失修项时，本段会列出清单并给出「修复选中的会话（零损失）」按钮，无需任何命令行动作。'
+
 function inlineRepairBody(view: InlineRepairView | null, gate: GateView | null, actionToken: string): string {
   if (view === null) {
     return '<p class="muted">未探测（本次体检没有跑到可修项扫描）。</p>'
@@ -616,15 +643,13 @@ function inlineRepairBody(view: InlineRepairView | null, gate: GateView | null, 
     + '其中 <strong>' + String(view.fixable.length) + '</strong> 条存在<strong>零损失</strong>可修项'
     + '（重放重复行 —— 字节相同且 seq 相同的副本，丢弃即恢复）。</p>'
   // 本段的出口只指向**本救急台自己**的就地修复入口：sessions repair 不改写会话字节，不能当等价通道。
-  const boundary = '<p class="muted">职责边界：<code>sessions repair [--fix]</code> 只做会话'
-    + '<strong>布局归位</strong>与<strong>重复 id 隔离</strong>，<strong>不改写会话字节</strong>，'
-    + '所以修不了重放重复行；离线<strong>字节级</strong>通道就是本救急台（<code>dcm web</code> 打开的这一页）：'
-    + '发现可零损失修项时，本段会列出清单并给出「修复选中的会话（零损失）」按钮，无需任何命令行动作。</p>'
+  // 文案取自单一事实源（C1c）——别在这里另写一套说法。
+  const boundary = '<p class="muted">职责边界：' + SESSIONS_REPAIR_BOUNDARY + '</p>'
   if (view.fixable.length === 0) {
     const why = view.blocked.length === 0 ? ''
       : '<p class="muted">其余不可修的原因分布：'
         + view.blocked.map((b) => '<code>' + esc(b.reason) + '</code> × ' + String(b.count)).join('、')
-        + '。这些类别按设计**只报告**，不解压改写会话字节。</p>'
+        + '。这些类别按设计<strong>只报告</strong>，不解压改写会话字节。</p>'
     return head + '<p class="muted">本次没有发现可零损失修复的会话。</p>' + why + boundary
   }
   const gateNote = gate !== null && !gate.ok
@@ -638,9 +663,11 @@ function inlineRepairBody(view: InlineRepairView | null, gate: GateView | null, 
       action: '/sessions/inline-repair',
       token: actionToken,
       title: '就地修复重放重复行',
-      consequence: '对**选中的那一条**会话：丢弃字节相同且 seq 相同的重放重复事件，写前重跑连续性/引用完整性校验'
+      // 本段走 renderConfirmForm 的 esc()：consequence 里写 markup 会被转义、写 ** 会渲染成字面星号
+      // （C1c 修的就是这个），所以这里不带任何强调标记，事实措辞不变。
+      consequence: '对选中的那一条会话：丢弃字节相同且 seq 相同的重放重复事件，写前重跑连续性/引用完整性校验'
         + '（不过就拒绝），时间戳备份就地保留，临时文件 + rename 原子换入，写后复验。'
-        + '合成 closer / seq 空洞 / 子代理缺父**不在**本入口的修复范围内（只报告）。',
+        + '合成 closer / seq 空洞 / 子代理缺父不在本入口的修复范围内（只报告）。',
       submitLabel: '修复选中的会话（零损失）',
       danger: false,
       checklist: view.fixable.map((f, i) => ({
@@ -707,9 +734,9 @@ export function renderSessionsPage(
     row.sizeBytes === undefined ? '—' : formatBytes(row.sizeBytes),
     row.issues.map((i) => i.code + (i.detail === undefined ? '' : '(' + i.detail + ')')).join(' '),
   ])
+  // C1c：旧文案说「本页不提供」，与同页「修复一」卡（本页确实提供该写动作）自相矛盾 —— 改为单一事实源。
   const fixHint = problems.length > 0
-    ? '<p class="muted">修复（sessions repair）是写动作且必须在 DSH 停止后进行，本页不提供；'
-      + '先用 <code>dsh-config-manager sessions repair</code> 看计划，加 <code>--apply</code> 才落盘。</p>'
+    ? '<p class="muted">' + PAGE_SESSION_WRITE_ENTRIES + '</p>'
     : ''
   parts.push(section('需要处理的会话（' + String(problems.length) + '）',
     renderTable(['严重级', '会话单元', '格式版本', '体积', '问题'], rows) + fixHint))

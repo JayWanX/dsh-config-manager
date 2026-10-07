@@ -16,9 +16,12 @@ import { readFileSync } from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { startConsoleServer, CONSOLE_SESSION_COOKIE, type ConsoleServerHandle } from './server.ts'
+import { renderSessionsPage, type InlineRepairView } from './page.ts'
 import type { RescuePaths } from '../actions.ts'
+import type { SessionHealthScanResult } from '../../utils/session-health-scan.ts'
 
 const silentIo = { log: () => undefined, error: () => undefined }
 
@@ -834,6 +837,83 @@ test('R1-02b 「修复二」段不把 sessions repair 说成等价通道；「�
     assert.match(inline, /职责边界/)
   })
 })
+
+/**
+ * C1c：会话页的「写入口」事实必须唯一且真实，且卡片段里不得再把 `**` 当强调符号输出成字面星号。
+ *
+ * 这里**直接渲染** renderSessionsPage（页面是服务端直出 HTML，渲染结果就是用户看到的字节）：
+ * 「修复二」段有两条分支（无零损失可修项 → 只报告分布段；有可修项 → 确认表单），
+ * 两条分支过去各有一处 `**`，走 HTTP + 造会话夹具只能覆盖其中一条。
+ */
+test('C1c 会话页写入口表述真实（不说「本页不提供」）+ 修复二段无字面 **', () => {
+  const paths: RescuePaths = {
+    homeDir: 'D:/home',
+    dataDir: 'D:/home/dsh-config-manager',
+    snapshotsDir: 'D:/home/dsh-config-manager/snapshots',
+    exportsDir: 'D:/home/dsh-config-manager/exports',
+    locksDir: 'D:/home/dsh-config-manager/locks',
+    controlRoots: ['D:/home/dsh-config-manager'],
+    profile: 'web',
+  }
+  const result: SessionHealthScanResult = {
+    rows: [{
+      unitId: '--D--/a',
+      sessionId: 'a',
+      projectKey: '--D--',
+      severity: 'nextRequestFails',
+      issues: [{ code: 'seq-gap', severity: 'nextRequestFails' }],
+    }],
+    summary: {
+      total: 1,
+      bySeverity: { blocksStartup: 0, unloadable: 0, nextRequestFails: 1, invisible: 0, ok: 0 },
+      structurallyChecked: 1,
+      deepVerified: 1,
+      deepUnverified: 0,
+    },
+    untested: 0,
+    unreadableEntries: 0,
+    sessionsDir: 'D:/home/sessions',
+    sessionsDirExists: true,
+  }
+  const blockedInline: InlineRepairView = { fixable: [], probed: 3, blocked: [{ reason: 'seq-gap', count: 2 }] }
+  const blocked = renderSessionsPage(result, undefined, '0.0.0-test', paths, null, 'tok', '', null, blockedInline)
+
+  // ① fixHint（有「需要处理」的行才渲染）：不得再声称「本页不提供」——同页「修复一」卡就是本页提供的写动作
+  const problems = cardOf(blocked, '需要处理的会话（')
+  assert.doesNotMatch(problems, /本页不提供/, 'fixHint 不得再声称本页不提供该写动作（自相矛盾）')
+  assert.match(problems, /本页<strong>提供<\/strong>两个写入口/, '必须正向写清本页提供哪些写入口')
+  assert.match(problems, /sessions repair --apply/, '「修复一」的等价命令是成立的，仍要如实给出')
+
+  // ② 无零损失可修项 + 有「只报告」原因分布 → 该分支确实渲染，且强调是真 <strong> 而不是字面 **
+  assert.match(blockedInlineCard(blocked), /只报告/, '该分支必须真的渲染「只报告」文案（否则下面的断言是假阴性）')
+  assert.match(blockedInlineCard(blocked), /<strong>只报告<\/strong>/, '强调必须是真 <strong>')
+  assert.doesNotMatch(blockedInlineCard(blocked), /\*\*/, '卡片段里不得再出现字面 **')
+
+  // ③ 有零损失可修项 → 确认表单分支（consequence 里也曾有字面 **）
+  const fixable = renderSessionsPage(result, undefined, '0.0.0-test', paths, null, 'tok', '', null,
+    { fixable: [{ unitId: '--D--/a', droppedRows: 3 }], probed: 1, blocked: [] })
+  const fixableCard = cardOf(fixable, '修复二：重放重复行')
+  assert.match(fixableCard, /修复选中的会话（零损失）/, '该分支必须真的渲染确认表单')
+  assert.doesNotMatch(fixableCard, /\*\*/, '确认表单段同样不得出现字面 **')
+
+  // ④ 不误伤：页脚速查表照旧；「修复一」卡里那处**成立**的等价命令仍在源码里（渲染路径见 R1-02b 的真实磁盘用例）
+  assert.match(fixable, /会话布局归位（本页按同一实现执行）/, '页脚速查表不得被误改')
+
+  // ⑤ 源码级：fixHint 那一小段里不得再有「本页不提供」（页面另外两处是别的写动作，别误伤）
+  const source = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'page.ts'), 'utf8')
+  const at = source.indexOf('const fixHint =')
+  assert.notEqual(at, -1, '源码里找不到 fixHint')
+  const snippet = source.slice(at, source.indexOf('parts.push(section(', at))
+  assert.doesNotMatch(snippet, /本页不提供/, 'fixHint 源码段不得再出现「本页不提供」')
+  assert.match(snippet, /PAGE_SESSION_WRITE_ENTRIES/, 'fixHint 只能渲染单一事实源常量')
+  // 「修复一」布局归位卡的等价命令是**成立**的（本页与 CLI 同实现），不得被这轮收尾一刀切删掉
+  assert.ok(source.includes('等价命令：dsh-config-manager sessions repair --apply'), '布局归位卡的等价命令必须仍在')
+})
+
+/** 取「修复二」段卡片（C1c 用例内部用，避免页脚命中造成假阴性）。 */
+function blockedInlineCard(html: string): string {
+  return cardOf(html, '修复二：重放重复行')
+}
 
 test('R1-03 就地修复写路由：token 一次性；没 token 一律 400（不写任何字节）', async () => {
   await withConsole(async (handle) => {

@@ -129,6 +129,30 @@ export function sessionLayoutCandidates(response: SessionHealthResponse | null):
     .filter((candidate) => candidate.issueCodes.length > 0)
 }
 
+
+/* ------------------------------------------------- ①b 入口可见性（扫过之后不许消失） */
+
+/** 入口状态：`hidden` = 还没扫过（此时无从判断）；`empty` = 扫过但没有这一档问题；`ready` = 有候选或有计划/结果。 */
+export type SessionLayoutSectionState = 'hidden' | 'empty' | 'ready'
+
+/**
+ * 面板入口的可见性判定。
+ *
+ * 为什么单独成一个纯函数：入口**只在有候选行时**渲染的话，本机没有这一档问题（真机 1218 单元全
+ * `already-placed`）的用户**根本看不到这个功能** —— 发现性缺陷。口径：**扫过之后入口始终可见**
+ * （用空态说明"本机没有这一档"），只有"还没扫过 + 手上没计划/结果"才隐藏；有计划/结果时更不能消失
+ * （否则刚做完的逐条结果被吞掉）。
+ */
+export function sessionLayoutSectionState(input: {
+  response: SessionHealthResponse | null
+  plan: SessionLayoutPlanView | null
+  applied: SessionLayoutApplyView | null
+}): SessionLayoutSectionState {
+  if (input.plan !== null || input.applied !== null) return 'ready'
+  if (input.response === null) return 'hidden'
+  return sessionLayoutCandidates(input.response).length > 0 ? 'ready' : 'empty'
+}
+
 /* ------------------------------------------------- ② 计划：可执行的条 + keep 选择 */
 
 /** 计划里的一条展示行（键已是字典键，**不是**裸机器码）。 */

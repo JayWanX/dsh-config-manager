@@ -30,6 +30,7 @@ import {
   sessionLayoutPlanSubmittable,
   sessionLayoutReasonKey,
   sessionLayoutResultCounts,
+  sessionLayoutSectionState,
   sessionLayoutStatusBadgeKind,
 } from './session-layout-view.ts';
 import type {
@@ -339,4 +340,22 @@ test('E2：模型产出的每一个键都在 recovery 字典 zh / en 里逐字�
   assert.match(recoveryZh['sessions.layout.quarantineNote'], /隔离目录/);
   assert.match(recoveryEn['sessions.layout.runtimeNote'].toLowerCase(), /while dsh is running/);
   assert.match(recoveryEn['sessions.layout.quarantineNote'].toLowerCase(), /quarantine/);
+});
+
+
+/* ------------------------------------------------- ⑥ 入口可见性：扫过之后不许消失 */
+
+test('E2：入口可见性 —— 还没扫过 hidden；扫过但本机无这一档 empty；有候选/有计划或结果 ready', () => {
+  // 还没扫过：无从判断 ⇒ 不渲染
+  assert.equal(sessionLayoutSectionState({ response: null, plan: null, applied: null }), 'hidden');
+  // 扫过且全机没有这一档（真机 1218 单元全 already-placed 的真实形态）⇒ 入口仍在，带空态说明
+  assert.equal(sessionLayoutSectionState({ response: response([row(), row({ sessionId: 'session-b' })]), plan: null, applied: null }), 'empty');
+  // 有 blocksStartup 的 location-mismatch ⇒ ready
+  const hit = response([row({ severity: 'blocksStartup', issues: [{ code: 'location-mismatch' }] as SessionHealthRowView['issues'] })]);
+  assert.equal(sessionLayoutSectionState({ response: hit, plan: null, applied: null }), 'ready');
+  // 只有 ok 行 + 别的严重级（invisible）不构成本档候选 ⇒ empty
+  assert.equal(sessionLayoutSectionState({ response: response([row({ severity: 'invisible', issues: [{ code: 'subagent-without-parent' }] as SessionHealthRowView['issues'] })]), plan: null, applied: null }), 'empty');
+  // 手上还有计划 / 结果时**不能**消失（否则刚做完的逐条结果被吞掉）
+  assert.equal(sessionLayoutSectionState({ response: response([row()]), plan: {} as SessionLayoutPlanView, applied: null }), 'ready');
+  assert.equal(sessionLayoutSectionState({ response: null, plan: null, applied: {} as SessionLayoutApplyView }), 'ready');
 });

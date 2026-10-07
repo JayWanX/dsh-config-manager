@@ -362,6 +362,8 @@ export const zh = {
   'sessions.layout.apiMissing': '当前接口不支持布局归位（缺少 layoutRepairSessions）；请更新插件后重试 —— 本机未做任何改动。',
   'sessions.layout.planTitle': '布局归位计划（只读，尚未改动任何文件）',
   'sessions.layout.planReadOnly': '计划只读：确认前零写入。',
+  // 空态：入口在扫过之后始终可见，本机没有这一档时必须自己说明白（否则用户以为功能不存在）
+  'sessions.layout.noCandidates': '本机没有「布局归位 / 重复 id 隔离」这一档的问题会话：扫描结果里既没有需要归位的目录，也没有重复 id。',
   'sessions.layout.summary': '将归位 {move} 条、隔离 {quarantine} 条',
   'sessions.layout.planSkipped': '另有 {count} 条只报告（缺 cwd / 会话被锁 / 多份 generation 的 cwd 不一致）—— 本入口不动它们。',
   'sessions.layout.onlyReported': '只报告（不执行）',
@@ -745,6 +747,7 @@ export const en: Record<keyof typeof zh, string> = {
   'sessions.layout.apiMissing': 'This client does not support layout repair (layoutRepairSessions is missing); update the plugin and retry -- nothing was changed on this machine.',
   'sessions.layout.planTitle': 'Layout repair plan (read-only, nothing changed yet)',
   'sessions.layout.planReadOnly': 'The plan is read-only: zero writes before you confirm.',
+  'sessions.layout.noCandidates': 'No sessions fall into this class on this machine: the scan found nothing to relocate and no duplicate ids.',
   'sessions.layout.summary': 'Will relocate {move} and quarantine {quarantine}',
   'sessions.layout.planSkipped': 'Another {count} item(s) are report-only (missing cwd / locked session / inconsistent cwd across generations) -- this entry does not touch them.',
   'sessions.layout.onlyReported': 'Report only (not executed)',

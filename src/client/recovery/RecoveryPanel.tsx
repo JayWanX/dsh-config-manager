@@ -55,6 +55,7 @@ import {
   sessionLayoutPlanSkippedCount,
   sessionLayoutPlanSubmittable,
   sessionLayoutResultCounts,
+  sessionLayoutSectionState,
   type SessionLayoutApplyView,
   type SessionLayoutPlanView,
   type SessionLayoutPort,
@@ -456,8 +457,9 @@ function SessionLayoutSection({ recoveryApi, t, response, onScan }: SessionLayou
       .finally(() => { setBusy(null) })
   }
 
-  // 候选行没了（修完了 / 重扫了）但手上还有计划或结果时**不能**整块消失：否则刚做完的逐条结果被吞掉
-  if (candidates.length === 0 && plan === null && applied === null) return null
+  // 扫过之后入口**始终可见**（否则本机没有这一档的用户根本找不到它）；只有「还没扫过且手上没计划/结果」才隐藏。
+  const sectionState = sessionLayoutSectionState({ response, plan, applied })
+  if (sectionState === 'hidden') return null
 
   return (
     <div className={css.snapshotRow}>
@@ -466,6 +468,7 @@ function SessionLayoutSection({ recoveryApi, t, response, onScan }: SessionLayou
       {/* 口径：本入口跑在 DSH 运行时 —— 与离线 CLI 的「须先停 DSH」不同，必须让用户看见 */}
       <div className={css.hint}>{t('sessions.layout.runtimeNote')}</div>
       <div className={css.hint}>{t('sessions.layout.quarantineNote')}</div>
+      {sectionState === 'empty' && <div className={css.hint}>{t('sessions.layout.noCandidates')}</div>}
       {candidates.length > 0 && (
         <div className={css.snapshotList}>
           {candidates.map((candidate) => (

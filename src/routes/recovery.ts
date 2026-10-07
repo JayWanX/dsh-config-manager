@@ -22,6 +22,7 @@ import {
   resolveSessionUnit,
   rollbackSessionRepair,
 } from '../utils/session-repair-service.ts'
+import { applySessionLayoutRepair, planSessionLayoutRepair } from '../utils/session-layout-repair-service.ts'
 import { sessionHealthNextSteps } from '../index.ts'
 
 /**
@@ -51,6 +52,26 @@ function readRepairExpect(value: unknown): { size: number; mtimeMs: number } | u
   if (typeof size !== 'number' || !Number.isFinite(size)) return undefined
   if (typeof mtimeMs !== 'number' || !Number.isFinite(mtimeMs)) return undefined
   return { size, mtimeMs }
+}
+
+/**
+ * E1：`body.keep` = `{ sessionId: '<projectKey>/<sessionId>' }`（要保留的**副本身份**，不是绝对路径）。
+ * 形状不对的非字符串条目一律忽略 —— 被忽略的重复 id 在服务层按「未点名 keep」**拒绝执行**（绝不猜）。
+ */
+function readLayoutKeep(value: unknown): Record<string, string> | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const out: Record<string, string> = {}
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof raw === 'string' && raw !== '') out[key] = raw
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+/** E1：`body.unitIds` = 只处理这些单元（`<projectKey>/<sessionId>`）；缺省 = 计划里全部可执行项。 */
+function readLayoutUnitIds(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const out = value.filter((entry): entry is string => typeof entry === 'string' && entry !== '')
+  return out.length > 0 ? out : undefined
 }
 
 /** 残留条目（只回传界面需要的四个字段；内部字段 markerReadable 这类不外泄）。 */
@@ -186,6 +207,66 @@ export function recoveryRoutes(env: RoutesEnv): WebRoute[] {
           } catch (error) {
             if (error instanceof EnvironmentLockUnavailableError) {
               host.log.warn(`mutation lock blocked: op=session-repair reason=${error.reason}`)
+              writeJson(res, 423, { error: error.message, code: 'mutation-locked' })
+              return
+            }
+            writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+          }
+          return
+        }
+        // E1：**布局归位 / 重复 id 隔离**（写路径）。POST /recovery/sessions/layout
+        //
+        // 与字节级修复（/repair）的分工：那条改日志**字节**（丢弃重放重复行），这条改**位置**
+        // （header cwd 与目录位置不一致的会话搬回正确 projectKey 段）+ 把重复 id 的副本移进隔离目录。
+        // 两者共用同一套门模型（SAFE MODE + mutation lock + 逐目标前置 + 失败逐条回滚）。
+        //
+        // 安全模型与 CLI 的差异（**必须如实写明**）：CLI `dcm sessions repair --fix` 要求「DSH 已停止」；
+        // 面板就跑在 DSH 里，不可能满足 —— 因此改为：下面这条 runWithMutationLock（SAFE MODE + 环境锁）
+        // + 服务层**逐目标前置**（无 session.lock / 不在 30s 静止期）+ **每次移动或改写后必须**
+        // 用 SessionStoreFacade.reindexSessionHeader 刷新索引（刷新失败 → 该条回滚 + 如实汇报）
+        // + 失败逐条回滚。依据：导入链 SessionsAdapter.finalizeApply 本来就在 DSH 运行时做同类
+        // 「改写首帧 + 归位 + 刷新」。面板文案由前端负责，这里只保证判定与结果如实。
+        if (segments.length === 2 && segments[1] === 'layout') {
+          if (req.method !== 'POST') { writeJson(res, 405, { error: 'method not allowed' }); return }
+          try {
+            const body = await readJsonBody(req)
+            if (body === undefined) { writeJson(res, 400, { error: 'invalid JSON body' }); return }
+            const homeDir = sessionHealth.homeDir
+            const keep = readLayoutKeep(body['keep'])
+            if (body['apply'] !== true) {
+              // 只读：只给计划，**零写入**（不拿锁、不过门 —— 与 /repair 的预览同口径）
+              const plan = await planSessionLayoutRepair({ homeDir, ...(keep !== undefined ? { keep } : {}) })
+              writeJson(res, 200, plan)
+              return
+            }
+            const unitIds = readLayoutUnitIds(body['unitIds'])
+            await runWithMutationLock(
+              host.mutationLock,
+              { op: 'session-layout-repair', isBlocked: () => host.safeModeIsBlocked?.() ?? false },
+              async () => {
+                // 索引刷新端口：宿主没给（旧外壳）时**不传** —— 服务层会如实回 reindex-unavailable，绝不假装搬成功
+                const reindex = host.sessions?.reindexSessionHeader
+                const result = await applySessionLayoutRepair({
+                  homeDir,
+                  ...(keep !== undefined ? { keep } : {}),
+                  ...(unitIds !== undefined ? { unitIds } : {}),
+                  ...(typeof reindex === 'function' ? { reindex: (sessionId: string) => reindex.call(host.sessions, sessionId) } : {}),
+                })
+                await tryAppendHistory({
+                  kind: 'recovery',
+                  result: result.ok ? 'success' : 'skipped',
+                  sections: [],
+                  source: 'recovery',
+                  summary: result.ok
+                    ? '会话布局归位（搬运/隔离 ' + String(result.applied) + ' 条）'
+                    : '会话布局归位未全部完成（成功 ' + String(result.applied) + '，失败 ' + String(result.failed) + '，跳过 ' + String(result.skipped) + '）',
+                })
+                writeJson(res, 200, result)
+              },
+            )
+          } catch (error) {
+            if (error instanceof EnvironmentLockUnavailableError) {
+              host.log.warn(`mutation lock blocked: op=session-layout-repair reason=${error.reason}`)
               writeJson(res, 423, { error: error.message, code: 'mutation-locked' })
               return
             }

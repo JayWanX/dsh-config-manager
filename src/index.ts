@@ -2591,7 +2591,10 @@ function makeRoutes(deps: RoutesDeps): { routes: WebRoute[]; scheduler: AutoSync
     },
     writeText: async (relPath, text) => { await host.fs.writeFile(relPath, Buffer.from(text, 'utf8')) },
     resolveBundle: bundleResolvable,
-    parseYaml: (text) => yaml.load(text),
+    // 启动关键 yaml 里包含**两层 cordis.patch.yml**（BOOT_CRITICAL_RELS），它们是 DSH 的专用方言
+    // （`!!js`）。用缺省 schema 解析会把用户的 patch 层误报成「启动关键文件无法解析」——
+    // 与 issue #75 同一个根因，只是症状换成了假警报。其余设置类 yaml 用同一 schema 只会更宽松。
+    parseYaml: (text) => loadPatchDocument(text),
     msg,
   })
 

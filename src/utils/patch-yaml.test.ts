@@ -10,6 +10,8 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import * as yaml from 'js-yaml';
 
 import { describePatchYamlError, dumpPatchDocument, isPatchJsExpr, loadPatchDocument } from './patch-yaml.ts';
@@ -85,4 +87,26 @@ test('describePatchYamlError：只取首行，源码片段（可能含内联密�
   const realSafe = describePatchYamlError(real);
   assert.equal(realSafe.includes('\n'), false, '真实解析错误的摘要同样只有一行: ' + realSafe);
   assert.ok(realSafe.length > 0);
+});
+
+/* ---------------------------------- 接线守卫（源码级） ---------------------------------- */
+
+/**
+ * 只把方言修进本模块不够：**用它解析 patch 文件的地方**也必须接线，否则换个入口
+ * `!!js` 依旧被读成「空层」。这里做源码级断言（行为测试在 index.facade.test.ts）；
+ * 与 incident-wiring.test.ts 同一手法 —— 守的是「接线是否存在」。
+ */
+test('接线守卫：patch 门面与 boot-safety 的 YAML 解析都必须走本方言', () => {
+  const root = fileURLToPath(new URL('../../', import.meta.url));
+  const index = fs.readFileSync(root + 'src/index.ts', 'utf8');
+
+  assert.ok(index.includes('doc = loadPatchDocument(text)'), 'readPatchLines 必须用方言载入');
+  assert.ok(index.includes('doc = loadPatchDocument(existing)'), 'applyPatchChanges 必须用方言载入既有文件');
+  assert.ok(index.includes('+ dumpPatchDocument(out)'), '写回 patch 文件必须用方言（yaml.dump 会把 {__jsExpr} 写成普通 map）');
+  assert.match(
+    index,
+    /parseYaml:\s*\(text\)\s*=>\s*loadPatchDocument\(text\)/,
+    'boot-safety 的 parseYaml 必须是方言：启动关键 yaml 含两层 cordis.patch.yml',
+  );
+  assert.equal(index.includes('yaml.dump('), false, 'src/index.ts 不得再用裸 yaml.dump 写 patch 文件');
 });

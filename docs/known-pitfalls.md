@@ -381,6 +381,8 @@ d`。
 
 **第二段数据丢失（同一根因）**：`applyPatchChanges` 同样建不出 rows/order → 重建后的文件**只包含本次导入的行**，用户手写的其余行被整段删掉。
 
+**同一根因的第三个出口（假警报）**：`core/boot-safety.ts` 的启动自洽审计用宿主注入的 `parseYaml` 解析**全部**启动关键 yaml，其中就有两层 `cordis.patch.yml`（`BOOT_CRITICAL_RELS`）。宿主注入一度是缺省 schema 的 `yaml.load` → 带 `!!js` 的 patch 层会在导入分析里被报成 `criticalFileUnparsable`（「启动关键文件无法解析」）：用户看到的是关于自己配置的假错误。现在注入口同样走方言（`parseYaml: (text) => loadPatchDocument(text)`），并由源码级接线守卫（`patch-yaml.test.ts` 末条）钉住。
+
 **修法**：新增 `src/utils/patch-yaml.ts` 作为方言**单一事实源**（`JSON_SCHEMA.withTags(defineScalarTag('tag:yaml.org,2002:js', …))`；载入 `!!js <源码>` → `{__jsExpr: <源码>}`，写回反向），`DshPatchFileFacade` 的读取与写回都走它。两道护栏：① `applyPatchChanges` 遇到「存在但解析不了 / 读不到」的原文件**拒绝覆盖**（`host.patchRefuseClobber`）；② `readPatchLines` 解析失败**上抛**（`host.patchUnreadable`），经既有 `failures` 通道变成三处 adapter 的可见告警。**ENOENT 仍是「按需创建、本来就没有」→ 空层**（边界不放宽）。
 
 **三条必须记住的口径**：

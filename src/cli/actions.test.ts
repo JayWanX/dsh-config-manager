@@ -16,8 +16,8 @@ import path from 'node:path'
 import {
   checkWriteGates, cleanupDisk, collectVerifyResults, diskUsageDirsOf, exportOfflineBackup, isProcessAlive,
   planSnapshotRestore, readBackups, readDiskUsage, readLockState, readProfiles, readRescueStatus,
-  readRunningInstances, readSnapshots, recoverStaleEnvironmentLock, repairSessions, sessionRepairRowMessage,
-  sessionVerifyNoteOf, stopProfile, unlockEncryptedBackup, type SessionLogRepairRow,
+  readRunningInstances, readSnapshots, recoverStaleEnvironmentLock, repairSessionLogInline, repairSessions,
+  sessionRepairRowMessage, sessionVerifyNoteOf, stopProfile, unlockEncryptedBackup, type SessionLogRepairRow,
 } from './actions.ts'
 import type { SessionVerifyResult } from '../utils/session-verify.ts'
 
@@ -513,4 +513,36 @@ test('t17 行结构：verify 逐字段进 JSON（不改造、不丢字段）', (
   assert.deepEqual(parsed['verify'], { verified: true, events: 9, strong: true, strongDetail: 'detail', equivalentToReadPath: false })
   assert.equal(parsed['repairId'], 'repair-1')
   assert.equal(parsed['droppedRows'], 1)
+})
+
+/* ---------------- C1：就地修复的文案不得把 sessions repair 说成等价命令 ---------------- */
+
+test('C1 文案：就地修复的 commands 指向救急台并说明 sessions repair 的职责边界（不再自称等价命令）', async () => {
+  await withTmp(async (home) => {
+    // unitIds 为空 → 零 IO 提前返回，但 base.commands 已经成型（页面/终端可复制的出口命令）
+    const outcome = await repairSessionLogInline({ home, dataDir: home, unitIds: [], apply: false }, [])
+    const joined = outcome.commands.join(' | ')
+    assert.equal(outcome.commands.some((cmd) => /sessions repair\s+--apply/.test(cmd)), false, joined)
+    assert.equal(outcome.commands.some((cmd) => cmd.includes('等价命令')), false, joined)
+    assert.equal(outcome.commands.some((cmd) => cmd.includes('dsh-config-manager web')), true, joined)
+    assert.equal(
+      outcome.commands.some((cmd) => cmd.includes('sessions repair') && cmd.includes('布局归位') && cmd.includes('重复 id')),
+      true,
+      '必须写明 sessions repair 只做布局归位与重复 id 隔离: ' + joined,
+    )
+  })
+})
+
+test('C1 文案：不可修复项的回执指向字节级离线出口（不再含糊说「请用离线命令」）', async () => {
+  await withTmp(async (home) => {
+    const outcome = await repairSessionLogInline(
+      { home, dataDir: home, unitIds: ['--no-such-project--/session-x'], apply: false },
+      [],
+    )
+    const message = outcome.rows[0]?.message ?? ''
+    assert.match(message, /不可修复（unknown-unit）/)
+    assert.match(message, /dsh-config-manager web/)
+    assert.equal(message.includes('请用离线命令'), false, message)
+    assert.equal(/sessions repair\s+--apply/.test(message), false, message)
+  })
 })

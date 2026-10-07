@@ -222,6 +222,55 @@ test('T3 采集器：只读 —— 扫描前后文件字节与 mtime 逐字节�
   });
 });
 
+/* ---------------- C1：knownSessionIds —— 「未知」不得被伪造成「确知为空集」 ---------------- */
+
+/** 子代理会话 header（磁盘上父对话字段叫 parentSession；采集器按 session-log 的别名映射成 parentSessionId）。 */
+function subagentHeader(id: string, parent: string): Record<string, unknown> {
+  return { type: 'session', version: 3, id, cwd: 'D:\\proj', origin: 'subagent', parentSession: parent };
+}
+
+test('C1 采集器：不传 knownSessionIds → 用本次遍历到的全部单元自证（父对话在本机就不报缺父）', { skip: !CAPABLE }, async () => {
+  await withTmp(async (home) => {
+    await writeLog(home, KEY, 'session-parent', 'session.jsonl.zstd', logBytes({ type: 'session', version: 3, id: 'parent', cwd: 'D:\\proj' }));
+    await writeLog(home, KEY, 'session-child', 'session.jsonl.zstd', logBytes(subagentHeader('child', 'parent')));
+    const result = await scanSessionHealth({ homeDir: home, targetFormatVersion: 3 });
+    const child = result.rows.find((row) => row.sessionId === 'session-child');
+    assert.ok(child !== undefined);
+    assert.equal(
+      child.issues.some((issue) => issue.code === 'subagent-without-parent'),
+      false,
+      '父对话就在本机，不得报缺父: ' + JSON.stringify(child.issues),
+    );
+    assert.equal(result.summary.bySeverity.invisible, 0, 'invisible 必须归零（旧行为是全都算缺父）');
+  });
+});
+
+test('C1 采集器：不传 knownSessionIds 且父对话真的不在本机 → 仍报缺父（自证不是「一律不报」）', { skip: !CAPABLE }, async () => {
+  await withTmp(async (home) => {
+    await writeLog(home, KEY, 'session-child', 'session.jsonl.zstd', logBytes(subagentHeader('child', 'no-such-parent')));
+    const result = await scanSessionHealth({ homeDir: home, targetFormatVersion: 3 });
+    const row = result.rows[0];
+    assert.ok(row !== undefined);
+    assert.equal(row.issues.some((issue) => issue.code === 'subagent-without-parent'), true, JSON.stringify(row));
+    assert.equal(result.summary.bySeverity.invisible, 1);
+  });
+});
+
+test('C1 采集器：调用方提供了 knownSessionIds 就用它的（显式空集 = 确知本机没有该父 → 报）', { skip: !CAPABLE }, async () => {
+  await withTmp(async (home) => {
+    await writeLog(home, KEY, 'session-parent', 'session.jsonl.zstd', logBytes({ type: 'session', version: 3, id: 'parent', cwd: 'D:\\proj' }));
+    await writeLog(home, KEY, 'session-child', 'session.jsonl.zstd', logBytes(subagentHeader('child', 'parent')));
+    const result = await scanSessionHealth({ homeDir: home, targetFormatVersion: 3, knownSessionIds: new Set<string>() });
+    const child = result.rows.find((row) => row.sessionId === 'session-child');
+    assert.ok(child !== undefined);
+    assert.equal(
+      child.issues.some((issue) => issue.code === 'subagent-without-parent'),
+      true,
+      '调用方给的集合优先于采集器自证（显式空集 = 确知本机没有该父）',
+    );
+  });
+});
+
 /* ---------------- T4：工具生命周期四类 + tool/result 配对（只报不修；严重级 = 真 codec 实测口径） ---------------- */
 
 const T4_V4 = { type: 'session', version: 4, id: 'session-a', cwd: 'D:\\proj' };

@@ -161,6 +161,30 @@ test('T3 分类：格式版本超前 / 未登记工作区 / 子代理缺父 → 
   assert.equal(noParent.severity, 'invisible');
 });
 
+test('C1 分类：knownSessionIds 未提供（**未知**）→ 不判父子存在性（绝不把「未知」当「确知为空集」）', () => {
+  // 旧实现由采集器用 `?? new Set()` 把「未知」伪造成「空集」，于是**每一个**子代理会话都被判缺父
+  // （真机实测 1199 条里 800 条误报，bySeverity.invisible 全是它）。这里钉住 core 侧的判据：undefined = 不判。
+  const unknownSet: SessionHealthContext = { targetFormatVersion: 3, workspaceKeys: new Set([KEY]) };
+  const row = classifySessionHealth(input({ origin: 'subagent', parentSessionId: 'session-parent' }), unknownSet);
+  assert.equal(codes(row).includes('subagent-without-parent'), false);
+  assert.equal(row.severity, 'ok');
+});
+
+test('C1 分类：knownSessionIds = **显式空集**（确知本机没有该父）→ 仍报 subagent-without-parent', () => {
+  const missing = classifySessionHealth(
+    input({ origin: 'subagent', parentSessionId: 'session-parent' }),
+    ctx({ knownSessionIds: new Set<string>() }),
+  );
+  assert.deepEqual(codes(missing), ['subagent-without-parent']);
+  assert.equal(missing.severity, 'invisible');
+  // 父对话在本机（归一化键命中）→ 不报
+  const present = classifySessionHealth(
+    input({ origin: 'subagent', parentSessionId: 'session-parent' }),
+    ctx({ knownSessionIds: new Set(['parent']) }),
+  );
+  assert.equal(codes(present).includes('subagent-without-parent'), false);
+});
+
 test('T3：本机版本读不到 → 不做「超前」判定（宁可不报，也不谎报）', () => {
   const row = classifySessionHealth(input({ headerVersion: 99 }), ctx({ targetFormatVersion: undefined }));
   assert.equal(codes(row).includes('format-newer'), false);

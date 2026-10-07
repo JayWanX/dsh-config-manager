@@ -89,7 +89,13 @@ export interface SessionHealthScanOptions {
   targetFormatVersion?: number;
   /** 本机工作区记录的 cwd 目录键（`projectKeyOf(path)`） */
   workspaceKeys?: ReadonlySet<string>;
-  /** 本机全部已知会话 id 的归一化键（父对话存在性判定） */
+  /**
+   * 本机全部已知会话 id 的归一化键（父对话存在性判定）。
+   *
+   * **不传 = 未知**（调用方没有本机会话全量清单）→ 采集器**自证**：用本次遍历到的全部单元 id
+   * 作为已知集合（见 `scanSessionHealth`），绝不伪造成「确知为空集」；传了就用调用方的
+   * （UI 侧 `parentRelations` 更权威：它连注册表里的会话一起算）。
+   */
   knownSessionIds?: ReadonlySet<string>;
   /** 出现在多个 projectKey 的会话 id（归一化键） */
   duplicateSessionIds?: ReadonlySet<string>;
@@ -554,7 +560,7 @@ async function scanUnit(
   projectKey: string,
   sessionId: string,
   withRows: boolean,
-): Promise<{ input: SessionHealthInput; unreadable: number }> {
+): Promise<{ input: SessionHealthInput; unreadable: number; headerSessionId?: string }> {
   const dir = join(sessionsDir, projectKey, sessionId);
   let unreadable = 0;
   let names: string[] = [];
@@ -635,7 +641,11 @@ async function scanUnit(
       ? { deep: { verified: true, ...(deepIssues.length > 0 ? { issues: deepIssues } : {}) } }
       : { deep: { verified: false, unverifiedReason: 'row-scan-not-run' } }),
   };
-  return { input, unreadable };
+  // 首帧 header 的 id 是这一条会话的**真身份**（目录名可能是 `session-<uuid>`，也可能被手工改过）；
+  // 采集器自证时优先用它，取不到才回落到目录名。
+  const out: { input: SessionHealthInput; unreadable: number; headerSessionId?: string } = { input, unreadable };
+  if (header?.id !== undefined) out.headerSessionId = header.id;
+  return out;
 }
 
 /**
@@ -673,6 +683,15 @@ export async function scanSessionHealth(options: SessionHealthScanOptions): Prom
   const projectKeys = projectDirs.filter((name) => PROJECT_KEY_RE.test(name));
   const inputs: SessionHealthInput[] = [];
   const duplicates = new Set<string>();
+  /**
+   * **采集器自证**用的已知会话 id 集合：本次遍历到的**全部单元**（不限于被深查/被限额截断的那些）。
+   *
+   * 为什么需要：调用方（CLI / 救急台）不提供 `knownSessionIds` 时，旧实现用 `?? new Set()`
+   * 把「未知」伪造成「确知为空集」，于是「父对话存在性」判据对**每一条**子代理会话都成立 ——
+   * 真机实测 1199 条里 800 条被误报 `subagent-without-parent`（bySeverity.invisible=800）。
+   * 集合取「遍历到的全部单元 id」是**保守**方向：宁可少报「缺父」，也不谎报。
+   */
+  const knownIdsFromTraversal = new Set<string>();
   // 第一趟：只数「同一会话 id 出现在几个 projectKey 目录」（重复 id 是启动级故障）
   const idLocations = new Map<string, Set<string>>();
   for (const projectKey of projectKeys) {
@@ -686,6 +705,7 @@ export async function scanSessionHealth(options: SessionHealthScanOptions): Prom
     }
     for (const sessionId of dirs) {
       const key = sessionIdKey(sessionId);
+      knownIdsFromTraversal.add(key);
       const set = idLocations.get(key) ?? new Set<string>();
       set.add(projectKey);
       idLocations.set(key, set);
@@ -733,14 +753,21 @@ export async function scanSessionHealth(options: SessionHealthScanOptions): Prom
     scanned += 1;
     const withRows = deepLimit > 0 && deepUsed < deepLimit;
     if (withRows) deepUsed += 1;
-    const { input, unreadable } = await scanUnit(sessionsDir, unit.projectKey, unit.sessionId, withRows);
+    const { input, unreadable, headerSessionId } = await scanUnit(sessionsDir, unit.projectKey, unit.sessionId, withRows);
     result.unreadableEntries += unreadable;
+    // 首帧 header 的 id 与目录名可能不同形态（session-<uuid> / 裸 <uuid>）：都按 sessionIdKey 归一后并进已知集合
+    if (headerSessionId !== undefined) knownIdsFromTraversal.add(sessionIdKey(headerSessionId));
     inputs.push(input);
   }
   const analyzed = analyzeSessionHealth(inputs, {
     ...(options.targetFormatVersion !== undefined ? { targetFormatVersion: options.targetFormatVersion } : {}),
+    // workspaceKeys 维持「size > 0 才判未登记」：调用方读不到注册表与「注册表为空」不可区分，
+    // 把空集当确知会让每一条会话都报未登记（另一种误报）。这一点与 knownSessionIds 不同 —— 那里
+    // 「未知」由调用方用 undefined 显式表达。
     workspaceKeys: options.workspaceKeys ?? new Set<string>(),
-    knownSessionIds: options.knownSessionIds ?? new Set<string>(),
+    // 「未知」绝不伪造成「确知为空集」：调用方提供了就用它的（UI 的 parentRelations 更权威）；
+    // 没提供 → 用本次遍历到的全部单元 id 自证。
+    knownSessionIds: options.knownSessionIds ?? knownIdsFromTraversal,
     duplicateSessionIds: options.duplicateSessionIds ?? duplicates,
   });
   result.rows = analyzed.rows;

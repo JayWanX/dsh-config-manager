@@ -129,10 +129,23 @@ export interface SessionHealthInput {
 export interface SessionHealthContext {
   /** 本机 DSH 支持的会话格式版本（读不到 = undefined → 不做「超前」判定） */
   targetFormatVersion?: number;
-  /** 本机工作区记录的 cwd 目录键集合（`projectKeyOf(path)`） */
+  /**
+   * 本机工作区记录的 cwd 目录键集合（`projectKeyOf(path)`）。
+   *
+   * 判据**刻意**是「`size > 0` 才判未登记」：调用方读不到注册表（catch 分支）与注册表确实为空
+   * 在 UI 侧不可区分，把空集当「确知本机没有工作区」会让**每一条会话**都被报未登记 —— 那是另一种误报。
+   */
   workspaceKeys: ReadonlySet<string>;
-  /** 本机全部已知会话 id 的归一化键（sessionIdKey；父对话存在性判定用） */
-  knownSessionIds: ReadonlySet<string>;
+  /**
+   * 本机全部已知会话 id 的归一化键（sessionIdKey；父对话存在性判定用）。
+   *
+   * **「未知」与「确知为空集」必须分开**（否则会谎报）：
+   *  · `undefined` = **未知** —— 调用方根本拿不到本机会话全量清单 → **不判**父子存在性；
+   *  · 空集 = **确知本机一条会话都没有** → 照判（保留真缺陷检测：父对话真的不在了）。
+   * 旧实现由采集器用 `?? new Set()` 把「未知」伪造成「确知为空集」，于是 CLI / 救急台这类
+   * **不传上下文**的调用把本机**每一个**子代理会话都判成「缺父对话」（真机实测 1199 条里 800 条误报）。
+   */
+  knownSessionIds?: ReadonlySet<string>;
   /** 出现在多个 projectKey 目录的会话 id 的归一化键 */
   duplicateSessionIds?: ReadonlySet<string>;
 }
@@ -228,7 +241,10 @@ export function sessionHealthIssues(input: SessionHealthInput, ctx: SessionHealt
   if (cwd !== undefined && cwd !== '' && ctx.workspaceKeys.size > 0 && !ctx.workspaceKeys.has(projectKeyOf(cwd))) {
     push('unregistered-workspace', 'invisible', projectKeyOf(cwd));
   }
+  // 父子存在性只在**已知集合确实可用**时判：undefined（未知）→ 不报；空集（确知本机没有该父）→ 报。
+  // 绝不把「调用方没给集合」读成「本机没有任何会话」。
   if (input.origin === 'subagent' && input.parentSessionId !== undefined && input.parentSessionId !== ''
+    && ctx.knownSessionIds !== undefined
     && !ctx.knownSessionIds.has(sessionIdKey(input.parentSessionId))) {
     push('subagent-without-parent', 'invisible', input.parentSessionId);
   }

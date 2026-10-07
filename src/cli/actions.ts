@@ -550,7 +550,12 @@ export interface InlineRepairOutcome {
   ok: boolean
   dryRun: boolean
   rows: SessionLogRepairRow[]
-  /** 页面用的等价命令 */
+  /**
+   * 离线出口命令（可复制去终端）。
+   *
+   * **不是本入口的等价实现** —— 见 `repairSessionLogInline` 的能力边界：`sessions repair` 只做
+   * 布局归位与重复 id 隔离，不改写会话字节；字节级离线通道只有救急台 `dcm web`。
+   */
   commands: string[]
   error?: string
 }
@@ -628,9 +633,13 @@ export function sessionRepairRowMessage(facts: SessionRepairRowFacts): string {
  * 能力边界（**不得放宽**）：
  *  - 只做 `session-repair-service` 已有的那一类 —— 字节相同 + seq 相同的重放重复行（零损失）；
  *    其余类别（合成 closer / seq 空洞 / 不可解析行 / 容器非法 / header 不可读 / 子代理缺父）
- *    **只报告 + 给离线命令**，绝不在这里扩张（设计稿 §10.3/§10.4 的 G-23 界限）。
+ *    **只报告**，绝不在这里扩张（设计稿 §10.3/§10.4 的 G-23 界限）。
+ *  - **离线出口只有一个**：救急台 `dsh-config-manager web`（别名 `dcm web`）—— 它调用的就是本函数。
+ *    CLI 的 `sessions repair`（加 `--fix`/`--apply` 才落盘）**不是**字节级修复的等价命令：
+ *    它只做**布局归位**（按首帧 cwd 把目录搬回 `projectKeyOf(cwd)`）与**重复 id 隔离**，不碰会话字节。
+ *    此前把 `sessions repair --apply` 写成「等价命令」是不实表述（已订正，见下面的 `commands`）。
  *  - 三道写入门由服务层自持：单元必须解析到会话根内 / 无 `session.lock` / 文件不在 30s 静止期内；
- *    「DSH 已停」这一条由 `checkWriteGates` 在这里补上（= 与 CLI `sessions repair --apply` 同一道门，
+ *    「DSH 已停」这一条由 `checkWriteGates` 在这里补上（与 CLI 写动作共用同一道写入门，
  *    比应用内 T8 通道更严：T8 跑在 DSH 内部，靠静止期而非停机）。
  *  - 与 CLI 同源：预览-应用指纹一致（TOCTOU）/ 时间戳备份 / 原子换入 / 写后复验，全在服务层。
  *
@@ -643,11 +652,15 @@ export async function repairSessionLogInline(
 ): Promise<InlineRepairOutcome> {
   const base: InlineRepairOutcome = {
     ok: true, dryRun: !options.apply, rows: [],
-    commands: ['dsh-config-manager sessions repair --apply  # 等价命令（离线时）'],
+    // 不得再把 `sessions repair --apply` 说成等价命令：它只做布局归位与重复 id 隔离，不改写会话字节。
+    commands: [
+      'dsh-config-manager web  # 离线救急台：字节级就地修复的唯一离线通道（别名 dcm web）',
+      'dsh-config-manager sessions repair  # 只做布局归位与重复 id 隔离，不改写会话字节（--fix/--apply 才落盘）',
+    ],
   }
   if (options.unitIds.length === 0) return { ...base, ok: false, error: '没有选中任何会话单元。' }
   if (options.apply) {
-    // 与 sessions repair --apply 同一道门：改写会话字节必须先停 DSH（+ SAFE MODE + 环境锁）
+    // 与 CLI 写动作共用同一道写入门：改写会话字节必须先停 DSH（+ SAFE MODE + 环境锁）
     const gate = await checkWriteGates(controlRoots, { needsDshStopped: true })
     if (!gate.ok) return { ...base, ok: false, error: gate.reason }
   }
@@ -666,7 +679,8 @@ export async function repairSessionLogInline(
         ...(preview.expect !== undefined ? { expect: preview.expect } : {}),
         message: preview.ok
           ? '可零损失修复：将丢弃 ' + String(preview.droppedRows ?? 0) + ' 行重放重复事件。'
-          : '不可修复（' + (preview.reason ?? 'unknown') + '）：这一类只报告，请用离线命令或保留原样。',
+          : '不可修复（' + (preview.reason ?? 'unknown') + '）：这一类只报告，本入口绝不改写它的字节；'
+            + '字节级离线出口是救急台 dsh-config-manager web（sessions repair 只做布局归位与重复 id 隔离）。',
       })
       continue
     }

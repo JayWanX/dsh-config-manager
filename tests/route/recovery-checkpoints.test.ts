@@ -47,7 +47,10 @@ interface Harness {
 }
 
 async function makeHarness(): Promise<Harness> {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-cm-checkpoint-route-'))
+  // issue #69 口径：os.tmpdir() 在部分平台给的是**未规范化**的拼写 —— macOS 是 /var（真身 /private/var）、
+  // GitHub 的 Windows runner 是 8.3 短名（C:\Users\RUNNER~1\…）。服务侧解析 unitId 拿到的是规范化路径，
+  // 所以夹具的根也必须先 realpath，否则断言比的是「同一个目录的两种写法」（CI 上 windows/macos 必红，本机不复现）。
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-cm-checkpoint-route-')))
   const homeDir = path.join(root, 'home')
   const dataDir = path.join(homeDir, 'dsh-config-manager')
   const workspaceDir = path.join(root, 'proj')

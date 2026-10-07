@@ -1,0 +1,13 @@
+# GitHub 自动生成的 release notes 分类（--generate-notes 读取本文件）。
+# 目的：把 dependabot 的依赖升级收敛成一个分类，正文不再被 20+ 条 bump 行刷屏。
+# 匹配规则：按 categories 顺序取第一个命中的分类；`*` 是兜底，必须放在最后（GitHub 要求）。
+# 依据：仓库现有 31 条 dependabot PR 全部带 `dependencies` 标签（另有 javascript / github_actions 生态标签），
+#       人工 PR 无标签 ⇒ 依赖类命中第 1 类，其余全部落第 2 类。
+changelog:
+  categories:
+    - title: "🔧 依赖更新 / Dependency Updates"
+      labels:
+        - dependencies
+    - title: "📦 其它变更 / Other Changes"
+      labels:
+        - "*"

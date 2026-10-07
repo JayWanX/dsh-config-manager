@@ -42,17 +42,38 @@ src/
 
 ## 🚀 自动发布（npm + GitHub Release）
 
-打 tag 即全自动（`.github/workflows/publish.yml`）：
+**发版顺序**（顺序有意义：publish.yml 抽取的是**被打 tag 的那个提交**里的 CHANGELOG，所以 CHANGELOG 收口必须先提交再打 tag）：
 
 ```bash
+# 1) 收口 CHANGELOG：[Unreleased] → ## [0.1.70] - <今天>，并在顶部开好下一轮骨架
+node .github/scripts/changelog-section.mjs release 0.1.70
+git add CHANGELOG.md && git commit -m "docs(changelog): 0.1.70"
+
+# 2) 同步版本号三处并打 tag（全自动：typecheck → test → build → pack → npm publish → GitHub Release）
 npm version patch          # 0.1.x → 0.1.x+1（改版本 + 打 tag）
 git push origin main --tags
 ```
 
+- **CHANGELOG 版本段有通用骨架**：`.github/changelog-template.md` 定义固定结构 —— `## [x.y.z] - ISO日期` +
+  `> 中文主题` / `> **Theme**: 英文主题` + 可选 `### 中文 / English` 小节 + 可选 `> **致谢 / Thanks**`。
+  `changelog-section.mjs release` 负责收口并开下一轮骨架（结构与骨架同源），`check` 在 **npm publish 之前**
+  做格式门禁（标题带日期 / 有中英主题 / `###` 小节非空 / 不留 `{{...}}` 占位符 —— 骨架没填完发不出去）；
+  行为门禁见 `tests/changelog-section.test.ts`。
+
 CI 流水线：`typecheck → 192 测试 → build → npm pack → npm publish（OIDC）→ 创建 GitHub Release（tgz 附件 + CHANGELOG 双语亮点 + 自动变更记录）`
 
 - **npm 发布走 Trusted Publishing（OIDC）**：无任何长期令牌；workflow 需 `id-token: write` + npm ≥ 11.5.1（workflow 会先升级 npm）
-- **Release 描述**：CI 从 `CHANGELOG.md` 抽取当前版本段（中英双语亮点，漏写会 **fail fast**）拼上自动变更记录；发版前务必在 `CHANGELOG.md` 顶部更新对应版本段
+- **Release 描述由模板渲染**：CI 从 `CHANGELOG.md` 抽取当前版本段（中英双语亮点，漏写会 **fail fast**），
+  再由 `node .github/scripts/render-release-notes.mjs <tag> <模板> <亮点> <自动记录>` 套用
+  **`.github/release-notes-template.md`** 渲染成最终描述并 `gh release edit --notes-file` 写回。
+  文案只改模板即可，不必动 workflow；占位符 `{{highlights}}` / `{{autoNotes}}`（必填）/ `{{version}}`（去 v）/ `{{tag}}`，
+  未知占位符原样保留，HTML 注释视为模板注释不进描述。
+- **模板在 npm publish 之前先 dry-run 一次**（与亮点段同一个门禁步骤）：模板写坏会在发 npm 包之前就红，
+  避免出现「包已发到 npm、GitHub Release 描述没写」的半成品；dry-run 用桩自动记录，正式渲染在 release 步骤。
+- **自动变更记录的分类**：`.github/release.yml` 把 dependabot（`dependencies` 标签）归入「🔧 依赖更新」、其余进
+  「📦 其它变更」兜底类；若要彻底不显示依赖升级，把该标签移到 `changelog.exclude.labels`。
+- **本地预览描述**：`node .github/scripts/render-release-notes.mjs v0.1.70 .github/release-notes-template.md <亮点文件> <自动记录文件>`
+  （亮点可用 `python3 .github/scripts/extract-release-notes.py 0.1.70 CHANGELOG.md` 生成）；行为门禁见 `tests/release-notes-template.test.ts`
 - 一次性配置（首次）：
   ```bash
   npm login

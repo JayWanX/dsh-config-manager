@@ -240,6 +240,7 @@ function readClientSources(): SourceFile[] {
       }
       if (!/\.tsx?$/.test(entry.name) || /\.test\.tsx?$/.test(entry.name)) continue;
       const rel = path.relative(ROOT, child).split(path.sep).join('/');
+      // issue #70：锚点是含裸 \n 的源码字面量 ⇒ 读取入口统一折 LF（本文件用 normalizeEol 同一口径）
       out.push({ rel, code: normalizeEol(stripJsComments(fs.readFileSync(child, 'utf8'), true, false)) });
     }
   };

@@ -319,6 +319,8 @@ export function synthesizeDshRows(
   let stepOpen = false;
   let model = 'unknown';
   let messageIndex = 0;
+  /** 已发出、尚未收到结果的 callId（FIFO）：源侧结果缺 id 时按它回填，绝不产出空 callId */
+  const openCallIds: string[] = [];
 
   const closeStep = (): void => {
     if (stepOpen) {
@@ -355,6 +357,9 @@ export function synthesizeDshRows(
       const source = message.passthrough?.['source'];
       const m = irStr((source as Record<string, unknown> | undefined)?.['model']);
       if (m !== undefined) model = m;
+      // DSH 要求 provider/model 都是**非空**字符串（hasProviderModel），空串一律兜底，绝不产出会被拒读的行
+      const providerName = hints.provider === '' ? 'foreign' : hints.provider;
+      const modelName = model === '' ? 'unknown' : model;
       if (text.trim() === '' && calls.length === 0) {
         irBump(stats.ignored, 'assistant-empty');
         continue;
@@ -365,6 +370,31 @@ export function synthesizeDshRows(
       push('step/start', at, { turn, step });
       stepOpen = true;
       const usage = message.passthrough?.['usage'];
+      /**
+       * assistant/message 的 `message.content` **必须携带 tool-call 块**（与 DSH 自己写的日志同形）：
+       * ① `deriveEventMessage` 对空 content 返回 null —— 只有工具调用、没有正文的助手消息会整条消失；
+       * ② DSH 的 interrupted-turn 修复逻辑按 `content[].type === 'tool-call'` 记录未决调用。
+       * 块里的 id 与随后 `tool/call` 事件的 callId **共用同一份 callIds**，不可能对不上。
+       */
+      const content: Record<string, unknown>[] = [];
+      if (text.trim() === '') {
+        for (const b of hints.emptyBlocks) content.push({ ...b });
+      } else {
+        content.push({ ...irTextBlock(text) });
+      }
+      const callIds: string[] = [];
+      for (let i = 0; i < calls.length; i++) {
+        const call = calls[i];
+        if (call === undefined) continue;
+        const callId = call.id === '' ? 'call-' + String(messageIndex) + '-' + String(i) : call.id;
+        callIds.push(callId);
+        content.push({
+          type: 'tool-call',
+          id: callId,
+          name: call.name === '' ? 'unknown' : call.name,
+          arguments: JSON.stringify(call.input),
+        });
+      }
       push(
         'assistant/message',
         at,
@@ -373,20 +403,35 @@ export function synthesizeDshRows(
           step,
           message: {
             role: 'assistant',
-            content: text.trim() === '' ? [...hints.emptyBlocks] : [irTextBlock(text)],
-            source: { kind: 'assistant', provider: hints.provider, model },
+            content,
+            /**
+             * DSH 的 `assertMessageEventShape` 对 assistant/message 的硬要求：
+             * `source.kind === 'model'` **且** `hasProviderModel(source)`（provider 与 model 都是非空字符串）。
+             * 写 `kind: 'assistant'` 或空的 provider/model 会被**直接拒读**（真机表现为「历史加载失败：… message must have model source」）。
+             */
+            source: { kind: 'model', provider: providerName, model: modelName },
             id: message.id,
           },
           usage: irUsageOf(usage),
+          /**
+           * 真实 DSH 日志的 assistant/message 一定带 `stream`（模型增量标记，语义不透明）。
+           * 消息正文走 `message.content`（`deriveEventMessage` 只读它），所以空数组是安全的；
+           * 但**不能省**：装入/种子边界要求它是数组（`assertAssistantSettlementShape`）。
+           */
+          stream: [],
         },
         'append',
       );
-      for (const call of calls) {
+      for (let i = 0; i < calls.length; i++) {
+        const call = calls[i];
+        const callId = callIds[i];
+        if (call === undefined || callId === undefined) continue;
         stats.toolCalls++;
+        openCallIds.push(callId);
         push('tool/call', at, {
           turn,
           step,
-          callId: call.id === '' ? 'call-' + String(messageIndex) : call.id,
+          callId,
           name: call.name === '' ? 'unknown' : call.name,
           arguments: JSON.stringify(call.input),
         });
@@ -410,6 +455,25 @@ export function synthesizeDshRows(
         stepOpen = true;
       }
       for (const r of results) {
+        /**
+         * 配对键**必须非空**：DSH 的 `assertMessageEventShape` 要求 tool/result 的
+         * `source.callId` 是非空字符串，且与 `content[0].toolCallId` 逐字相同，块类型是 `tool-result`
+         * （连字符；`tool_result`/`tool_use_id`/`is_error` 这套 Anthropic 命名会被直接拒读）。
+         * 源没给 id 时按「最早尚未收到结果的调用」FIFO 回填；一个未决调用都没有 → 这条结果无处归位，
+         * 计数后丢弃（**不发明悬空引用**）。
+         */
+        let callId = r.id;
+        if (callId === '') {
+          const next = openCallIds.shift();
+          callId = next === undefined ? '' : next;
+        } else {
+          const idx = openCallIds.indexOf(callId);
+          if (idx >= 0) openCallIds.splice(idx, 1);
+        }
+        if (callId === '') {
+          irBump(stats.ignored, 'orphan-tool-result');
+          continue;
+        }
         stats.toolResults++;
         push(
           'tool/result',
@@ -418,17 +482,17 @@ export function synthesizeDshRows(
             turn,
             step,
             message: {
-              source: { kind: 'tool', callId: r.id },
+              id: message.id,
+              role: 'user',
+              source: { kind: 'tool', callId },
               content: [
                 {
-                  type: 'tool_result',
-                  tool_use_id: r.id,
+                  type: 'tool-result',
+                  toolCallId: callId,
+                  isError: r.isError,
                   content: [{ type: 'text', text: r.text }],
-                  is_error: r.isError,
                 },
               ],
-              role: 'user',
-              id: message.id,
             },
           },
           'append',

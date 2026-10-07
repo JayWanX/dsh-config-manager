@@ -179,13 +179,21 @@ const CORPUS: readonly Case[] = [
  * + 5 个 skip 面。**不得为了让它变绿而改写这里的数值** —— 那等于把护栏变成橡皮图章。
  */
 const GOLDEN: Record<string, string> = {
-  'basic-with-malformed-line': '870:88c8a5c87737b2e22fcfac0ef6c895b903b14414692be2c4fa40b64cff58411e',
-  'frames-crossing-64k': '7618:a13be1d8cc97b0654bd19f80e3aa0ca2a64f815e32ce3296ee9809dd6d3c560c',
+  /**
+   * 2026-10-07 有意更新（**理由**）：旧基线是**会被 DSH 拒读**的产物 —— 真机导入 Hermes
+   * 会话时报 `session event at seq … message must have model source`。修 `synthesizeDshRows`
+   * 的三处不合规形状（assistant `source.kind: 'assistant'` → `'model'`（provider/model 非空）；
+   * assistant 行补 `stream: []` 与 content 里的 `tool-call` 块；tool/result 块改为
+   * `tool-result`/`toolCallId`/`isError` 且 callId 非空）后，字节必然变化。
+   * 复验：DSH 自己的 `adoptSessionEvent` 逐行校验 hermes 71 会话 / 29687 行 → 0 拒绝。
+   */
+  'basic-with-malformed-line': '891:1b8d8c38f294800815d3d4e9ad338313406ae650ccdaacd113f9a9d1dbfc840d',
+  'frames-crossing-64k': '7506:63663ed1e2d0f3f6c8b177b2a8ad04478ea6f92eebdfe2e0c8cae31f1dafe4a3',
   'orphan-empty-and-unknown': '338:94f6bfc7a6c8414def1f26db26fc691eeefa90ab27df973c569e15116b20c817',
   'title-only-no-events': '276:c7c2bb7be4040ecac5c404f88d2074a97986bceae08c4220d2efb5700a4a4159',
-  'no-uuid-fallback-ids': '709:afdf3524f347e6be385d27cb1863691c5931a528a3f71e544eb9bd1139f4e379',
-  'timestamps-numeric-and-unparsable': '718:369d9a2cf3443044f536f4f249caa59caa19ec33463686fb130841f33fb773aa',
-  'unicode-and-max-id': '717:7ec3c1051f419a7d84ccdfd519bc7a568a88ce112914e2e8ec4698441574358b',
+  'no-uuid-fallback-ids': '731:babd8decf0b3b6a2396a12767d6ce1a428df157b6f3567012e606ef5269789aa',
+  'timestamps-numeric-and-unparsable': '723:462361f41500fc0611684c9bcfe46a4b489feb043c2cf343a3442706bba6271b',
+  'unicode-and-max-id': '725:bf06eee24f22d88fbe4764a8be8af62c22e1fcb51ffa65f0ed27d0e16cd2632c',
   'skip-unsupported-version': 'skip:session-format-unsupported',
   'skip-unsafe-id': 'skip:session-unsafe-id',
   'skip-missing-cwd': 'skip:session-missing-cwd',

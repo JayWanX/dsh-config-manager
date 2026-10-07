@@ -336,4 +336,30 @@ d`。
 - **只读预览 vs 真实导出的量化数据（第二批）**：真机 agentInstructions 预览 4.8 s／4016 文件；self 预览 2460 文件／11.44 MB，而真实导出 1936 B；本机会话树 941 文件 / 528 MB 的预览已降至 ~0.4 s。
 - **`readSessionMeta` 缓存动机的量化数据**：`storages/session_projcache.json` = **1.57 MB**，每次预览 / 每次 `/plan` 都要解析，实测 **7.3 ms**。
 - **磁盘清理那次的原始症状（2026-09）**：`includeRecent` 只影响可重建区，但导出区仍按保留期回收 ⇒ 界面说「只清缓存」却删了备份；守卫 = `tests/route/disk-usage-routes.test.ts`。
+
+---
+
+## 外部 Agent 会话导入的行形状（2026-10-07 真机事故）
+
+**症状**：导入 Hermes 历史会话后，DSH 会话列表对该会话报
+`历史加载失败：stored session "<id>" is corrupt: stored session "<id>" failed validation: Error: session event at seq 5 message must have model source（gateway/internal）`。
+
+**根因**（`src/foreign/session-ir.ts` 的 `synthesizeDshRows`，2026-10-06 起 24 个会话来源 + Claude Code 共用）：
+
+| # | 我们产出的形状 | DSH 要求（`dsh-session/lib/index.js`） |
+|---|---|---|
+| 1 | assistant `message.source = {kind:'assistant', provider, model}` | `assertMessageEventShape`（:946-948）：`source.kind === 'model'` **且** `hasProviderModel`（:958-961，provider 与 model 都非空） |
+| 2 | assistant 行**没有** `stream` 字段 | 真实日志必有；`assertAssistantSettlementShape`（:904-908）要求 `Array.isArray(data.stream)` |
+| 3 | assistant `message.content` 只有 text 块 | `deriveEventMessage`（:209-215）对**空 content 返回 null**；DSH 的 interrupted-turn 修复（:634）按 `content[].type === 'tool-call'` 记录未决调用 → 只有工具调用的助手消息会整条消失 |
+| 4 | 工具结果块 `{type:'tool_result', tool_use_id, content, is_error}`，`source.callId` 可能为空串 | `assertMessageEventShape`（:950-955）：`source.kind === 'tool'`、`callId` 非空、`content` 恰好一块且 `type === 'tool-result'`、`block.toolCallId === source.callId` |
+
+**权威形态来源**（不是猜的）：① DSH 校验器源码（上面行号）；② 本机真实日志逐行取样 —— `~/.dsh/sessions/--D-Projects-…--/session-…/session.v3.jsonl.zstd` 解帧后 8023 行里，assistant 行的 `data` 键恒为 `turn,step,message,usage,stream`、`source` 恒为 `{kind:'model',provider,model}`，工具结果块恒为 `{type:'tool-result',toolCallId,content,isError}`。
+
+**修法**：`session-ir.ts` 四处对齐（kind → `'model'` + 非空兜底；补 `stream: []`；content 里补与 `tool/call` 同 id 的 `tool-call` 块；工具结果块改 `tool-result`/`toolCallId`/`isError`，空 id 按「最早未决调用」FIFO 回填、无主结果计数丢弃）。
+
+**复核方式（可复现）**：用 DSH 自己的校验器逐行跑真机产物 —— `import { adoptSessionEvent } from '<dsh>/node_modules/@deepseek-ai/dsh-session/lib/index.js'`，对每条行的 `JSON.parse` 结果调用它。修复后：hermes 71 会话 / 29687 行、antigravity 7 / 2474、claude-code 2 / 6，**0 拒绝**；修复前正是这条链在拒绝。
+
+**护栏**：`src/foreign/session-ir.test.ts` 钉四条形状（CI 里不依赖 DSH）；`claude-sessions-bytes.test.ts` 的字节基线随之有意更新（该文件头部要求「从旧值变更必须写明理由」，理由已写在 `GOLDEN` 上方）。
+
+**已导入的坏会话需要重导**：旧产物在磁盘上仍是旧字节，导入计划会按 `session-id-conflict` 跳过；重导前先删掉那批会话目录。
 - **救援冲突的时间尺度**：`reconcileBundles` 约 **1.5 s** 内就把插件加回（文档正文表述为「秒级」）。

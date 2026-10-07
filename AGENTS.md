@@ -36,6 +36,7 @@ src/utils/     paths/zip/hashing/json/logger/atomic-write/env-lock/recursive-wal
 src/client/    React壳(浏览器半)  ← 只做装配
 tests/ 集成测试(node --test)；docs/README.md 文档索引；docs/design/ 设计文档；docs/spec/ 对外契约(格式规格/schema/兼容矩阵/已知缺口)；
               docs/seo/ 曝光审计；docs/handoff/ 阶段交接(历史归档，非当前状态)；其余文档一律进 docs/，根目录只放对外文档
+.dsh/skills/  项目级 skill（DSH 启动即自动发现、进会话的 skill 目录）：changelog-writing = CHANGELOG 的落位/体例/发版门禁
 ```
 
 ### UI 分层铁律
@@ -204,6 +205,7 @@ UI 自查：DESIGN.md 一致(token/组件/spacing/radius/状态语义)、响应�
 | 新 Design Pattern/Shared Component/Token/主题/新页面 | `DESIGN.md` |
 | 新目录约定/架构Pattern/开发规范/脚本/CI | `AGENTS.md` |
 | 新增/修订常见坑（铁律或细节） | `AGENTS.md` §📌 常见坑 **和** `docs/known-pitfalls.md`（两处同步） |
+| 新增/调整 CHANGELOG 体例或分组约定 | `CHANGELOG.md` 头部「条目落位」**和** `.dsh/skills/changelog-writing/SKILL.md`（两处同步） |
 代码与文档同步；冲突时以代码为准修正文档。
 
 ## 📌 常见坑

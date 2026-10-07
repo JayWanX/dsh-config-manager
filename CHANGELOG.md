@@ -16,6 +16,8 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 > **Where new entries go (grouped by change type)**: new entries land under `## [Unreleased]` in the matching group —
 > `Added` / `Changed` / `Fixed` (and `Removed` / `Security` when applicable); omit empty groups.
 > Released sections keep the style they were written in.
+>
+> 体例细节、分组表、发版两道门禁与写后自检命令见项目 skill `.dsh/skills/changelog-writing/SKILL.md`（DSH 会自动发现并加载）。
 
 ## [Unreleased]
 

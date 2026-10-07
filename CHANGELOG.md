@@ -21,6 +21,22 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 
 ## [Unreleased]
 
+> **{{本版主题}}**：{{一句话中文主题}}
+>
+> **Theme**: {{one-line English theme}}
+
+## [0.1.70] - 2026-10-07
+
+> **本版主题：把「来源」与「通道」两头同时拓宽** —— 外部 agent 迁移来源一次从 6 个补齐到 30 个（新增统一会话 IR 层），
+> 同步通道从 git / WebDAV 扩到 6 类云端点（S3 / OSS / COS / MinIO / Kodo / Gist）并支持直接选/新建私有仓库；
+> 同时修掉本轮上报的 issue #69–#75 —— 其中一个是数据丢失级（`!!js` 方言让整层 patch 行从导出/同步里消失），
+> 另有两个属于「报成功但其实没做成」（#71 备份不到外壳的 MCP / Skills、#73 一键同步永不收敛）。
+>
+> **Theme**: this release widens both ends of the pipe — foreign-agent import sources go from 6 to 30 (on a new
+> shared session IR layer), and the sync channel grows from git / WebDAV to six cloud endpoints plus a
+> private-repo picker. Reported issues #69–#75 are fixed, including a data-loss one (the `!!js` dialect silently
+> dropped whole patch layers from export/sync) and two "reported success while nothing happened" bugs (#71, #73).
+
 ### 🆕 新增 · Added
 
 > **外部 agent 迁移来源一次补齐到 30 个（+24）**：此前只认 6 个来源（Claude Code / Hermes / Cursor / Codex /

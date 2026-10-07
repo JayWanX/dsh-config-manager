@@ -41,7 +41,8 @@
  *     标 `via: "asar-extract"`（`detail` 写成 `runtime-anchor+asar-extract`，仍**不含绝对路径**）。
  *  ③ **显式安装根锚点**：环境变量 `DSH_CM_DSH_INSTALL` = DSH 安装根（含 `resources/app.asar` 的那一层）
  *     → `<root>/resources/app.asar/dsh/node_modules/…`（标签 `env-anchor`，排在运行时锚点之前）。
- *     **只在用户显式给出时使用**；「离线 CLI 自动发现安装位置」仍是已登记缺口，本模块**不做任何启发式搜索**。
+ *     **只在用户显式给出时使用**。它与其余锚点一样同时进**候选链**与**权威版本解析**
+ *     （两条链共用 `anchorPlans()` 这一份计划表；早先只有权威侧看 env，纯 node 只设 env 会误判 unavailable —— B3/F1）。
  *  ④ **<home>/profiles/node_modules/@deepseek-ai/dsh-session-format-catalog**（以及 <home>/profiles/<profile>/… ）
  *     —— 与 src/index.ts 的 dshPackageJsonCandidates 第 ②③ 条同源，每处再试 hoisted 与 pnpm 嵌套两种布局
  *     （deriveRoots 与 utils/session-format.ts 的 resolveSessionFormatVersion 逐字同款）。
@@ -76,8 +77,9 @@
  *     profiles-tree 的旧代际静态 catalog；结果里的 `via: "asar-extract"` 让调用方与台账能看见这条路径。
  *     仍然**不放宽**任何判据：asar 缺失 / 不可读 / 解不出 / 代际对不上 → 一律如实 unavailable
  *     （绝不伪造 verified，也绝不因此把日志判成 decode-failed）。
- *  剩余缺口（登记在 docs/spec/known-gaps.md G-24）：「离线 CLI 自动发现安装位置」—— 本模块只认
- *     `process.resourcesPath`（Electron 宿主）与显式 `DSH_CM_DSH_INSTALL`，**不扫盘、不猜默认安装路径**。
+ *  锚点的共同前提：必须由外部**显式**给出 —— 宿主注入 `installAnchor`、进程环境变量 `DSH_CM_DSH_INSTALL`、
+ *     或 Electron 的 `process.resourcesPath`。**「离线 CLI 自动发现安装位置」在本仓未实现**：
+ *     本模块不扫盘、不猜默认安装路径；纯 node 下三者都拿不到时如实判 unavailable（不伪造 verified）。
  *
  * ── recovery / validation（对着已安装包实测确定，不抄文档）────────────────────
  *  · recovery: 'strict' 写死。日志是**我们刚改写过的字节**，必须逐行严格成立；用 'recoverable' 会接受
@@ -210,12 +212,18 @@ export function nodeModulesRootsFor(dshPackageJsonCandidates: readonly string[])
 }
 
 /**
- * 缺省候选：**运行时锚点优先**（拉起本进程的那份 runtime），其次本机 profile 树。
+ * 锚点候选清单（**公开视图**）：env-anchor（`DSH_CM_DSH_INSTALL`）→ runtime-anchor（拉起本进程的 runtime）
+ * → profiles-tree（本机档案树）。与 `anchorPlans()` 的**同一份来源、同一顺序**。
  *
- *  ① Electron 桌面端：<resources>/app.asar/dsh/node_modules/@deepseek-ai/dsh/package.json
- *     —— profileContext.installAnchor 在服务层（拿不到 profileContext 的地方）的进程内等价物；
- *     app.asar.unpacked 与解包安装的 app 两种形态一并列出（存在即用，不存在即跳过，绝不猜）。
- *  ② 与 src/index.ts 的 dshPackageJsonCandidates 第 ②③ 条逐字同款：<home>/profiles/<profile>/、
+ * 调用关系（写清楚，避免「注释承诺 > 实际防线」）：缺省路径**不调用本函数** —— `resolveCatalog` 与
+ * `resolveAuthoritativeVersion` 都直接吃 `anchorPlans()` 那张（标签 + 候选）计划表；本函数是同一份来源的
+ * 扁平清单，供**需要显式传 `dshPackageJsonCandidates` 的调用方与诊断**使用（显式传它等于把整条锚点链
+ * 换成这一份清单，标签统一为 `anchor`）。
+ *
+ *  ① env-anchor：<DSH_CM_DSH_INSTALL>/resources/app.asar/dsh/node_modules/…（用户显式给出的安装根）。
+ *  ② runtime-anchor：<process.resourcesPath>/app.asar|app.asar.unpacked|app 下的 dsh/node_modules
+ *     —— profileContext.installAnchor 在服务层（拿不到 profileContext 的地方）的进程内等价物。
+ *  ③ profiles-tree：与 src/index.ts 的 dshPackageJsonCandidates 第 ②③ 条逐字同款：<home>/profiles/<profile>/、
  *     <home>/profiles/、<home>/profiles/web/。
  *
  * 顺序就是真伪顺序：真机实测「profile hoisted 树」是 web 档案装出来的旧副本（本机 0.1.5-rc.2），
@@ -330,11 +338,16 @@ function isSessionVerifyCatalog(value: unknown): value is SessionVerifyCatalog {
 }
 
 /**
- * 权威候选清单（**带来源标签**，与 src/index.ts 的 dshPackageJsonCandidates 同序）：
- * install-anchor（profileContext.installAnchor）→ runtime-anchor（asar / 解包 app）→ profiles-tree。
- * 调用方显式给了 dshPackageJsonCandidates 时，它**就是**权威清单（标签 anchor）。
+ * 锚点计划（**标签 + 候选清单**）—— 权威「已装版本」解析与 catalog 候选规划**共用这一份**（B3/F1）。
+ *
+ * 顺序即真伪顺序：install-anchor（profileContext.installAnchor）→ env-anchor（显式 \`DSH_CM_DSH_INSTALL\`）
+ * → runtime-anchor（<resources>/app.asar|app）→ profiles-tree（<home>/profiles/**）。
+ * 调用方显式给了 dshPackageJsonCandidates 时，它**就是**唯一清单（标签 anchor）。
+ *
+ * 为什么必须共用：这两处一旦分叉，就会出现「权威版本按 env 锚点算出来了、catalog 候选却根本不看 env」
+ * —— 纯 node 只设 env 时永远 unavailable，而显式传 candidates 却能 verified（正是 B3/F1 的现场）。
  */
-function authoritativePlans(options: SessionVerifyOptions): { label: string; candidates: string[] }[] {
+function anchorPlans(options: SessionVerifyOptions): { label: string; candidates: string[] }[] {
   if (options.dshPackageJsonCandidates !== undefined) return [{ label: 'anchor', candidates: [...options.dshPackageJsonCandidates] }];
   const plans: { label: string; candidates: string[] }[] = [];
   if (options.installAnchor !== undefined && options.installAnchor !== '') plans.push({ label: 'install-anchor', candidates: [options.installAnchor] });
@@ -358,7 +371,7 @@ function authoritativePlans(options: SessionVerifyOptions): { label: string; can
  */
 async function resolveAuthoritativeVersion(options: SessionVerifyOptions): Promise<{ version?: number; tried: string[] }> {
   const tried: string[] = [];
-  for (const plan of authoritativePlans(options)) {
+  for (const plan of anchorPlans(options)) {
     for (const root of nodeModulesRootsFor(plan.candidates)) {
       // 磁盘树优先（解包 app / 档案树），asar 容器内的同树常量走只读读取器（缺口⑤）
       const version = readSessionFormatVersionAt(root) ?? (await readSessionFormatVersionInAsar(root));
@@ -552,7 +565,8 @@ async function resolveCatalog(options: SessionVerifyOptions, headerVersion: unkn
     }
   }
 
-  // ②③ 显式候选（标签 anchor）或运行时锚点（runtime-anchor）+ profile 树（profiles-tree）
+  // ②③④ 候选链与权威版本解析**同源同序**（anchorPlans 是唯一那份计划表，B3/F1）：
+  // 显式 candidates → anchor；否则 install-anchor → env-anchor → runtime-anchor → profiles-tree。
   const plans: { label: string; root: string }[] = [];
   const seenRoots = new Set<string>();
   const pushPlan = (label: string, root: string): void => {
@@ -560,11 +574,8 @@ async function resolveCatalog(options: SessionVerifyOptions, headerVersion: unkn
     seenRoots.add(root);
     plans.push({ label, root });
   };
-  if (options.dshPackageJsonCandidates !== undefined) {
-    for (const root of nodeModulesRootsFor(options.dshPackageJsonCandidates)) pushPlan('anchor', root);
-  } else {
-    for (const root of nodeModulesRootsFor(runtimeAnchorCandidates())) pushPlan('runtime-anchor', root);
-    for (const root of nodeModulesRootsFor(profileCandidates(options.homeDir, options.profile))) pushPlan('profiles-tree', root);
+  for (const plan of anchorPlans(options)) {
+    for (const root of nodeModulesRootsFor(plan.candidates)) pushPlan(plan.label, root);
   }
   for (const plan of plans) {
     const direct = join(plan.root, CATALOG_PKG_REL, CATALOG_ENTRY_REL);

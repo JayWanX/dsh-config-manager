@@ -1,7 +1,8 @@
 /**
  * 最小只读 asar 读取器（宿主/CLI 专用，node 侧）—— 解析 Chromium pickle 包头 + JSON 目录表，
  * 按**显式包名 / 相对前缀**把需要的条目取出到缓存目录，供 \`session-verify.ts\` 在纯 node 下
- * import DSH 安装里 app.asar 内的官方 catalog（known-gaps G-24 的缺口⑤）。
+ * import DSH 安装里 app.asar 内的官方 catalog（缺口⑤：打包安装下 asar 是容器不是目录，
+ * 纯 node 既 existsSync 不到、也 import 不了里面的文件）。
  *
  * 为什么需要它：asar 是**容器不是目录**，纯 node 既 existsSync 不到、也 import 不了里面的文件。
  * DSH 桌面版把整个 dsh 运行时打进 \`<resources>/app.asar\`，而官方 codec
@@ -26,8 +27,9 @@
  *  · \`process.resourcesPath\`（Electron 宿主；接线见 session-verify.ts 的 runtimeAnchorCandidates）；
  *  · 显式环境变量 \`DSH_CM_DSH_INSTALL\` = **DSH 安装根**（就是含 \`resources/app.asar\` 的那一层，
  *    例如 \`D:\Apps\DSH\`）→ 候选 \`<root>/resources/app.asar/...\`。**只在用户显式给出时使用**。
- *  · 「离线 CLI 自动发现安装位置」仍是**已知缺口**（登记在 docs/spec/known-gaps.md G-24）：本模块
- *    与调用方都不做任何启发式搜索（不扫盘、不猜默认安装路径）。
+ *  · **「离线 CLI 自动发现安装位置」在本仓未实现**（不依赖任何文档登记即可核实：全仓只有
+ *    `process.resourcesPath` 与 `DSH_CM_DSH_INSTALL` 两个来源）。本模块与调用方都不做启发式搜索
+ *    （不扫盘、不猜默认安装路径）—— 两者都拿不到时，调用方如实判 unavailable。
  *
  * ── 运行上下文（真机实测；这决定「直接 import」与「抽取」两条路各自的前提）────
  *  · **Electron 宿主**（`DeepSeek Harness.exe`，Electron 44 / node 24.18.1）：Node 的 fs 被 asar **虚拟化** ——
@@ -98,10 +100,17 @@ export class AsarReadError extends Error {
   }
 }
 
-function errorDetail(error: unknown): string {
-  if (error instanceof AsarReadError) return error.code + ':' + error.message.replace(/^[a-z-]+: /, '');
-  if (error instanceof Error) return error.message;
-  return String(error);
+/**
+ * 出错时只保留**稳定机器码**：errno 码（ENOENT/EACCES/EPERM…）或错误类名，**绝不回显 message**
+ * —— node 的 fs 错误 message 里带**绝对路径**，而 detail 会经 `SessionVerifyResult.detail` 回传调用方/
+ * 浏览器（F3：结果与台账的纪律是「不含绝对路径」）。判不出来时给 'unknown'，绝不把原文塞进去。
+ */
+function errorCode(error: unknown): string {
+  if (error instanceof AsarReadError) return error.code;
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  if (typeof code === 'string' && /^[A-Z0-9_]+$/.test(code)) return code;
+  if (error instanceof Error && error.name !== '') return error.name;
+  return 'unknown';
 }
 
 /* ------------------------------------------------------------------ 类型 */
@@ -237,7 +246,7 @@ export async function readAsarIndex(asarPath: string): Promise<AsarIndex> {
   try {
     stat = await fs.stat(asarPath);
   } catch (error) {
-    throw new AsarReadError(isENOENT(error) ? 'not-found' : 'io-error', 'stat:' + errorDetail(error));
+    throw new AsarReadError(isENOENT(error) ? 'not-found' : 'io-error', 'stat:' + errorCode(error));
   }
   if (!stat.isFile()) throw new AsarReadError('not-found', 'not-a-file');
   const cached = indexCache.get(asarPath);
@@ -248,7 +257,7 @@ export async function readAsarIndex(asarPath: string): Promise<AsarIndex> {
   try {
     handle = await fs.open(asarPath, 'r');
   } catch (error) {
-    throw new AsarReadError(isENOENT(error) ? 'not-found' : 'io-error', 'open:' + errorDetail(error));
+    throw new AsarReadError(isENOENT(error) ? 'not-found' : 'io-error', 'open:' + errorCode(error));
   }
   try {
     const sizePickle = Buffer.alloc(SIZE_PICKLE_BYTES);
@@ -277,7 +286,7 @@ async function readEntryWithIndex(index: AsarIndex, entry: AsarFileEntry): Promi
     try {
       return await fs.readFile(asarUnpackedPath(index.asarPath, entry.path));
     } catch (error) {
-      throw new AsarReadError(isENOENT(error) ? 'not-found' : 'io-error', 'unpacked-read:' + errorDetail(error));
+      throw new AsarReadError(isENOENT(error) ? 'not-found' : 'io-error', 'unpacked-read:' + errorCode(error));
     }
   }
   const handle = await fs.open(index.asarPath, 'r');
@@ -468,7 +477,8 @@ export type AsarExtractResult = AsarExtractOk | AsarExtractFailure;
 
 function failureOf(error: unknown): AsarExtractFailure {
   if (error instanceof AsarReadError) return { ok: false, code: error.code, detail: error.message };
-  return { ok: false, code: 'io-error', detail: errorDetail(error) };
+  // 非 AsarReadError（fs 直传错误等）只留机器码：message 里可能带绝对路径（F3）
+  return { ok: false, code: 'io-error', detail: 'io-error:' + errorCode(error) };
 }
 
 /** 校验并规整相对前缀（\`dsh/node_modules\`）；非法 → undefined。 */
@@ -570,7 +580,7 @@ export async function extractAsarPackages(rawOptions: AsarExtractOptions): Promi
       await fs.rename(tmpDir, target);
     } catch (error) {
       const existing = await readCacheManifest(target, key);
-      if (existing === undefined) return { ok: false, code: 'cache-failed', detail: errorDetail(error) };
+      if (existing === undefined) return { ok: false, code: 'cache-failed', detail: 'rename:' + errorCode(error) };
       await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
       return { ok: true, dir: target, cached: true, packages: closure.roots, files: existing.files, bytes: existing.bytes, unresolved: closure.unresolved, key };
     }

@@ -14,6 +14,10 @@
  *  再 import（`via: "asar-extract"`）；权威已装版本优先取自 asar 内的 dsh-session；asar 缺失/畸形
  *  仍如实 unavailable（绝不伪造 verified，也不误判 decode-failed）。合成 asar 在测试内构造。
  *
+ * t20 / B3 修复（F1/F3）追加覆盖：env-anchor（`DSH_CM_DSH_INSTALL`）与 install-anchor 也要进**候选链**
+ *  （不只是「已装版本」解析），纯 node 无 resourcesPath 时只设 env 即可 verified + via=asar-extract；
+ *  asar 读取器失败 detail 只留机器码/errno，绝不回显绝对路径。
+ *
  * 全部用真实 zstd 帧 + 真实文件系统上的假包（真的走 import），不 mock 解析器。
  */
 import test from 'node:test';
@@ -32,6 +36,7 @@ import {
   type SessionVerifyCatalog,
   type SessionVerifyResult,
 } from './session-verify.ts';
+import { clearAsarIndexCache, extractAsarPackages } from './asar-read.ts';
 import { encodeZstdFrame, zstdAvailable } from './zstd-frame.ts';
 import { applySessionRepair, readSessionRepairLedger } from './session-repair-service.ts';
 
@@ -649,4 +654,109 @@ test('t2/缺口⑤：splitAsarPath 只认 .asar 段（app.asar.unpacked 走普�
   assert.deepEqual(splitAsarPath(path.join('D:', 'res', 'app.asar')), { asarPath: 'D:/res/app.asar', innerPrefix: '' });
   assert.equal(splitAsarPath(path.join('D:', 'res', 'app.asar.unpacked', 'dsh', 'node_modules')), undefined);
   assert.equal(splitAsarPath(path.join('D:', 'res', 'app', 'dsh', 'node_modules')), undefined);
+});
+/* ------------------- t20 / B3：F1（锚点进候选链）+ F3（detail 不含绝对路径） ------------------- */
+
+test('t20/F1：纯 node 无 resourcesPath，只设 DSH_CM_DSH_INSTALL → verified + equivalentToReadPath + via=asar-extract', { skip: !CAPABLE }, async () => {
+  await withTmp(async (dir) => {
+    const installRoot = path.join(dir, 'install');
+    await writeSynthInstall(path.join(installRoot, 'resources'), { catalogSource: childrenCatalogSource(4), sessionVersion: '4' });
+    const homeDir = path.join(dir, 'home');
+    // profile 树只给权威版本（4），**不给** catalog：候选面只剩锚点那一条路
+    await writeVersionOnlyProfileTree(homeDir, 4);
+    const envKey = 'DSH_CM_DSH_INSTALL';
+    const hadEnv = Object.prototype.hasOwnProperty.call(process.env, envKey);
+    const savedEnv = process.env[envKey];
+    const proc = process as { resourcesPath?: string };
+    const hadRes = Object.prototype.hasOwnProperty.call(proc, 'resourcesPath');
+    const savedRes = proc.resourcesPath;
+    clearSessionVerifyCache();
+    try {
+      delete proc.resourcesPath;
+      delete process.env[envKey];
+      // 对照组①：不设任何锚点 → 如实 unavailable（detail 里不该出现 env-anchor）
+      const without = await verifySessionLogBytes(logBytes(HEADER, ROWS), { homeDir, asarCacheDir: path.join(dir, 'cache') });
+      assert.equal(without.verified, false, JSON.stringify(without));
+      assert.equal(without.verified === false ? without.reason : '', 'unavailable');
+      assert.equal(String(without.verified === false ? without.detail : '').includes('env-anchor'), false, '没给锚点时不得凭空出现 env-anchor');
+
+      // 只看 env 这一个来源（默认缺省链）
+      process.env[envKey] = installRoot;
+      assert.ok(defaultDshPackageJsonCandidates(homeDir).some((p) => p.startsWith(installRoot)), '公开视图必须把 env-anchor 排在前面');
+      const withEnv = await verifySessionLogBytes(logBytes(HEADER, ROWS), { homeDir, asarCacheDir: path.join(dir, 'cache') });
+      assert.equal(withEnv.verified, true, JSON.stringify(withEnv));
+      assert.equal(withEnv.verified === true ? withEnv.events : -1, 2);
+      assert.equal(withEnv.verified === true ? withEnv.via : undefined, 'asar-extract');
+      assert.equal(withEnv.equivalentToReadPath, true, 'asar 内 currentVersion 4 === header 4 === 权威已装版本 4');
+
+      // 对照组②：env 指向**畸形 asar** → 仍如实 unavailable，且 detail 必须出现 env-anchor（证明它真的进了候选链）
+      const badRoot = path.join(dir, 'bad-install');
+      await fs.mkdir(path.join(badRoot, 'resources'), { recursive: true });
+      await fs.writeFile(path.join(badRoot, 'resources', 'app.asar'), Buffer.alloc(64, 0xff));
+      process.env[envKey] = badRoot;
+      clearSessionVerifyCache();
+      const bad = await verifySessionLogBytes(logBytes(HEADER, ROWS), { homeDir, asarCacheDir: path.join(dir, 'cache') });
+      assert.equal(bad.verified, false, JSON.stringify(bad));
+      assert.match(String(bad.verified === false ? bad.detail : ''), /env-anchor:asar-extract-failed/);
+    } finally {
+      if (hadEnv) process.env[envKey] = savedEnv;
+      else delete process.env[envKey];
+      if (hadRes) proc.resourcesPath = savedRes;
+      else delete proc.resourcesPath;
+      clearSessionVerifyCache();
+    }
+  });
+});
+
+test('t20/F1：installAnchor 与候选链同源同序（不再只参与「已装版本」解析）', { skip: !CAPABLE }, async () => {
+  await withTmp(async (dir) => {
+    const resources = path.join(dir, 'resources');
+    await writeSynthInstall(resources, { catalogSource: childrenCatalogSource(4), sessionVersion: '4' });
+    const installAnchor = path.join(resources, 'app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'package.json');
+    const homeDir = path.join(dir, 'home');
+    await writeVersionOnlyProfileTree(homeDir, 4); // 无 catalog：只有锚点能提供 codec
+    const envKey = 'DSH_CM_DSH_INSTALL';
+    const hadEnv = Object.prototype.hasOwnProperty.call(process.env, envKey);
+    const savedEnv = process.env[envKey];
+    clearSessionVerifyCache();
+    try {
+      delete process.env[envKey];
+      delete (process as { resourcesPath?: string }).resourcesPath;
+      const result = await verifySessionLogBytes(logBytes(HEADER, ROWS), { installAnchor, homeDir, asarCacheDir: path.join(dir, 'cache') });
+      assert.equal(result.verified, true, JSON.stringify(result));
+      assert.equal(result.verified === true ? result.via : undefined, 'asar-extract');
+      assert.equal(result.equivalentToReadPath, true);
+    } finally {
+      if (hadEnv) process.env[envKey] = savedEnv;
+      else delete process.env[envKey];
+      clearSessionVerifyCache();
+    }
+  });
+});
+
+test('t20/F3：asar 读取器失败 detail 只留机器码/errno —— 缺失/畸形/非普通文件都不回显绝对路径', async () => {
+  await withTmp(async (dir) => {
+    clearAsarIndexCache();
+    const assertNoPath = (label: string, detail: string): void => {
+      assert.equal(detail.includes(dir), false, label + ' 不得含绝对路径: ' + detail);
+      assert.equal(/[A-Za-z]:[\\/]/.test(detail), false, label + ' 不得含盘符路径: ' + detail);
+      assert.equal(detail.includes('/'), false, label + ' 不得含斜杠: ' + detail);
+      assert.equal(detail.includes(String.fromCharCode(92)), false, label + ' 不得含反斜杠: ' + detail);
+    };
+    const missing = await extractAsarPackages({ asarPath: path.join(dir, 'nope.asar'), packages: ['@scope/pkg'], cacheDir: path.join(dir, 'cache') });
+    assert.equal(missing.ok, false);
+    assert.equal(missing.ok === false ? missing.code : '', 'not-found');
+    assertNoPath('缺失', String(missing.ok === false ? missing.detail : ''));
+
+    const malformedPath = path.join(dir, 'bad.asar');
+    await fs.writeFile(malformedPath, Buffer.alloc(64, 0xff));
+    const malformed = await extractAsarPackages({ asarPath: malformedPath, packages: ['@scope/pkg'], cacheDir: path.join(dir, 'cache') });
+    assert.equal(malformed.ok, false);
+    assert.equal(malformed.ok === false ? malformed.code : '', 'truncated');
+    assertNoPath('畸形', String(malformed.ok === false ? malformed.detail : ''));
+
+    const asDirectory = await extractAsarPackages({ asarPath: dir, packages: ['@scope/pkg'], cacheDir: path.join(dir, 'cache') });
+    assert.equal(asDirectory.ok === false ? asDirectory.code : '', 'not-found');
+    assertNoPath('目录当容器', String(asDirectory.ok === false ? asDirectory.detail : ''));
+  });
 });

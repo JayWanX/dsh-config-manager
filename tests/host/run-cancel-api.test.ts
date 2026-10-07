@@ -77,11 +77,15 @@ test('H-06 宿主 env 暴露终止通道与审计', () => {
   assert.ok(hostSource.includes('cancelDecisionTimeoutMs: CANCEL_DECISION_TIMEOUT_MS,'), '超时时长经 env 下发');
 });
 
-test('H-07 启动自洽审计的宿主接线：读写走 HostContext.fs，YAML 走 js-yaml，bundle 解析走多根探测', () => {
+test('H-07 启动自洽审计的宿主接线：读写走 HostContext.fs，YAML 走 patch 方言载入器，bundle 解析走多根探测', () => {
   const audit = block(hostSource, 'const bootSafetyAudit = async', 1400);
   assert.ok(audit.includes('host.fs.readFile(relPath)'), '读配置必须走 HostContext.fs（内存 mock 可注入）');
   assert.ok(audit.includes('host.fs.writeFile(relPath'), '剔除不可解析 bundle 才需要写');
-  assert.ok(audit.includes('parseYaml: (text) => yaml.load(text)'), 'YAML 解析必须注入（core 不 import js-yaml）');
+  // 2026-10-07（issue #75）：注入的必须是 **patch 方言**载入器（JSON_SCHEMA + !!js）——
+  // 启动关键 yaml 里含两层 cordis.patch.yml，缺省 schema 会把带 !!js 的 patch 层误报成
+  // 「启动关键文件无法解析」。仍然是「宿主注入的 js-yaml 能力」（core 不 import js-yaml），
+  // 只是换成方言包装（utils/patch-yaml.ts）。
+  assert.ok(audit.includes('parseYaml: (text) => loadPatchDocument(text)'), 'YAML 解析必须注入且走 patch 方言（core 不 import js-yaml）');
   assert.ok(hostSource.includes('const bundleResolvable = async'), 'bundle 可解析探测必须是宿主实现');
   assert.ok(hostSource.includes("for (const root of [join(host.homeDir, 'profiles'"), '多根探测：只有所有根都找不到才判不可解析（宁少剪不误剪）');
 });

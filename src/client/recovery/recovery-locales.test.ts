@@ -74,3 +74,15 @@ test('A1c：sessions.desc 把「其余类别」的两条真实出路分类写清
     assert.ok(enText.toLowerCase().includes(token.toLowerCase()), 'en 必须如实写清修不了的类别：' + token)
   }
 })
+
+
+/**
+ * 类级守卫（M2 收尾）：**面板是纯文本渲染**（`RecoveryPanel` 只做 `{t('…')}`，recovery 目录没有 markdown/HTML 辅助），
+ * 所以任何 `**` 都会原样显示成星号。这条把人机"看着像加粗"的错觉变回红灯 —— zh/en 一视同仁。
+ */
+test('渲染文案不得含字面 markdown 标记 **（面板纯文本渲染）', () => {
+  const offenders: string[] = []
+  for (const [key, value] of Object.entries(zh)) if (value.includes('**')) offenders.push('zh:' + key)
+  for (const [key, value] of Object.entries(en)) if (value.includes('**')) offenders.push('en:' + key)
+  assert.deepEqual(offenders, [], '这些键的文案含字面 **，面板纯文本渲染会原样显示星号：' + offenders.join(', '))
+})

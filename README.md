@@ -47,7 +47,7 @@ DSH is your AI assistant workbench — it holds your settings: model configs, pl
 
 ### Backup DeepSeek Harness configuration
 
-Create a portable backup of your DSH settings, model providers, plugins, MCP servers, skills, agent presets and workspace — one ZIP file, no secret values included by default. (DSH's own profiles — `$DSH_HOME/profiles/<name>`, i.e. which plugin stack to boot — are machine-local and are not migrated; the **Profiles** page can list/create/rename/delete them and record which one the next launch should use.)
+Create a portable backup of your DSH settings, model providers, plugins, MCP servers, skills, agent presets and workspace — one ZIP file, no secret values included by default. (DSH's own profiles — `$DSH_HOME/profiles/<name>`, i.e. which plugin stack to boot — are machine-local and are **not** part of the backup; the **Profiles** page manages them instead — list / create / rename / delete, plus launching or stopping an independent instance for one.)
 
 ### Restore DeepSeek Harness on another machine
 
@@ -82,7 +82,7 @@ Several DSH plugins live in this space and they solve different problems — pic
 | Plugin | Strongest at | Where DSH Config Manager goes further |
 |---|---|---|
 | [xiaoyuyu6420/dsh-backup](https://github.com/xiaoyuyu6420/dsh-backup) | One-command `~/.dsh` snapshots from the CLI, plus session doctor / upgrade snapshots / rescue console | Review-before-write GUI flow (dry-run preview, per-item conflict decisions, automatic rollback), cross-machine path remapping, encrypted credential payload, configuration marketplace |
-| [muyifc/dsh-config-sync](https://github.com/muyifc/dsh-config-sync) | Export / import DSH configuration to a portable, password-encrypted file, callable from tool calls | 13–14 sections incl. plugins / MCP / skills / profiles / workspaces, scheduled backups, Git + WebDAV sync per channel, session migration with path rebase |
+| [muyifc/dsh-config-sync](https://github.com/muyifc/dsh-config-sync) | Export / import DSH configuration to a portable, password-encrypted file, callable from tool calls | 13–14 sections (plugins / MCP / skills / workspaces / session logs …), scheduled backups, Git + WebDAV sync per channel, session migration with path rebase |
 | [dickpy/dsh-cloud-sync](https://github.com/dickpy/dsh-cloud-sync) · [weibaohui/dsh-sync](https://github.com/weibaohui/dsh-sync) | Keeping machines consistent through WebDAV / S3 or a private Git mirror | Sync is one of five capabilities here — alongside export/import, scheduling, marketplace and profile instance launch/stop |
 | `cp -r ~/.dsh` (or Git on the home dir) | Free, zero setup, fine for a purely textual config | No secret handling, no path remapping, no capture of `link:` / `file:` plugin installs, no session-log work, no conflict handling or rollback |
 
@@ -111,7 +111,7 @@ Several DSH plugins live in this space and they solve different problems — pic
 | 🗄️ | **Configurable retention (GFS tiers)** | "keep the last N + one per month + one per year" — the defaults are equivalent to the previous behaviour |
 | 🤖 | **Agent tools** | Backup / snapshot / restore / sync right from an agent session |
 | 💾 | **Disk usage report** | The backups page shows how much space the plugin's own artifacts take (backups / snapshots / sync copies / caches / staging) with a three-tier cleanup policy; **one-click cleanup only touches regenerable caches and expired backups** — snapshots and sync data are never removed there |
-| ⬆️ | **Update check** | The About page reads the latest version from npm and, when there is a newer one, hands you a copyable upgrade command (never auto-installs); offline failures are reported honestly and affect nothing else |
+| ⬆️ | **Update check** | The About page reads the latest version from npm (read-only, cached 10 minutes); when there is a newer one it offers a copyable upgrade command **and** a one-click **Update now** that installs exactly that version — DSH must then be restarted, and the plugin never restarts it for you. Offline failures are reported honestly and affect nothing else |
 | 🧭 | **Compatibility explained** | Before importing you see "source DSH version / platform → local" plus **structured reasons** for the score (cross-platform / missing sections / newer source …) instead of a bare "partial" |
 | 🧳 | **Import from other AI agents** | Read Claude Code / Cursor / Codex / Hermes / Antigravity … configuration **and chat history** on this machine, translate it into a standard bundle, then import through the usual preview / conflict / rollback flow |
 
@@ -319,7 +319,7 @@ When the target already has a same-named item, you choose:
 
 You do not have to rebuild another agent's setup by hand.
 
-- **30 sources recognized** — Claude Code, Hermes, Cursor, Codex, Antigravity, Gemini, OpenCode, Mimocode, ZCode, Grok Build, OpenClaw, Pi, Kimi, Kilocode, Qoder, ChatGPT, WorkBuddy, Qwen, Continue, Cline, Goose, Zed, Crush, TeleAgent, Trae, Vibe, Reasonix, Copilot, and DSH itself (importing from another DSH home). Sources **not** installed on this machine are still listed (greyed out, not selectable), so "this machine has no such tool" is never mistaken for "the feature is missing".
+- **30 sources recognized** — Claude Code, Hermes, Cursor, Codex, Antigravity, Gemini, OpenCode, Mimocode, ZCode, Grok Build, OpenClaw, Pi, Kimi, Kilocode, Qoder, ChatGPT, WorkBuddy, Qwen, Continue, Cline, Goose, Zed, Crush, TeleAgent, Trae, Vibe, Reasonix, Copilot, and DSH itself (importing from another DSH home — its v3 and v4 logs count as two ids). Sources **not** installed on this machine are still listed (greyed out, not selectable), so "this machine has no such tool" is never mistaken for "the feature is missing".
 - **Translation, not a second import path** — the source is converted into a standard bundle v1 ZIP and handed to the **existing** import wizard: same preview, same per-item conflict decisions, same pre-import snapshot and rollback, same dry-run.
 - **What travels** — MCP servers, skills, global instructions (as `AGENTS.md`), and **chat history together with the workspaces those conversations belong to** (29 sources; conversations are re-encoded into DSH's session-log format and placed by their recorded `cwd`).
 - **What does not** — secret **values** are never read: only the key names are recorded so the plan can ask you to re-enter them. Structures DSH has no equivalent for (Claude Code hooks, slash commands, …) are reported as explicit codes rather than silently dropped.
@@ -344,7 +344,7 @@ Push / pull your portable config between machines through **either of two channe
 | **Endpoint** | `repoUrl` | `webdav.url` |
 | **Credentials** | auth token in DSH credentials (`DSH_CONFIG_MANAGER_SYNC_TOKEN`) | `username` stored in the config (echoed in the UI); **password never synced / never logged** — DSH credentials `DSH_CONFIG_MANAGER_SYNC_WEBDAV_PASSWORD` |
 
-- **Same snapshot retention for both channels**: only the newest **10** snapshots are kept on the remote (`MAX_REMOTE_SNAPSHOTS=10`); older ones are deleted automatically.
+- **Remote retention follows your backup schedule**: both channels keep the same policy as local backups — by default the newest **10** snapshots, plus optional "one per month / one per year" tiers — and the snapshot you just pushed is always kept; older ones are deleted automatically.
 - **Switching channels starts fresh**: Git and WebDAV do **not** share snapshots or a common ancestor. When you switch transport, sync begins again from the new remote's empty baseline — push a fresh snapshot first.
 - **WebDAV auth** uses HTTP Basic: the `username` is stored in the config and may be echoed back into the UI, while the `password` is read live from the DSH credentials slot `DSH_CONFIG_MANAGER_SYNC_WEBDAV_PASSWORD` — it never appears in any sync file or log.
 - **Plugins auto-install**: when pulling diffs, plugins that are new in the backup are **installed automatically** on confirm — no manual per-item ticking in the diff list. Only **version-conflict** plugins still ask you to pick "Keep Current / Use Imported".
@@ -539,7 +539,7 @@ dsh-config-manager backup --sections skills,self          # narrow the scope
 
 `--sections` accepts `skills,agentPresets,agentInstructions,self,pluginFiles`. `pluginFiles` is **opt-in** (as in the GUI): it copies third-party plugin files verbatim, and `dsh-ssh.json` holds plaintext host passwords — select it only when you have looked at what is in there.
 
-**A typical rescue flow** when DSH won't start: ① `dsh-config-manager reinstall` to bring the launcher back (plus any clean-up), ② if DSH reports a session-log error (`corrupt session log` / `duplicate JSONL session id`), run `dsh-config-manager sessions repair --fix` first — it repairs the log layout offline, ③ `dsh web` to start DSH again, ③ re-add the plugin from the registry, and ④ pull a snapshot from the remote repo (or run `dsh-config-manager restore`) to bring your config back. The CLI works at every step regardless of DSH's health.
+**A typical rescue flow** when DSH won't start: ① `dsh-config-manager reinstall` to bring the launcher back (plus any clean-up), ② if DSH reports a session-log error (`corrupt session log` / `duplicate JSONL session id`), run `dsh-config-manager sessions repair --fix` — it repairs the log layout offline, ③ `dsh web` to start DSH again, ④ re-add the plugin from the registry, and ⑤ pull a snapshot from the remote repo (or run `dsh-config-manager restore`) to bring your config back. The CLI works at every step regardless of DSH's health.
 
 **`recover-stale-lock` — when every operation suddenly fails.** Before touching your config, the plugin claims a small environment lock (it records who is operating plus a heartbeat) so that two operations can never write your config at the same time. If a `dsh web` process is **force-killed** (Task Manager, `kill -9`), the lock file survives with a dead owner: the next operation is refused, and it stays refused **no matter how often you retry or restart DSH** — because the plugin deliberately never removes a lock on its own (a wrong guess could evict a live operation).
 
@@ -669,7 +669,7 @@ Yes. Dead absolute paths are detected and remapped (batch replacement supported)
 No. A checksum mismatch rejects the import outright (protects against corruption or tampering).
 
 **Q: Will re-importing duplicate things?**
-No. Items are deduplicated by stable IDs (plugin ID / MCP name / skill name…); existing items are skipped.
+No. Items are matched by stable IDs (plugin ID / MCP name / skill name…): identical ones are skipped, and ones that differ from the target surface as **conflicts you decide** (Keep Current / Use Imported) — nothing is overwritten silently.
 
 **Q: Why is the console quiet after `dsh web` — how do I get the plugin logs back?**
 By design. Routine progress logs (mount banner, scheduler skips, export/backup completion) are emitted at `info`, and the shipped default level is `warn` — so only warnings and errors reach the terminal. Set `DSH_CONFIG_MANAGER_LOG_LEVEL=info` (or `debug`) before starting DSH to bring the verbose lines back.
@@ -687,7 +687,7 @@ Yes. The import wizard asks for the export-time encryption password and verifies
 4. **History/session migration is opt-in** — DSH's own sessions are only exported/synced when you explicitly select the `sessions` section (the sync channel additionally needs both sides to allow it); **another agent's chat history is migrated when you pick that source** in the foreign import. Conversation state that DSH's session format has no room for (model reasoning traces, images, compaction checkpoints) is counted and reported, never fabricated
 5. **Encrypted backups**: a lost password means the `secrets.enc` can't be decrypted (by design — keep your password safe)
 6. **Snapshot restore is offline and honest**: entries the offline engine can't restore (settings namespaces / patch lines when the snapshot has no whole-file backup, workspace records stored in DSH storages) are reported as skipped with a pointer to online rollback; credential **values** are never auto-written (manual re-entry hint only); old snapshots without a plugin baseline only get a hint to remove added plugins manually
-7. **Foreign-agent import has two known blanks**: **Copilot has no chat-history import** (its session format could not be verified on this machine, so only its configuration is imported), and Cursor's per-project history is located through Cursor's own folder-slug scheme, which may not resolve for every project. Conversations already imported with an older build should be deleted and re-imported (they are listed as conflicts otherwise)
+7. **Foreign-agent import has two known blanks**: **Copilot has no chat-history import** (its session format could not be verified on this machine, so only its configuration is imported), and Cursor's per-project history is located through Cursor's own folder-slug scheme, which may not resolve for every project. Conversations already imported with an older build should be deleted and re-imported first (a second import of the same id is reported as a **skipped** `session-id-conflict`, not merged)
 8. **Local source plugins (`link:` / `file:`) are packed into the backup**: the export runs `npm pack` on plugins you are developing locally and stores the tarball in the backup; the import unpacks it under `$DSH_HOME/dsh-config-manager/local-plugins/` and installs it as `file:`. Three consequences: ① backup size grows with those plugins (a single plugin over 100 MB is skipped with a warning — publish it to a registry / git first); ② plugin **source code** enters the backup (this does not conflict with "no secrets in backups" — secrets stay excluded, what travels is code); ③ packing needs a working `npm` on this machine; without it the plugin falls back to the previous behaviour (the original spec is kept, and a new machine still needs a manual install)
 
 ## 💬 Feedback

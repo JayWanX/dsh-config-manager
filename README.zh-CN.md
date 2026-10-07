@@ -48,7 +48,7 @@ DSH 是你的 AI 助手工作台，里面存着你的各种设置：模型配置
 
 ### 备份 DeepSeek Harness 配置
 
-把你的 DSH 设置、模型供应商、插件、MCP 服务器、技能、Agent 预设、配置档案与工作区打包成一个便携 ZIP 备份——默认不含任何密钥值。
+把你的 DSH 设置、模型供应商、插件、MCP 服务器、技能、Agent 预设与工作区打包成一个便携 ZIP 备份——默认不含任何密钥值（DSH 档案不随备份迁移，见上方说明）。
 
 ### 在另一台电脑上恢复 DeepSeek Harness
 
@@ -83,7 +83,7 @@ DSH 生态里这个方向有几个插件，它们解决的问题并不相同—�
 | 插件 | 最擅长 | 本插件更进一步的地方 |
 |---|---|---|
 | [xiaoyuyu6420/dsh-backup](https://github.com/xiaoyuyu6420/dsh-backup) | 一条命令从 CLI 给整个 `~/.dsh` 打快照，另有会话体检 / 升级快照 / 救援控制台 | 写盘前可审阅的 GUI 流程（dry-run 预览、冲突逐项决策、失败自动回滚）、跨机路径重映射、加密凭据载荷、配置市场 |
-| [muyifc/dsh-config-sync](https://github.com/muyifc/dsh-config-sync) | 把 DSH 配置导出/导入成可移植的密码加密文件，可被工具调用 | 13–14 个分区（含插件 / MCP / 技能 / 档案 / 工作区）、定时备份、Git + WebDAV 双通道同步、会话跨机迁移与路径重定基 |
+| [muyifc/dsh-config-sync](https://github.com/muyifc/dsh-config-sync) | 把 DSH 配置导出/导入成可移植的密码加密文件，可被工具调用 | 13–14 个分区（插件 / MCP / 技能 / 工作区 / 会话日志 …）、定时备份、Git + WebDAV 双通道同步、会话跨机迁移与路径重定基 |
 | [dickpy/dsh-cloud-sync](https://github.com/dickpy/dsh-cloud-sync) · [weibaohui/dsh-sync](https://github.com/weibaohui/dsh-sync) | 通过 WebDAV / S3 或私有 Git 镜像让多台机器保持一致 | 同步只是本插件五项能力之一——另有导出/导入、定时备份、配置市场与档案实例启停 |
 | `cp -r ~/.dsh`（或给 home 目录挂 Git） | 免费、零配置，纯文本配置够用 | 不处理密钥、不做路径重映射、抓不到 `link:` / `file:` 安装的本地插件、不动会话日志、没有冲突处理与回滚 |
 
@@ -112,7 +112,7 @@ DSH 生态里这个方向有几个插件，它们解决的问题并不相同—�
 | 🌐 | **双语界面** | 界面、报告与错误详情跟随 DSH 应用语言（中文 / English） |
 | 🤖 | **Agent 工具** | Agent 会话内直接备份 / 快照 / 恢复 / 同步 |
 | 💾 | **磁盘占用体检** | 备份页逐项列出本插件自身占了多少盘（备份 / 快照 / 同步副本 / 缓存 / 暂存），三档回收策略一目了然；**一键清理只碰可重建缓存与过期备份**，快照与同步数据永不在此删除 |
-| ⬆️ | **版本更新检查** | 「关于」页只读探测 npm 上的最新版本，有新版本时给一条可复制的升级命令（绝不自动安装）；离线失败如实显示，不影响其它功能 |
+| ⬆️ | **版本更新检查** | 「关于」页只读探测 npm 上的最新版本（缓存 10 分钟）；有新版本时既给可复制的升级命令，也提供一键**立即更新**（按该精确版本安装）——之后需重启 DSH 才生效，插件绝不代你重启；离线失败如实显示，不影响其它功能 |
 | 🧭 | **兼容性讲清楚** | 导入前显示「来源 DSH 版本 / 平台 → 本机」，并用**结构化原因**解释评分（跨平台 / 分区缺失 / 版本超前…），而不是只丢一句「部分兼容」 |
 | 🧳 | **从其它 AI Agent 导入** | 读取本机 Claude Code / Cursor / Codex / Hermes / Antigravity 等的配置**与历史会话**，翻译成标准 bundle，再走既有的预览 / 冲突 / 回滚流程导入 |
 
@@ -315,7 +315,7 @@ allowBuilds:
 
 不必手工重建另一个 Agent 里已经调好的那套配置。
 
-- **识别 30 个来源** —— Claude Code、Hermes、Cursor、Codex、Antigravity、Gemini、OpenCode、Mimocode、ZCode、Grok Build、OpenClaw、Pi、Kimi、Kilocode、Qoder、ChatGPT、WorkBuddy、Qwen、Continue、Cline、Goose、Zed、Crush、TeleAgent、Trae、Vibe、Reasonix、Copilot，以及 DSH 自己（从另一个 DSH home 导入）。本机**没装**的来源照样列出来（置灰不可选）——「这台机器没有这个工具」不会被误解成「功能没做」。
+- **识别 30 个来源** —— Claude Code、Hermes、Cursor、Codex、Antigravity、Gemini、OpenCode、Mimocode、ZCode、Grok Build、OpenClaw、Pi、Kimi、Kilocode、Qoder、ChatGPT、WorkBuddy、Qwen、Continue、Cline、Goose、Zed、Crush、TeleAgent、Trae、Vibe、Reasonix、Copilot，以及 DSH 自己（从另一个 DSH home 导入，其 v3 / v4 日志算两个 id）。本机**没装**的来源照样列出来（置灰不可选）——「这台机器没有这个工具」不会被误解成「功能没做」。
 - **是翻译，不是第二套导入通道** —— 来源被转成标准 bundle v1 ZIP，交给**既有**导入向导：同一份预览、同一套逐项冲突决策、同一次导入前快照与回滚、同样的 dry-run。
 - **会带走什么** —— MCP Servers、技能、全局指令（落成 `AGENTS.md`），以及**历史会话连同这些对话所属的工作区**（29 个来源；会话会重新编码成 DSH 的会话日志格式，并按它记录的 `cwd` 归位）。
 - **不会带走什么** —— 密钥**值**一律不读：只记录键名，由导入计划提示补录。DSH 没有对等结构的东西（Claude Code 的 hooks、斜杠命令等）会**报出明确的码**，不会静默丢掉。
@@ -340,7 +340,7 @@ allowBuilds:
 | **端点** | `repoUrl` | `webdav.url` |
 | **凭据** | 认证 token 存入 DSH credentials（`DSH_CONFIG_MANAGER_SYNC_TOKEN`） | `username` 存配置、可在界面回显；**密码永不同步、永不记日志**——存入 DSH credentials `DSH_CONFIG_MANAGER_SYNC_WEBDAV_PASSWORD` |
 
-- **两通道保留策略一致**：远端只保留最新 **10** 个快照（`MAX_REMOTE_SNAPSHOTS=10`），更旧的自动删除。
+- **远端保留跟本地同一套策略**：两通道都按你的备份计划保留——默认最新 **10** 个快照，可另设「每月 1 份 / 每年 1 份」分层；刚推上去的那份恒保留，更旧的自动删除。
 - **切换通道重新开始**：Git 与 WebDAV 的快照 / 共同祖先**互不共享**。切换通道后，同步从新远端的空基线重新开始——请先推送一个新快照。
 - **WebDAV 认证**采用 HTTP Basic：`username` 存配置、可在界面回显；`password` 则实时从 DSH credentials 槽位 `DSH_CONFIG_MANAGER_SYNC_WEBDAV_PASSWORD` 读取——绝不出现于任何同步文件或日志。
 - **插件自动安装**：拉取差异时，备份里新增的插件会在确认导入时**自动安装**，无需在差异列表里逐项手动勾选；只有**版本冲突**的插件仍需要你决定「保留当前 / 采用备份」。
@@ -496,7 +496,7 @@ dsh-config-manager backup --sections skills,self          # 收窄范围
 `--sections` 可选值为 `skills,agentPresets,agentInstructions,self,pluginFiles`。其中 `pluginFiles` 与 GUI 侧一致属**默认关闭**：它原样复制第三方插件自有文件，而 `dsh-ssh.json` 里是明文主机密码——确认过内容之后再选它。
 
 
-**典型救急流程**（DSH 起不来时）：① `dsh-config-manager reinstall` 先把启动器重装回来（必要时顺带清理），② `dsh web` 重新启动 DSH，③ 从仓库装回插件，④ 从远程仓库拉取快照（或执行 `dsh-config-manager restore`）把配置恢复回来。整个流程中 CLI 全程可用，与 DSH 是否健康无关。
+**典型救急流程**（DSH 起不来时）：① `dsh-config-manager reinstall` 先把启动器重装回来（必要时顺带清理），② 若 DSH 报会话日志错误（`corrupt session log` / `duplicate JSONL session id`），先跑 `dsh-config-manager sessions repair --fix` 把日志目录离线归位，③ `dsh web` 重新启动 DSH，④ 从仓库装回插件，⑤ 从远程仓库拉取快照（或执行 `dsh-config-manager restore`）把配置恢复回来。整个流程中 CLI 全程可用，与 DSH 是否健康无关。
 
 **`web` —— 离线救急台（不想在终端里敲命令时用这个）。** 它在本机起一个**只绑 127.0.0.1** 的小网页，
 把上面的诊断信息与救急动作都摊在浏览器里：
@@ -565,7 +565,7 @@ dsh-config-manager web            # 启动并自动打开浏览器（终端里�
 不能。校验和检查不通过会直接拒绝导入（防止损坏或篡改）。
 
 **Q：重复导入会重复吗？**
-不会。按插件 ID / MCP 名称 / 技能名等稳定标识去重，重复导入自动跳过已有项。
+不会。按插件 ID / MCP 名称 / 技能名等稳定标识配对：完全一致的跳过，与目标机有差异的会列为**冲突由你决定**（保留本机 / 用导入的），不会静默覆盖。
 
 **Q：加密备份导入时需要密码吗？**
 需要。导入向导会要求输入导出时设置的加密密码并验证通过后才能继续执行；密码仅存于内存、绝不保存。密码错误或缺失都会阻止导入（密码正确时凭据直接从备份解密恢复，无需重新填写）。
@@ -583,7 +583,7 @@ dsh-config-manager web            # 启动并自动打开浏览器（终端里�
 4. **历史会话是显式可选项** —— DSH 自己的会话只有在导出 / 同步时**显式勾选 `sessions` 分区**才会带走（同步通道还要求两侧都放行）；**其它 Agent 的历史会话在你选中那个来源时迁移**。DSH 会话格式里没有位置的对话状态（模型思考过程、图片、压缩检查点）一律**如实计数并报告**，绝不伪造
 5. **加密备份**：密码丢失则无法解密（设计使然——请牢记密码）
 6. **快照恢复是离线的、诚实的**：离线引擎无法恢复的条目（快照无整文件备份时的 settings namespace / patch 行、存在 DSH storages 里的 workspace 记录）会如实列为跳过并指向在线回滚；凭据**值**绝不自动改写（只提示人工补录）；无插件基线的旧快照只提示人工核对新增插件
-7. **从其它 Agent 导入有两处已知空白**：**Copilot 不支持导入历史会话**（其会话格式在本机无法取证，只导入它的配置）；Cursor 的项目历史要靠它自己的目录 slug 反解，个别项目可能对不上。用**旧版本**导入过的会话请先删掉再重导（否则会被列为冲突）
+7. **从其它 Agent 导入有两处已知空白**：**Copilot 不支持导入历史会话**（其会话格式在本机无法取证，只导入它的配置）；Cursor 的项目历史要靠它自己的目录 slug 反解，个别项目可能对不上。用**旧版本**导入过的会话请先删掉再重导（同一 id 二次导入会如实报**跳过** `session-id-conflict`，不会合并）
 8. **本地源插件（`link:` / `file:`）随备份打包**：导出时执行 `npm pack` 把本地开发中的插件打成 tarball 一并备份，导入时解包到 `$DSH_HOME/dsh-config-manager/local-plugins/` 后按 `file:` 安装。因此：① 备份体积会随本地插件的体积增大（单插件超过 100 MB 会被跳过并告警，建议先发布到 registry / git 再备份）；② 插件**源码**会进入备份（与「密钥永不进备份」不冲突——密钥仍被排除，这里进的是代码）；③ 打包需要本机有可用的 `npm`，无 npm 时该插件退化为原行为（保留原 spec，换机后仍需手工安装）
 
 ## 💬 反馈与建议

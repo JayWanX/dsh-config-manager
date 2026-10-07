@@ -8,42 +8,18 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 >
 > **Release workflow**: on tag push, CI extracts the current version's section as the release notes highlights;
 > the build fails fast if the section is missing, so you cannot forget to update it.
+>
+> **条目落位（按改动性质分组）**：新条目一律先写进 `## [Unreleased]`，并放进对应分组 ——
+> `### 🆕 新增 · Added` / `### 🔧 变更 · Changed` / `### 🐛 修复 · Fixed`（`🗑️ 移除 · Removed` / `🔐 安全 · Security` 同理）；
+> 没有内容的分组**不写标题**。已发布的历史版本段保留当时写法，不回改。
+>
+> **Where new entries go (grouped by change type)**: new entries land under `## [Unreleased]` in the matching group —
+> `Added` / `Changed` / `Fixed` (and `Removed` / `Security` when applicable); omit empty groups.
+> Released sections keep the style they were written in.
 
 ## [Unreleased]
 
-> **导出/同步不再丢 `!!js`，pnpm 隔离安装也能识别会话格式版本（issue #75 / #74）**
-> - **`cordis.patch.yml` 的 `!!js` 方言（issue #75，数据丢失级）**：`!!js` 是 DSH 的专用 YAML 标签（`JSON_SCHEMA` + `tag:yaml.org,2002:js`），而插件此前用缺省 schema 读它 —— 遇到 `!!js` 直接抛 unknown tag，被吞成空数组。后果不止「丢一条配置」：解析针对整份文档，**只要该层有一处 `!!js`，这一层全部 patch 行都会从导出 / 同步 / 预览里消失**；导入写回时更会把整份文件重写成「只剩本次导入的行」。现在读写统一走新的方言单一事实源（`raw` 的内存形态是 `{__jsExpr: <源码>}`，普通 JSON、写回还原成 `!!js`），并补两道护栏：**原文件存在却解析不了 / 读不到时拒绝覆盖**、解析失败上抛成可见告警（不再静默）；文件不存在仍按「本来就没有」处理。
-> - **pnpm 隔离安装的会话格式版本解析（issue #74）**：pnpm 全局安装 DSH 时 `installAnchor` 落在 `.pnpm` 存储段内，同级没有 `dsh-session`（`dsh` 的依赖里也没有它），旧的「同级 / 嵌套两种布局」必然落空 → 每次启动报 warn、导入与同步的「格式超前」体检整体跳过。现在会向上定位最近的 `.pnpm` 并按 `@deepseek-ai+dsh-session@*` 扫段（多版本取与本机 dsh 同版本者，判不准则不猜），失败时把**已尝试的路径**写进日志；同一份布局推导已收敛为单一实现（复验门与档案列表共用）。
->
-> **No more lost `!!js` on export/sync; pnpm-isolated installs resolve the session format version (issues #75 / #74)**
-> - **The `!!js` dialect of `cordis.patch.yml` (issue #75, data loss)**: `!!js` is DSH's own YAML tag (`JSON_SCHEMA` + `tag:yaml.org,2002:js`), but the plugin read the file with the default schema — hitting `!!js` threw an unknown-tag error that was swallowed into an empty array. The damage was bigger than one missing config: parsing covers the whole document, so **a single `!!js` anywhere made every patch row of that layer disappear from export / sync / preview**, and importing rewrote the file down to just the imported rows. Read and write now share one dialect source of truth (`raw` keeps the JSON-safe `{__jsExpr: <source>}` shape and is written back as `!!js`), plus two guard rails: **an existing file that cannot be parsed or read is never overwritten**, and parse failures surface as visible warnings instead of silence; a missing file still means "nothing there yet".
-> - **Session format version under a pnpm-isolated install (issue #74)**: with a global pnpm install the `installAnchor` sits inside a `.pnpm` store segment whose siblings have no `dsh-session` (and `dsh` does not depend on it), so the old two-layout lookup always missed → a startup warning on every boot and the import/sync "format ahead" check skipped entirely. The resolver now walks up to the nearest `.pnpm` and scans `@deepseek-ai+dsh-session@*` segments (preferring the version matching the local dsh; never guessing when ambiguous), and logs the paths it tried on failure. The same layout derivation is now a single implementation shared with the verify gate and the profile list.
-
-> **M1 会话修复引擎加固：拆掉一个会毁数据的陷阱 + 装上真 codec 复验门与只读检测**
-> 一条 v0 打包行的判据错误，让 1194 份真机会话日志里的 **407 份**被判成「需要损失性修复」；按该计划执行会丢弃 **865,098 / 876,680 行（98.7%）**。本轮修掉这个判据，并把「写前复验」「有损预览」「引用闭包」「只读检测」四道护栏补齐。
-> - **packed 行假空洞（真机 407 例）**：v0 打包行（`text-chunks` / `reasoning-chunks` / `tool-call-chunks`）**没有 `seq` 成员**，一行按 `seq0` + payload 展开成 N 个事件（官方 `decodePackedRun`：`firstSeq = seq0`、`eventCount = payload.length`）。旧判据只读 `seq` → 打包行被当成「无 seq 行」跳过却保留上一个 `lastSeq`，于是打包行之后的第一条标量行被误判为 seq 空洞。真机：**lossy-required 407 / nothing-to-fix 787**；407 份**全部是 v0 代际**日志（`session.jsonl.zstd`，header `version:0`），v3/v4 零误判。复核脚本 `.tmp/probe-session-repair.mjs`。
-> - **判据分两层，不得混同**：(i) **形状不可判定**（缺 `seq0` / 载荷非数组 / 长度非安全整数 / `dt` 长度 ≠ len-1 / 带严格键集外成员 / 无 `seq0` 的未知非 packed 类型）→ 视为**不透明跨度**，禁止跨越它下连续性结论，计划 refuse；(ii) **形状可判定但 `seq0` 与运行计数不衔接** → 这是**真实 seq 空洞**，与标量行空洞同待遇（默认 refuse；显式 `allowLossy` 才在首个异常处截断）。把它当 opaque 会让同一种语义因前一行的物理编码不同而有两种待遇。
-> - **帧粒度规则**：`≤200 行/帧` 只约束**本次重编码**的帧；**未触及帧（帧内无被丢行且全部保留）必须逐字节复用**，即使它原本超过 200 行 —— 真机有 **226 个事件帧 >200 行、最大 8654 行**，那是 DSH 自己写出的形态，字节保真优先于自定上限。
-> - **真 codec 复验门**：写后（以及有损计划应用前）用 DSH 官方 `createSessionFormatCatalogWithChildren` + 逐行 `decodeRow` + `finish` 复验；**能力不可用 → `unavailable`（unverified）且绝不宣称成功**；**确定性失败 → 用备份自动回滚**；`unavailable` **不触发回滚、不写成功台账**、但**仍写台账**以保证已应用的修复可回滚。
-> - **有损计划预览可见**：`lossy-required` 的计划必须给出真实的 `truncate-tail` 条目与丢弃行数（旧实现给的是空动作清单 —— 用户被告知「需要损失性修复」却说不出将丢什么）。
-> - **引用闭包闸门**：closer-drop 候选若被保留行引用 → **不计划该动作**（零损动作优雅降级）；截断造成「引用目标由存在变不存在」→ **在 planner 内整体 refuse**（不允许「先给 lossy 预览、再在 apply 期拒绝」）。
-> - **只读检测扩展**：会话体检新增 `empty-tool-call-id` / `duplicate-tool-call-id` / `tool-result-id-mismatch` 三个码，并让 `missing-message-id` / `dangling-tool-call` 真正产出；严重级按**代际 + 载体**分级（v4 与 pre-v4 下缺 message id、空 tool-call id、重复通告同一 advertised tool call 都是**前台读盘管线拒读** → `unloadable`；版本读不出 → `nextRequestFails` + `codec-uncalibrated`）。**只报不修**。
-> - **CLI / 离线救急台如实反映 verify 三态**：现役可读 / 迁移链可还原 / 未验证 —— 不再把「写完了」说成「已可加载」。
-> - **口径（不得夸大）**：① 修掉 packed 误判 **≠** 这些 v0 日志变得可读 —— 真 codec 对 407 份复验 = **405 失败 / 2 通过**，失败原因是 v0→v1 迁移拒绝（`summary requires notice form` / `unsupported descriptor version 2` / `unclassified message source`），与 seq 无关；那 2 份的正确表述是「**可被迁移链还原**」，不是「DSH 能直接读」（官方 `resolveCurrentLog`：pre-v4 没有「当前日志」）。② 其中 `session-66add64c-…`（1160 行）**正是会被旧的有损路径毁掉的那一份**（现状 `allowLossy` 只留 23 行、丢 1137 行）—— 这是本轮最强的修复动机。③ **本轮收益为零的事实要如实说**：修复执行覆盖 **0**（真机修复计划恒为 `nothing-to-fix`）、新增只读检测真机命中 **0**、真 codec 门的真机覆盖有限（本机最新代际 < v4 占 **80.67%**，默认解析下多为 `unavailable`）。它是「拆陷阱 + 装护栏与闸门」，**不是**「修好了一批会话」。
-> - 数字口径（2026-10-06 真机快照）：units **1195**（日志 **1194**），最新代际 {v0: **442** / v3: **522** / v4: **231**}，`KNOWN_SESSION_EVENT_TYPES.size = **59**`，`SESSION_FORMAT_VERSION = **4**`。
->
-> **M1 session-repair hardening: removing a data-destroying trap and adding a real-codec verify gate plus read-only detection**
-> One wrong judgement about a v0 packed row made **407 of 1194** real session logs look like "lossy repair required"; executing that plan discards **865,098 / 876,680 rows (98.7%)**. This round fixes the judgement and adds four guard rails: pre-write verification, lossy preview, reference closure, and read-only detection.
-> - **Packed-row phantom gaps (407 real cases)**: v0 packed rows (`text-chunks` / `reasoning-chunks` / `tool-call-chunks`) carry **no `seq` member**; one row expands into N events via `seq0` + payload (official `decodePackedRun`: `firstSeq = seq0`, `eventCount = payload.length`). The old judgement read only `seq`, skipped packed rows while keeping the previous `lastSeq`, and therefore reported the first scalar row after a packed run as a seq gap. Real machine: **lossy-required 407 / nothing-to-fix 787**, and all 407 are **v0-generation** logs (`session.jsonl.zstd`, header `version:0`); v3/v4 have zero false positives. Probe: `.tmp/probe-session-repair.mjs`.
-> - **Two judgement layers, never conflated**: (i) **undecidable shape** (missing `seq0` / payload not an array / non-safe-integer length / `dt` length ≠ len-1 / extra members outside the strict key set / unknown non-packed type without `seq0`) → an **opaque span**; never draw a continuity conclusion across it, and refuse the plan; (ii) **decidable shape whose `seq0` does not line up with the running count** → a **real seq gap**, treated exactly like a scalar-row gap (refuse by default; truncate at the first anomaly only under explicit `allowLossy`). Treating (ii) as opaque would give one semantic two different verdicts depending on how the previous row happened to be encoded.
-> - **Frame granularity**: `≤200 rows/frame` constrains only frames **this run re-encodes**; **untouched frames (no dropped row inside, everything kept) must be reused byte-for-byte**, even when they were larger than 200 rows — the real machine has **226 event frames above 200 rows, the largest 8654 rows**, and those are shapes DSH itself wrote. Byte fidelity beats a self-imposed cap.
-> - **Real-codec verify gate**: after writing (and before applying a lossy plan) the log is re-verified through the official `createSessionFormatCatalogWithChildren` + per-row `decodeRow` + `finish`; **capability unavailable → `unavailable` (unverified), never reported as success**; **deterministic failure → automatic rollback from the backup**; `unavailable` **does not roll back and does not record a success ledger entry**, but **still writes the ledger** so repairs that were applied remain rollback-able.
-> - **Lossy plans are visible before they run**: a `lossy-required` plan must carry the real `truncate-tail` entry and the number of rows it would drop (the old implementation returned an empty action list, telling users a lossy repair was needed without saying what would be lost).
-> - **Reference-closure gate**: a closer-drop candidate referenced by a kept row is **not planned** (a zero-loss action degrades gracefully); a truncation that turns a referenced seq from "present" into "missing" makes the planner **refuse outright** (no "show a lossy preview, refuse at apply time").
-> - **Read-only detection**: session health gains `empty-tool-call-id` / `duplicate-tool-call-id` / `tool-result-id-mismatch`, and `missing-message-id` / `dangling-tool-call` are actually produced. Severity is classified **per generation and per carrier** (on v4 and pre-v4 a missing message id, an empty tool-call id, or a repeated advertised tool call is rejected by the **foreground read pipeline** → `unloadable`; an unreadable version → `nextRequestFails` + `codec-uncalibrated`). **Reported, never repaired.**
-> - **CLI / offline rescue console report the three verify states honestly**: readable-now / restorable-through-the-migration-chain / unverified — "the write finished" is no longer presented as "it loads".
-> - **Non-negotiable wording**: ① fixing the packed-row judgement does **not** make those v0 logs readable — the real codec verifies **405 failures / 2 passes** out of 407, and the failures are v0→v1 migration refusals (`summary requires notice form` / `unsupported descriptor version 2` / `unclassified message source`), unrelated to seq; the 2 passes are correctly described as "**restorable through the migration chain**", not "DSH can read them directly" (official `resolveCurrentLog`: pre-v4 has no "current log"). ② One of them, `session-66add64c-…` (1160 rows), **is exactly the file the old lossy path would have destroyed** (it kept 23 rows and dropped 1137) — the strongest motivation for this round. ③ **Say the zero-benefit facts out loud**: repair execution coverage is **0** (real-machine repair plans are always `nothing-to-fix`), the new read-only detection hits **0** real cases, and the real-codec gate has limited real coverage (on this machine **80.67%** of units have a newest generation below v4, which resolves to `unavailable` by default). This round removed a trap and installed guard rails — it did **not** fix a batch of sessions.
-> - Number baseline (real-machine snapshot, 2026-10-06): units **1195** (logs **1194**), newest-generation split {v0: **442** / v3: **522** / v4: **231**}, `KNOWN_SESSION_EVENT_TYPES.size = **59**`, `SESSION_FORMAT_VERSION = **4**`.
+### 🆕 新增 · Added
 
 > **外部 agent 迁移来源一次补齐到 30 个（+24）**：此前只认 6 个来源（Claude Code / Hermes / Cursor / Codex /
 > Copilot / Antigravity），现在把生态里其余 24 个会话来源一并接进来：Gemini CLI、Reasonix、OpenCode、Mimocode、
@@ -131,6 +107,22 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 >   `capturedAt` is monotonic per instance only, so a cross-process clock going backwards makes "same point"
 >   optimistic; the workspace section's `restored` counter does not decrement per chunk.
 
+> **同步通道新增「选择已有仓库 / 新建仓库」**：git 通道的仓库地址此前只能手填 —— 得先去 GitHub 建好仓库、
+> 复制 clone URL、再贴回来，还容易漏掉「必须私有」这条前提。现在配置弹窗可以直接从当前 token 可见的
+> **私有**仓库里选（按最近更新排序，带更新时间与 fork 徽章），或就地新建一个私有仓库并自动选中。
+> 公开仓库不进列表、也没有「公开」开关 —— 新建请求体根本不带 `private`，宿主恒定以私有建仓
+> （同步仓库公开等于把配置内容公开）。地址输入框保留：ssh、本地路径、不在列表里的仓库仍可手填。
+>
+> **Repository picker for the sync channel**: the git channel's repository URL no longer has to be typed
+> by hand (create the repo on GitHub, copy the clone URL, paste it back — and remember that it must be
+> private). The channel dialog now lists the **private** repositories the current token can see (sorted by
+> most recently updated, with a timestamp and a fork badge), or creates a new private repository inline and
+> selects it. Public repositories are never listed and there is no "public" switch — the create request does
+> not even carry `private`, because the host always creates private repos (a public sync repo would publish
+> your configuration). The URL field stays: ssh remotes, local paths and unlisted repos are still typeable.
+
+### 🔧 变更 · Changed
+
 > **两处「静默」改成可见**：① 快照现在记录导出时的 DSH 版本，版本不匹配时恢复计划里多一条**咨询性提示**
 > （不阻断、也不猜版本）；② 会话导出探测此前只看状态码，而官方 `GET /api/session.export` 在服务缺失时
 > 返回 **500（不是 501）** —— 于是「服务没装」与「服务在但没正文」被混为一谈。现在探测读有限字节正文，
@@ -143,6 +135,42 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 > installed" with "service present but no body". The probe now reads a bounded amount of body, so the three
 > states (available / unavailable / unknown) are distinguishable, and it **does not consume the full response**
 > (there is a cap plus an active abort, pinned by a failable assertion).
+
+### 🐛 修复 · Fixed
+
+> **导出/同步不再丢 `!!js`，pnpm 隔离安装也能识别会话格式版本（issue #75 / #74）**
+> - **`cordis.patch.yml` 的 `!!js` 方言（issue #75，数据丢失级）**：`!!js` 是 DSH 的专用 YAML 标签（`JSON_SCHEMA` + `tag:yaml.org,2002:js`），而插件此前用缺省 schema 读它 —— 遇到 `!!js` 直接抛 unknown tag，被吞成空数组。后果不止「丢一条配置」：解析针对整份文档，**只要该层有一处 `!!js`，这一层全部 patch 行都会从导出 / 同步 / 预览里消失**；导入写回时更会把整份文件重写成「只剩本次导入的行」。现在读写统一走新的方言单一事实源（`raw` 的内存形态是 `{__jsExpr: <源码>}`，普通 JSON、写回还原成 `!!js`），并补两道护栏：**原文件存在却解析不了 / 读不到时拒绝覆盖**、解析失败上抛成可见告警（不再静默）；文件不存在仍按「本来就没有」处理。
+> - **pnpm 隔离安装的会话格式版本解析（issue #74）**：pnpm 全局安装 DSH 时 `installAnchor` 落在 `.pnpm` 存储段内，同级没有 `dsh-session`（`dsh` 的依赖里也没有它），旧的「同级 / 嵌套两种布局」必然落空 → 每次启动报 warn、导入与同步的「格式超前」体检整体跳过。现在会向上定位最近的 `.pnpm` 并按 `@deepseek-ai+dsh-session@*` 扫段（多版本取与本机 dsh 同版本者，判不准则不猜），失败时把**已尝试的路径**写进日志；同一份布局推导已收敛为单一实现（复验门与档案列表共用）。
+>
+> **No more lost `!!js` on export/sync; pnpm-isolated installs resolve the session format version (issues #75 / #74)**
+> - **The `!!js` dialect of `cordis.patch.yml` (issue #75, data loss)**: `!!js` is DSH's own YAML tag (`JSON_SCHEMA` + `tag:yaml.org,2002:js`), but the plugin read the file with the default schema — hitting `!!js` threw an unknown-tag error that was swallowed into an empty array. The damage was bigger than one missing config: parsing covers the whole document, so **a single `!!js` anywhere made every patch row of that layer disappear from export / sync / preview**, and importing rewrote the file down to just the imported rows. Read and write now share one dialect source of truth (`raw` keeps the JSON-safe `{__jsExpr: <source>}` shape and is written back as `!!js`), plus two guard rails: **an existing file that cannot be parsed or read is never overwritten**, and parse failures surface as visible warnings instead of silence; a missing file still means "nothing there yet".
+> - **Session format version under a pnpm-isolated install (issue #74)**: with a global pnpm install the `installAnchor` sits inside a `.pnpm` store segment whose siblings have no `dsh-session` (and `dsh` does not depend on it), so the old two-layout lookup always missed → a startup warning on every boot and the import/sync "format ahead" check skipped entirely. The resolver now walks up to the nearest `.pnpm` and scans `@deepseek-ai+dsh-session@*` segments (preferring the version matching the local dsh; never guessing when ambiguous), and logs the paths it tried on failure. The same layout derivation is now a single implementation shared with the verify gate and the profile list.
+
+> **M1 会话修复引擎加固：拆掉一个会毁数据的陷阱 + 装上真 codec 复验门与只读检测**
+> 一条 v0 打包行的判据错误，让 1194 份真机会话日志里的 **407 份**被判成「需要损失性修复」；按该计划执行会丢弃 **865,098 / 876,680 行（98.7%）**。本轮修掉这个判据，并把「写前复验」「有损预览」「引用闭包」「只读检测」四道护栏补齐。
+> - **packed 行假空洞（真机 407 例）**：v0 打包行（`text-chunks` / `reasoning-chunks` / `tool-call-chunks`）**没有 `seq` 成员**，一行按 `seq0` + payload 展开成 N 个事件（官方 `decodePackedRun`：`firstSeq = seq0`、`eventCount = payload.length`）。旧判据只读 `seq` → 打包行被当成「无 seq 行」跳过却保留上一个 `lastSeq`，于是打包行之后的第一条标量行被误判为 seq 空洞。真机：**lossy-required 407 / nothing-to-fix 787**；407 份**全部是 v0 代际**日志（`session.jsonl.zstd`，header `version:0`），v3/v4 零误判。复核脚本 `.tmp/probe-session-repair.mjs`。
+> - **判据分两层，不得混同**：(i) **形状不可判定**（缺 `seq0` / 载荷非数组 / 长度非安全整数 / `dt` 长度 ≠ len-1 / 带严格键集外成员 / 无 `seq0` 的未知非 packed 类型）→ 视为**不透明跨度**，禁止跨越它下连续性结论，计划 refuse；(ii) **形状可判定但 `seq0` 与运行计数不衔接** → 这是**真实 seq 空洞**，与标量行空洞同待遇（默认 refuse；显式 `allowLossy` 才在首个异常处截断）。把它当 opaque 会让同一种语义因前一行的物理编码不同而有两种待遇。
+> - **帧粒度规则**：`≤200 行/帧` 只约束**本次重编码**的帧；**未触及帧（帧内无被丢行且全部保留）必须逐字节复用**，即使它原本超过 200 行 —— 真机有 **226 个事件帧 >200 行、最大 8654 行**，那是 DSH 自己写出的形态，字节保真优先于自定上限。
+> - **真 codec 复验门**：写后（以及有损计划应用前）用 DSH 官方 `createSessionFormatCatalogWithChildren` + 逐行 `decodeRow` + `finish` 复验；**能力不可用 → `unavailable`（unverified）且绝不宣称成功**；**确定性失败 → 用备份自动回滚**；`unavailable` **不触发回滚、不写成功台账**、但**仍写台账**以保证已应用的修复可回滚。
+> - **有损计划预览可见**：`lossy-required` 的计划必须给出真实的 `truncate-tail` 条目与丢弃行数（旧实现给的是空动作清单 —— 用户被告知「需要损失性修复」却说不出将丢什么）。
+> - **引用闭包闸门**：closer-drop 候选若被保留行引用 → **不计划该动作**（零损动作优雅降级）；截断造成「引用目标由存在变不存在」→ **在 planner 内整体 refuse**（不允许「先给 lossy 预览、再在 apply 期拒绝」）。
+> - **只读检测扩展**：会话体检新增 `empty-tool-call-id` / `duplicate-tool-call-id` / `tool-result-id-mismatch` 三个码，并让 `missing-message-id` / `dangling-tool-call` 真正产出；严重级按**代际 + 载体**分级（v4 与 pre-v4 下缺 message id、空 tool-call id、重复通告同一 advertised tool call 都是**前台读盘管线拒读** → `unloadable`；版本读不出 → `nextRequestFails` + `codec-uncalibrated`）。**只报不修**。
+> - **CLI / 离线救急台如实反映 verify 三态**：现役可读 / 迁移链可还原 / 未验证 —— 不再把「写完了」说成「已可加载」。
+> - **口径（不得夸大）**：① 修掉 packed 误判 **≠** 这些 v0 日志变得可读 —— 真 codec 对 407 份复验 = **405 失败 / 2 通过**，失败原因是 v0→v1 迁移拒绝（`summary requires notice form` / `unsupported descriptor version 2` / `unclassified message source`），与 seq 无关；那 2 份的正确表述是「**可被迁移链还原**」，不是「DSH 能直接读」（官方 `resolveCurrentLog`：pre-v4 没有「当前日志」）。② 其中 `session-66add64c-…`（1160 行）**正是会被旧的有损路径毁掉的那一份**（现状 `allowLossy` 只留 23 行、丢 1137 行）—— 这是本轮最强的修复动机。③ **本轮收益为零的事实要如实说**：修复执行覆盖 **0**（真机修复计划恒为 `nothing-to-fix`）、新增只读检测真机命中 **0**、真 codec 门的真机覆盖有限（本机最新代际 < v4 占 **80.67%**，默认解析下多为 `unavailable`）。它是「拆陷阱 + 装护栏与闸门」，**不是**「修好了一批会话」。
+> - 数字口径（2026-10-06 真机快照）：units **1195**（日志 **1194**），最新代际 {v0: **442** / v3: **522** / v4: **231**}，`KNOWN_SESSION_EVENT_TYPES.size = **59**`，`SESSION_FORMAT_VERSION = **4**`。
+>
+> **M1 session-repair hardening: removing a data-destroying trap and adding a real-codec verify gate plus read-only detection**
+> One wrong judgement about a v0 packed row made **407 of 1194** real session logs look like "lossy repair required"; executing that plan discards **865,098 / 876,680 rows (98.7%)**. This round fixes the judgement and adds four guard rails: pre-write verification, lossy preview, reference closure, and read-only detection.
+> - **Packed-row phantom gaps (407 real cases)**: v0 packed rows (`text-chunks` / `reasoning-chunks` / `tool-call-chunks`) carry **no `seq` member**; one row expands into N events via `seq0` + payload (official `decodePackedRun`: `firstSeq = seq0`, `eventCount = payload.length`). The old judgement read only `seq`, skipped packed rows while keeping the previous `lastSeq`, and therefore reported the first scalar row after a packed run as a seq gap. Real machine: **lossy-required 407 / nothing-to-fix 787**, and all 407 are **v0-generation** logs (`session.jsonl.zstd`, header `version:0`); v3/v4 have zero false positives. Probe: `.tmp/probe-session-repair.mjs`.
+> - **Two judgement layers, never conflated**: (i) **undecidable shape** (missing `seq0` / payload not an array / non-safe-integer length / `dt` length ≠ len-1 / extra members outside the strict key set / unknown non-packed type without `seq0`) → an **opaque span**; never draw a continuity conclusion across it, and refuse the plan; (ii) **decidable shape whose `seq0` does not line up with the running count** → a **real seq gap**, treated exactly like a scalar-row gap (refuse by default; truncate at the first anomaly only under explicit `allowLossy`). Treating (ii) as opaque would give one semantic two different verdicts depending on how the previous row happened to be encoded.
+> - **Frame granularity**: `≤200 rows/frame` constrains only frames **this run re-encodes**; **untouched frames (no dropped row inside, everything kept) must be reused byte-for-byte**, even when they were larger than 200 rows — the real machine has **226 event frames above 200 rows, the largest 8654 rows**, and those are shapes DSH itself wrote. Byte fidelity beats a self-imposed cap.
+> - **Real-codec verify gate**: after writing (and before applying a lossy plan) the log is re-verified through the official `createSessionFormatCatalogWithChildren` + per-row `decodeRow` + `finish`; **capability unavailable → `unavailable` (unverified), never reported as success**; **deterministic failure → automatic rollback from the backup**; `unavailable` **does not roll back and does not record a success ledger entry**, but **still writes the ledger** so repairs that were applied remain rollback-able.
+> - **Lossy plans are visible before they run**: a `lossy-required` plan must carry the real `truncate-tail` entry and the number of rows it would drop (the old implementation returned an empty action list, telling users a lossy repair was needed without saying what would be lost).
+> - **Reference-closure gate**: a closer-drop candidate referenced by a kept row is **not planned** (a zero-loss action degrades gracefully); a truncation that turns a referenced seq from "present" into "missing" makes the planner **refuse outright** (no "show a lossy preview, refuse at apply time").
+> - **Read-only detection**: session health gains `empty-tool-call-id` / `duplicate-tool-call-id` / `tool-result-id-mismatch`, and `missing-message-id` / `dangling-tool-call` are actually produced. Severity is classified **per generation and per carrier** (on v4 and pre-v4 a missing message id, an empty tool-call id, or a repeated advertised tool call is rejected by the **foreground read pipeline** → `unloadable`; an unreadable version → `nextRequestFails` + `codec-uncalibrated`). **Reported, never repaired.**
+> - **CLI / offline rescue console report the three verify states honestly**: readable-now / restorable-through-the-migration-chain / unverified — "the write finished" is no longer presented as "it loads".
+> - **Non-negotiable wording**: ① fixing the packed-row judgement does **not** make those v0 logs readable — the real codec verifies **405 failures / 2 passes** out of 407, and the failures are v0→v1 migration refusals (`summary requires notice form` / `unsupported descriptor version 2` / `unclassified message source`), unrelated to seq; the 2 passes are correctly described as "**restorable through the migration chain**", not "DSH can read them directly" (official `resolveCurrentLog`: pre-v4 has no "current log"). ② One of them, `session-66add64c-…` (1160 rows), **is exactly the file the old lossy path would have destroyed** (it kept 23 rows and dropped 1137) — the strongest motivation for this round. ③ **Say the zero-benefit facts out loud**: repair execution coverage is **0** (real-machine repair plans are always `nothing-to-fix`), the new read-only detection hits **0** real cases, and the real-codec gate has limited real coverage (on this machine **80.67%** of units have a newest generation below v4, which resolves to `unavailable` by default). This round removed a trap and installed guard rails — it did **not** fix a batch of sessions.
+> - Number baseline (real-machine snapshot, 2026-10-06): units **1195** (logs **1194**), newest-generation split {v0: **442** / v3: **522** / v4: **231**}, `KNOWN_SESSION_EVENT_TYPES.size = **59**`, `SESSION_FORMAT_VERSION = **4**`.
 
 > **全仓对抗审计修复**：本轮对**整仓**做了一次对抗性审计（七个区域审计 + 三轮横向扫查 + 每个修复配独立验证），
 > 收敛出 **44 项缺陷：40 项闭环、5 项部分闭环、2 项等第三方写者落盘后复扫**。修的主要是**静默数据风险**，
@@ -204,20 +232,6 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 >   bundle self-containment guard passes 1/1; a real isolated instance served **7/7 key routes with HTTP 200**
 >   and every UI number matched the on-disk facts.
 
-> **同步通道新增「选择已有仓库 / 新建仓库」**：git 通道的仓库地址此前只能手填 —— 得先去 GitHub 建好仓库、
-> 复制 clone URL、再贴回来，还容易漏掉「必须私有」这条前提。现在配置弹窗可以直接从当前 token 可见的
-> **私有**仓库里选（按最近更新排序，带更新时间与 fork 徽章），或就地新建一个私有仓库并自动选中。
-> 公开仓库不进列表、也没有「公开」开关 —— 新建请求体根本不带 `private`，宿主恒定以私有建仓
-> （同步仓库公开等于把配置内容公开）。地址输入框保留：ssh、本地路径、不在列表里的仓库仍可手填。
->
-> **Repository picker for the sync channel**: the git channel's repository URL no longer has to be typed
-> by hand (create the repo on GitHub, copy the clone URL, paste it back — and remember that it must be
-> private). The channel dialog now lists the **private** repositories the current token can see (sorted by
-> most recently updated, with a timestamp and a fork badge), or creates a new private repository inline and
-> selects it. Public repositories are never listed and there is no "public" switch — the create request does
-> not even carry `private`, because the host always creates private repos (a public sync repo would publish
-> your configuration). The URL field stays: ssh remotes, local paths and unlisted repos are still typeable.
-
 > **性能修复**：本轮修的是**「总览」页每次都要等十几秒到半分钟**的问题 —— 根因是首屏把只读预览
 > 也当成了真实导出，并且一次预览里叠加了三处重复的全量读取。真机（24 个 settings namespace、
 > 12 个本地源插件）实测：全量预览 27.6 s → 现在首屏不再等它。
@@ -269,7 +283,7 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 > read per layer and written back to the layer they came from, skills are collected through the shell's
 > `skills` service, and backup/rollback record the layer of every row.
 
-### 🔌 修复：备份不到外壳的 MCP 与 Skills（issue #71）· MCP / skills not backed up (issue #71)
+#### 🔌 修复：备份不到外壳的 MCP 与 Skills（issue #71）· MCP / skills not backed up (issue #71)
 
 - 🔌 **MCP 服务器现在从两个 patch 层读出**：`$DSH_HOME/cordis.patch.yml`（用户层）与
   `$DSH_HOME/profiles/<name>/cordis.patch.yml`（档案层）按 **DSH 自己的合并优先级**取有效行（home 层后合并 ⇒
@@ -321,7 +335,7 @@ This file records release highlights of dsh-config-manager (bilingual: 中文 + 
 > this machine). Both now skip as expected, and a non-empty target against an empty import is still a conflict,
 > so local configuration is never silently wiped.
 
-### 🔁 修复：一键同步永不收敛（issue #73）· One-click sync that could never converge (issue #73)
+#### 🔁 修复：一键同步永不收敛（issue #73）· One-click sync that could never converge (issue #73)
 
 - ⚙️ **settings / providers 判定顺序修正**：`planNamespaceItems` 与 `ProvidersAdapter.analyzeImport` 把
   「值相等 → 跳过」提到「目标为空 → 新建」之前，两端皆 `{}` 时不再反复产生空写入。`ui` 分区与

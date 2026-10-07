@@ -32,9 +32,17 @@
  *  ① **裸模块动态 import**（第一顺位）：await import('@deepseek-ai/dsh-session-format-catalog') ——
  *     已装插件自己依赖树里的那一份（开发树 / 档案 node_modules / app.asar 内均按 Node 解析规则命中）；
  *     再用 createRequire(import.meta.url).resolve('<pkg>/package.json') 反推它的 node_modules 根，供代际闸门用。
- *  ② **运行时锚点的 asar 路径**：<process.resourcesPath>/app.asar/dsh/node_modules（含 .unpacked 与解包 app 两种形态）
+ *  ② **运行时锚点的 asar 容器**：<process.resourcesPath>/app.asar/dsh/node_modules（含 .unpacked 与解包 app 两种形态）
  *     —— 这是 profileContext.installAnchor 在服务层（拿不到 profileContext 的地方）的进程内等价物。
- *  ③ **<home>/profiles/node_modules/@deepseek-ai/dsh-session-format-catalog**（以及 <home>/profiles/<profile>/… ）
+ *     纯 node 下这条候选**落在 asar 容器里**，直接 existsSync/import 都不可能命中 ⇒ 交给
+ *     `utils/asar-read.ts` 的最小只读读取器：把 catalog **及其依赖闭包**（真机 37 包 / 940 文件 / 8.4 MB）
+ *     取出到缓存目录（缺省 `<os.tmpdir()>/dsh-cm-asar-codec`，可用 `asarCacheDir` 注入）再 import；
+ *     命中缓存不重复解包，源 asar 全程只读（细节与拒绝条件见该模块文件头）。这种解析在内部/结果里
+ *     标 `via: "asar-extract"`（`detail` 写成 `runtime-anchor+asar-extract`，仍**不含绝对路径**）。
+ *  ③ **显式安装根锚点**：环境变量 `DSH_CM_DSH_INSTALL` = DSH 安装根（含 `resources/app.asar` 的那一层）
+ *     → `<root>/resources/app.asar/dsh/node_modules/…`（标签 `env-anchor`，排在运行时锚点之前）。
+ *     **只在用户显式给出时使用**；「离线 CLI 自动发现安装位置」仍是已登记缺口，本模块**不做任何启发式搜索**。
+ *  ④ **<home>/profiles/node_modules/@deepseek-ai/dsh-session-format-catalog**（以及 <home>/profiles/<profile>/… ）
  *     —— 与 src/index.ts 的 dshPackageJsonCandidates 第 ②③ 条同源，每处再试 hoisted 与 pnpm 嵌套两种布局
  *     （deriveRoots 与 utils/session-format.ts 的 resolveSessionFormatVersion 逐字同款）。
  *  代际闸门：候选 catalog 必须暴露 currentVersion，且必须等于**权威「已装版本」**——
@@ -62,11 +70,14 @@
  *     磁盘上 0.1.5-rc.2 那棵树（currentVersion 3）把 v3 日志标成「现役读盘可读」，而真实运行的 DSH 是
  *     asar 里的 0.2.0（v4）—— 结论对运行环境不诚实。现在「已装版本」一律走上面的权威解析顺序
  *     （installAnchor 同源），候选自己那棵树只作为**被判定对象**；权威侧读不到 → unavailable（不猜）。
- *  已知缺口（交由文档任务登记）：**asar 抽取不作为产品路径** —— 打包安装下 app.asar 对普通 node 不可读，
- *     本模块不做任何「自己解 asar」的事；R1 的 .tmp/m1/vendor 只用于验证，不参与本模块任何代码路径。
- *     F2 的连带后果（同一条缺口）：纯 node 的 CLI/救生台拿不到 asar 里的真 codec，只能落到 profiles-tree 那份
- *     旧 catalog —— 这在**该上下文里**是可得的最好知识，但它不等于「正在跑的 DSH 的现役版本」，
- *     所以 equivalentToReadPath 只在权威版本确实等于 header 版本时才为 true。
+ *  缺口⑤（本模块的接线，2026-10）：**asar 抽取现在是产品路径** —— runtime-anchor 候选落在 app.asar 容器里
+ *     且直接 import 失败时，用 `utils/asar-read.ts` 的只读读取器把 catalog 及其依赖闭包取出到缓存目录再 import
+ *     （见上 ②）。于是纯 node 的 CLI/离线救急台也能拿到**正在跑的 DSH** 那份真 codec，不再必然退化到
+ *     profiles-tree 的旧代际静态 catalog；结果里的 `via: "asar-extract"` 让调用方与台账能看见这条路径。
+ *     仍然**不放宽**任何判据：asar 缺失 / 不可读 / 解不出 / 代际对不上 → 一律如实 unavailable
+ *     （绝不伪造 verified，也绝不因此把日志判成 decode-failed）。
+ *  剩余缺口（登记在 docs/spec/known-gaps.md G-24）：「离线 CLI 自动发现安装位置」—— 本模块只认
+ *     `process.resourcesPath`（Electron 宿主）与显式 `DSH_CM_DSH_INSTALL`，**不扫盘、不猜默认安装路径**。
  *
  * ── recovery / validation（对着已安装包实测确定，不抄文档）────────────────────
  *  · recovery: 'strict' 写死。日志是**我们刚改写过的字节**，必须逐行严格成立；用 'recoverable' 会接受
@@ -93,7 +104,8 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { readSessionFormatVersionAt } from './session-format.ts';
+import { extractAsarPackages, extractedEntryPath, readAsarTextEntry } from './asar-read.ts';
+import { parseSessionFormatVersion, readSessionFormatVersionAt } from './session-format.ts';
 import { decodeZstdFrame, scanZstdFrames, zstdAvailable } from './zstd-frame.ts';
 
 /** 复验结论里的失败原因（机器可读；文案由调用方输出层决定）。 */
@@ -142,6 +154,8 @@ export interface SessionVerifyOptions {
   children?: readonly unknown[];
   /** 注入 catalog（测试用）。传 null = 直接判 unavailable（不探测）。 */
   catalog?: SessionVerifyCatalog | null;
+  /** asar 解包缓存根（可选注入）；缺省 `<os.tmpdir()>/dsh-cm-asar-codec`。 */
+  asarCacheDir?: string;
   /** 缺省探测时的 home（给 <home>/profiles/** 候选）；缺省取 DSH_HOME 环境变量。 */
   homeDir?: string;
   /** 与 homeDir 搭配的档案名（有则插在 hoisted 树之前）。 */
@@ -159,15 +173,20 @@ export interface SessionVerifyOptions {
  * verified:true 时 strong/strongDetail 也只是额外信息，不参与判定。
  */
 export type SessionVerifyResult =
-  | { verified: true; events: number; strong: boolean; strongDetail?: string; equivalentToReadPath: boolean }
+  | { verified: true; events: number; strong: boolean; strongDetail?: string; equivalentToReadPath: boolean; via?: 'asar-extract' }
   | { verified: false; reason: SessionVerifyReason; detail?: string; equivalentToReadPath: false };
 
 /* ------------------------------------------------- 候选与布局（与 session-format.ts 同款） */
 
 const DSH_PKG_REL = join('@deepseek-ai', 'dsh');
+const DSH_SESSION_PKG_REL = join('@deepseek-ai', 'dsh-session');
 const CATALOG_PKG = '@deepseek-ai/dsh-session-format-catalog';
 const CATALOG_PKG_REL = join('@deepseek-ai', 'dsh-session-format-catalog');
 const CATALOG_ENTRY_REL = join('lib', 'index.js');
+/** 包内入口的 POSIX 相对路径（asar 内路径一律 POSIX）；解包目录定位用。 */
+const CATALOG_ENTRY_IN_NM = CATALOG_PKG_REL.split('\\').join('/') + '/' + CATALOG_ENTRY_REL.split('\\').join('/');
+/** 显式安装根锚点（**只在用户显式给出时使用**，见文件头）。 */
+const DSH_INSTALL_ENV = 'DSH_CM_DSH_INSTALL';
 
 /**
  * 候选 @deepseek-ai/dsh/package.json → 待探测的 node_modules 根。
@@ -202,17 +221,30 @@ export function nodeModulesRootsFor(dshPackageJsonCandidates: readonly string[])
  * 桌面端实际跑的是 app.asar 里的 0.2.0-rc.2 —— 所以锚点必须排在前面。
  */
 export function defaultDshPackageJsonCandidates(homeDir?: string, profile?: string): string[] {
-  return [...runtimeAnchorCandidates(), ...profileCandidates(homeDir, profile)];
+  return [...envInstallAnchorCandidates(), ...runtimeAnchorCandidates(), ...profileCandidates(homeDir, profile)];
+}
+
+/**
+ * 显式安装根锚点：`DSH_CM_DSH_INSTALL` = **DSH 安装根**（就是含 `resources/app.asar` 的那一层，
+ * 例如 `D:\Apps\DSH`）。只在用户显式给出时使用 —— **绝不**扫盘或猜默认安装路径。
+ */
+function envInstallAnchorCandidates(): string[] {
+  const root = process.env[DSH_INSTALL_ENV];
+  if (typeof root !== 'string' || root === '') return [];
+  return anchorCandidatesAt(join(root, 'resources'));
 }
 
 /** 运行时锚点候选（Electron resources 下的 asar / 解包 app）；非 Electron 进程为空。 */
 function runtimeAnchorCandidates(): string[] {
-  const out: string[] = [];
   const resources = (process as { resourcesPath?: unknown }).resourcesPath;
-  if (typeof resources !== 'string' || resources === '') return out;
+  if (typeof resources !== 'string' || resources === '') return [];
+  return anchorCandidatesAt(resources);
+}
+
+/** 一个 resources 目录下的三种形态（打包 asar / asarUnpack / 解包 app）。 */
+function anchorCandidatesAt(resources: string): string[] {
   const bases = [join('app.asar', 'dsh', 'node_modules'), join('app.asar.unpacked', 'dsh', 'node_modules'), join('app', 'dsh', 'node_modules')];
-  for (const base of bases) out.push(join(resources, base, DSH_PKG_REL, 'package.json'));
-  return out;
+  return bases.map((base) => join(resources, base, DSH_PKG_REL, 'package.json'));
 }
 
 /** 本机 profile 树候选（与 src/index.ts 的 dshPackageJsonCandidates ②③ 同源）。 */
@@ -305,6 +337,8 @@ function authoritativePlans(options: SessionVerifyOptions): { label: string; can
   if (options.dshPackageJsonCandidates !== undefined) return [{ label: 'anchor', candidates: [...options.dshPackageJsonCandidates] }];
   const plans: { label: string; candidates: string[] }[] = [];
   if (options.installAnchor !== undefined && options.installAnchor !== '') plans.push({ label: 'install-anchor', candidates: [options.installAnchor] });
+  const env = envInstallAnchorCandidates();
+  if (env.length > 0) plans.push({ label: 'env-anchor', candidates: env });
   const runtime = runtimeAnchorCandidates();
   if (runtime.length > 0) plans.push({ label: 'runtime-anchor', candidates: runtime });
   const profiles = profileCandidates(options.homeDir, options.profile);
@@ -321,16 +355,80 @@ function authoritativePlans(options: SessionVerifyOptions): { label: string; can
  * 自证，于是磁盘上 0.1.5-rc.2 那棵树（currentVersion 3）把 v3 日志标成「现役读盘可读」，而真实运行的 DSH 是 v4
  * （asar 里的 0.2.0）—— 同一输入在新/旧进程给出不同代际结论，且对运行环境不诚实。
  */
-function resolveAuthoritativeVersion(options: SessionVerifyOptions): { version?: number; tried: string[] } {
+async function resolveAuthoritativeVersion(options: SessionVerifyOptions): Promise<{ version?: number; tried: string[] }> {
   const tried: string[] = [];
   for (const plan of authoritativePlans(options)) {
     for (const root of nodeModulesRootsFor(plan.candidates)) {
-      const version = readSessionFormatVersionAt(root);
+      // 磁盘树优先（解包 app / 档案树），asar 容器内的同树常量走只读读取器（缺口⑤）
+      const version = readSessionFormatVersionAt(root) ?? (await readSessionFormatVersionInAsar(root));
       if (version !== undefined) return { version, tried };
     }
     tried.push(plan.label);
   }
   return { tried };
+}
+
+/* ------------------------------------------------------------------ asar 容器 */
+
+/**
+ * 把「可能位于 asar 容器内的路径」拆成 <容器路径> + <容器内相对前缀>（POSIX）。
+ * 只认以 `.asar` 结尾的路径段 —— `app.asar.unpacked` 不匹配（它的实体是普通目录）。
+ */
+export function splitAsarPath(p: string): { asarPath: string; innerPrefix: string } | undefined {
+  const normalized = p.replace(/\\/g, '/');
+  const segments = normalized.split('/').filter((segment) => segment !== '');
+  const index = segments.findIndex((segment) => /\.asar$/i.test(segment));
+  if (index < 0) return undefined;
+  const leading = normalized.startsWith('/') ? '/' : '';
+  return { asarPath: leading + segments.slice(0, index + 1).join('/'), innerPrefix: segments.slice(index + 1).join('/') };
+}
+
+/** 从 asar 里的 node_modules 根读同树 @deepseek-ai/dsh-session 的格式常量；读不到 → undefined（不猜）。 */
+async function readSessionFormatVersionInAsar(root: string): Promise<number | undefined> {
+  const split = splitAsarPath(root);
+  if (split === undefined) return undefined;
+  const rel = [...split.innerPrefix.split('/'), ...DSH_SESSION_PKG_REL.split('\\'), 'lib', 'index.js'].filter((part) => part !== '').join('/');
+  try {
+    const text = await readAsarTextEntry(split.asarPath, rel);
+    return text === undefined ? undefined : parseSessionFormatVersion(text);
+  } catch {
+    return undefined;
+  }
+}
+
+function existsSafe(file: string): boolean {
+  try {
+    return existsSync(file);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * runtime-anchor 候选落在 asar 容器里时的产品路径：把 catalog **及其依赖闭包**取出到缓存目录再 import。
+ * 缓存被外部破坏（清单在、入口文件没了）时强制重解一次；一切失败都如实返回 undefined（判 unavailable）。
+ */
+async function extractCatalogFromAsar(split: { asarPath: string; innerPrefix: string }, options: SessionVerifyOptions): Promise<string | undefined> {
+  const resolveFrom = split.innerPrefix === '' ? undefined : split.innerPrefix;
+  const run = (refresh: boolean) => extractAsarPackages({
+    asarPath: split.asarPath,
+    packages: [CATALOG_PKG],
+    ...(resolveFrom !== undefined ? { resolveFrom } : {}),
+    ...(options.asarCacheDir !== undefined ? { cacheDir: options.asarCacheDir } : {}),
+    ...(refresh ? { refresh: true } : {}),
+  });
+  try {
+    for (const refresh of [false, true]) {
+      const result = await run(refresh);
+      if (!result.ok) return undefined;
+      const entry = extractedEntryPath(result.dir, split.innerPrefix, CATALOG_ENTRY_IN_NM);
+      if (existsSafe(entry)) return entry;
+    }
+    return undefined;
+  } catch {
+    // 读取器按纪律不 throw；这里只兜住不可预见的异常，一律如实判「取不出」
+    return undefined;
+  }
 }
 
 /** 装配一个候选模块（**与日志无关**的那一半判定）。 */
@@ -381,6 +479,7 @@ function pickCandidate(
   headerVersion: unknown,
   installedVersion: number,
   label: string,
+  via?: 'asar-extract',
 ): { ok: true; resolution: CatalogResolution } | { ok: false; code: string } {
   let facts: CachedCandidate | undefined;
   if (children.length === 0) {
@@ -397,7 +496,7 @@ function pickCandidate(
   }
   const gate = headerGateFailure(facts, headerVersion);
   if (gate !== undefined) return { ok: false, code: gate };
-  return { ok: true, resolution: { catalog: facts.catalog, currentVersion: facts.currentVersion, installedVersion, detail: label } };
+  return { ok: true, resolution: { catalog: facts.catalog, currentVersion: facts.currentVersion, installedVersion, detail: label, ...(via !== undefined ? { via } : {}) } };
 }
 
 /** 解析 catalog 的结果；detail 只放候选标签 + 失败码（**不放路径** —— 它会回传浏览器）。 */
@@ -406,6 +505,8 @@ interface CatalogResolution {
   currentVersion?: number;
   installedVersion?: number;
   detail: string;
+  /** 这条 catalog 是不是从 asar 容器取出后再 import 的（缺口⑤；透出到结果的 via 字段）。 */
+  via?: 'asar-extract';
 }
 
 async function resolveCatalog(options: SessionVerifyOptions, headerVersion: unknown): Promise<CatalogResolution> {
@@ -429,7 +530,7 @@ async function resolveCatalog(options: SessionVerifyOptions, headerVersion: unkn
   };
 
   // 「已装版本」先**独立**解析（权威解析，与被判定的候选自己那棵树无关）；读不到 → 不猜（detail 带上试过的来源）
-  const authority = resolveAuthoritativeVersion(options);
+  const authority = await resolveAuthoritativeVersion(options);
   if (authority.version === undefined) {
     return { detail: authority.tried.length > 0 ? 'no-installed-version(' + authority.tried.join('+') + ')' : 'no-installed-version' };
   }
@@ -465,25 +566,34 @@ async function resolveCatalog(options: SessionVerifyOptions, headerVersion: unkn
     for (const root of nodeModulesRootsFor(profileCandidates(options.homeDir, options.profile))) pushPlan('profiles-tree', root);
   }
   for (const plan of plans) {
-    const file = join(plan.root, CATALOG_PKG_REL, CATALOG_ENTRY_REL);
-    let present = false;
-    try {
-      present = existsSync(file);
-    } catch {
-      present = false;
+    const direct = join(plan.root, CATALOG_PKG_REL, CATALOG_ENTRY_REL);
+    let entryFile = direct;
+    let label = plan.label;
+    let via: 'asar-extract' | undefined;
+    if (!existsSafe(direct)) {
+      // 直接路径不存在：若候选落在 asar 容器里，走只读读取器取出闭包再从缓存目录 import（缺口⑤）
+      const split = splitAsarPath(plan.root);
+      if (split === undefined) {
+        note(plan.label, 'not-found');
+        continue;
+      }
+      const extracted = await extractCatalogFromAsar(split, options);
+      if (extracted === undefined) {
+        note(plan.label, 'asar-extract-failed');
+        continue;
+      }
+      entryFile = extracted;
+      label = plan.label + '+asar-extract';
+      via = 'asar-extract';
     }
-    if (!present) {
-      note(plan.label, 'not-found');
-      continue;
-    }
-    const mod = await importCatalogModule(file);
+    const mod = await importCatalogModule(entryFile);
     if (mod === undefined) {
-      note(plan.label, 'import-failed');
+      note(label, 'import-failed');
       continue;
     }
-    const picked = pickCandidate(mod, plan.root, children, headerVersion, installedVersion, plan.label);
+    const picked = pickCandidate(mod, plan.root, children, headerVersion, installedVersion, label, via);
     if (picked.ok) return picked.resolution;
-    note(plan.label, picked.code);
+    note(label, picked.code);
   }
 
   // 全部候选都不匹配时：只要任一候选卡在「静态 catalog 过不了 v3→v4 边界」，最终结论就是 children-required
@@ -654,8 +764,9 @@ export async function verifySessionLogBytes(bytes: Uint8Array, options: SessionV
     && (resolution.installedVersion === undefined || resolution.installedVersion === resolution.currentVersion);
   const verdict = runRestore(resolution.catalog, framed.header, framed.rows, 'transformed');
   if (!verdict.ok) return { verified: false, reason: verdict.reason, detail: verdict.detail, equivalentToReadPath: false };
+  const via = resolution.via !== undefined ? { via: resolution.via } : {};
   // 可选增强（不参与判定）：跑完整安装侧校验，用来区分「能读且干净」与「能读但语义不完全干净」
   const strong = runRestore(resolution.catalog, framed.header, framed.rows, 'current');
-  if (strong.ok) return { verified: true, events: verdict.events, strong: true, equivalentToReadPath };
-  return { verified: true, events: verdict.events, strong: false, strongDetail: strong.detail, equivalentToReadPath };
+  if (strong.ok) return { verified: true, events: verdict.events, strong: true, equivalentToReadPath, ...via };
+  return { verified: true, events: verdict.events, strong: false, strongDetail: strong.detail, equivalentToReadPath, ...via };
 }

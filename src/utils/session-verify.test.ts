@@ -10,6 +10,10 @@
  *    children-required → unavailable；
  *  - **unavailable 绝不能被当成成功**。
  *
+ * t2 / 缺口⑤ 追加覆盖：runtime-anchor 落在 **app.asar 容器**里时走 `utils/asar-read.ts` 的只读抽取
+ *  再 import（`via: "asar-extract"`）；权威已装版本优先取自 asar 内的 dsh-session；asar 缺失/畸形
+ *  仍如实 unavailable（绝不伪造 verified，也不误判 decode-failed）。合成 asar 在测试内构造。
+ *
  * 全部用真实 zstd 帧 + 真实文件系统上的假包（真的走 import），不 mock 解析器。
  */
 import test from 'node:test';
@@ -23,6 +27,7 @@ import {
   defaultDshPackageJsonCandidates,
   isSessionVerifyReason,
   nodeModulesRootsFor,
+  splitAsarPath,
   verifySessionLogBytes,
   type SessionVerifyCatalog,
   type SessionVerifyResult,
@@ -451,8 +456,11 @@ test('t22/V2-F2：权威「已装版本」来自运行时锚点/installAnchor，
     const proc = process as { resourcesPath?: string };
     const had = Object.prototype.hasOwnProperty.call(proc, 'resourcesPath');
     const saved = proc.resourcesPath;
+    const hadEnv = Object.prototype.hasOwnProperty.call(process.env, 'DSH_CM_DSH_INSTALL');
+    const savedEnv = process.env['DSH_CM_DSH_INSTALL'];
     clearSessionVerifyCache();
     try {
+      delete process.env['DSH_CM_DSH_INSTALL']; // 显式安装根锚点会插在运行时锚点之前，本用例要求「没有运行时锚点」
       if (had) delete proc.resourcesPath;
       const byProfileTree = await verifySessionLogBytes(logBytes({ ...HEADER, version: 3 }, ROWS), { homeDir });
       assert.equal(byProfileTree.verified, true, '没有运行时锚点时，权威解析只能落到 profile 树（本机 CLI 的现实情形）');
@@ -465,7 +473,180 @@ test('t22/V2-F2：权威「已装版本」来自运行时锚点/installAnchor，
     } finally {
       if (had) proc.resourcesPath = saved;
       else delete proc.resourcesPath;
+      if (hadEnv) process.env['DSH_CM_DSH_INSTALL'] = savedEnv;
+      else delete process.env['DSH_CM_DSH_INSTALL'];
       clearSessionVerifyCache();
     }
   });
+});
+
+/* ---------------------- t2 / 缺口⑤：asar 容器作为产品路径（合成 asar，不依赖真机 121 MB） */
+
+/** 合成 asar：与真机容器同构（8 字节包长 pickle + 头 pickle + 数据区）。 */
+function synthAsar(files: Record<string, string>): Buffer {
+  const body: Buffer[] = [];
+  let bodyLength = 0;
+  const tree: Record<string, unknown> = {};
+  for (const [rel, content] of Object.entries(files)) {
+    const parts = rel.split('/');
+    let cursor = tree;
+    for (let i = 0; i < parts.length - 1; i += 1) {
+      const segment = parts[i] as string;
+      if (cursor[segment] === undefined) cursor[segment] = { files: {} };
+      cursor = (cursor[segment] as { files: Record<string, unknown> }).files;
+    }
+    const bytes = Buffer.from(content, 'utf8');
+    cursor[parts[parts.length - 1] as string] = { size: bytes.length, offset: String(bodyLength) };
+    body.push(bytes);
+    bodyLength += bytes.length;
+  }
+  const json = Buffer.from(JSON.stringify({ files: tree }), 'utf8');
+  const padded = (json.length + 3) & ~3;
+  const payload = Buffer.alloc(4 + padded);
+  payload.writeUInt32LE(json.length, 0);
+  json.copy(payload, 4);
+  const header = Buffer.alloc(4 + payload.length);
+  header.writeUInt32LE(payload.length, 0);
+  payload.copy(header, 4);
+  const out = Buffer.alloc(8 + header.length + bodyLength);
+  out.writeUInt32LE(4, 0);
+  out.writeUInt32LE(header.length, 4);
+  header.copy(out, 8);
+  Buffer.concat(body).copy(out, 8 + header.length);
+  return out;
+}
+
+/** 写一个「打包安装」形态的合成 resources：<resources>/app.asar/dsh/node_modules/… */
+async function writeSynthInstall(resources: string, opts: { catalogSource: string; sessionVersion: string }): Promise<void> {
+  const files: Record<string, string> = {
+    'dsh/node_modules/@deepseek-ai/dsh/package.json': JSON.stringify({ name: '@deepseek-ai/dsh', version: '9.9.9' }),
+    'dsh/node_modules/@deepseek-ai/dsh-session/package.json': JSON.stringify({ name: '@deepseek-ai/dsh-session', version: '9.9.9', type: 'module' }),
+    'dsh/node_modules/@deepseek-ai/dsh-session/lib/index.js': 'export const SESSION_FORMAT_VERSION = ' + opts.sessionVersion + ';\n',
+    'dsh/node_modules/@deepseek-ai/dsh-session-format-catalog/package.json': JSON.stringify({ name: '@deepseek-ai/dsh-session-format-catalog', version: '9.9.9', type: 'module', main: 'lib/index.js' }),
+    'dsh/node_modules/@deepseek-ai/dsh-session-format-catalog/lib/index.js': opts.catalogSource,
+  };
+  await fs.mkdir(resources, { recursive: true });
+  await fs.writeFile(path.join(resources, 'app.asar'), synthAsar(files));
+}
+
+/** 临时替换 process.resourcesPath 并屏蔽显式环境变量锚点，跑完还原。 */
+async function withResources<T>(resources: string, fn: () => Promise<T>): Promise<T> {
+  const proc = process as { resourcesPath?: string };
+  const had = Object.prototype.hasOwnProperty.call(proc, 'resourcesPath');
+  const saved = proc.resourcesPath;
+  const hadEnv = Object.prototype.hasOwnProperty.call(process.env, 'DSH_CM_DSH_INSTALL');
+  const savedEnv = process.env['DSH_CM_DSH_INSTALL'];
+  clearSessionVerifyCache();
+  try {
+    delete process.env['DSH_CM_DSH_INSTALL'];
+    proc.resourcesPath = resources;
+    return await fn();
+  } finally {
+    if (had) proc.resourcesPath = saved;
+    else delete proc.resourcesPath;
+    if (hadEnv) process.env['DSH_CM_DSH_INSTALL'] = savedEnv;
+    else delete process.env['DSH_CM_DSH_INSTALL'];
+    clearSessionVerifyCache();
+  }
+}
+
+test('t2/缺口⑤：app.asar 内的官方 catalog 走 asar-extract 真解析 —— v4 verified + equivalentToReadPath，且 via 可见', { skip: !CAPABLE }, async () => {
+  await withTmp(async (dir) => {
+    const resources = path.join(dir, 'resources');
+    await writeSynthInstall(resources, { catalogSource: childrenCatalogSource(4), sessionVersion: '4' });
+    const homeDir = path.join(dir, 'home'); // 空 profile 树：权威版本只能来自 asar 里的 dsh-session
+    await fs.mkdir(homeDir, { recursive: true });
+    const cacheDir = path.join(dir, 'cache');
+
+    await withResources(resources, async () => {
+      const first = await verifySessionLogBytes(logBytes(HEADER, ROWS), { homeDir, asarCacheDir: cacheDir });
+      assert.equal(first.verified, true, JSON.stringify(first));
+      assert.equal(first.verified === true ? first.events : -1, 2);
+      assert.equal(first.verified === true ? first.via : undefined, 'asar-extract', '结果必须标出这条解析走了 asar 抽取');
+      assert.equal(first.equivalentToReadPath, true, 'asar 里的 currentVersion 4 === header 4 === 权威已装版本 4');
+      const second = await verifySessionLogBytes(logBytes(HEADER, ROWS), { homeDir, asarCacheDir: cacheDir });
+      assert.deepEqual(second, first, '缓存命中路径必须逐字段一致');
+      const leftovers = (await fs.readdir(cacheDir)).filter((name) => name.startsWith('.tmp-'));
+      assert.deepEqual(leftovers, [], '原子发布后不得留临时目录');
+      const historical = await verifySessionLogBytes(logBytes({ ...HEADER, version: 3 }, ROWS), { homeDir, asarCacheDir: cacheDir });
+      assert.equal(historical.verified, true, JSON.stringify(historical));
+      assert.equal(historical.equivalentToReadPath, false, '迁移链 ≠ 现役读盘（判据不放宽）');
+    });
+  });
+});
+
+test('t2/缺口⑤：权威「已装版本」优先取 asar 内的 dsh-session（profile 树仍是旧代际也不自证）', { skip: !CAPABLE }, async () => {
+  await withTmp(async (dir) => {
+    const resources = path.join(dir, 'resources');
+    await writeSynthInstall(resources, { catalogSource: childrenCatalogSource(4), sessionVersion: '4' });
+    const homeDir = path.join(dir, 'home');
+    await writeFakePackage(path.join(homeDir, 'profiles'), { catalogSource: staticOnlyCatalogSource(3), sessionVersion: '3' });
+    await withResources(resources, async () => {
+      const result = await verifySessionLogBytes(logBytes(HEADER, ROWS), { homeDir, asarCacheDir: path.join(dir, 'cache') });
+      assert.equal(result.verified, true, JSON.stringify(result));
+      assert.equal(result.verified === true ? result.via : undefined, 'asar-extract');
+      assert.equal(result.equivalentToReadPath, true, '权威版本必须来自 asar 的 4，不能由 profile 树的 3 自证');
+    });
+  });
+});
+
+/** 只写「权威版本」不写 catalog 的 profile 树（把候选面收窄到 asar 一条路上）。 */
+async function writeVersionOnlyProfileTree(homeDir: string, version: number): Promise<void> {
+  const base = path.join(homeDir, 'profiles', 'node_modules', '@deepseek-ai', 'dsh-session');
+  await fs.mkdir(path.join(base, 'lib'), { recursive: true });
+  await fs.writeFile(path.join(base, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-session', version: '9.9.9', type: 'module' }));
+  await fs.writeFile(path.join(base, 'lib', 'index.js'), 'export const SESSION_FORMAT_VERSION = ' + version + ';\n');
+}
+
+test('t2/缺口⑤：asar 缺失 / 畸形 → 仍如实 unavailable（绝不伪造 verified，也不误判 decode-failed）', { skip: !CAPABLE }, async () => {
+  await withTmp(async (dir) => {
+    const bytes = logBytes(HEADER, ROWS);
+    const homeDir = path.join(dir, 'home');
+    // profile 树只提供权威版本（4），**不提供任何 catalog**：候选面只剩 asar 那一条
+    await writeVersionOnlyProfileTree(homeDir, 4);
+
+    const emptyResources = path.join(dir, 'empty-resources');
+    await fs.mkdir(emptyResources, { recursive: true });
+    await withResources(emptyResources, async () => {
+      const missing = await verifySessionLogBytes(bytes, { homeDir, asarCacheDir: path.join(dir, 'cache') });
+      assert.equal(missing.verified, false, JSON.stringify(missing));
+      assert.equal(missing.verified === false ? missing.reason : '', 'unavailable');
+      assert.equal(missing.equivalentToReadPath, false);
+    });
+
+    const badResources = path.join(dir, 'bad-resources');
+    await fs.mkdir(badResources, { recursive: true });
+    await fs.writeFile(path.join(badResources, 'app.asar'), Buffer.alloc(64, 0xff));
+    await withResources(badResources, async () => {
+      const malformed = await verifySessionLogBytes(bytes, { homeDir, asarCacheDir: path.join(dir, 'cache') });
+      assert.equal(malformed.verified, false, JSON.stringify(malformed));
+      assert.equal(malformed.verified === false ? malformed.reason : '', 'unavailable');
+      assert.match(String(malformed.verified === false ? malformed.detail : ''), /asar-extract-failed/);
+      const detail = String(malformed.verified === false ? malformed.detail : '');
+      assert.equal(detail.includes(dir), false, 'detail 不得含绝对路径: ' + detail);
+      assert.equal(/[A-Za-z]:[\\/]/.test(detail), false, 'detail 不得含盘符路径: ' + detail);
+    });
+  });
+});
+
+test('t2/缺口⑤：显式 candidates 指向 asar 内 dsh/package.json 与默认运行时锚点同结论', { skip: !CAPABLE }, async () => {
+  await withTmp(async (dir) => {
+    const resources = path.join(dir, 'resources');
+    await writeSynthInstall(resources, { catalogSource: childrenCatalogSource(4), sessionVersion: '4' });
+    const candidate = path.join(resources, 'app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'package.json');
+    await withResources(path.join(dir, 'unused-resources'), async () => {
+      clearSessionVerifyCache();
+      const result = await verifySessionLogBytes(logBytes(HEADER, ROWS), { dshPackageJsonCandidates: [candidate], asarCacheDir: path.join(dir, 'cache') });
+      assert.equal(result.verified, true, JSON.stringify(result));
+      assert.equal(result.verified === true ? result.via : undefined, 'asar-extract');
+      assert.equal(result.equivalentToReadPath, true);
+    });
+  });
+});
+
+test('t2/缺口⑤：splitAsarPath 只认 .asar 段（app.asar.unpacked 走普通目录路径）', () => {
+  assert.deepEqual(splitAsarPath(path.join('D:', 'res', 'app.asar', 'dsh', 'node_modules')), { asarPath: 'D:/res/app.asar', innerPrefix: 'dsh/node_modules' });
+  assert.deepEqual(splitAsarPath(path.join('D:', 'res', 'app.asar')), { asarPath: 'D:/res/app.asar', innerPrefix: '' });
+  assert.equal(splitAsarPath(path.join('D:', 'res', 'app.asar.unpacked', 'dsh', 'node_modules')), undefined);
+  assert.equal(splitAsarPath(path.join('D:', 'res', 'app', 'dsh', 'node_modules')), undefined);
 });

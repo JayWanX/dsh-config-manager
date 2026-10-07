@@ -36,7 +36,7 @@ src/utils/     paths/zip/hashing/json/logger/atomic-write/env-lock/recursive-wal
 src/client/    React壳(浏览器半)  ← 只做装配
 tests/ 集成测试(node --test)；docs/README.md 文档索引；docs/design/ 设计文档；docs/spec/ 对外契约(格式规格/schema/兼容矩阵/已知缺口)；
               docs/seo/ 曝光审计；docs/handoff/ 阶段交接(历史归档，非当前状态)；其余文档一律进 docs/，根目录只放对外文档
-.dsh/skills/  项目级 skill（DSH 启动即自动发现、进会话的 skill 目录）：changelog-writing = CHANGELOG 的落位/体例/发版门禁
+.dsh/skills/  项目级 skill（DSH 启动即自动发现、进会话的 skill 目录）：changelog-writing = CHANGELOG 的落位/体例/发版门禁；**写或改 CHANGELOG.md 前先按它落位并跑自检**
 ```
 
 ### UI 分层铁律
